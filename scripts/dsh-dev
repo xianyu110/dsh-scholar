@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run the DSH CLI from the test-lzszq dev checkout (profile/plugin modes).
+set -eu
+root="${DSH_DEV_ROOT:-/home/dev/Desktop/test-lzszq}"
+NODE_USE_ENV_PROXY=1 TSX_TSCONFIG_PATH="$root/tsconfig.json" \
+  exec node --import "$root/node_modules/tsx/dist/esm/index.mjs" \
+  "$root/apps/cli/src/bin.ts" "$@"

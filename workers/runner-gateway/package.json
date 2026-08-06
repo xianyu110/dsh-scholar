@@ -1,0 +1,29 @@
+{
+  "name": "@dsh-scholar/runner-gateway",
+  "version": "0.1.0",
+  "description": "DSH Research OS — isolated experiment runner gateway: claims durable jobs from the Research Kernel, executes them outside the DSH process (subprocess fallback for smoke, docker when available), uploads artifacts and signs RunManifests.",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./bin/runner.js": "./lib/bin/runner.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "runner": "node lib/bin/runner.js"
+  },
+  "dependencies": {
+    "@dsh-scholar/research-client": "file:../../packages/research-client",
+    "@dsh-scholar/research-schemas": "file:../../packages/research-schemas"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}

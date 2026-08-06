@@ -1,0 +1,12 @@
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+.dsh-plugin-prepare-*/
+dsh-plugin-assets/
+dsh-plugin.mjs
+.kernel/
+.tmp/
+coverage/
+*.log
+.DS_Store

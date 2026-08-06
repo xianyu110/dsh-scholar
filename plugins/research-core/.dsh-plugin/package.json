@@ -1,0 +1,14 @@
+{
+  "name": "@dsh-scholar/research-core-skill",
+  "version": "0.1.0",
+  "description": "DSH Research OS — static research-core skill pack for the repository-plugin (github:lzszq/dsh-scholar#main&path:/plugins/research-core/.dsh-plugin)",
+  "private": true,
+  "dsh": {
+    "skills": [
+      "../skills/research-core"
+    ]
+  },
+  "scripts": {
+    "prepare": "dsh-plugin-prepare"
+  }
+}

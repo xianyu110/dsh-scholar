@@ -1,0 +1,33 @@
+# DSH Research OS — Web overlay (design §8.4 概念示意).
+#
+# The dsh-scholar bundle (@dsh-scholar/research-plugin) already carries its own
+# cordis.patch.yml and joins a profile's layer stack via `dsh plugin --profile
+# <name> add <path|github:...>`. This file is the reference overlay for raw
+# compositions: it shows the rows the bundle inserts, so operators can also
+# apply it with `--patch` against a profile that mounts the plugin package.
+#
+# Security stance (design §1.2, §4.9): no danger-full-access, no generic
+# web_fetch, no cordis_* self tools; default workspace-write + ask is kept.
+
+- insert:
+    # Research Kernel client + lifecycle: spawns the kernel sidecar process,
+    # exposes ctx.research service, tools and /research commands.
+    - id: research-plugin
+      name: '@dsh-scholar/research-plugin'
+      config:
+        kernel:
+          host: 127.0.0.1
+          port: 7412
+          # dbPath/casRoot default to $DSH_HOME/profiles/<name>/research-kernel
+        defaultMode: gate-only
+
+    # Research-core skill pack (methodology + agent roles).
+    - id: research-skill
+      name: '@deepseek-ai/dsh-skill-local'
+      config:
+        providerName: dsh-scholar-research-core
+        includeDefaultRoots: false
+        customSkillDirs: ['skills/research-core']
+
+# Keep the shipped defaults untouched: workspace-write + ask, web_search only,
+# web_fetch disabled, no MCP, no cordis self tools.

@@ -1,0 +1,118 @@
+/**
+ * Kernel infrastructure schemas: gates/decisions, artifacts (CAS), durable
+ * jobs, budget ledger and the append-only event outbox (design §4.2, §5.2,
+ * §8.3).
+ * @module @dsh-scholar/research-schemas
+ */
+
+import { z } from 'zod'
+import { KernelEventKind } from './project.js'
+
+/** Human gate kinds (design §5.2). */
+export const GateType = z.enum(['scope', 'idea', 'contract', 'budget', 'release'])
+export type GateType = z.infer<typeof GateType>
+
+/** A pending human gate attached to a project. */
+export const Gate = z.object({
+  gate_id: z.string().regex(/^gate_[a-z0-9_]+$/),
+  project_id: z.string().min(1),
+  type: GateType,
+  title: z.string().min(1),
+  summary: z.string().default(''),
+  payload: z.record(z.unknown()).default({}),
+  status: z.enum(['pending', 'approved', 'rejected', 'revised']).default('pending'),
+  dsh_session_id: z.string().nullable().default(null),
+  dsh_event_id: z.string().nullable().default(null),
+  created_at: z.string(),
+  decided_at: z.string().nullable().default(null),
+})
+export type Gate = z.infer<typeof Gate>
+
+/** Append-only human decision record (design §6.6: actor, diff, reason kept forever). */
+export const Decision = z.object({
+  decision_id: z.string().min(1),
+  gate_id: z.string().min(1),
+  project_id: z.string().min(1),
+  gate_type: GateType,
+  actor: z.string().min(1),
+  decision: z.enum(['approved', 'rejected', 'revised']),
+  reason: z.string().default(''),
+  diff: z.string().default(''),
+  session_id: z.string().nullable().default(null),
+  event_id: z.string().nullable().default(null),
+  decided_at: z.string(),
+})
+export type Decision = z.infer<typeof Decision>
+
+/** Artifact kinds in the CAS registry. */
+export const ArtifactKind = z.enum(['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle'])
+export type ArtifactKind = z.infer<typeof ArtifactKind>
+
+/** Content-addressed artifact registry record (design §4.2 Artifact Registry). */
+export const ArtifactRecord = z.object({
+  artifact_id: z.string().min(1), // sha256:<hex>
+  project_id: z.string().min(1),
+  kind: ArtifactKind,
+  size_bytes: z.number().int().nonnegative(),
+  sha256: z.string().min(1),
+  metadata: z.record(z.unknown()).default({}),
+  created_at: z.string(),
+})
+export type ArtifactRecord = z.infer<typeof ArtifactRecord>
+
+/** Durable job state — the runner authority across process restarts (design §4.6.1, §9.3). */
+export const JobStatus = z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'retryable'])
+export type JobStatus = z.infer<typeof JobStatus>
+
+/** Durable runner job with lease/heartbeat/idempotency (design §4.2 Job Controller). */
+export const JobRecord = z.object({
+  job_id: z.string().min(1),
+  project_id: z.string().min(1),
+  contract_id: z.string().nullable().default(null),
+  idempotency_key: z.string().min(1),
+  kind: z.enum(['echo', 'smoke', 'baseline', 'pilot', 'formal', 'analysis', 'reproduce']),
+  command: z.array(z.string()).default([]),
+  payload: z.record(z.unknown()).default({}),
+  status: JobStatus.default('queued'),
+  failure_class: z.enum(['environment', 'resources', 'code_error', 'data_issue', 'no_improvement', 'unstable_results', 'budget_exhausted', 'unknown']).nullable().default(null),
+  lease_owner: z.string().nullable().default(null),
+  lease_expires_at: z.string().nullable().default(null),
+  heartbeat_at: z.string().nullable().default(null),
+  attempts: z.number().int().nonnegative().default(0),
+  max_attempts: z.number().int().positive().default(3),
+  run_manifest: z.record(z.unknown()).nullable().default(null),
+  error: z.string().default(''),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+export type JobRecord = z.infer<typeof JobRecord>
+
+/** Budget accounting record (design §4.2 Budget & Policy). */
+export const BudgetRecord = z.object({
+  project_id: z.string().min(1),
+  model_cost_usd: z.number().nonnegative().default(0),
+  gpu_hours: z.number().nonnegative().default(0),
+  api_requests: z.number().int().nonnegative().default(0),
+  updated_at: z.string(),
+})
+export type BudgetRecord = z.infer<typeof BudgetRecord>
+
+/** One append-only kernel event (outbox, at-least-once delivery). */
+export const KernelEvent = z.object({
+  event_id: z.string().min(1),
+  project_id: z.string().nullable().default(null),
+  kind: KernelEventKind,
+  payload: z.record(z.unknown()).default({}),
+  source: z.string().default('kernel'),
+  delivered: z.boolean().default(false),
+  created_at: z.string(),
+})
+export type KernelEvent = z.infer<typeof KernelEvent>
+
+/** Session↔project mapping (design RSP-006). */
+export const SessionLink = z.object({
+  session_id: z.string().min(1),
+  project_id: z.string().min(1),
+  linked_at: z.string(),
+})
+export type SessionLink = z.infer<typeof SessionLink>

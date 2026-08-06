@@ -1,0 +1,31 @@
+{
+  "name": "@dsh-scholar/research-kernel",
+  "version": "0.1.0",
+  "description": "DSH Research OS — Research Kernel: authoritative project state machine, gates, research ledger, artifact CAS, durable job store. Runs as a sidecar process (ADR-002).",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./bin/kernel.js": "./lib/bin/kernel.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "kernel": "node lib/bin/kernel.js"
+  },
+  "dependencies": {
+    "@dsh-scholar/research-schemas": "file:../research-schemas",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}

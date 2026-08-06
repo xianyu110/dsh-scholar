@@ -1,0 +1,23 @@
+# DSH Research OS — bundle patch (design §8.4).
+#
+# Applied as ONE insert when @dsh-scholar/research-plugin joins a profile's
+# layer stack (`dsh plugin --profile <name> add <path|github:...>`).
+#
+# The plugin itself: spawns/reuses the Research Kernel sidecar, registers the
+# research tool surface with per-role ACL, the /research command family and
+# the research-core skill pack.
+#
+# Security stance (design §1.2, §4.9): this bundle only ADDS rows; it never
+# touches sandbox/approval/web_fetch rows, so the profile keeps its shipped
+# workspace-write + ask default and web_fetch stays disabled.
+
+- insert:
+    - id: research-plugin
+      name: '@dsh-scholar/research-plugin'
+      config:
+        kernel:
+          host: 127.0.0.1
+          # 7412 is the Local Desktop Kernel port (design §9.1); set 0 to
+          # auto-pick a free port and read the actual one from logs/events.
+          port: 7412
+        defaultMode: gate-only

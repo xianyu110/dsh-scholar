@@ -1,0 +1,20 @@
+# DSH Research OS — headless overlay for CI / evaluation (design §3.4).
+# Same bundle rows as the web overlay; unattended mode must never block on
+# ask_user_question — gates mark the project BLOCKED_GATE instead.
+
+- insert:
+    - id: research-plugin
+      name: '@dsh-scholar/research-plugin'
+      config:
+        kernel:
+          host: 127.0.0.1
+          port: 7412
+        defaultMode: gate-only
+        unattended: true
+
+    - id: research-skill
+      name: '@deepseek-ai/dsh-skill-local'
+      config:
+        providerName: dsh-scholar-research-core
+        includeDefaultRoots: false
+        customSkillDirs: ['skills/research-core']

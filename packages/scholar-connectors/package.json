@@ -1,0 +1,28 @@
+{
+  "name": "@dsh-scholar/scholar-connectors",
+  "version": "0.1.0",
+  "description": "DSH Research OS — controlled scholarly connectors: OpenAlex, Crossref, arXiv with caching, dedup and immutable query snapshots.",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@dsh-scholar/research-schemas": "file:../research-schemas"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
