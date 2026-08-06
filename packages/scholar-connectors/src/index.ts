@@ -98,16 +98,19 @@ export function titleFingerprint(title: string): string {
 
 /** Deduplicate papers by DOI, arXiv id, then title fingerprint. Keeps first. */
 export function dedupPapers(papers: Paper[]): { papers: Paper[]; removed: number } {
-  const seen = new Set<string>()
+  const seenDoi = new Set<string>()
+  const seenTitle = new Set<string>()
   const result: Paper[] = []
   for (const paper of papers) {
     const doi = paper.identifiers?.doi
     const arxiv = paper.identifiers?.arxiv
-    const key = doi !== undefined ? `doi:${doi.toLowerCase()}`
-      : arxiv !== undefined ? `arxiv:${arxiv.toLowerCase()}`
-        : `title:${titleFingerprint(paper.title)}`
-    if (seen.has(key)) continue
-    seen.add(key)
+    const doiKey = doi !== undefined ? `doi:${doi.toLowerCase()}` : arxiv !== undefined ? `arxiv:${arxiv.toLowerCase()}` : undefined
+    const titleKey = `title:${titleFingerprint(paper.title)}`
+    // A title-variant of an already-seen DOI record must also dedup, and
+    // vice versa: both keys are consulted for every paper.
+    if ((doiKey !== undefined && seenDoi.has(doiKey)) || seenTitle.has(titleKey)) continue
+    if (doiKey !== undefined) seenDoi.add(doiKey)
+    seenTitle.add(titleKey)
     result.push(paper)
   }
   return { papers: result, removed: papers.length - result.length }

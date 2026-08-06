@@ -296,6 +296,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.releaseBundle(id))
               return
             }
+            if (method === 'POST' && sub === 'analysis') {
+              const input = z.object({ contract_id: z.string().optional(), metric: z.string().optional() }).parse(body)
+              ok(res, kernel.computeAnalysis(id, input.contract_id, input.metric))
+              return
+            }
             if (method === 'GET' && sub === 'events') {
               ok(res, kernel.listEvents(id))
               return

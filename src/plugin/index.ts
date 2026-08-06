@@ -27,11 +27,12 @@ import { DiskCache } from '@dsh-scholar/scholar-connectors'
 import { KernelSidecar, resolveDshHome } from './sidecar.js'
 import { registerResearchTools } from './tools.js'
 import { registerResearchCommands } from './commands.js'
+import { registerResearchApiBridge } from './web-bridge.js'
 import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
 
 export const name = 'research-plugin'
 
-export const inject = ['tools', 'commands']
+export const inject = ['tools', 'commands', 'subagents']
 
 export interface ResearchPluginConfig {
   kernel?: {
@@ -92,7 +93,7 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
   })
 
   // Research tool surface (design §4.1) with per-role ACL (§1.3 least privilege).
-  registerResearchTools({ tools: ctx.tools }, { client, cache })
+  registerResearchTools({ tools: ctx.tools }, { client, cache, ctx: ctx as never, roles })
 
   // Role-based ACL: deny research tools outside the caller role's surface.
   const researchToolSet = new Set<string>(RESEARCH_TOOLS)
@@ -109,6 +110,9 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
 
   // /research command family (design 附录 A).
   registerResearchCommands(ctx, { client, cache, unattended })
+
+  // Web-only data plane: /research-api/* -> kernel (E7 panels).
+  registerResearchApiBridge(ctx, sidecar)
 
   // Skill pack mount: research-core methodology (design §4.2).
   const ownDir = dirname(fileURLToPath(import.meta.url))

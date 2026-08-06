@@ -101,6 +101,25 @@ else
   ok "manifest with missing artifact rejected"
 fi
 
+say "Test 6: two processes decide the same gate concurrently — exactly one wins"
+PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"fault-concurrent\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jqfield project_id 2>/dev/null || api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"fault-concurrent\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+GATE2=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/gates" -H 'content-type: application/json' -d '{"type":"scope","title":"Concurrent Scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+# Fire both decisions at once.
+curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE2/decisions" -H 'content-type: application/json' -d '{"actor":"browser-a","decision":"approved"}' > "$WORK/code-a" &
+PA=$!
+curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE2/decisions" -H 'content-type: application/json' -d '{"actor":"browser-b","decision":"approved"}' > "$WORK/code-b" &
+PB=$!
+wait "$PA"; wait "$PB"
+CODE_A=$(cat "$WORK/code-a"); CODE_B=$(cat "$WORK/code-b")
+NDEC=$(curl -s "http://127.0.0.1:$PORT/v1/projects/$PROJ2/decisions" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).length))")
+PSTATUS=$(curl -s "http://127.0.0.1:$PORT/v1/projects/$PROJ2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+WINS=$(printf '%s %s' "$CODE_A" "$CODE_B" | grep -o 200 | wc -l)
+if [[ "$WINS" == "1" && "$NDEC" == "1" && "$PSTATUS" == "SCOPED" ]]; then
+  ok "concurrent decisions: one 200 winner (codes $CODE_A/$CODE_B), 1 decision recorded, project SCOPED"
+else
+  bad "expected exactly one winner; codes=$CODE_A/$CODE_B decisions=$NDEC status=$PSTATUS"
+fi
+
 stop_kernel
 rm -rf "$WORK"
 say "Summary: $PASS passed, $FAIL failed"

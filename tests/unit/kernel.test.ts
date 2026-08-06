@@ -182,6 +182,108 @@ describe('durable jobs', () => {
   })
 })
 
+describe('analysis pipeline (E5)', () => {
+  it('aggregates multi-seed metrics into mean/CI/effect size with baseline', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    // baseline run with a metrics artifact
+    const baselineMetrics = JSON.stringify({ metrics: [{ metric: 'f1', value: 0.8, seed: 0 }] })
+    const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: baselineMetrics })
+    const baselineJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'b1', kind: 'baseline', payload: {} })
+    kernel.claimJobs('r1', 60, 8)
+    kernel.completeJob({ job_id: baselineJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id, run_id: 'run_base' } })
+    // five formal runs with metrics
+    const values = [0.81, 0.83, 0.79, 0.85, 0.82]
+    for (let i = 0; i < values.length; i++) {
+      const art = kernel.registerArtifact({
+        project_id: project.project_id, kind: 'analysis',
+        content: JSON.stringify({ metrics: [{ metric: 'f1', value: values[i], seed: 10 + i }] }),
+      })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {} })
+      kernel.claimJobs('r1', 60, 8)
+      kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id, run_id: `run_${i}` } })
+    }
+    const analysis = kernel.computeAnalysis(project.project_id, undefined, 'f1')
+    expect(analysis.n).toBe(5)
+    expect(analysis.mean).toBeCloseTo(0.82, 3)
+    expect(analysis.baseline_value).toBeCloseTo(0.8, 3)
+    expect(analysis.effect_size).toBeCloseTo(0.02, 3)
+    expect(analysis.ci_low).toBeLessThan(analysis.ci_high)
+    expect(analysis.artifact_id.startsWith('sha256:')).toBe(true)
+    expect(kernel.cas.has(analysis.artifact_id.replace('sha256:', ''))).toBe(true)
+    // Deterministic: same data -> same CI
+    const again = kernel.computeAnalysis(project.project_id, undefined, 'f1')
+    expect(again.ci_low).toBe(analysis.ci_low)
+    expect(again.ci_high).toBe(analysis.ci_high)
+    kernel.close()
+  })
+
+  it('rejects analysis with no succeeded runs', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expect(() => kernel.computeAnalysis(project.project_id)).toThrow(/no succeeded runs/)
+    kernel.close()
+  })
+})
+
+describe('§11.2 recovery & concurrency cases', () => {
+  it('concurrent gate decisions: exactly one wins, the other is rejected (CAS race)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    // Two "browsers" decide simultaneously: the second UPDATE matches zero rows.
+    const first = kernel.decideGate({ gate_id: gate.gate_id, actor: 'browser-a', decision: 'approved' })
+    expect(first.gate.status).toBe('approved')
+    expect(() => kernel.decideGate({ gate_id: gate.gate_id, actor: 'browser-b', decision: 'approved' }))
+      .toThrow(/already/)
+    expect(kernel.listDecisions(project.project_id)).toHaveLength(1)
+    expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+    kernel.close()
+  })
+
+  it('session resume: a resumed DSH session links the SAME project; new projects never steal an old session mapping', async () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), session_id: 'session-old' })
+    // Resume = a fresh DSH session continues the project via explicit link.
+    const link = kernel.linkSession('session-new', project.project_id)
+    expect(link.project_id).toBe(project.project_id)
+    expect(kernel.getProjectBySession('session-old')?.project_id).toBe(project.project_id)
+    expect(kernel.getProjectBySession('session-new')?.project_id).toBe(project.project_id)
+    // A brand-new project must NOT inherit the old session's mapping implicitly.
+    const other = kernel.createProject({ name: 'other', workspace: '/w2', brief: makeBrief() })
+    expect(kernel.getProjectBySession('session-old')?.project_id).toBe(project.project_id)
+    expect(other.session_id).toBeNull()
+    // Phase is not duplicated on resume: revision/status stay monotonic.
+    const moved = kernel.transition(project.project_id, 'SCOPED', project.revision)
+    expect(moved.revision).toBe(1)
+    expect(kernel.transition(project.project_id, 'SURVEYING', moved.revision).status).toBe('SURVEYING')
+    kernel.close()
+  })
+
+  it('session format independence: kernel state survives even when the DSH session log is absent (upgrade drill)', () => {
+    // The Kernel DB is the authority; a "read-only old session" cannot hold
+    // research state hostage. Simulate: no session links at all, project still
+    // fully queryable and transitionable.
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+    expect(kernel.listEvents(project.project_id).length).toBeGreaterThanOrEqual(3)
+    // Events remain deliverable after a "restart" (reopen the same DB file).
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-reopen-'))
+    const dbPath = join(dir, 'kernel.db')
+    const k1 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas') })
+    const p1 = k1.createProject({ name: 'x', workspace: '/w', brief: makeBrief() })
+    k1.close()
+    const k2 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas') })
+    expect(k2.getProject(p1.project_id).status).toBe('DRAFT')
+    expect(k2.getProjectBySession('whatever')).toBeNull()
+    k2.close()
+    kernel.close()
+  })
+})
+
 describe('claims and evidence', () => {
   it('verifyClaim marks supported when CIs exclude zero', () => {
     const kernel = freshKernel()

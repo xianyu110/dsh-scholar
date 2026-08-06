@@ -45,5 +45,20 @@
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
     "@dsh-scholar/runner-gateway": "file:workers/runner-gateway"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client-panel.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dshClient": {
+    "inject": [],
+    "platform": "web"
   }
 }

@@ -10,8 +10,8 @@ Idea 生成、Baseline 复现、实验预注册与隔离执行,到 Claim-Evidenc
 
 | 层 | 组件 | 职责 |
 |---|---|---|
-| DSH 插件 | `src/plugin/` | kernel sidecar 生命周期、22 个科研工具(带角色 ACL)、`/research` 命令族、research-core skill |
-| Research Kernel | `packages/research-kernel/` | 项目状态机 + Gate、Research Ledger(SQLite)、Artifact CAS、durable Job Store、预算策略、事件 outbox |
+| DSH 插件 | `src/plugin/` | kernel sidecar 生命周期、27 个科研工具(带角色 ACL)、12 个 `/research` 命令、research-core skill、`/research-api` Web 桥 + 浏览器面板(E7) |
+| Research Kernel | `packages/research-kernel/` | 项目状态机 + Gate(CAS 原子决策)、Research Ledger(SQLite)、Artifact CAS、durable Job Store、预算策略、事件 outbox、多种子统计分析(mean/sd/bootstrap-95%CI/效应量)+ SVG 图表 |
 | 科研服务 | `packages/scholar-connectors/` | OpenAlex/Crossref/arXiv 受控连接、缓存、去重、快照 |
 | 隔离执行 | `workers/runner-gateway/` | 租约/心跳/恢复、echo/smoke 作业、RunManifest 签名、失败分类 |
 | 共享契约 | `packages/research-schemas/` `packages/research-client/` | Zod 权威 schema + 类型化 Kernel 客户端 |
@@ -50,8 +50,10 @@ DSH 进程退出**不会丢失**研究状态(SQLite 权威状态)。
 
 ## /research 命令面(设计附录 A)
 
-`new` `status` `survey` `ideas` `contract` `run` `evidence` `write` `export`
-`release` — 见 `src/plugin/commands.ts`;22 个 `research_*` 工具见
+`new` `status` `survey` `ideas` `reproduce` `contract` `run` `evidence` `write`
+`review` `export` `release` — 见 `src/plugin/commands.ts`;27 个 `research_*`
+工具(含 `research_panel` 并行子代理面板、`workspace_snapshot`/`patch_apply`/
+`baseline_prepare`/`test_run`/`analysis_build`/`idea_compare`)见
 `src/plugin/tools.ts`;角色工具 ACL 见 `src/plugin/acl.ts`。
 
 ## 开发
@@ -60,9 +62,12 @@ DSH 进程退出**不会丢失**研究状态(SQLite 权威状态)。
 pnpm install
 bash scripts/link-dsh-deps.sh        # 链接 DSH 安装的 @deepseek-ai/* 类型(本地类型检查)
 pnpm run build                        # 构建全部包
-pnpm test                             # 单元测试(26)
-bash tests/fault-injection/run-fault-tests.sh   # 故障注入(5)
-bash tests/e2e/golden-path.sh         # 黄金路径 e2e(11,可选 --live-connectors 走真实学术 API)
+pnpm test                             # 单元测试(31)
+bash tests/fault-injection/run-fault-tests.sh   # 故障注入(6,含跨进程并发 Gate CAS)
+bash tests/e2e/golden-path.sh         # 黄金路径 e2e(14,可选 --live-connectors)
+bash evals/fault-stress.sh 100        # §11.4 恢复门槛:100 次 kill -9 压力
+bash evals/survey-eval.sh --live      # §11.3 Survey 评测(真实连接器 recall@K)
+bash evals/clean-room-rerun.sh        # §13.1 DoD#9:空环境重跑复现
 ```
 
 ## 仓库结构(设计 §8.2 映射)
@@ -93,7 +98,8 @@ plugins/research-core/.dsh-plugin  repository-plugin 静态 skill 包(GitHub 可
 
 ## 状态
 
-MVP 基线(E0/E1 + E2-E5 核心)已实现并通过验证:
-[kernel 状态机/CAS/幂等 job/租约恢复] [学术连接器] [Idea+新颖性审计]
-[Runner+RunManifest] [Claim-Evidence] [确定性论文/评审/复现包]。
-设计文档 12 周路线中的 E7(Web 面板)、E8 强化、Team/Cluster 部署为后续阶段。
+已实现并验证:E0/E1(插件/持久项目)、E2(学术连接器+快照)、E3(Idea+
+新颖性+并行 Idea Panel)、E4(Runner/Contract/Baseline/正式运行)、E5(统计
+分析+Claim+图表)、E6(确定性论文/评审/复现包)、E7(Web 面板:阶段/Gate/
+预算/Runs/Artifacts/Evidence)、E8 主体(100 次故障注入压力、clean-room
+rerun、安全基线)。Team/Cluster 部署(§9.2)与多模型路由(§8.5)为演进项。

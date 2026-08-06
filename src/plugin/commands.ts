@@ -148,6 +148,34 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             return { kind: 'success' as const, text }
           }
 
+          case 'reproduce': {
+            const project = await requireProject(client, sessionId, undefined)
+            const { json, positional } = jsonArg(rest)
+            const data = briefFromJson(json)
+            const command = Array.isArray(data?.command) ? data.command.map(String)
+              : positional !== '' ? positional.split(/\s+/)
+                : []
+            const idem = String(data?.idempotency_key ?? `baseline-${Date.now()}`)
+            const job = await client.submitJob({
+              project_id: project.project_id,
+              idempotency_key: idem,
+              kind: 'baseline',
+              command,
+              payload: {
+                message: '/research reproduce',
+                repo: data?.repo !== undefined ? String(data.repo) : undefined,
+                commit: data?.commit !== undefined ? String(data.commit) : undefined,
+                expected_metrics: data?.expected_metrics,
+                tolerance: data?.tolerance,
+                ...(data ?? {}),
+              },
+              contract_id: data?.contract_id !== undefined ? String(data.contract_id) : null,
+            })
+            const text = `Baseline reproduction job **${job.job_id}** [${job.kind}] submitted (${job.status}, idempotency ${idem}).\n\n`
+              + `The runner gateway executes it in isolation; the RunManifest records commit, environment, hashes and metrics deviation.`
+            return { kind: 'success' as const, text }
+          }
+
           case 'contract': {
             const project = await requireProject(client, sessionId, undefined)
             const { json } = jsonArg(rest)
@@ -221,6 +249,21 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             return { kind: 'success' as const, text }
           }
 
+          case 'review': {
+            const project = await requireProject(client, sessionId, undefined)
+            const review = await client.manuscriptReview(project.project_id)
+            const gates = await client.listGates(project.project_id)
+            const releaseGates = gates.filter(g => g.type === 'release')
+            const text = 'Reviewer checks (deterministic, evidence-ledger bound):\n'
+              + review.checks.map(c => `  - [${c.status}] ${c.check}: ${c.detail}`).join('\n')
+              + '\n\n'
+              + `Overall: ${review.pass ? 'PASS — manuscript ready for the human Release Gate' : 'SEE CHECKS — fix before writing'}\n`
+              + (releaseGates.length > 0
+                ? `Release Gate ${releaseGates.map(g => g.gate_id).join(', ')} pending (human only).`
+                : 'No Release Gate yet — run /research export then /research release.')
+            return { kind: 'success' as const, text }
+          }
+
           case 'export': {
             const project = await requireProject(client, sessionId, undefined)
             const bundle = await client.releaseBundle(project.project_id)
@@ -250,10 +293,12 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
                 + '  status [project_id]   phase, gates, jobs, budget, next actions\n'
                 + '  survey <query>        multi-source search + frozen CorpusSnapshot\n'
                 + '  ideas                 list IdeaCards (generate via idea_create tool)\n'
+                + '  reproduce [json]      prepare + run Baseline reproduction (isolated)\n'
                 + '  contract <json>       pre-register an ExperimentContract\n'
                 + '  run [kind] [json]     submit a durable runner job\n'
                 + '  evidence <json>       ingest a statistical EvidenceItem\n'
                 + '  write                 build manuscript from the read-only ledger\n'
+                + '  review                deterministic reviewer checks + Release Gate status\n'
                 + '  export                private Release Bundle (not publication)\n'
                 + '  release               create the human Release Gate',
             }

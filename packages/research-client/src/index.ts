@@ -278,6 +278,22 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${projectId}/release-bundle`)
   }
 
+  computeAnalysis(projectId: string, contractId?: string, metric?: string): Promise<{
+    artifact_id: string
+    contract_id: string | null
+    metric: string
+    runs: Array<{ run_id: string; job_id: string; value: number; seed?: number }>
+    mean: number
+    sd: number
+    n: number
+    ci_low: number
+    ci_high: number
+    baseline_value: number | null
+    effect_size: number | null
+  }> {
+    return this.request('POST', `/v1/projects/${projectId}/analysis`, { contract_id: contractId, metric })
+  }
+
   // ── budget / events ──────────────────────────────────────────────────────
 
   recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): Promise<Record<string, unknown>> {

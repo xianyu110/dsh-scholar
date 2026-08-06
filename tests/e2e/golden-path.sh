@@ -120,6 +120,17 @@ CSTATUS=$(api -X POST "http://127.0.0.1:$PORT/v1/claims/verify" -d "{\"claim_id\
 [[ "$CSTATUS" == "supported" ]] && ok "claim $CLAIM verified: $CSTATUS" || bad "claim status $CSTATUS"
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"EVIDENCE_READY","expected_revision":7}' > /dev/null
 
+say "8.5 deterministic analysis (E5): multi-seed mean/CI/effect size"
+ANALYSIS=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/analysis" -d "{\"contract_id\":\"$CONTRACT\",\"metric\":\"mAP@0.5\"}" | jqfield artifact_id)
+CHART=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/analysis" -d "{\"contract_id\":\"$CONTRACT\",\"metric\":\"mAP@0.5\"}" | jqfield chart_artifact)
+AMEAN=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/analysis" -d "{\"contract_id\":\"$CONTRACT\",\"metric\":\"mAP@0.5\"}" | jqfield mean)
+AN=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/analysis" -d "{\"contract_id\":\"$CONTRACT\",\"metric\":\"mAP@0.5\"}" | jqfield n)
+[[ "$ANALYSIS" == sha256:* && "$AN" == "3" ]] && ok "analysis artifact $ANALYSIS: mean=$AMEAN over $AN seeds (bootstrap CI)" || bad "analysis artifact=$ANALYSIS n=$AN"
+[[ "$CHART" == sha256:* ]] && ok "chart artifact $CHART bound to analysis (SVG figure for the manuscript)" || bad "chart artifact missing"
+# chart svg is retrievable from CAS via the artifacts route
+CHART_SVG=$(curl -s -m 3 "http://127.0.0.1:$PORT/v1/artifacts/$CHART" | head -c 60)
+[[ "$CHART_SVG" == "<svg"* ]] && ok "chart content is a valid SVG" || bad "chart content: ${CHART_SVG:0:40}"
+
 say "9. manuscript + reviewer checks → WRITING/REVIEWING"
 DRAFT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscripts/build" -d '{"format":"markdown","include_limitations":true}' | jqfield manuscript_id)
 REVIEW=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscript-review" | jqfield pass)

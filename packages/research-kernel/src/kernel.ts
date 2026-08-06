@@ -350,8 +350,14 @@ export class ResearchKernel {
     this.db.prepare(
       'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor, decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at)
-    this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
+    const gateUpdate = this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
       .run(input.decision, decision.decided_at, gate.gate_id, 'pending')
+    if (Number(gateUpdate.changes) !== 1) {
+      // Lost the CAS race to a concurrent decision (design §11.2: two browsers
+      // deciding the same gate — exactly one wins, the conflict is recorded).
+      this.db.prepare('DELETE FROM decisions WHERE decision_id = ?').run(decision.decision_id)
+      throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} was decided concurrently (CAS race)`)
+    }
 
     let project = this.getProject(gate.project_id)
     const now = nowIso()
@@ -907,6 +913,135 @@ export class ResearchKernel {
     return rows.map(row => JSON.parse(row.body) as Claim)
   }
 
+  // ── analysis pipeline (design §4.7, §11.3 Statistics) ────────────────────
+
+  /**
+   * Deterministic multi-seed analysis over succeeded formal runs: aggregate
+   * metrics from RunManifest metrics artifacts in CAS, compute mean, sd,
+   * percentile bootstrap 95% CI and effect size vs the baseline run. Writes
+   * one analysis artifact; numbers in manuscripts must come from this.
+   */
+  computeAnalysis(projectId: string, contractId?: string, metric?: string): {
+    artifact_id: string
+    chart_artifact: string
+    contract_id: string | null
+    metric: string
+    runs: Array<{ run_id: string; job_id: string; value: number; seed?: number }>
+    mean: number
+    sd: number
+    n: number
+    ci_low: number
+    ci_high: number
+    baseline_value: number | null
+    effect_size: number | null
+    generated_at: string
+  } {
+    const project = this.getProject(projectId)
+    const jobs = this.listJobs(projectId).filter(j => j.status === 'succeeded' && j.run_manifest !== null)
+    const metricValues: Array<{ run_id: string; job_id: string; value: number; seed?: number }> = []
+    let baselineValue: number | null = null
+    for (const job of jobs) {
+      if (contractId !== undefined && job.contract_id !== contractId) continue
+      const metricsArtifact = job.run_manifest?.metrics_artifact
+      if (typeof metricsArtifact !== 'string') continue
+      const sha = metricsArtifact.replace(/^sha256:/, '')
+      if (!this.cas.has(sha)) continue
+      const parsed = JSON.parse(this.cas.read(sha).toString('utf8')) as { metrics?: Array<{ metric?: string; value?: number; seed?: number }> }
+      for (const entry of parsed.metrics ?? []) {
+        if (entry.value === undefined || entry.metric === undefined) continue
+        if (metric !== undefined && entry.metric !== metric) continue
+        const targetMetric = entry.metric
+        if (job.kind === 'baseline') {
+          baselineValue = entry.value
+        } else {
+          metricValues.push({ run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id, job_id: job.job_id, value: entry.value, seed: entry.seed })
+        }
+        void targetMetric
+      }
+    }
+    if (metricValues.length === 0) {
+      throw new KernelError(422, 'no_metrics', 'no succeeded runs with metrics artifacts found for analysis')
+    }
+    const values = metricValues.map(v => v.value)
+    const mean = values.reduce((a, b) => a + b, 0) / values.length
+    const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / Math.max(values.length - 1, 1)
+    const sd = Math.sqrt(variance)
+    const [ciLow, ciHigh] = bootstrapCi95(values, 1000)
+    const effectSize = baselineValue !== null ? mean - baselineValue : null
+    const result = {
+      contract_id: contractId ?? null,
+      metric: metric ?? 'auto',
+      runs: metricValues,
+      mean: round(mean),
+      sd: round(sd),
+      n: values.length,
+      ci_low: round(ciLow),
+      ci_high: round(ciHigh),
+      baseline_value: baselineValue !== null ? round(baselineValue) : null,
+      effect_size: effectSize !== null ? round(effectSize) : null,
+    }
+    const artifact = this.registerArtifact({
+      project_id: projectId,
+      kind: 'analysis',
+      content: JSON.stringify({ analysis: result, method: 'percentile-bootstrap-95', n_resamples: 1000, project_id: projectId }, null, 2),
+      metadata: { kind: 'analysis', metric: result.metric, n: result.n, generated_by: 'research-kernel.computeAnalysis' },
+    })
+    this.emit(projectId, 'artifact.registered', { artifact_id: artifact.artifact_id, kind: 'analysis' })
+    // Deterministic chart artifact bound to the same analysis numbers (§11.3).
+    const chart = this.buildChartSvg(projectId, { artifact_id: artifact.artifact_id, ...result })
+    return { artifact_id: artifact.artifact_id, chart_artifact: chart.chart_artifact, ...result, generated_at: nowIso() }
+  }
+
+  /**
+   * Generate a deterministic SVG bar chart for one analysis result (design
+   * §11.3 charts, E5): mean with bootstrap CI whiskers vs baseline. The SVG
+   * is registered as a `chart` CAS artifact so manuscripts embed artifact
+   * references, not ad-hoc numbers.
+   */
+  buildChartSvg(projectId: string, analysis: {
+    artifact_id: string
+    metric: string
+    mean: number
+    ci_low: number
+    ci_high: number
+    baseline_value: number | null
+    n: number
+  }): { chart_artifact: string; svg: string } {
+    this.getProject(projectId)
+    const W = 420, H = 260, M = { l: 60, r: 20, t: 30, b: 40 }
+    const values = [analysis.baseline_value ?? analysis.mean, analysis.mean]
+    const lo = Math.min(...values, analysis.ci_low)
+    const hi = Math.max(...values, analysis.ci_high)
+    const span = Math.max(hi - lo, 1e-9) * 1.25
+    const scale = (v: number): number => H - M.b - ((v - lo) / span) * (H - M.t - M.b)
+    const barW = 70
+    const bar = (x: number, v: number, color: string, label: string): string => {
+      const y = scale(Math.max(v, lo))
+      const h = Math.max(H - M.b - y, 1)
+      const textY = y - 6
+      return `<rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${color}" rx="3"/>
+        <text x="${x + barW / 2}" y="${textY}" text-anchor="middle" font-size="12" fill="#333">${label}: ${v.toFixed(4)}</text>`
+    }
+    const ciY = scale(analysis.ci_high)
+    const ciH = Math.max(Math.abs(scale(analysis.ci_low) - scale(analysis.ci_high)), 1)
+    const meanX = M.l + barW + 50
+    const baselineX = M.l
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <text x="${W / 2}" y="20" text-anchor="middle" font-size="14" font-weight="bold">${escapeXml(analysis.metric)} — mean ± 95% bootstrap CI (n=${analysis.n})</text>
+  ${analysis.baseline_value !== null ? bar(baselineX, analysis.baseline_value, '#9aa5b1', 'baseline') : ''}
+  ${bar(meanX, analysis.mean, '#4c6ef5', 'treatment')}
+  <rect x="${meanX + barW / 2 - 3}" y="${ciY}" width="6" height="${ciH}" fill="#f03e3e"/>
+  <text x="${meanX + barW / 2}" y="${H - M.b + 18}" text-anchor="middle" font-size="11" fill="#555">analysis ${analysis.artifact_id.slice(0, 12)}</text>
+</svg>`
+    const record = this.registerArtifact({
+      project_id: projectId,
+      kind: 'chart',
+      content: svg,
+      metadata: { kind: 'chart', metric: analysis.metric, analysis_artifact: analysis.artifact_id },
+    })
+    return { chart_artifact: record.artifact_id, svg }
+  }
+
   // ── manuscript & release bundle (design §4.8) ────────────────────────────
 
   /** Deterministic manuscript draft from the read-only Evidence Ledger. */
@@ -978,7 +1113,19 @@ export class ResearchKernel {
       for (const paper of snapshots.at(-1)?.papers ?? []) {
         lines.push(`- ${paper.paper_id}: ${paper.title} (${paper.year ?? 'n.d.'})`)
       }
-      if (includeLimitations) {
+      // Charts: every analysis artifact gets a figure reference (numbers stay
+    // bound to analysis artifacts — the chart is a rendering of them).
+    const analyses = this.listArtifacts(projectId).filter(a => a.kind === 'analysis')
+    const charts = this.listArtifacts(projectId).filter(a => a.kind === 'chart')
+    if (charts.length > 0) {
+      lines.push('', '## Figures')
+      for (const chart of charts) {
+        const metric = String(chart.metadata.metric ?? 'metric')
+        lines.push(`![${metric} (analysis artifact bound)](${chart.artifact_id})`)
+      }
+    }
+    void analyses
+    if (includeLimitations) {
         lines.push('', '## Limitations')
         for (const claim of claims) {
           if (claim.limitations.length > 0) lines.push(...claim.limitations.map(l => `- ${l}`))
@@ -1143,4 +1290,43 @@ function supportedOrInconclusive(claims: import('@dsh-scholar/research-schemas')
   const supported = claims.filter(c => c.status === 'supported').length
   const inconclusive = claims.filter(c => c.status === 'inconclusive').length
   return `${supported} supported, ${inconclusive} inconclusive, ${claims.length - supported - inconclusive} other`
+}
+
+
+/** Deterministic mulberry32 PRNG (seeded) for the percentile bootstrap. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** Percentile bootstrap 95% CI with a fixed seed (deterministic). */
+function bootstrapCi95(values: number[], resamples: number): [number, number] {
+  const rand = mulberry32(20260806)
+  const means: number[] = []
+  for (let r = 0; r < resamples; r++) {
+    let sum = 0
+    for (let i = 0; i < values.length; i++) {
+      sum += values[Math.floor(rand() * values.length)]!
+    }
+    means.push(sum / values.length)
+  }
+  means.sort((a, b) => a - b)
+  const lo = means[Math.floor(resamples * 0.025)]!
+  const hi = means[Math.ceil(resamples * 0.975) - 1]!
+  return [lo, hi]
+}
+
+function round(value: number): number {
+  return Math.round(value * 10000) / 10000
+}
+
+
+function escapeXml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }

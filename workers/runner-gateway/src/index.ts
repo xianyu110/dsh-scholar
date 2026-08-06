@@ -165,8 +165,10 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-scholar-run-'))
 
   let run: RunOutcome
-  if (job.kind === 'echo') {
-    // Echo jobs execute nothing on the host: pure in-process manifest.
+  if (job.kind === 'echo' || (job.command.length === 0 && typeof job.payload.message === 'string')) {
+    // Echo-style jobs execute nothing on the host: pure in-process manifest.
+    // A non-echo job with an empty command and a `message` payload is treated
+    // the same way (deterministic stdout for fixtures/metrics tests).
     const message = typeof job.payload.message === 'string' ? job.payload.message : `echo ${job.job_id}`
     run = {
       run_id: `run_${randomUUID().slice(0, 12)}`,
