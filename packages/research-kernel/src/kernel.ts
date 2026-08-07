@@ -469,31 +469,34 @@ export class ResearchKernel {
   }
 
   recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): BudgetRecord {
-    const project = this.getProject(projectId)
-    const current = this.getBudget(projectId)
-    const next: BudgetRecord = {
-      project_id: projectId,
-      model_cost_usd: current.model_cost_usd + (usage.model_cost_usd ?? 0),
-      gpu_hours: current.gpu_hours + (usage.gpu_hours ?? 0),
-      api_requests: current.api_requests + (usage.api_requests ?? 0),
-      updated_at: nowIso(),
-    }
-    this.db.prepare(
-      'INSERT INTO budget (project_id, model_cost_usd, gpu_hours, api_requests, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET model_cost_usd = excluded.model_cost_usd, gpu_hours = excluded.gpu_hours, api_requests = excluded.api_requests, updated_at = excluded.updated_at',
-    ).run(projectId, next.model_cost_usd, next.gpu_hours, next.api_requests, next.updated_at)
-    this.emit(projectId, 'budget.updated', { model_cost_usd: next.model_cost_usd, gpu_hours: next.gpu_hours })
-    // Hard limit check: crossing a limit stops the project into BLOCKED_GATE.
-    if (project.status !== 'BLOCKED_GATE' && project.status !== 'FAILED' && project.status !== 'STOPPED') {
-      const exceeded: string[] = []
-      if (next.model_cost_usd > project.constraints.max_model_cost_usd) exceeded.push(`model cost $${next.model_cost_usd} > $${project.constraints.max_model_cost_usd}`)
-      if (next.gpu_hours > project.constraints.max_gpu_hours) exceeded.push(`gpu hours ${next.gpu_hours} > ${project.constraints.max_gpu_hours}`)
-      if (exceeded.length > 0) {
-        this.emit(projectId, 'policy.violation', { reasons: exceeded })
-        this.db.prepare('UPDATE projects SET status = ?, updated_at = ?, history = ? WHERE project_id = ?')
-          .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')})`]), projectId)
+    // v2 §7.6: budget increment + limit check + block state + outbox in ONE transaction.
+    return withTransaction(this.db, () => {
+      const project = this.getProject(projectId)
+      const current = this.getBudget(projectId)
+      const next: BudgetRecord = {
+        project_id: projectId,
+        model_cost_usd: current.model_cost_usd + (usage.model_cost_usd ?? 0),
+        gpu_hours: current.gpu_hours + (usage.gpu_hours ?? 0),
+        api_requests: current.api_requests + (usage.api_requests ?? 0),
+        updated_at: nowIso(),
       }
-    }
-    return this.getBudget(projectId)
+      this.db.prepare(
+        'INSERT INTO budget (project_id, model_cost_usd, gpu_hours, api_requests, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET model_cost_usd = excluded.model_cost_usd, gpu_hours = excluded.gpu_hours, api_requests = excluded.api_requests, updated_at = excluded.updated_at',
+      ).run(projectId, next.model_cost_usd, next.gpu_hours, next.api_requests, next.updated_at)
+      this.emit(projectId, 'budget.updated', { model_cost_usd: next.model_cost_usd, gpu_hours: next.gpu_hours })
+      // Hard limit check: crossing a limit stops the project into BLOCKED_GATE.
+      if (project.status !== 'BLOCKED_GATE' && project.status !== 'FAILED' && project.status !== 'STOPPED') {
+        const exceeded: string[] = []
+        if (next.model_cost_usd > project.constraints.max_model_cost_usd) exceeded.push(`model cost $${next.model_cost_usd} > $${project.constraints.max_model_cost_usd}`)
+        if (next.gpu_hours > project.constraints.max_gpu_hours) exceeded.push(`gpu hours ${next.gpu_hours} > ${project.constraints.max_gpu_hours}`)
+        if (exceeded.length > 0) {
+          this.emit(projectId, 'policy.violation', { reasons: exceeded })
+          this.db.prepare('UPDATE projects SET status = ?, updated_at = ?, history = ? WHERE project_id = ?')
+            .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')})`]), projectId)
+        }
+      }
+      return this.getBudget(projectId)
+    })
   }
 
   // ── artifacts (CAS) ──────────────────────────────────────────────────────

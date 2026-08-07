@@ -401,7 +401,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               const matches = kernel.listArtifactsForBlob(id)
               if (matches.length === 0) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found`)
               if (matches.length > 1) throw new KernelError(409, 'artifact_ambiguous', `artifact ${id} exists in multiple projects; pass project_id`)
-              record = matches[0]
+              record = matches[0]!
             }
             const content = kernel.cas.read(record.sha256)
             res.writeHead(200, {
