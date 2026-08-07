@@ -1,38 +1,34 @@
 #!/usr/bin/env bash
 # §19.3 Golden Path v2 — REAL execution end-to-end (no echo jobs, no message
-# fallback, no forged metrics).
+# fallback, no forged metrics). v2 SCH-EXEC-002: the Runner materializes the
+# code snapshot from CAS (archive → artifact → /work) and reads formal metrics
+# from the fixed-schema metrics FILE (/outputs/metrics.json), not stdout.
 #
 # Drives the full v2 experiment lifecycle against a small self-contained
 # fixture repo (evals/golden-path-v2/fixture-repo) with real code executed by
 # real `node` inside a `node:22-alpine` docker container through the runner's
 # `--mode docker` path:
 #
-#   1. fixture-repo tar -> code artifact (kind='code', content-addressed,
-#      integrity round-trip via GET /v1/artifacts/{id});
-#   2. baseline job  (kind=baseline, seed 0)   — real node execution;
-#   3. three formal jobs (kind=formal, seeds 1/2/3) — real node execution;
-#   4. each run writes the §12.5 fixed-schema metrics file in-container
-#      (/tmp/metrics.json) and `cat`s it (proven by validating the exact
-#      record inside the run log artifact);
-#   5. metrics are also printed as stdout JSON lines (compat with the current
-#      runner, which still extracts metrics from stdout — §12.5 "runner does
-#      not derive metrics from arbitrary stdout" is the target mechanism, not
-#      yet implemented; both channels must agree);
-#   6. POST /v1/projects/{id}/analysis aggregates the real runs: mean,
+#   1. fixture-repo -> POST /v1/projects/{id}/code-snapshots: the Kernel
+#      archives the ACTUAL file contents into a content-addressed code
+#      artifact (archive_artifact_id) + manifest artifact (§11.3);
+#   2. baseline job  (kind=baseline, seed 0) — bound to the code snapshot
+#      (§12.2 code_snapshot_id), materialized from CAS into /work, executed
+#      by real node in docker;
+#   3. three formal jobs (kind=formal, seeds 1/2/3) — same binding;
+#   4. every run writes the §12.5 fixed-schema metrics file in-container to
+#      /outputs/metrics.json (output_contract); the Runner reads it back and
+#      registers it as the metrics artifact (source=metrics-file). The fixture
+#      prints NO metric lines to stdout — metrics can only come from the file;
+#   5. materialization is proven inside the container (`head -n1 /work/train.js`
+#      -> shebang line found in the run log artifact);
+#   6. a Code Engineer PATCH changes a real algorithm constant (0.01 -> 0.02
+#      seed coefficient), a NEW snapshot is archived, one more formal run
+#      (seed 4) executes the patched code and its metric differs from the
+#      unpatched expectation — patch really changed the executed algorithm;
+#   7. POST /v1/projects/{id}/analysis aggregates the real runs: mean,
 #      baseline_value, effect_size, seeds — asserted against the
 #      deterministic expectation the script computes itself.
-#
-# How real code reaches the container (verified against
-# workers/runner-gateway/src/index.ts runDocker): the runner mounts the job's
-# mkdtemp workdir at /work:ro and executes `job.command` verbatim, but only
-# smoke+script jobs get files written into that workdir. Baseline/formal jobs
-# therefore carry the fixture INSIDE the command itself: `sh -c` materializes
-# train.js/baseline.js + the dataset into the container's writable /tmp
-# (tmpfs) via heredocs, then runs node on them. /tmp is used instead of the
-# §12.5 `/outputs` path because /work is mounted ro and uid 65534 cannot
-# create /outputs in the image root fs. The runner does not yet materialize
-# CAS artifacts into the container, so the fixture tar registered as a code
-# artifact is verified for integrity but is not the execution input.
 #
 # Prerequisite: working docker runtime (docker info passes); node:22-alpine
 # image (auto-pulled). Usage: bash evals/golden-path-v2/run-golden-v2.sh
@@ -97,27 +93,39 @@ BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m1"],"resou
 PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"golden-path-v2\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"local-docker-cpu\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 ok "project $PROJ"
 
-echo "== fixture-repo -> code artifact (content-addressed, integrity round-trip) =="
-TAR="$WORK/fixture-repo.tar"
-tar --sort=name --mtime=@1767225600 --owner=0 --group=0 --numeric-owner -cf "$TAR" -C "$FIXTURE" .
-TAR_SHA=$(sha256sum "$TAR" | awk '{print $1}')
-CODE_ART=$(api -X POST "http://127.0.0.1:$PORT/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\"code\",\"content_base64\":\"$(base64 -w0 "$TAR")\",\"metadata\":{\"fixture\":\"golden-path-v2\",\"tar_sha256\":\"$TAR_SHA\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).artifact_id))")
-if [[ "$CODE_ART" == "sha256:$TAR_SHA" ]]; then
-  ok "fixture-repo tar registered as code artifact $CODE_ART (deterministic tar)"
+echo "== fixture-repo -> code snapshot archive (actual contents into CAS, §11.3) =="
+SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$FIXTURE\",\"description\":\"golden-path-v2 fixture\"}")
+CODE_ART=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
+MAN_ART=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).manifest_artifact_id))")
+SNAP_FILES=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).files))")
+if [[ "$CODE_ART" == sha256:* ]] && [[ "$MAN_ART" == sha256:* ]] && [ "$SNAP_FILES" -ge 4 ] 2>/dev/null; then
+  ok "code snapshot archived: archive_artifact_id=$CODE_ART manifest_artifact_id=$MAN_ART files=$SNAP_FILES (actual content, §11.3)"
 else
-  bad "code artifact id '$CODE_ART' != sha256:$TAR_SHA"
+  bad "code snapshot archive malformed: $SNAP"
 fi
-curl -sf "http://127.0.0.1:$PORT/v1/artifacts/$CODE_ART" -o "$WORK/dl.tar"
-if [[ "$(sha256sum "$WORK/dl.tar" | awk '{print $1}')" == "$TAR_SHA" ]]; then
-  ok "artifact bytes round-trip verified (GET /v1/artifacts/$CODE_ART == local tar)"
+curl -sf "http://127.0.0.1:$PORT/v1/artifacts/$CODE_ART?project_id=$PROJ" -o "$WORK/archive.json"
+if PORT="$PORT" PROJ="$PROJ" WORK="$WORK" node --input-type=module -e '
+  const fs=await import("node:fs")
+  const a=JSON.parse(fs.readFileSync(process.env.WORK+"/archive.json","utf8"))
+  const f=a.files
+  const train=Buffer.from(f["train.js"]?.content_base64??"","base64").toString("utf8")
+  const pkg=JSON.parse(Buffer.from(f["package.json"]?.content_base64??"","base64").toString("utf8"))
+  const ok=a.schema_version===1
+    && typeof f["train.js"]==="object" && typeof f["baseline.js"]==="object"
+    && typeof f["data/seed-data.json"]==="object" && typeof f["package.json"]==="object"
+    && train.includes("weightedSum") && train.includes("#!/usr/bin/env node")
+    && pkg.type==="module" && /^[0-9a-f]{64}$/.test(f["train.js"].sha256)
+  if(!ok){console.error("archive content invalid");process.exit(1)}
+  console.log(JSON.stringify({files:Object.keys(f).length, has_train:true, has_package_json:true, sample_sha:f["train.js"].sha256.slice(0,12)}))' ; then
+  ok "archive artifact holds ACTUAL file contents (train.js/package.json/data, per-file sha256)"
 else
-  bad "artifact download hash mismatch"
+  bad "archive artifact content check failed"
 fi
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 wait_job() { # <idempotency_key> — echoes terminal status (succeeded|failed|cancelled|timeout)
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 160); do
     S=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d).find(x=>x.idempotency_key==='$1');console.log(j?.status??'missing')})")
     case "$S" in succeeded|failed|cancelled) echo "$S"; return 0;; esac
     sleep 0.25
@@ -128,82 +136,96 @@ wait_job() { # <idempotency_key> — echoes terminal status (succeeded|failed|ca
 
 # job_metric <key> <metric> — reads GET /projects/{id}/jobs JSON on stdin,
 # prints the metric value from the run's metrics artifact ('' if missing).
+# §12.5: artifact entries are {name, value, unit, seed} (legacy {metric, value}
+# accepted too).
 job_metric() {
-  KEY="$1" METRIC="$2" PORT="$PORT" node --input-type=module -e '
+  KEY="$1" METRIC="$2" PORT="$PORT" PROJ="$PROJ" node --input-type=module -e '
     let d="";process.stdin.on("data",c=>d+=c).on("end",async()=>{
       const jobs=JSON.parse(d)
       const art=jobs.find(x=>x.idempotency_key===process.env.KEY)?.run_manifest?.metrics_artifact
       if(!art){process.stdout.write("");return}
       try{
-        const res=await fetch("http://127.0.0.1:"+process.env.PORT+"/v1/artifacts/"+encodeURIComponent(art))
+        const res=await fetch("http://127.0.0.1:"+process.env.PORT+"/v1/artifacts/"+encodeURIComponent(art)+"?project_id="+process.env.PROJ)
         const parsed=JSON.parse(await res.text())
-        const m=(parsed.metrics??[]).find(x=>x.metric===process.env.METRIC)
+        const m=(parsed.metrics??[]).find(x=>(x.name??x.metric)===process.env.METRIC)
         process.stdout.write(m!==undefined?String(m.value):"")
       }catch{process.stdout.write("")}
     })'
 }
 
-# check_schema <key> <expected-seed> — reads jobs JSON on stdin, finds the
-# §12.5 fixed-schema metrics.json record inside the run log artifact (the
-# in-container `cat /tmp/metrics.json`) and validates every field.
-check_schema() {
-  KEY="$1" EXPECT_SEED="$2" PORT="$PORT" node --input-type=module -e '
+# check_metrics_artifact <key> <expected-seed> — reads jobs JSON on stdin,
+# validates the metrics ARTIFACT (registered by the runner from the in-container
+# §12.5 fixed-schema file: schema_version, run_id, contract_id, seed,
+# metrics[{name,value,unit}]) and its metadata source=metrics-file.
+check_metrics_artifact() {
+  KEY="$1" EXPECT_SEED="$2" PORT="$PORT" PROJ="$PROJ" node --input-type=module -e '
+    let d="";process.stdin.on("data",c=>d+=c).on("end",async()=>{
+      const jobs=JSON.parse(d)
+      const art=jobs.find(x=>x.idempotency_key===process.env.KEY)?.run_manifest?.metrics_artifact
+      if(!art){console.error("no metrics artifact");process.exit(1)}
+      const res=await fetch("http://127.0.0.1:"+process.env.PORT+"/v1/artifacts/"+encodeURIComponent(art)+"?project_id="+process.env.PROJ)
+      const rep=JSON.parse(await res.text())
+      const artifacts=await (await fetch("http://127.0.0.1:"+process.env.PORT+"/v1/projects/"+process.env.PROJ+"/artifacts")).json()
+      const record=artifacts.find(x=>x.artifact_id===art)
+      const okFields=rep.schema_version===1
+        && rep.seed===Number(process.env.EXPECT_SEED)
+        && typeof rep.run_id==="string" && typeof rep.contract_id==="string"
+        && Array.isArray(rep.metrics) && rep.metrics.length>=3
+        && rep.metrics.every(m=>typeof m.name==="string"&&typeof m.value==="number"&&typeof m.unit==="string")
+      const okSource=record?.metadata?.source==="metrics-file"
+      if(!okFields){console.error("§12.5 schema mismatch: "+JSON.stringify(rep).slice(0,220));process.exit(1)}
+      if(!okSource){console.error("metrics source != metrics-file: "+JSON.stringify(record?.metadata));process.exit(1)}
+      console.log(JSON.stringify({run_id:rep.run_id,contract_id:rep.contract_id,seed:rep.seed,source:record.metadata.source,metrics:rep.metrics.map(m=>m.name+":"+m.value)}))
+    })'
+}
+
+# check_log_contains <key> <needle> — reads the run log artifact on stdin and
+# asserts the needle is present (materialization / in-container file proofs).
+check_log_contains() {
+  KEY="$1" NEEDLE="$2" PORT="$PORT" PROJ="$PROJ" node --input-type=module -e '
     let d="";process.stdin.on("data",c=>d+=c).on("end",async()=>{
       const jobs=JSON.parse(d)
       const art=jobs.find(x=>x.idempotency_key===process.env.KEY)?.run_manifest?.log_artifact
       if(!art){console.error("no log artifact");process.exit(1)}
-      const res=await fetch("http://127.0.0.1:"+process.env.PORT+"/v1/artifacts/"+encodeURIComponent(art))
-      const log=await res.text()
-      const line=log.split("\n").map(s=>s.trim()).find(s=>s.startsWith("{\"schema_version\":"))
-      if(!line){console.error("metrics.json line not found in run log");process.exit(1)}
-      const rep=JSON.parse(line)
-      const okFields=rep.schema_version===1
-        && rep.seed===Number(process.env.EXPECT_SEED)
-        && typeof rep.run_id==="string" && typeof rep.contract_id==="string"
-        && Array.isArray(rep.metrics) && rep.metrics.length>=2
-        && rep.metrics.every(m=>typeof m.name==="string"&&typeof m.value==="number"&&typeof m.unit==="string")
-      if(!okFields){console.error("schema mismatch: "+line.slice(0,220));process.exit(1)}
-      console.log(JSON.stringify({run_id:rep.run_id,contract_id:rep.contract_id,seed:rep.seed,metrics:rep.metrics.map(m=>m.name+":"+m.value)}))
+      const log=await (await fetch("http://127.0.0.1:"+process.env.PORT+"/v1/artifacts/"+encodeURIComponent(art)+"?project_id="+process.env.PROJ)).text()
+      if(!log.includes(process.env.NEEDLE)){console.error("needle not found in run log: "+process.env.NEEDLE);process.exit(1)}
+      console.log("found: "+process.env.NEEDLE)
     })'
 }
 
-# embed_run <fixture-js> [node args...] — emits the in-container sh script:
-# materializes the fixture files into /tmp, runs node on them (real
-# execution), then cats the fixed-schema metrics file.
-embed_run() {
-  local js="$1"; shift
-  { printf "cat > /tmp/golden-run.js <<'DHSH_GOLDEN_EOF'\n"
-    cat "$FIXTURE/$js"
-    printf '\nDHSH_GOLDEN_EOF\n'
-    printf "cat > /tmp/golden-seed-data.json <<'DHSH_GOLDEN_EOF'\n"
-    cat "$FIXTURE/data/seed-data.json"
-    printf '\nDHSH_GOLDEN_EOF\n'
-    # The container has no package.json; mark /tmp as ESM so node interprets
-    # the fixture exactly like on the host (repo root is "type":"module").
-    printf "printf '%s' > /tmp/package.json\n" '{"type":"module"}'
-    printf 'node /tmp/golden-run.js --data /tmp/golden-seed-data.json --output /tmp/metrics.json'
-    for a in "$@"; do printf ' %q' "$a"; done
-    printf '\ncat /tmp/metrics.json\n'
+# run_sh <fixture-js> <seed> — emits the in-container sh script: runs node
+# against the MATERIALIZED /work fixture (real code, fixed-schema metrics file
+# to /outputs), cats the metrics file and prints the materialized file shebang
+# (proof of CAS materialization).
+run_sh() {
+  local js="$1" seed="$2"
+  { printf 'set -e\n'
+    printf 'node /work/%s --seed %s --data /work/data/seed-data.json --output /outputs/metrics.json\n' "$js" "$seed"
+    printf 'cat /outputs/metrics.json\n'
+    printf 'head -n1 /work/%s\n' "$js"
   }
 }
 
-# submit_job <key> <kind> <fixture-js> [node args...] — submits a real
-# command job (the runner executes job.command verbatim in the container).
+# submit_job <key> <kind> <fixture-js> <snapshot_id> <seed> — submits a real
+# command job bound to the §12.2 code snapshot + output contract; the runner
+# materializes <snapshot_id> from CAS into /work and executes it.
 submit_job() {
-  local key="$1" kind="$2" js="$3"; shift 3
+  local key="$1" kind="$2" js="$3" snap="$4" seed="$5"
   local run_sh
-  run_sh=$(embed_run "$js" "$@")
-  KEY="$key" KIND="$kind" RUN_SH="$run_sh" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,command:["sh","-c",process.env.RUN_SH]}))' \
+  run_sh=$(run_sh "$js" "$seed")
+  KEY="$key" KIND="$kind" SNAP="$snap" RUN_SH="$run_sh" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,image_digest:"node:22-alpine",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c",process.env.RUN_SH]}))' \
     | api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d @-
 }
 
 # expect_m1 <seed> — deterministic expectation computed from the fixture data.
+# PATCHED=1 uses the patched algorithm constants (0.02 seed coeff, 0.15 weight).
 expect_m1() {
   SEED="$1" FIXTURE="$FIXTURE" node -e '
     const fs=require("node:fs")
     const d=JSON.parse(fs.readFileSync(process.env.FIXTURE+"/data/seed-data.json","utf8"))
     const ws=d.baseline.reduce((a,b,i)=>a+b*d.weights[i],0)
-    process.stdout.write(String(0.5+0.01*Number(process.env.SEED)+0.1*ws))'
+    const [sc,wc]=process.env.PATCHED==="1"?[0.02,0.15]:[0.01,0.1]
+    process.stdout.write(String(0.5+sc*Number(process.env.SEED)+wc*ws))'
 }
 
 approx() { # <actual> <expected> — within 1e-9
@@ -212,15 +234,15 @@ approx() { # <actual> <expected> — within 1e-9
 
 jobs_api() { api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs"; }
 
-# ── baseline job (kind=baseline, seed 0) ─────────────────────────────────────
+# ── baseline job (kind=baseline, seed 0, materialized from CAS) ──────────────
 
-echo "== baseline job: kind=baseline, real node execution in docker (seed 0) =="
-submit_job "gpv2-baseline" "baseline" "baseline.js" --seed 0 > /dev/null
+echo "== baseline job: kind=baseline, code snapshot materialized to /work, real node in docker (seed 0) =="
+submit_job "gpv2-baseline" "baseline" "baseline.js" "$CODE_ART" 0 > /dev/null
 S=$(wait_job "gpv2-baseline" || echo timeout)
 if [[ "$S" == "succeeded" ]]; then
-  ok "baseline job succeeded (kind=baseline, docker mode, real execution)"
+  ok "baseline job succeeded (kind=baseline, docker mode, real execution from materialized CAS snapshot)"
 else
-  bad "baseline job status=$S"; tail -3 "$WORK/runner.log" || true
+  bad "baseline job status=$S"; tail -5 "$WORK/runner.log" || true
 fi
 B_M1=$(jobs_api | job_metric "gpv2-baseline" "m1")
 B_EXP=$(expect_m1 0)
@@ -229,22 +251,32 @@ if [ -n "$B_M1" ] && approx "$B_M1" "$B_EXP"; then
 else
   bad "baseline m1='$B_M1' != expected $B_EXP"
 fi
-if B_S=$(jobs_api | check_schema "gpv2-baseline" 0); then
-  ok "baseline metrics.json fixed schema verified in-container: $B_S"
+if B_S=$(jobs_api | check_metrics_artifact "gpv2-baseline" 0); then
+  ok "baseline metrics artifact from fixed-schema FILE (§12.5, source=metrics-file): $B_S"
 else
-  bad "baseline fixed-schema metrics.json check failed"
+  bad "baseline metrics artifact §12.5 check failed"
+fi
+if jobs_api | check_log_contains "gpv2-baseline" "#!/usr/bin/env node" > /dev/null; then
+  ok "materialized baseline.js readable IN the container (shebang found in run log)"
+else
+  bad "baseline materialization proof failed"
+fi
+if jobs_api | check_log_contains "gpv2-baseline" '{"schema_version":1' > /dev/null; then
+  ok "in-container /outputs/metrics.json written and cat'ed (fixed-schema line in log)"
+else
+  bad "in-container metrics file line not found in log"
 fi
 
-# ── three formal jobs (seeds 1/2/3) ──────────────────────────────────────────
+# ── three formal jobs (seeds 1/2/3, materialized from CAS) ───────────────────
 
 echo "== formal jobs: kind=formal, seeds 1/2/3, real node execution in docker =="
 for seed in 1 2 3; do
-  submit_job "gpv2-seed-$seed" "formal" "train.js" --seed "$seed" > /dev/null
+  submit_job "gpv2-seed-$seed" "formal" "train.js" "$CODE_ART" "$seed" > /dev/null
   S=$(wait_job "gpv2-seed-$seed" || echo timeout)
   if [[ "$S" == "succeeded" ]]; then
-    ok "formal job seed=$seed succeeded"
+    ok "formal job seed=$seed succeeded (materialized from CAS)"
   else
-    bad "formal job seed=$seed status=$S"; tail -3 "$WORK/runner.log" || true
+    bad "formal job seed=$seed status=$S"; tail -5 "$WORK/runner.log" || true
   fi
 done
 
@@ -268,10 +300,15 @@ if [[ "$NS" == "4" ]]; then
 else
   bad "n_samples='$NS' != 4"
 fi
-if S2=$(jobs_api | check_schema "gpv2-seed-2" 2); then
-  ok "formal job metrics.json fixed schema verified in-container: $S2"
+if S2=$(jobs_api | check_metrics_artifact "gpv2-seed-2" 2); then
+  ok "formal job metrics artifact from fixed-schema FILE (§12.5): $S2"
 else
-  bad "formal job fixed-schema metrics.json check failed"
+  bad "formal job metrics artifact §12.5 check failed"
+fi
+if jobs_api | check_log_contains "gpv2-seed-3" "#!/usr/bin/env node" > /dev/null; then
+  ok "materialized train.js readable IN the container (shebang found in run log)"
+else
+  bad "formal materialization proof failed"
 fi
 
 # ── multi-seed analysis over the real runs ───────────────────────────────────
@@ -301,6 +338,45 @@ if AN_RES=$(AN_JSON="$AN" EXPECT_MEAN="$EXPECT_MEAN" EXPECT_BASE="$EXPECT_BASE" 
   ok "analysis aggregated over real runs: $AN_RES (expected mean $EXPECT_MEAN, baseline $EXPECT_BASE, effect $EXPECT_EFF)"
 else
   bad "analysis assertions failed"; printf '%s' "$AN" | head -c 400; echo
+fi
+
+# ── patch changes the REAL algorithm (§19.3 step 4) ─────────────────────────
+
+echo "== patch: Code Engineer changes a real algorithm constant, re-archive, run seed 4 =="
+PATCHED="$WORK/fixture-patched"
+cp -r "$FIXTURE" "$PATCHED"
+sed -i 's/0.5 + 0.01 \* seed + 0.1 \* weightedSum/0.5 + 0.02 * seed + 0.15 * weightedSum/' "$PATCHED/train.js"
+if grep -q '0.02 \* seed + 0.15 \* weightedSum' "$PATCHED/train.js"; then
+  ok "patch applied to train.js (seed coefficient 0.01 -> 0.02, weight 0.1 -> 0.15)"
+else
+  bad "patch application failed"
+fi
+PAT_SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$PATCHED\",\"description\":\"golden-path-v2 patched fixture\"}")
+PAT_ART=$(printf '%s' "$PAT_SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
+if [[ "$PAT_ART" == sha256:* ]] && [[ "$PAT_ART" != "$CODE_ART" ]]; then
+  ok "patched snapshot archived: $PAT_ART (new content -> new CAS address)"
+else
+  bad "patched snapshot archive failed: $PAT_ART"
+fi
+submit_job "gpv2-seed-4" "formal" "train.js" "$PAT_ART" 4 > /dev/null
+S=$(wait_job "gpv2-seed-4" || echo timeout)
+if [[ "$S" == "succeeded" ]]; then
+  ok "formal job seed=4 succeeded (patched code materialized from CAS)"
+else
+  bad "formal job seed=4 status=$S"; tail -5 "$WORK/runner.log" || true
+fi
+V4=$(jobs_api | job_metric "gpv2-seed-4" "m1")
+E4_PATCHED=$(PATCHED=1 expect_m1 4)
+E4_UNPATCHED=$(expect_m1 4)
+if [ -n "$V4" ] && approx "$V4" "$E4_PATCHED" && ! approx "$V4" "$E4_UNPATCHED"; then
+  ok "patched m1(4)=$V4 == patched expectation $E4_PATCHED != unpatched $E4_UNPATCHED — patch changed the executed algorithm"
+else
+  bad "patched metric mismatch: got '$V4', patched-expected $E4_PATCHED, unpatched-expected $E4_UNPATCHED"
+fi
+if jobs_api | check_metrics_artifact "gpv2-seed-4" 4 > /dev/null; then
+  ok "patched run metrics artifact from fixed-schema FILE (seed 4)"
+else
+  bad "patched run metrics artifact §12.5 check failed"
 fi
 
 echo "== cleanup =="

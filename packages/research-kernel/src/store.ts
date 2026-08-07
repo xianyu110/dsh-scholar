@@ -101,6 +101,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   lease_expires_at TEXT,
   heartbeat_at TEXT,
   lease_generation INTEGER,
+  -- §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized by the
+  -- Runner from CAS; image_digest/output_contract/data_artifact_ids live in
+  -- payload (see ResearchKernel.submitJob).
+  code_snapshot_id TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   run_manifest TEXT,
@@ -182,6 +186,10 @@ export function openDatabase(path: string): DatabaseSync {
   // §12.6 lease fencing: generation counter, bumped on every claim.
   ensureColumn(db, 'jobs', 'lease_generation', 'INTEGER')
   migrateJobsProjectIdempotency(db)
+  // §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized from CAS.
+  // Added AFTER the jobs table rebuild so `INSERT INTO jobs_v2 SELECT *` keeps
+  // a matching column count on legacy databases.
+  ensureColumn(db, 'jobs', 'code_snapshot_id', 'TEXT')
   migrateArtifactsProjectScoped(db)
   return db
 }
@@ -312,6 +320,8 @@ export interface JobRow {
   heartbeat_at: string | null
   /** §12.6 lease fencing: bumped on every claim; stale generations are rejected. */
   lease_generation: number | null
+  /** §12.2 JobSpec binding (SCH-EXEC-002): CAS code snapshot id, if any. */
+  code_snapshot_id: string | null
   attempts: number
   max_attempts: number
   run_manifest: string | null

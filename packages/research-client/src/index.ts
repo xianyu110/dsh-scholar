@@ -174,6 +174,28 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${String(input.project_id)}/corpus`, input)
   }
 
+  /**
+   * §11.3 (SCH-EXEC-002): archive a directory's ACTUAL file contents into a
+   * content-addressed `code` artifact (+ `manifest` artifact). The Runner
+   * materializes jobs from this snapshot — never from agent host dirs.
+   */
+  snapshotCodeArchive(projectId: string, path: string, description?: string): Promise<{
+    snapshot_id: string
+    project_id: string
+    path: string
+    description: string
+    archive_artifact_id: string
+    manifest_artifact_id: string
+    submodules_artifact_id: string | null
+    lockfiles: string[]
+    files: number
+    total_bytes: number
+    sha256: string
+    created_at: string
+  }> {
+    return this.request('POST', `/v1/projects/${projectId}/code-snapshots`, { path, description })
+  }
+
   // ── jobs ─────────────────────────────────────────────────────────────────
 
   submitJob(input: {
@@ -183,6 +205,11 @@ export class ResearchClient {
     command?: string[]
     payload?: Record<string, unknown>
     contract_id?: string | null
+    // §12.2 JobSpec binding (SCH-EXEC-002).
+    code_snapshot_id?: string | null
+    data_artifact_ids?: string[]
+    image_digest?: string
+    output_contract?: { metrics: string; logs: string }
   }): Promise<JobRecord> {
     return this.request('POST', `/v1/projects/${input.project_id}/jobs`, input)
   }

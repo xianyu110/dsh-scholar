@@ -1,19 +1,39 @@
 /**
  * Research Kernel unit tests: state machine CAS, gates/decisions, CAS
  * artifacts, durable jobs with idempotency + leases + recovery, claims,
- * manuscript determinism (design §11.1, §11.2).
+ * manuscript determinism (design §11.1, §11.2), §11.3 code-snapshot archive
+ * + §12.2 JobSpec binding + §12.5 metrics-file parsing (SCH-EXEC-002).
  */
 import { describe, expect, it } from 'vitest'
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { fixtureCorpus, fixtureIdea } from '@dsh-scholar/research-schemas'
+import { materializeCodeSnapshot, unpackCodeSnapshot } from '@dsh-scholar/runner-gateway'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-test-'))
   return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+}
+
+/** Register a minimal valid §11.3 code-snapshot archive artifact. */
+function codeArtifact(kernel: ResearchKernel, projectId: string): import('@dsh-scholar/research-schemas').ArtifactRecord {
+  const content = Buffer.from('console.log("train")\n')
+  return kernel.registerArtifact({
+    project_id: projectId,
+    kind: 'code',
+    content: JSON.stringify({
+      schema_version: 1,
+      project_id: projectId,
+      files: {
+        'train.js': { sha256: createHash('sha256').update(content).digest('hex'), content_base64: content.toString('base64') },
+      },
+      excludes: ['.git', 'node_modules', '.research-cas'],
+    }),
+    metadata: { kind: 'code-snapshot-archive' },
+  })
 }
 
 function makeBrief(overrides: Record<string, unknown> = {}) {
@@ -271,7 +291,8 @@ describe('analysis pipeline (E5)', () => {
     // baseline run with a metrics artifact
     const baselineMetrics = JSON.stringify({ metrics: [{ metric: 'f1', value: 0.8, seed: 0 }] })
     const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: baselineMetrics })
-    const baselineJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'b1', kind: 'baseline', payload: {} })
+    const code = codeArtifact(kernel, project.project_id)
+    const baselineJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'b1', kind: 'baseline', payload: {}, code_snapshot_id: code.artifact_id })
     kernel.claimJobs('r1', 60, 8)
     kernel.completeJob({ job_id: baselineJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id, run_id: 'run_base' } })
     // five formal runs with metrics
@@ -281,7 +302,7 @@ describe('analysis pipeline (E5)', () => {
         project_id: project.project_id, kind: 'analysis',
         content: JSON.stringify({ metrics: [{ metric: 'f1', value: values[i], seed: 10 + i }] }),
       })
-      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {} })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
       kernel.claimJobs('r1', 60, 8)
       kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id, run_id: `run_${i}` } })
     }
@@ -528,7 +549,8 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     })
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
-    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', payload: {} })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
     kernel.claimJobs('runner-1', 60, 8)
     const { publicKey, privateKey } = generateKeyPairSync('ed25519')
     const keyId = 'runner-key-test-1'
@@ -645,6 +667,216 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
       () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
       422, 'manifest_lease_mismatch',
     )
+    kernel.close()
+  })
+})
+
+describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
+  it('archives ACTUAL file contents into a code artifact + manifest artifact', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-'))
+    mkdirSync(join(dir, 'data'), { recursive: true })
+    mkdirSync(join(dir, 'node_modules'), { recursive: true })
+    mkdirSync(join(dir, '.git', 'objects'), { recursive: true })
+    writeFileSync(join(dir, 'train.js'), 'console.log("real code")\n')
+    writeFileSync(join(dir, 'data', 'seed.json'), '{"baseline":[1,2]}')
+    writeFileSync(join(dir, 'node_modules', 'junk.js'), 'ignored')
+    writeFileSync(join(dir, '.git', 'objects', 'pack'), 'ignored')
+
+    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'unit test snapshot')
+    expect(snap.files).toBe(2)
+    expect(snap.total_bytes).toBe(Buffer.byteLength('console.log("real code")\n') + Buffer.byteLength('{"baseline":[1,2]}'))
+    expect(snap.archive_artifact_id.startsWith('sha256:')).toBe(true)
+    expect(snap.manifest_artifact_id.startsWith('sha256:')).toBe(true)
+    expect(snap.archive_artifact_id).not.toBe(snap.manifest_artifact_id)
+    expect(snap.sha256).toBe(snap.archive_artifact_id.replace('sha256:', ''))
+
+    // The archive artifact really contains the file CONTENT (base64) + hashes.
+    const archive = JSON.parse(kernel.cas.read(snap.sha256).toString('utf8')) as {
+      schema_version: number
+      files: Record<string, { sha256: string; content_base64: string }>
+    }
+    expect(archive.schema_version).toBe(1)
+    expect(Buffer.from(archive.files['train.js']!.content_base64, 'base64').toString()).toBe('console.log("real code")\n')
+    expect(archive.files['data/seed.json']!.sha256).toBe(createHash('sha256').update('{"baseline":[1,2]}').digest('hex'))
+    expect(archive.files['node_modules/junk.js']).toBeUndefined()
+    expect(archive.files['.git/objects/pack']).toBeUndefined()
+
+    // The manifest artifact carries the file list + hashes WITHOUT content.
+    const manifest = JSON.parse(kernel.cas.read(snap.manifest_artifact_id!.replace('sha256:', '')).toString('utf8')) as {
+      files: Record<string, { sha256: string }>
+    }
+    expect(manifest.files['train.js']?.sha256).toBe(archive.files['train.js']!.sha256)
+    expect(JSON.stringify(manifest)).not.toContain('content_base64')
+
+    // Events recorded (artifact.registered for both artifacts).
+    const registered = kernel.listEvents(project.project_id).filter(e => e.kind === 'artifact.registered')
+    expect(registered.filter(e => String(e.payload.kind) === 'code').length).toBe(1)
+    expect(registered.filter(e => String(e.payload.kind) === 'manifest').length).toBe(1)
+    kernel.close()
+  })
+
+  it('rejects symlinks escaping the archived root (path escape protection)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const root = mkdtempSync(join(tmpdir(), 'dsh-snap-root-'))
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-snap-outside-'))
+    writeFileSync(join(root, 'ok.js'), 'fine')
+    writeFileSync(join(outside, 'secret.txt'), 'secret')
+    symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt'))
+    expectKernelError(
+      () => kernel.snapshotCodeArchive(project.project_id, root, 'escape test'),
+      422, 'snapshot_path_escape',
+    )
+    // A symlink INSIDE the root is followed and archived (after the escaping
+    // symlink is removed).
+    rmSync(join(root, 'leak.txt'))
+    symlinkSync(join(root, 'ok.js'), join(root, 'alias.js'))
+    const snap = kernel.snapshotCodeArchive(project.project_id, root, 'escape test')
+    expect(snap.files).toBe(2)
+    kernel.close()
+  })
+
+  it('rejects a missing root with 422 snapshot_root_missing', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expectKernelError(
+      () => kernel.snapshotCodeArchive(project.project_id, join(tmpdir(), 'does-not-exist-' + Date.now())),
+      422, 'snapshot_root_missing',
+    )
+    kernel.close()
+  })
+})
+
+describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
+  it('formal-class jobs REQUIRE code_snapshot_id (422) and validate it', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap', kind: 'baseline' }),
+      422, 'code_snapshot_required',
+    )
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap2', kind: 'formal' }),
+      422, 'code_snapshot_required',
+    )
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap3', kind: 'pilot' }),
+      422, 'code_snapshot_required',
+    )
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap4', kind: 'reproduce' }),
+      422, 'code_snapshot_required',
+    )
+    // Unknown snapshot id -> 422 code_snapshot_unknown.
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bad-snap', kind: 'formal', code_snapshot_id: 'sha256:' + 'a'.repeat(64) }),
+      422, 'code_snapshot_unknown',
+    )
+    // A snapshot from ANOTHER project is also unknown here.
+    const other = kernel.createProject({ name: 'o', workspace: '/o', brief: makeBrief() })
+    const foreignCode = codeArtifact(kernel, other.project_id)
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'foreign-snap', kind: 'formal', code_snapshot_id: foreignCode.artifact_id }),
+      422, 'code_snapshot_unknown',
+    )
+    // smoke/echo stay binding-free.
+    const smoke = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'smoke-ok', kind: 'smoke', payload: { script: 'echo hi' } })
+    expect(smoke.code_snapshot_id).toBeNull()
+    kernel.close()
+  })
+
+  it('persists code_snapshot_id column + image_digest/output_contract/data_artifact_ids payload', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'bound-1',
+      kind: 'formal',
+      code_snapshot_id: code.artifact_id,
+      data_artifact_ids: ['sha256:' + 'b'.repeat(64)],
+      image_digest: 'node:22-alpine',
+      output_contract: { metrics: '/outputs/metrics.json', logs: '/outputs/run.log' },
+    })
+    expect(job.code_snapshot_id).toBe(code.artifact_id)
+    expect(job.image_digest).toBe('node:22-alpine')
+    expect(job.output_contract?.metrics).toBe('/outputs/metrics.json')
+    expect(job.payload.data_artifact_ids).toEqual(['sha256:' + 'b'.repeat(64)])
+
+    // Survives a read-back from the DB (jobFromRow).
+    const reloaded = kernel.getJob(job.job_id)
+    expect(reloaded.code_snapshot_id).toBe(code.artifact_id)
+    expect(reloaded.image_digest).toBe('node:22-alpine')
+    expect(reloaded.output_contract?.logs).toBe('/outputs/run.log')
+
+    // Secure kinds default image_digest to node:22-alpine.
+    const defaulted = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bound-2', kind: 'formal', code_snapshot_id: code.artifact_id })
+    expect(defaulted.image_digest).toBe('node:22-alpine')
+    kernel.close()
+  })
+})
+
+describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
+  it('unpackCodeSnapshot round-trips an archived snapshot and rejects tampering', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-unpack-'))
+    mkdirSync(join(dir, 'lib'), { recursive: true })
+    writeFileSync(join(dir, 'train.js'), '#!/usr/bin/env node\nconsole.log("hi")\n')
+    writeFileSync(join(dir, 'lib', 'util.js'), 'export const f = 1\n')
+    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'unpack test')
+
+    const archiveText = kernel.cas.read(snap.sha256).toString('utf8')
+    const files = unpackCodeSnapshot(archiveText)
+    expect(files.size).toBe(2)
+    expect(files.get('train.js')?.toString()).toBe('#!/usr/bin/env node\nconsole.log("hi")\n')
+    expect(files.get('lib/util.js')?.toString()).toBe('export const f = 1\n')
+
+    // Tampered hash -> integrity failure.
+    const tampered = JSON.parse(archiveText) as { files: Record<string, { sha256: string; content_base64: string }> }
+    tampered.files['train.js']!.sha256 = '0'.repeat(64)
+    expect(() => unpackCodeSnapshot(JSON.stringify(tampered))).toThrow(/integrity mismatch/)
+
+    // Unsupported schema_version -> rejected.
+    const bad = JSON.parse(archiveText) as { schema_version: number }
+    bad.schema_version = 2
+    expect(() => unpackCodeSnapshot(JSON.stringify(bad))).toThrow(/schema_version/)
+
+    // Materialization writes real files into a workdir (runner behavior).
+    const workDir = mkdtempSync(join(tmpdir(), 'dsh-materialize-'))
+    const count = materializeCodeSnapshot(unpackCodeSnapshot(archiveText), workDir)
+    expect(count).toBe(2)
+    expect(readFileSync(join(workDir, 'train.js'), 'utf8')).toBe('#!/usr/bin/env node\nconsole.log("hi")\n')
+    expect(readFileSync(join(workDir, 'lib', 'util.js'), 'utf8')).toBe('export const f = 1\n')
+    kernel.close()
+  })
+
+  it('computeAnalysis reads §12.5 fixed-schema metrics artifacts (name/value/unit)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const fileSchema = (seed: number, value: number) => JSON.stringify({
+      schema_version: 1, run_id: `run-${seed}`, contract_id: 'expc_x', seed,
+      metrics: [{ name: 'f1', value, unit: 'ratio' }],
+    })
+    const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(0, 0.8) })
+    const bJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'fb', kind: 'baseline', code_snapshot_id: code.artifact_id })
+    kernel.claimJobs('r1', 60, 8)
+    kernel.completeJob({ job_id: bJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id } })
+    const values = [0.81, 0.83, 0.85]
+    for (let i = 0; i < values.length; i++) {
+      const art = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(11 + i, values[i]!) })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ff${i}`, kind: 'formal', code_snapshot_id: code.artifact_id })
+      kernel.claimJobs('r1', 60, 8)
+      kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id } })
+    }
+    const analysis = kernel.computeAnalysis(project.project_id, undefined, 'f1')
+    expect(analysis.n).toBe(3)
+    expect(analysis.mean).toBeCloseTo(0.83, 3)
+    expect(analysis.baseline_value).toBeCloseTo(0.8, 3)
+    expect(analysis.runs.map(r => r.seed).sort()).toEqual([11, 12, 13])
     kernel.close()
   })
 })

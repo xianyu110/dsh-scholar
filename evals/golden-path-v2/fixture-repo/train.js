@@ -18,10 +18,8 @@
  * Output: the fixed-schema metrics file (design §12.5) written to --output:
  *   { "schema_version": 1, "run_id": ..., "contract_id": ...,
  *     "seed": N, "metrics": [ {name, value, unit}, ... ] }
- * plus one stdout JSON line per metric ({metric, value, seed}) — the current
- * runner still extracts metrics from stdout JSON lines; the fixed-schema
- * file is the target mechanism and is surfaced by the orchestrator via
- * `cat /tmp/metrics.json`.
+ * The runner (v2 SCH-EXEC-002) reads metrics ONLY from this file — stdout is
+ * logs only (no metric lines).
  *
  * Usage: node train.js --seed N --data PATH --output PATH [--contract-id ID]
  *
@@ -95,11 +93,9 @@ function main() {
   // exact §12.5 fixed-schema record from the run log (`cat` of this file).
   fs.writeFileSync(args.output, JSON.stringify(report) + '\n', 'utf8')
 
-  // stdout JSON lines: compatibility with the runner's current metrics
-  // extraction (values are the computed ones, never hardcoded).
-  for (const m of metrics) {
-    console.log(JSON.stringify({ metric: m.name, value: m.value, seed }))
-  }
+  // v2 (SCH-EXEC-002): NO stdout metric lines. Formal metrics are read by the
+  // runner ONLY from the fixed-schema metrics file (design §12.5) — stdout is
+  // logs only.
 }
 
 main()

@@ -550,16 +550,35 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
 
   ctx.tools.register(researchTool({
     name: 'workspace_snapshot',
-    description: 'Snapshot the project workspace: walks the directory, sha256-hashes every file, and registers a content-addressed code artifact plus a CodeSnapshot record. Locked snapshots are what the Runner executes — never live host paths.',
+    description: 'Snapshot the project workspace. archive=true (default, §11.3 SCH-EXEC-002): the Kernel archives the ACTUAL file contents into a content-addressed code artifact (+ manifest artifact); jobs bound to it are materialized by the Runner from CAS — never from live host paths. archive=false: legacy manifest (file list + hashes only, no content).',
     parameters: {
       project_id: OPT_STRING,
       path: { type: 'string', required: true },
       description: OPT_STRING,
+      archive: { type: 'boolean' },
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      if (args.archive !== false) {
+        // §11.3: real content archive (kernel-side walk, escape/symlink protected).
+        const snapshot = await client.snapshotCodeArchive(projectId, args.path, args.description ?? '')
+        return {
+          ok: true,
+          snapshot: {
+            snapshot_id: snapshot.snapshot_id,
+            project_id: snapshot.project_id,
+            archive_artifact_id: snapshot.archive_artifact_id,
+            manifest_artifact_id: snapshot.manifest_artifact_id,
+            files: snapshot.files,
+            total_bytes: snapshot.total_bytes,
+            sha256: snapshot.sha256,
+            description: snapshot.description,
+            note: 'code snapshot archived with actual content — Runner materializes it from CAS (v2 §11.3)',
+          },
+        }
+      }
       const snapshot = await snapshotWorkspace(args.path, args.description ?? '', projectId)
       const artifact = await client.registerArtifact({
         project_id: projectId,
@@ -598,7 +617,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
 
   ctx.tools.register(researchTool({
     name: 'baseline_prepare',
-    description: 'Prepare and kick off a Baseline reproduction (design §4.6 step 1-2): records the repository reference, environment notes and reproduction tolerance, then submits a `baseline` runner job. The RunManifest carries commit, hashes and metrics; deviation vs expected_metrics is returned for the reproduction gate.',
+    description: 'Prepare and kick off a Baseline reproduction (design §4.6 step 1-2): records the repository reference, environment notes and reproduction tolerance, then submits a `baseline` runner job bound to a code snapshot (code_snapshot_id, §12.2). The RunManifest carries commit, hashes and metrics; deviation vs expected_metrics is returned for the reproduction gate.',
     parameters: {
       project_id: OPT_STRING,
       repo: { type: 'string', required: true },
@@ -607,6 +626,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       expected_metrics_json: OPT_STRING,
       tolerance: { type: 'number' },
       idempotency_key: OPT_STRING,
+      // §12.2 JobSpec binding (SCH-EXEC-002): required for baseline kind.
+      code_snapshot_id: OPT_STRING,
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
@@ -620,6 +641,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         idempotency_key: args.idempotency_key ?? `baseline-prep-${Date.now()}`,
         kind: 'baseline',
         command,
+        code_snapshot_id: args.code_snapshot_id ?? null,
         payload: { repo: args.repo, commit: args.commit ?? '', expected_metrics: expected, tolerance: args.tolerance ?? 0.05, message: 'baseline reproduction' },
       })
       return { ok: true, job, reproduction: { repo: args.repo, commit: args.commit ?? '', tolerance: args.tolerance ?? 0.05, expected_metrics: expected, note: 'reproduction passes when |metric - expected| / |expected| <= tolerance for every expected metric' } }
@@ -675,10 +697,13 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       if (typeof metricsArtifact !== 'string') throw new Error('baseline RunManifest has no metrics artifact')
       const content = await client.fetchArtifact(projectId, metricsArtifact)
       if (content === null) throw new Error(`metrics artifact unreadable: ${metricsArtifact}`)
-      const parsed = JSON.parse(content) as { metrics?: Array<{ metric?: string; value?: number }> }
+      // §12.5 (SCH-EXEC-002): metrics artifacts carry {name, value, unit} (fixed
+      // schema file) or legacy {metric, value}; both keys are accepted.
+      const parsed = JSON.parse(content) as { metrics?: Array<{ metric?: string; name?: string; value?: number }> }
       const actual = new Map<string, number>()
       for (const entry of parsed.metrics ?? []) {
-        if (entry.metric !== undefined && entry.value !== undefined) actual.set(entry.metric, entry.value)
+        const name = entry.name ?? entry.metric
+        if (name !== undefined && entry.value !== undefined) actual.set(name, entry.value)
       }
       const deviations: Array<{ metric: string; expected: number; actual: number | null; relative_deviation: number | null; within_tolerance: boolean }> = []
       for (const [metric, value] of Object.entries(expected)) {
@@ -751,7 +776,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
 
   ctx.tools.register(researchTool({
     name: 'experiment_submit',
-    description: 'Submit a durable runner job (kind: echo|smoke|baseline|pilot|formal|analysis|reproduce). idempotency_key guarantees no duplicate formal runs across restarts. The Runner executes outside the DSH process.',
+    description: 'Submit a durable runner job (kind: echo|smoke|baseline|pilot|formal|analysis|reproduce). idempotency_key guarantees no duplicate formal runs across restarts. Formal-class kinds (baseline/pilot/formal/reproduce) REQUIRE code_snapshot_id — the Runner materializes the code from CAS (§11.3/§12.2). The Runner executes outside the DSH process.',
     parameters: {
       project_id: OPT_STRING,
       contract_id: OPT_STRING,
@@ -759,6 +784,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       kind: { type: 'string', required: true, enum: ['echo', 'smoke', 'baseline', 'pilot', 'formal', 'analysis', 'reproduce'] },
       command_json: OPT_STRING,
       payload_json: OPT_STRING,
+      // §12.2 JobSpec binding (SCH-EXEC-002).
+      code_snapshot_id: OPT_STRING,
+      image_digest: OPT_STRING,
+      output_contract_json: OPT_STRING,
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
@@ -767,6 +796,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const command = args.command_json !== undefined ? JSON.parse(args.command_json) as unknown : []
       if (!Array.isArray(command)) throw new Error('command_json must be a JSON array of strings')
       const payload = parseJsonObject(args.payload_json, 'payload_json')
+      const outputContract = args.output_contract_json !== undefined
+        ? parseJsonObject(args.output_contract_json, 'output_contract_json')
+        : undefined
       const job = await client.submitJob({
         project_id: projectId,
         idempotency_key: args.idempotency_key,
@@ -774,6 +806,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         command,
         payload,
         contract_id: args.contract_id ?? null,
+        code_snapshot_id: args.code_snapshot_id ?? null,
+        image_digest: args.image_digest,
+        ...outputContract !== undefined && typeof outputContract.metrics === 'string' && typeof outputContract.logs === 'string'
+          && { output_contract: { metrics: outputContract.metrics, logs: outputContract.logs } },
       })
       return { ok: true, job }
     },

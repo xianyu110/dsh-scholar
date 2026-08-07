@@ -13,9 +13,9 @@
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { createHash, randomUUID, sign, type KeyObject } from 'node:crypto'
 import type { ResearchClient } from '@dsh-scholar/research-client'
@@ -74,6 +74,117 @@ export function extractMetrics(stdout: string): Array<{ metric: string; value: n
     } catch { /* not a metrics line */ }
   }
   return metrics
+}
+
+/**
+ * §11.3 (SCH-EXEC-002): unpack a code-snapshot archive artifact (JSON
+ * `{schema_version: 1, files: {rel: {sha256, content_base64}}}`) into
+ * `Map<relativePath, Buffer>`. Verifies each entry's sha256 — a tampered or
+ * truncated archive is rejected instead of silently materialized.
+ */
+export function unpackCodeSnapshot(content: string | Buffer): Map<string, Buffer> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.isBuffer(content) ? content.toString('utf8') : content)
+  } catch (error) {
+    throw new Error(`code snapshot archive is not valid JSON: ${(error as Error).message}`)
+  }
+  if (typeof parsed !== 'object' || parsed === null) throw new Error('code snapshot archive must be a JSON object')
+  const record = parsed as { schema_version?: unknown; files?: unknown }
+  if (record.schema_version !== 1) {
+    throw new Error(`code snapshot archive has unsupported schema_version: ${String(record.schema_version)}`)
+  }
+  if (typeof record.files !== 'object' || record.files === null) {
+    throw new Error('code snapshot archive is missing the files map')
+  }
+  const files = new Map<string, Buffer>()
+  for (const [rel, info] of Object.entries(record.files)) {
+    if (typeof rel !== 'string' || rel === '' || rel.startsWith('/') || rel.startsWith('..')) {
+      throw new Error(`code snapshot archive contains an unsafe path: ${rel}`)
+    }
+    const entry = info as { sha256?: unknown; content_base64?: unknown }
+    if (typeof entry.content_base64 !== 'string') continue
+    const buf = Buffer.from(entry.content_base64, 'base64')
+    if (typeof entry.sha256 === 'string' && entry.sha256 !== '') {
+      const actual = createHash('sha256').update(buf).digest('hex')
+      if (actual !== entry.sha256) {
+        throw new Error(`code snapshot integrity mismatch for ${rel}: got ${actual}, archive claims ${entry.sha256}`)
+      }
+    }
+    files.set(rel, buf)
+  }
+  return files
+}
+
+/**
+ * §11.3 (SCH-EXEC-002): write an unpacked code snapshot into `workDir` with
+ * path-traversal protection (every target must resolve inside workDir).
+ * The container mounts workDir read-only at /work — this is the ONLY code
+ * the Runner executes; agent host dirs are never mounted.
+ */
+export function materializeCodeSnapshot(files: Map<string, Buffer>, workDir: string): number {
+  const absRoot = resolve(workDir)
+  let count = 0
+  for (const [rel, buf] of files) {
+    const target = resolve(absRoot, rel)
+    if (!target.startsWith(`${absRoot}${sep}`) && target !== absRoot) {
+      throw new Error(`code snapshot path escapes workDir: ${rel}`)
+    }
+    mkdirSync(resolve(target, '..'), { recursive: true })
+    writeFileSync(target, buf)
+    count++
+  }
+  return count
+}
+
+/**
+ * §12.5 (SCH-EXEC-002): parse the fixed-schema metrics file written
+ * in-container to the output contract path:
+ * `{schema_version: 1, run_id, contract_id, seed, metrics: [{name, value, unit}]}`.
+ * Returns null when the file is absent or does not match the schema (the
+ * caller then falls back to legacy stdout extraction).
+ */
+export interface MetricsFileRecord {
+  schema_version: number
+  run_id?: string
+  contract_id?: string
+  seed?: number
+  metrics: Array<{ name?: string; metric?: string; value: number; unit?: string; seed?: number }>
+}
+
+export function parseMetricsFile(content: string): MetricsFileRecord | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const record = parsed as { schema_version?: unknown; run_id?: unknown; contract_id?: unknown; seed?: unknown; metrics?: unknown }
+  if (record.schema_version !== 1 || !Array.isArray(record.metrics)) return null
+  const entries = record.metrics
+    .map((m): { name?: string; metric?: string; value: number; unit?: string; seed?: number } | null => {
+      if (typeof m !== 'object' || m === null) return null
+      const entry = m as { name?: unknown; metric?: unknown; value?: unknown; unit?: unknown; seed?: unknown }
+      if (typeof entry.value !== 'number') return null
+      const name = typeof entry.name === 'string' ? entry.name : typeof entry.metric === 'string' ? entry.metric : undefined
+      if (name === undefined) return null
+      return {
+        name,
+        value: entry.value,
+        ...typeof entry.unit === 'string' && { unit: entry.unit },
+        ...typeof entry.seed === 'number' && { seed: entry.seed },
+      }
+    })
+    .filter((e): e is NonNullable<typeof e> => e !== null)
+  if (entries.length === 0) return null
+  return {
+    schema_version: 1,
+    ...typeof record.run_id === 'string' && { run_id: record.run_id },
+    ...typeof record.contract_id === 'string' && { contract_id: record.contract_id },
+    ...typeof record.seed === 'number' && { seed: record.seed },
+    metrics: entries,
+  }
 }
 
 /** Failure classification per design §4.6.2 (deterministic rules). */
@@ -292,7 +403,7 @@ async function runSubprocess(command: string[], cwd: string, timeoutMs: number, 
   return { run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
 }
 
-async function runDocker(command: string[], cwd: string, timeoutMs: number, jobId: string, signal?: AbortSignal): Promise<RunOutcome> {
+async function runDocker(command: string[], cwd: string, timeoutMs: number, jobId: string, signal?: AbortSignal, image = 'node:22-alpine'): Promise<RunOutcome> {
   const startedAt = new Date().toISOString()
   const container = `dsh-scholar-${randomUUID().slice(0, 8)}`
   const args = [
@@ -302,8 +413,12 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number, jobI
     '--memory', '1g', '--cpus', '1',
     '--workdir', '/work',
     '-v', `${cwd}:/work:ro`,
+    // §12.2/§12.5 (SCH-EXEC-002): output contract — the container writes the
+    // fixed-schema metrics file into /outputs (host: <cwd>/outputs, rw; the
+    // runner reads it back after execution).
+    '-v', `${cwd}/outputs:/outputs`,
     '--tmpfs', '/tmp:size=64m',
-    'node:22-alpine',
+    image,
     ...command,
   ]
   let result: SpawnResult
@@ -356,6 +471,39 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   // user to reach them (mkdtempSync defaults to 0700).
   chmodSync(workDir, 0o755)
 
+  // §12.2/§12.5 output contract: the container writes the fixed-schema
+  // metrics file into /outputs (rw mount) — the host mirror is
+  // <workDir>/outputs. uid 65534 must be able to write into it.
+  const outputsDir = join(workDir, 'outputs')
+  mkdirSync(outputsDir, { recursive: true })
+  chmodSync(outputsDir, 0o777)
+
+  // §11.3 (SCH-EXEC-002): materialize the bound code snapshot from the
+  // Artifact Store. The Runner ONLY executes this materialized content —
+  // agent host directories are never mounted into the container.
+  const codeSnapshotId = (job as JobRecord & { code_snapshot_id?: string | null }).code_snapshot_id
+  try {
+    if (codeSnapshotId !== null && codeSnapshotId !== undefined && codeSnapshotId !== '') {
+      const archiveText = await client.fetchArtifact(job.project_id, codeSnapshotId)
+      if (archiveText === null) {
+        throw new Error(`code snapshot artifact unreadable from CAS: ${codeSnapshotId} (project ${job.project_id})`)
+      }
+      const files = unpackCodeSnapshot(archiveText)
+      const materialized = materializeCodeSnapshot(files, workDir)
+      if (materialized === 0) {
+        throw new Error(`code snapshot ${codeSnapshotId} materialized zero files`)
+      }
+    }
+  } catch (error) {
+    // Materialization failure: never run the job, clean up the temp dir.
+    rmSync(workDir, { recursive: true, force: true })
+    throw error
+  }
+  // §12.2: image digest from the JobSpec binding (kernel default: node:22-alpine).
+  const image = typeof job.payload.image_digest === 'string' && job.payload.image_digest !== ''
+    ? job.payload.image_digest
+    : 'node:22-alpine'
+
   let run: RunOutcome
   if (job.kind === 'echo') {
     // Echo jobs execute nothing: pure in-process fixture (the ONLY kind that
@@ -386,12 +534,12 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     // Injected smoke script runs inside the isolated workdir.
     writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
     run = mode === 'docker'
-      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal)
+      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image)
       : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal)
   } else {
     const command = job.command.length > 0 ? job.command : ['true']
     run = mode === 'docker'
-      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal)
+      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image)
       : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal)
   }
 
@@ -412,7 +560,8 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       ...job.contract_id !== null && { contract_id: job.contract_id },
       job_id: job.job_id,
       code_commit: job.payload.code_commit ?? '',
-      container_digest: mode === 'docker' ? 'docker:node:22-alpine' : '',
+      code_snapshot_id: codeSnapshotId,
+      container_digest: mode === 'docker' ? `docker:${image}` : '',
       data_hash: job.payload.data_hash ?? '',
       command: job.command,
       resources: { gpu: 0, cpu: 1, memory_gb: 1 },
@@ -430,14 +579,60 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     })
     manifest.log_artifact = logArtifact.artifact_id
 
-    const metrics = extractMetrics(run.stdout)
+    // §12.5 (SCH-EXEC-002): formal metrics come from the fixed-schema metrics
+    // FILE written in-container to the output contract path (host mirror:
+    // <workDir>/outputs/<file>). The file is authoritative — stdout is only
+    // logs. Legacy stdout JSON-line extraction remains as a fallback for old
+    // fixtures that never write the file.
+    let metrics: Array<{ metric: string; value: number; seed?: number }> = []
+    let metricsFromFile: MetricsFileRecord | null = null
+    const outputContract = job.payload.output_contract
+    const metricsPath = typeof outputContract === 'object' && outputContract !== null
+      ? (outputContract as Record<string, unknown>).metrics
+      : undefined
+    if (typeof metricsPath === 'string' && metricsPath !== '') {
+      const rel = metricsPath.replace(/^\/outputs\/?/, '')
+      try {
+        const fileContent = readFileSync(join(outputsDir, rel), 'utf8')
+        metricsFromFile = parseMetricsFile(fileContent)
+      } catch { /* no metrics file written — fall back below */ }
+    }
+    if (metricsFromFile !== null) {
+      // Map the §12.5 record into the artifact, injecting the top-level seed
+      // into entries that lack their own (fixed-schema record shape).
+      metrics = metricsFromFile.metrics.map(m => ({
+        metric: m.name ?? m.metric ?? '',
+        value: m.value,
+        ...(m.seed !== undefined ? { seed: m.seed } : metricsFromFile!.seed !== undefined ? { seed: metricsFromFile!.seed } : {}),
+      }))
+    } else {
+      metrics = extractMetrics(run.stdout)
+    }
     if (metrics.length > 0 || run.exit_code === 0) {
-      const metricsContent = JSON.stringify({ run_id: run.run_id, job_id: job.job_id, metrics }, null, 2)
+      const metricsContent = metricsFromFile !== null
+        ? JSON.stringify({
+            schema_version: 1,
+            run_id: metricsFromFile.run_id ?? run.run_id,
+            job_id: job.job_id,
+            contract_id: metricsFromFile.contract_id ?? job.contract_id ?? undefined,
+            seed: metricsFromFile.seed,
+            metrics: metricsFromFile.metrics.map(m => ({
+              name: m.name ?? m.metric ?? '',
+              value: m.value,
+              unit: m.unit ?? '',
+              seed: m.seed ?? metricsFromFile!.seed,
+            })),
+            source: 'metrics-file',
+          }, null, 2)
+        : JSON.stringify({ run_id: run.run_id, job_id: job.job_id, metrics }, null, 2)
       const metricsArtifact = await client.registerArtifact({
         project_id: job.project_id,
         kind: 'analysis',
         content_base64: Buffer.from(metricsContent).toString('base64'),
-        metadata: { run_id: run.run_id, job_id: job.job_id, metrics: metrics.length },
+        metadata: {
+          run_id: run.run_id, job_id: job.job_id, metrics: metrics.length,
+          source: metricsFromFile !== null ? 'metrics-file' : 'stdout-json',
+        },
       })
       manifest.metrics_artifact = metricsArtifact.artifact_id
     }

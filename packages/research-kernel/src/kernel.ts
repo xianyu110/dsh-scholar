@@ -6,15 +6,16 @@
  */
 
 import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
-import { join } from 'node:path'
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
-  ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CorpusSnapshot, Decision,
+  ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision,
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, type ArtifactKind, type GateType, type JobStatus, type ProjectStatus,
+  buildProjectId, type ArtifactKind, type GateType, type JobSpecBound, type JobStatus, type ProjectStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
@@ -90,7 +91,7 @@ function gateFromRow(row: GateRow): Gate {
   }
 }
 
-function jobFromRow(row: JobRow): JobRecord {
+function jobFromRow(row: JobRow): JobSpecBound {
   const payload = jsonParse(row.payload, {} as Record<string, unknown>)
   // §12.6: the opaque lease token is persisted inside payload.__lease_token
   // (avoids a schema column); surface it as a first-class field and keep the
@@ -112,6 +113,13 @@ function jobFromRow(row: JobRow): JobRecord {
     heartbeat_at: row.heartbeat_at,
     lease_generation: row.lease_generation ?? null,
     lease_token: leaseToken,
+    // §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized from CAS.
+    code_snapshot_id: row.code_snapshot_id,
+    data_artifact_ids: Array.isArray(payload.data_artifact_ids) ? payload.data_artifact_ids.map(String) : [],
+    image_digest: typeof payload.image_digest === 'string' ? payload.image_digest : '',
+    output_contract: typeof payload.output_contract === 'object' && payload.output_contract !== null
+      ? { metrics: String((payload.output_contract as Record<string, unknown>).metrics ?? '/outputs/metrics.json'), logs: String((payload.output_contract as Record<string, unknown>).logs ?? '/outputs/run.log') }
+      : undefined,
     attempts: row.attempts,
     max_attempts: row.max_attempts,
     run_manifest: jsonParse(row.run_manifest, null),
@@ -549,12 +557,14 @@ export class ResearchKernel {
     const row = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
       .get(projectId, id) as ArtifactRecord | undefined
     if (row === undefined) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found in project ${projectId}`)
-    return row
+    // metadata is stored as JSON TEXT — surface it as the schema object.
+    return { ...row, metadata: jsonParse(row.metadata as unknown as string, {}) }
   }
 
 
   listArtifacts(projectId: string): ArtifactRecord[] {
-    return this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as ArtifactRecord[]
+    const rows = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as ArtifactRecord[]
+    return rows.map(row => ({ ...row, metadata: jsonParse(row.metadata as unknown as string, {}) }))
   }
 
   /** All project records referencing one blob (v2 §7.4 compatibility). */
@@ -738,6 +748,143 @@ export class ResearchKernel {
     return JSON.parse(row.body) as CorpusSnapshot
   }
 
+  // ── code snapshot archive (design §11.3, SCH-EXEC-002) ───────────────────
+
+  /**
+   * Archive a directory's ACTUAL file contents into a content-addressed
+   * `code` artifact (JSON `{schema_version, project_id, description, files:
+   * {rel: {sha256, content_base64}}, excludes}`) plus a lightweight `manifest`
+   * artifact (file list + hashes, no content). The Runner materializes the
+   * code snapshot ONLY from the Artifact Store — never from agent host dirs.
+   *
+   * Safety (path escape / symlink protection): the walk rejects any file whose
+   * relative path escapes the root, and any symbolic link whose realpath
+   * resolves OUTSIDE the real root (422 `snapshot_path_escape`); directories
+   * `.git`, `node_modules` and `.research-cas` are excluded.
+   */
+  snapshotCodeArchive(projectId: string, rootPath: string, description = ''): CodeSnapshot {
+    this.getProject(projectId)
+    const absRoot = resolve(rootPath)
+    let rootInfo
+    try {
+      rootInfo = statSync(absRoot)
+    } catch {
+      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root not readable: ${rootPath}`)
+    }
+    if (!rootInfo.isDirectory()) {
+      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root is not a directory: ${rootPath}`)
+    }
+    const realRoot = realpathSync(absRoot)
+    // Directories that are never part of a code snapshot (build/vendor/state).
+    const EXCLUDED_DIRS = new Set(['.git', 'node_modules', '.research-cas'])
+    const files: Record<string, { sha256: string; content_base64: string; size_bytes: number }> = {}
+    let totalBytes = 0
+    const walk = (dir: string): void => {
+      let entries: string[]
+      try {
+        entries = readdirSync(dir)
+      } catch (error) {
+        throw new KernelError(422, 'snapshot_read_error', `code snapshot: directory not readable: ${dir} (${(error as Error).message})`)
+      }
+      for (const entry of entries) {
+        const full = join(dir, entry)
+        let info
+        try {
+          info = lstatSync(full)
+        } catch {
+          continue // raced with deletion — skip
+        }
+        if (info.isSymbolicLink()) {
+          // §11.3 escape protection: symlinks resolving outside the archived
+          // root are rejected; symlinks staying inside are followed.
+          let target: string
+          try {
+            target = realpathSync(full)
+          } catch {
+            continue // dangling symlink — skip
+          }
+          if (target !== realRoot && !target.startsWith(`${realRoot}${sep}`)) {
+            throw new KernelError(422, 'snapshot_path_escape',
+              `code snapshot: symbolic link escapes the archived root: ${relative(absRoot, full)} -> ${target}`)
+          }
+          try {
+            info = statSync(full)
+          } catch {
+            continue
+          }
+        }
+        if (info.isDirectory()) {
+          if (EXCLUDED_DIRS.has(entry)) continue
+          walk(full)
+        } else if (info.isFile()) {
+          const rel = relative(absRoot, full)
+          if (rel.startsWith('..') || rel.startsWith(sep)) {
+            throw new KernelError(422, 'snapshot_path_escape', `code snapshot: path escapes the archived root: ${full}`)
+          }
+          let content: Buffer
+          try {
+            content = readFileSync(full)
+          } catch (error) {
+            throw new KernelError(422, 'snapshot_read_error', `code snapshot: unreadable file ${rel}: ${(error as Error).message}`)
+          }
+          const sha256 = createHash('sha256').update(content).digest('hex')
+          files[rel] = { sha256, content_base64: content.toString('base64'), size_bytes: content.byteLength }
+          totalBytes += content.byteLength
+        }
+        // sockets/fifos/devices are skipped silently (never part of source).
+      }
+    }
+    walk(absRoot)
+
+    const archive = {
+      schema_version: 1,
+      project_id: projectId,
+      description,
+      root: absRoot,
+      files,
+      excludes: [...EXCLUDED_DIRS],
+      created_at: nowIso(),
+    }
+    const archiveRecord = this.registerArtifact({
+      project_id: projectId,
+      kind: 'code',
+      content: JSON.stringify(archive),
+      metadata: { kind: 'code-snapshot-archive', files: Object.keys(files).length, total_bytes: totalBytes, root: absRoot },
+    })
+    // Lightweight manifest artifact (file list + hashes, no content) — §11.3
+    // `manifest_artifact_id`. Same sha256 space; content-addressed.
+    const manifestRecord = this.registerArtifact({
+      project_id: projectId,
+      kind: 'manifest',
+      content: JSON.stringify({
+        schema_version: 1,
+        project_id: projectId,
+        description,
+        root: absRoot,
+        files: Object.fromEntries(Object.entries(files).map(([rel, f]) => [rel, { sha256: f.sha256, size_bytes: f.size_bytes }])),
+        excludes: [...EXCLUDED_DIRS],
+        created_at: nowIso(),
+      }),
+      metadata: { kind: 'code-snapshot-manifest', files: Object.keys(files).length },
+    })
+    const snapshot: CodeSnapshot = {
+      snapshot_id: `code_snap_${randomUUID().slice(0, 8)}`,
+      project_id: projectId,
+      path: absRoot,
+      description,
+      archive_artifact_id: archiveRecord.artifact_id,
+      manifest_artifact_id: manifestRecord.artifact_id,
+      submodules_artifact_id: null,
+      lockfiles: [],
+      files: Object.keys(files).length,
+      total_bytes: totalBytes,
+      sha256: archiveRecord.sha256,
+      created_at: nowIso(),
+    }
+    // Both artifacts already emit artifact.registered events (outbox).
+    return snapshot
+  }
+
   // ── durable jobs (design §4.2 Job Controller, §9.3) ──────────────────────
 
   /** Idempotent job submission: same idempotency_key returns the existing job. */
@@ -749,7 +896,14 @@ export class ResearchKernel {
     payload?: Record<string, unknown>
     contract_id?: string | null
     max_attempts?: number
-  }): JobRecord {
+    // §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized by the
+    // Runner from CAS; image_digest/output_contract/data_artifact_ids travel
+    // inside payload.
+    code_snapshot_id?: string | null
+    data_artifact_ids?: string[]
+    image_digest?: string
+    output_contract?: { metrics: string; logs: string }
+  }): JobSpecBound {
     const project = this.getProject(input.project_id)
     // v2 §3.4: idempotency is project-scoped — the same key in two projects
     // yields two independent jobs.
@@ -763,14 +917,36 @@ export class ResearchKernel {
       throw new KernelError(422, 'container_execution_required',
         `job kind ${input.kind} requires a container runner profile (got ${project.execution.runner_profile}); host subprocess is prohibited (v2 §3.2)`)
     }
-    const job: JobRecord = {
+    // §12.2 (SCH-EXEC-002): formal-class jobs MUST bind a materialized code
+    // snapshot — the Runner never executes agent host directories.
+    const codeSnapshotId = input.code_snapshot_id ?? null
+    if (SECURE_KINDS.includes(input.kind) && (codeSnapshotId === null || codeSnapshotId === '')) {
+      throw new KernelError(422, 'code_snapshot_required',
+        `job kind ${input.kind} requires code_snapshot_id (the Runner materializes code from CAS, §11.3/§12.2)`)
+    }
+    if (codeSnapshotId !== null && codeSnapshotId !== '') {
+      try {
+        this.getArtifact(project.project_id, codeSnapshotId)
+      } catch {
+        throw new KernelError(422, 'code_snapshot_unknown',
+          `code_snapshot_id ${codeSnapshotId} is not a registered artifact of project ${project.project_id}`)
+      }
+    }
+    // §12.2: image digest default; the rest of the binding travels in payload.
+    const payload = {
+      ...(input.payload ?? {}),
+      image_digest: input.image_digest ?? (SECURE_KINDS.includes(input.kind) ? 'node:22-alpine' : ''),
+      ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
+      ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
+    }
+    const job: JobSpecBound = {
       job_id: `job_${randomUUID().slice(0, 12)}`,
       project_id: input.project_id,
       contract_id: input.contract_id ?? null,
       idempotency_key: input.idempotency_key,
       kind: input.kind,
       command: input.command ?? [],
-      payload: input.payload ?? {},
+      payload,
       status: 'queued',
       failure_class: null,
       lease_owner: null,
@@ -778,6 +954,10 @@ export class ResearchKernel {
       heartbeat_at: null,
       lease_generation: null,
       lease_token: null,
+      code_snapshot_id: codeSnapshotId,
+      data_artifact_ids: input.data_artifact_ids ?? [],
+      image_digest: String(payload.image_digest),
+      output_contract: input.output_contract,
       attempts: 0,
       max_attempts: input.max_attempts ?? 3,
       run_manifest: null,
@@ -786,13 +966,13 @@ export class ResearchKernel {
       updated_at: nowIso(),
     }
     this.db.prepare(
-      `INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at, code_snapshot_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       job.job_id, job.project_id, job.contract_id, job.idempotency_key, job.kind, JSON.stringify(job.command),
       JSON.stringify(job.payload), job.status, job.failure_class, job.lease_owner, job.lease_expires_at,
       job.heartbeat_at, job.attempts, job.max_attempts, job.run_manifest === null ? null : JSON.stringify(job.run_manifest),
-      job.error, job.created_at, job.updated_at,
+      job.error, job.created_at, job.updated_at, job.code_snapshot_id,
     )
     this.emit(input.project_id, 'job.submitted', { job_id: job.job_id, kind: job.kind, idempotency_key: input.idempotency_key })
     return job
@@ -1213,10 +1393,16 @@ export class ResearchKernel {
       if (typeof metricsArtifact !== 'string') continue
       const sha = metricsArtifact.replace(/^sha256:/, '')
       if (!this.cas.has(sha)) continue
-      const parsed = JSON.parse(this.cas.read(sha).toString('utf8')) as { metrics?: Array<{ metric?: string; value?: number; seed?: number }> }
+      // §12.5 (SCH-EXEC-002): metrics artifacts carry the fixed-schema file
+      // record ({schema_version, seed, metrics: [{name, value, unit}]});
+      // legacy stdout-derived artifacts used {metric, value, seed}. Both keys
+      // are accepted, and the §12.5 top-level `seed` is used as the per-entry
+      // fallback.
+      const parsed = JSON.parse(this.cas.read(sha).toString('utf8')) as { metrics?: Array<{ metric?: string; name?: string; value?: number; seed?: number }>; seed?: number }
       for (const entry of parsed.metrics ?? []) {
-        if (entry.value === undefined || entry.metric === undefined) continue
-        if (metric !== undefined && entry.metric !== metric) continue
+        const metricName = entry.name ?? entry.metric
+        if (entry.value === undefined || metricName === undefined) continue
+        if (metric !== undefined && metricName !== metric) continue
         if (job.kind === 'baseline') {
           baselineValue = entry.value
         } else {
@@ -1225,7 +1411,7 @@ export class ResearchKernel {
             job_id: job.job_id,
             kind: job.kind,
             value: entry.value,
-            seed: entry.seed,
+            seed: entry.seed ?? parsed.seed,
           })
         }
       }

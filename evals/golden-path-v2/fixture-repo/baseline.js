@@ -13,8 +13,8 @@
  *   m2           = weighted_sum + seed * 0.02                (unit: ratio)
  *   n_samples    = baseline.length                           (unit: count)
  *
- * Output: fixed-schema metrics file (design §12.5) at --output plus one
- * stdout JSON line per metric (current-runner extraction compatibility).
+ * Output: fixed-schema metrics file (design §12.5) at --output. The runner
+ * (v2 SCH-EXEC-002) reads metrics ONLY from this file — stdout is logs only.
  *
  * Usage: node baseline.js [--seed N] --data PATH --output PATH [--contract-id ID]
  *
@@ -86,9 +86,9 @@ function main() {
   // exact §12.5 fixed-schema record from the run log (`cat` of this file).
   fs.writeFileSync(args.output, JSON.stringify(report) + '\n', 'utf8')
 
-  for (const m of metrics) {
-    console.log(JSON.stringify({ metric: m.name, value: m.value, seed }))
-  }
+  // v2 (SCH-EXEC-002): NO stdout metric lines. Formal metrics are read by the
+  // runner ONLY from the fixed-schema metrics file (design §12.5) — stdout is
+  // logs only.
 }
 
 main()

@@ -94,6 +94,16 @@ const jobSchema = z.object({
   payload: z.record(z.unknown()).optional(),
   contract_id: z.string().nullable().optional(),
   max_attempts: z.number().int().positive().optional(),
+  // §12.2 JobSpec binding (SCH-EXEC-002).
+  code_snapshot_id: z.string().nullable().optional(),
+  data_artifact_ids: z.array(z.string()).optional(),
+  image_digest: z.string().optional(),
+  output_contract: z.object({ metrics: z.string(), logs: z.string() }).optional(),
+})
+
+const codeSnapshotSchema = z.object({
+  path: z.string().min(1),
+  description: z.string().optional(),
 })
 
 const jobCompleteSchema = z.object({
@@ -357,6 +367,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               const input = jobSchema.parse(body)
               const job = kernel.submitJob({ ...input, project_id: id })
               send(res, 201, job)
+              return
+            }
+            if (method === 'POST' && sub === 'code-snapshots') {
+              // §11.3 (SCH-EXEC-002): archive ACTUAL directory contents into
+              // a content-addressed `code` artifact (+ manifest artifact).
+              const input = codeSnapshotSchema.parse(body)
+              const snapshot = kernel.snapshotCodeArchive(id, input.path, input.description ?? '')
+              send(res, 201, snapshot)
               return
             }
             if (method === 'POST' && sub === 'claims') {
