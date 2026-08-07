@@ -211,7 +211,9 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     }
   }
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-  const parts = url.pathname.split('/').filter(Boolean) // e.g. ['v1','projects','rsp_x']
+  // pathname is percent-encoded; decode segments so ids like sha256:<hex>
+  // survive (encodeURIComponent on the client side).
+  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent) // e.g. ['v1','projects','rsp_x']
 
   const method = req.method ?? 'GET'
   const [version, resource, id, sub, subId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]

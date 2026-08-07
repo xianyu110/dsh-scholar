@@ -295,6 +295,18 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${projectId}/analysis`, { contract_id: contractId, metric })
   }
 
+  /** Read an artifact blob (text) from the CAS by sha256/id. */
+  async fetchArtifact(sha256OrId: string): Promise<string | null> {
+    const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
+    try {
+      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10000) })
+      if (!response.ok) return null
+      return await response.text()
+    } catch {
+      return null
+    }
+  }
+
   // ── budget / events ──────────────────────────────────────────────────────
 
   recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): Promise<Record<string, unknown>> {

@@ -668,6 +668,62 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }))
 
+  ctx.tools.register(researchTool({
+    name: 'baseline_verify',
+    description: 'Verify a reproduced baseline against expected metrics (design §4.6 step 2): reads the succeeded baseline job RunManifest metrics from CAS and reports per-metric deviation vs expected_metrics within the reproduction tolerance. Reproduction must pass BEFORE any comparison claim is made.',
+    parameters: {
+      project_id: OPT_STRING,
+      expected_metrics_json: { type: 'string', required: true },
+      tolerance: { type: 'number' },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveProjectId(client, sessionId, args.project_id)
+      if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      const expected = JSON.parse(args.expected_metrics_json) as unknown
+      if (typeof expected !== 'object' || expected === null) throw new Error('expected_metrics_json must be a JSON object {metric: value}')
+      const tolerance = args.tolerance ?? 0.05
+      const jobs = await client.listJobs(projectId)
+      const baselineJobs = jobs.filter(j => j.kind === 'baseline' && j.status === 'succeeded')
+      if (baselineJobs.length === 0) throw new Error('no succeeded baseline run found — reproduce the baseline first (baseline_prepare)')
+      const latest = baselineJobs.at(-1)!
+      const metricsArtifact = latest.run_manifest?.metrics_artifact
+      if (typeof metricsArtifact !== 'string') throw new Error('baseline RunManifest has no metrics artifact')
+      const content = await client.fetchArtifact(metricsArtifact)
+      if (content === null) throw new Error(`metrics artifact unreadable: ${metricsArtifact}`)
+      const parsed = JSON.parse(content) as { metrics?: Array<{ metric?: string; value?: number }> }
+      const actual = new Map<string, number>()
+      for (const entry of parsed.metrics ?? []) {
+        if (entry.metric !== undefined && entry.value !== undefined) actual.set(entry.metric, entry.value)
+      }
+      const deviations: Array<{ metric: string; expected: number; actual: number | null; relative_deviation: number | null; within_tolerance: boolean }> = []
+      for (const [metric, value] of Object.entries(expected)) {
+        const expectedValue = Number(value)
+        const actualValue = actual.get(metric) ?? null
+        const rel = actualValue !== null && expectedValue !== 0 ? Math.abs(actualValue - expectedValue) / Math.abs(expectedValue) : null
+        deviations.push({
+          metric,
+          expected: expectedValue,
+          actual: actualValue,
+          relative_deviation: rel !== null ? Math.round(rel * 10000) / 10000 : null,
+          within_tolerance: rel !== null && rel <= tolerance,
+        })
+      }
+      const pass = deviations.length > 0 && deviations.every(d => d.within_tolerance)
+      return {
+        ok: true,
+        verification: {
+          baseline_job: latest.job_id,
+          run_manifest: metricsArtifact,
+          tolerance,
+          deviations,
+          pass,
+          note: pass ? 'baseline reproduced within tolerance — comparisons allowed' : 'baseline OUT of tolerance — record deviation, do not compare',
+        },
+      }
+    },
+  }))
+
   // ── experiment (Architect / Operator) ────────────────────────────────────
 
   ctx.tools.register(researchTool({

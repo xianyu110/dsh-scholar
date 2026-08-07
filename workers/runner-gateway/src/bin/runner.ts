@@ -16,6 +16,7 @@ const { values } = parseArgs({
     token: { type: 'string' },
     mode: { type: 'string', default: 'subprocess' },
     'poll-ms': { type: 'string', default: '2000' },
+    'timeout-ms': { type: 'string', default: '60000' },
     owner: { type: 'string' },
   },
 })
@@ -23,6 +24,7 @@ const { values } = parseArgs({
 const endpoint = values.kernel ?? 'http://127.0.0.1:7412'
 const mode = (values.mode ?? 'subprocess') as RunnerMode
 const pollMs = Number(values['poll-ms'] ?? 2000)
+const timeoutMs = Number(values['timeout-ms'] ?? 60000)
 const owner = values.owner ?? `runner-${randomUUID().slice(0, 8)}`
 
 const client = new ResearchClient({ endpoint, token: values.token })
@@ -47,7 +49,7 @@ while (!stopping) {
       if (stopping) break
       console.error(`[runner-gateway] executing ${job.kind} job ${job.job_id}`)
       try {
-        const { job: completed } = await executeJob(job, { client, owner, mode })
+        const { job: completed } = await executeJob(job, { client, owner, mode, timeoutMs })
         console.error(`[runner-gateway] job ${job.job_id} → ${completed.status}`)
       } catch (error) {
         console.error(`[runner-gateway] job ${job.job_id} failed at gateway level:`, (error as Error).message)
