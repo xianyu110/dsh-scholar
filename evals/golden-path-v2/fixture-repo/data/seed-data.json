@@ -1,0 +1,6 @@
+{
+  "dataset": "golden-v2-fixture",
+  "description": "Synthetic deterministic fixture dataset (self-contained, no external dependencies).",
+  "baseline": [0.5, 1.0, 1.5, 2.0],
+  "weights": [0.1, 0.2, 0.3, 0.4]
+}

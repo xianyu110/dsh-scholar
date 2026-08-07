@@ -28,3 +28,38 @@ bash evals/fault-stress.sh 100
 bash evals/clean-room-rerun.sh
 bash evals/survey-eval.sh --live         # 需外网
 ```
+
+## Golden Path v2(design §19.3,真实执行)
+
+`evals/golden-path-v2/run-golden-v2.sh` 是 v2 的端到端"真实执行"黄金路径:
+不使用 LLM、不注入手工指标、无 message fallback。小型自包含 fixture 仓库
+(`evals/golden-path-v2/fixture-repo/`:`train.js` / `baseline.js` /
+`data/seed-data.json`,纯 Node,确定性)在 runner 的 `--mode docker` 路径下由
+容器内真实 `node` 执行:
+
+1. fixture-repo 打成确定性 tar,注册为 `kind='code'` CAS artifact 并做
+   GET 完整性回读校验;
+2. baseline 作业(`kind=baseline`,seed 0,容器内真实执行);
+3. 3 个 formal 作业(`kind=formal`,seeds 1/2/3,容器内真实执行);
+4. 每次运行在容器内写出 §12.5 固定 schema 的 `metrics.json`
+   (`/tmp/metrics.json`,`/work` 只读且 runner 尚未物化 CAS),并从 run log
+   校验该记录的每个字段;同时按当前 runner 机制打印 stdout JSON 行,两个
+   通道的值必须一致;
+5. 断言提取值与脚本自行计算的确定性预期一致、metric 随 seed 严格单调
+   (证明真实计算而非伪造)、`n_samples` 来自数据文件;
+6. `POST /v1/projects/{id}/analysis` 聚合真实 run,断言 mean / baseline_value
+   / effect_size / seeds 与手工预期一致。
+
+最近一次:`18/18`(两次连续运行一致;fixture tar 确定性 hash
+`36cbd753…d65b67`,可重复)。
+
+真实代码进容器的机制(已在 `workers/runner-gateway/src/index.ts`
+`runDocker` 验证):runner 把 job workDir 挂到 `/work:ro` 并原样执行
+`job.command`,但只有 smoke+script 会向 workDir 写文件;因此 baseline/formal
+作业把 fixture 代码内联进 command(`sh -c` 用 heredoc 物化到容器可写的
+`/tmp` 后执行 node)。依赖 docker(`docker info` 不可用则 exit 2)。
+
+```bash
+bash evals/golden-path-v2/run-golden-v2.sh
+```
+
