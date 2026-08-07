@@ -2,7 +2,7 @@
  * Scholar connector + runner unit tests (design §11.1, §4.6).
  */
 import { describe, expect, it, vi } from 'vitest'
-import { dedupPapers, titleFingerprint } from '@dsh-scholar/scholar-connectors'
+import { buildPassages, dedupPapers, titleFingerprint } from '@dsh-scholar/scholar-connectors'
 import { classifyFailure, extractMetrics } from '@dsh-scholar/runner-gateway'
 import type { Paper } from '@dsh-scholar/research-schemas'
 
@@ -23,6 +23,31 @@ describe('scholar connectors', () => {
     const { papers, removed } = dedupPapers([base, duplicateDoi, arxiv1, arxivDup, titleDup, titleDup2])
     expect(removed).toBe(3)
     expect(papers).toHaveLength(3)
+  })
+})
+
+describe('passage derivation (§4.4)', () => {
+  it('builds untrusted passages from abstracts', () => {
+    const now = new Date().toISOString()
+    const paper: Paper = {
+      paper_id: 'doi:10.1/abc',
+      title: 'A Study',
+      authors: ['A'],
+      source: 'openalex',
+      identifiers: { doi: '10.1/abc' },
+      abstract: 'First claim sentence. Second claim sentence. Third one.',
+      retrieved_at: now,
+    }
+    const passages = buildPassages([paper])
+    expect(passages).toHaveLength(2)
+    expect(passages[0]?.text).toContain('First claim')
+    expect(passages.every(p => p.is_untrusted === true)).toBe(true)
+    expect(passages.every(p => p.paper_id === 'doi:10.1/abc')).toBe(true)
+  })
+
+  it('skips papers without abstracts', () => {
+    const now = new Date().toISOString()
+    expect(buildPassages([{ paper_id: 'doi:1/x', title: 'No Abstract', authors: [], source: 'crossref', identifiers: {}, retrieved_at: now }])).toHaveLength(0)
   })
 })
 

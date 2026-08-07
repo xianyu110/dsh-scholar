@@ -9,7 +9,7 @@
 import { defineTool, type InferArgs, type InferValue, type ObjectValueSchemaSpec, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ResearchClient } from '@dsh-scholar/research-client'
-import { multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
+import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 
 /** Render a canonical tool value as text blocks. */
 export function renderText(value: unknown): ContentBlock[] {
@@ -330,12 +330,16 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       const result = await multiSourceSearch(args.query, { limit: args.limit ?? 20 }, ctx_.cache)
+      const papers = result.hits.map(h => h.paper)
       const snapshot = await client.snapshotCorpus({
         project_id: projectId,
         queries: result.queries,
-        papers: result.hits.map(h => h.paper),
+        papers,
+        // Quote-level passages derived from abstracts (design §4.4 step 5),
+        // all tagged untrusted so later agents treat them as data.
+        passages: buildPassages(papers),
       })
-      return { ok: true, snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length, dedup_removed: result.dedup_removed }
+      return { ok: true, snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length, passages: snapshot.passages.length, dedup_removed: result.dedup_removed }
     },
   }))
 

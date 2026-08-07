@@ -9,7 +9,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import type { Paper } from '@dsh-scholar/research-schemas'
+import type { Paper, Passage } from '@dsh-scholar/research-schemas'
 
 export type ConnectorSource = 'openalex' | 'crossref' | 'arxiv' | 'semantic-scholar'
 
@@ -348,3 +348,28 @@ export async function resolvePaper(identifier: string, cache: ConnectorCache = N
 }
 
 export { openAlexPaper, crossrefPaper, arxivPaper }
+
+
+/**
+ * Derive quote-level passages from paper abstracts (design §4.4 step 5).
+ * Every passage is tagged `is_untrusted: true` — external content must never
+ * be treated as instructions (design §4.9).
+ */
+export function buildPassages(papers: Paper[]): Passage[] {
+  const passages: Passage[] = []
+  for (const paper of papers) {
+    if ((paper.abstract ?? '').trim() === '') continue
+    const sentences = (paper.abstract ?? '').split(/(?<=[.!?])\s+/).map(t => t.trim()).filter(t => t.length > 0)
+    for (const [index, sentence] of sentences.slice(0, 2).entries()) {
+      passages.push({
+        passage_id: `passage_${paper.paper_id.replace(/[^a-zA-Z0-9]/g, '_')}_${index}`,
+        paper_id: paper.paper_id,
+        text: sentence,
+        location: 'abstract',
+        claim_summary: '',
+        is_untrusted: true,
+      })
+    }
+  }
+  return passages
+}
