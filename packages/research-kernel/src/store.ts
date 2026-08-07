@@ -78,13 +78,14 @@ CREATE TABLE IF NOT EXISTS corpus_snapshots (
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS artifacts (
-  artifact_id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL,
   project_id TEXT NOT NULL,
   kind TEXT NOT NULL,
   size_bytes INTEGER NOT NULL,
   sha256 TEXT NOT NULL,
   metadata TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, artifact_id)
 );
 CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY,
@@ -173,7 +174,35 @@ export function openDatabase(path: string): DatabaseSync {
   // v2 forward migrations on pre-existing databases.
   ensureColumn(db, 'evidence', 'provenance_status', "TEXT NOT NULL DEFAULT 'legacy_unverified'")
   migrateJobsProjectIdempotency(db)
+  migrateArtifactsProjectScoped(db)
   return db
+}
+
+/**
+ * v2 §7.4: artifacts become PROJECT-SCOPED references to global blobs.
+ * Legacy table had artifact_id as the global PK (same blob deduped across
+ * projects); rebuild so each project owns its own record.
+ */
+function migrateArtifactsProjectScoped(db: DatabaseSync): void {
+  const info = db.prepare(`PRAGMA table_info('artifacts')`).all() as unknown as Array<{ pk: number; name: string }>
+  // New schema: pk appears on both columns (composite). Legacy: only artifact_id has pk=1.
+  const pkCount = info.filter(c => c.pk > 0).length
+  if (pkCount >= 2) return
+  db.exec(`
+    CREATE TABLE artifacts_v2 (
+      artifact_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, artifact_id)
+    );
+    INSERT INTO artifacts_v2 SELECT * FROM artifacts;
+    DROP TABLE artifacts;
+    ALTER TABLE artifacts_v2 RENAME TO artifacts;
+  `)
 }
 
 /**

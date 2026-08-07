@@ -673,7 +673,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const latest = baselineJobs.at(-1)!
       const metricsArtifact = latest.run_manifest?.metrics_artifact
       if (typeof metricsArtifact !== 'string') throw new Error('baseline RunManifest has no metrics artifact')
-      const content = await client.fetchArtifact(metricsArtifact)
+      const content = await client.fetchArtifact(projectId, metricsArtifact)
       if (content === null) throw new Error(`metrics artifact unreadable: ${metricsArtifact}`)
       const parsed = JSON.parse(content) as { metrics?: Array<{ metric?: string; value?: number }> }
       const actual = new Map<string, number>()

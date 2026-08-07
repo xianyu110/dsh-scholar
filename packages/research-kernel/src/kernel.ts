@@ -506,10 +506,14 @@ export class ResearchKernel {
   }): ArtifactRecord {
     this.getProject(input.project_id)
     const { sha256, size_bytes } = this.cas.put(input.content)
-    const existing = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(`sha256:${sha256}`) as ArtifactRecord | undefined
-    if (existing !== undefined) return existing // content-addressed dedupe (RSP-008)
+    const artifactId = `sha256:${sha256}`
+    // v2 §7.4: blobs are global (CAS), artifact records are project-scoped —
+    // the same blob in another project yields that project's OWN record.
+    const existing = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
+      .get(input.project_id, artifactId) as ArtifactRecord | undefined
+    if (existing !== undefined) return existing
     const record: ArtifactRecord = {
-      artifact_id: `sha256:${sha256}`,
+      artifact_id: artifactId,
       project_id: input.project_id,
       kind: input.kind,
       size_bytes,
@@ -523,15 +527,24 @@ export class ResearchKernel {
     return record
   }
 
-  getArtifact(sha256OrId: string): ArtifactRecord {
+  /** Project-scoped artifact lookup (v2 §3.4 isolation). */
+  getArtifact(projectId: string, sha256OrId: string): ArtifactRecord {
     const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
-    const row = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(id) as ArtifactRecord | undefined
-    if (row === undefined) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found`)
+    const row = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
+      .get(projectId, id) as ArtifactRecord | undefined
+    if (row === undefined) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found in project ${projectId}`)
     return row
   }
 
+
   listArtifacts(projectId: string): ArtifactRecord[] {
     return this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as ArtifactRecord[]
+  }
+
+  /** All project records referencing one blob (v2 §7.4 compatibility). */
+  listArtifactsForBlob(sha256OrId: string): ArtifactRecord[] {
+    const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
+    return this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ? ORDER BY project_id').all(id) as unknown as ArtifactRecord[]
   }
 
   /** Verify a RunManifest's artifact refs exist in CAS (design §4.6.1). */

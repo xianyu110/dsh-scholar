@@ -391,12 +391,24 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (id !== undefined && method === 'GET' && sub === undefined) {
-            const record = kernel.getArtifact(id)
+            // v2: project-scoped lookup via ?project_id=; legacy unqualified
+            // lookup resolves only when the blob has a single project record.
+            const projectId = url.searchParams.get('project_id') ?? undefined
+            let record: import('@dsh-scholar/research-schemas').ArtifactRecord
+            if (projectId !== undefined) {
+              record = kernel.getArtifact(projectId, id)
+            } else {
+              const matches = kernel.listArtifactsForBlob(id)
+              if (matches.length === 0) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found`)
+              if (matches.length > 1) throw new KernelError(409, 'artifact_ambiguous', `artifact ${id} exists in multiple projects; pass project_id`)
+              record = matches[0]
+            }
             const content = kernel.cas.read(record.sha256)
             res.writeHead(200, {
               'content-type': 'application/octet-stream',
               'content-length': content.byteLength,
               'x-artifact-id': record.artifact_id,
+              'x-project-id': record.project_id,
             })
             res.end(content)
             return

@@ -295,11 +295,11 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${projectId}/analysis`, { contract_id: contractId, metric })
   }
 
-  /** Read an artifact blob (text) from the CAS by sha256/id. */
-  async fetchArtifact(sha256OrId: string): Promise<string | null> {
+  /** Read an artifact blob (text) from the CAS (project-scoped, v2 §7.4). */
+  async fetchArtifact(projectId: string, sha256OrId: string): Promise<string | null> {
     const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
     try {
-      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10000) })
+      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { signal: AbortSignal.timeout(10000) })
       if (!response.ok) return null
       return await response.text()
     } catch {

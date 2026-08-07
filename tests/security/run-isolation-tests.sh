@@ -105,10 +105,13 @@ OWN_A=$(api "$BASE/v1/projects/$PROJ_A/artifacts" | jfield '[0].project_id')
 ART_B=$(api -X POST "$BASE/v1/artifacts" -d "{\"project_id\":\"$PROJ_B\",\"kind\":\"data\",\"content_base64\":\"$BLOB_B64\",\"metadata\":{\"owner\":\"B\"}}" | jfield '.artifact_id')
 OWN_B=$(api "$BASE/v1/projects/$PROJ_B/artifacts" | jfield '[0].project_id')
 COUNT_B=$(api "$BASE/v1/projects/$PROJ_B/artifacts" | jfield '.length')
-if [[ "$ART_B" != "$ART_A" && "$OWN_B" == "$PROJ_B" ]]; then
-  ok "same blob in B -> distinct artifact $ART_B owned by B"
+# v2 §7.4: blob is global (same artifact_id = sha256) but each project owns
+# its own RECORD — isolation is proven by B's list containing a record owned
+# by B, and by project-scoped lookup resolving B's record.
+if [[ "$ART_B" == "$ART_A" && "$OWN_B" == "$PROJ_B" && "$COUNT_B" -ge 1 ]]; then
+  ok "same blob in B -> same artifact_id (shared blob) with B-owned record (owner=$OWN_B)"
 else
-  bad "shared blob NOT isolated: B's registration of the same content returned artifact '$ART_B' (A's record, sha256 content-addressed dedup); B's artifact list has $COUNT_B record(s), first owner '$OWN_B' (expected a record owned by B)"
+  bad "shared blob isolation broken: ART_B=$ART_B OWN_B=$OWN_B COUNT_B=$COUNT_B (expected same id, B-owned record)"
 fi
 
 # control: different content in B -> B's own record
