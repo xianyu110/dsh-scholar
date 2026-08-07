@@ -26,10 +26,15 @@ if [[ "$LIVE" == "1" ]]; then
       { title: 'Deep Residual Learning for Image Recognition', doi: '10.1109/CVPR.2016.90' },
     ]
     let pass = 0, fail = 0
-    const tokens = (t) => t.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 3)
+    // Unicode-aware tokenization (design §9.3): never drop non-ASCII scripts.
+    const tokens = (t) => t.normalize('NFKC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 3)
     for (const t of targets) {
       try {
-        const { hits } = await multiSourceSearch(t.title, { limit: 20 })
+        const { hits, source_status } = await multiSourceSearch(t.title, { limit: 20 })
+        if (Array.isArray(source_status) && source_status.length === 3) {
+          const failed = source_status.filter(s => s.status === 'failed').map(s => s.source).join(',')
+          console.log('  ok: source_status covers all 3 sources (' + (failed || 'no failures') + ')'); pass++
+        } else { console.log('  FAIL: source_status missing/incomplete: ' + JSON.stringify(source_status)); fail++ }
         const top = hits.slice(0, 20)
         const want = tokens(t.title)
         const hit = top.some(h => {
@@ -51,6 +56,12 @@ if [[ "$LIVE" == "1" ]]; then
     const { removed } = dedupPapers([a, b, c])
     if (removed === 2) { console.log('  ok: dedup removed 2/3 (doi + title fingerprint)'); pass++ } else { console.log('  FAIL: dedup removed ' + removed); fail++ }
     if (titleFingerprint('Attention Is All You Need!') === titleFingerprint('attention is all you need')) { console.log('  ok: title fingerprint normalization'); pass++ } else { console.log('  FAIL: fingerprint'); fail++ }
+    // Unicode-aware fingerprint (design §9.3): CJK survives, full-width folds, 繁/简 distinct.
+    const zh = titleFingerprint('基于深度学习的文本分类研究')
+    if (zh.length > 0 && zh === titleFingerprint('基于深度学习的文本分类研究!!')) { console.log('  ok: Unicode fingerprint keeps CJK and collapses punctuation'); pass++ } else { console.log('  FAIL: Unicode fingerprint: "' + zh + '"'); fail++ }
+    if (titleFingerprint('Ａｔｔｅｎｔｉｏｎ Ｉｓ Ａｌｌ Ｙｏｕ Ｎｅｅｄ') === titleFingerprint('Attention Is All You Need!')) { console.log('  ok: NFKC full-width folding'); pass++ } else { console.log('  FAIL: NFKC full-width folding'); fail++ }
+    if (titleFingerprint('café') === titleFingerprint('cafe\u0301') && titleFingerprint('café') !== titleFingerprint('cafe')) { console.log('  ok: NFKC accent composition (é vs e+combining, é ≠ e)'); pass++ } else { console.log('  FAIL: NFKC accent behavior'); fail++ }
+    if (titleFingerprint('深度学习') !== titleFingerprint('深度學習')) { console.log('  ok: 繁/简 treated as distinct'); pass++ } else { console.log('  FAIL: 繁/简 distinctness'); fail++ }
     process.exit(fail > 0 ? 1 : 0)
   " && true || { echo "node eval failed"; exit 1; }
 else
@@ -67,6 +78,16 @@ else
     const { papers, removed } = dedupPapers([a, b, c, d, e, f])
     if (removed === 3 && papers.length === 3) { console.log('  ok: dedup removed 3/6'); process.exit(0) }
     else { console.log('  FAIL: removed=' + removed + ' kept=' + papers.length); process.exit(1) }
+  "
+  node --input-type=module -e "
+    import { dedupPapers } from '$REPO/packages/scholar-connectors/lib/index.js'
+    // Unicode dedup (design §9.3): full-width/punctuation CJK variants dedup, 繁/简 stays distinct.
+    const now = new Date().toISOString()
+    const mk = (id, title, source) => ({ paper_id: id, title, authors: [], source, retrieved_at: now })
+    const zh = [mk('openalex:zh1', '基于深度学习的文本分类研究', 'openalex'), mk('openalex:zh2', '基于深度学习的文本分类研究!!', 'crossref'), mk('openalex:zh3', '基于深度学习的文本分類研究', 'arxiv')]
+    const r = dedupPapers(zh)
+    if (r.removed === 1 && r.papers[0].paper_id === 'openalex:zh1' && r.papers[1].paper_id === 'openalex:zh3') { console.log('  ok: Unicode dedup — CJK variants merged, 繁/简 kept'); process.exit(0) }
+    else { console.log('  FAIL: unicode dedup removed=' + r.removed + ' kept=' + r.papers.map(p => p.paper_id).join(',')); process.exit(1) }
   "
 fi
 echo "survey-eval: $PASS passed, $FAIL failed"

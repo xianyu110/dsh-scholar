@@ -93,9 +93,22 @@ async function fetchJson(url: string, timeoutMs: number): Promise<unknown> {
   }
 }
 
-/** Normalize a title for dedup fingerprinting (design §4.4 step 3). */
+/**
+ * Normalize a title for dedup fingerprinting (design §4.4 step 3, §9.3).
+ * Unicode-aware pipeline:
+ *   1. NFKC normalization (folds full-width forms, composes decomposed accents)
+ *   2. case-fold (toLowerCase — Unicode-aware)
+ *   3. keep only Unicode letters/digits (\p{L}\p{N})
+ *   4. punctuation and extra whitespace runs collapse to a single unit
+ *   5. truncate to 80 code points
+ * Per §9.3, rules that keep only [a-z0-9] are forbidden: CJK, Cyrillic and
+ * accented titles must survive fingerprinting.
+ */
 export function titleFingerprint(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 80)
+  const normalized = title.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+  // slice by code points, not UTF-16 code units, so astral characters are
+  // never split mid-surrogate (truncation is "80 码点" per §9.3).
+  return Array.from(normalized).slice(0, 80).join('')
 }
 
 /** Deduplicate papers by DOI, arXiv id, then title fingerprint. Keeps first. */
@@ -118,21 +131,33 @@ export function dedupPapers(papers: Paper[]): { papers: Paper[]; removed: number
   return { papers: result, removed: papers.length - result.length }
 }
 
+/**
+ * Map an OpenAlex work to a Paper. Defensive (§9.4): malformed or
+ * field-missing records (wrong types, nulls, non-array structures) degrade to
+ * placeholders instead of throwing — one bad record must not fail a survey.
+ */
 function openAlexPaper(raw: Record<string, unknown>): Paper {
-  const ids = raw.ids as Record<string, unknown> | undefined
-  const doi = typeof ids?.doi === 'string' ? ids.doi.replace(/^https:\/\/doi\.org\//, '') : undefined
+  const ids = raw.ids
+  const doi = typeof ids === 'object' && ids !== null && typeof (ids as { doi?: unknown }).doi === 'string'
+    ? (ids as { doi: string }).doi.replace(/^https:\/\/doi\.org\//, '')
+    : undefined
   const title = typeof raw.title === 'string' ? raw.title : 'Untitled'
   const authors = Array.isArray(raw.authorships)
-    ? (raw.authorships as Array<{ author?: { display_name?: string } }>).map(a => a.author?.display_name ?? '').filter(Boolean)
+    ? (raw.authorships as Array<{ author?: { display_name?: string } } | null | undefined>)
+        .map(a => a?.author?.display_name ?? '')
+        .filter(Boolean)
     : []
   const year = typeof raw.publication_year === 'number' ? raw.publication_year : undefined
   const venue = (raw.primary_location as { source?: { display_name?: string } } | null | undefined)?.source?.display_name
-  const abstractInverted = raw.abstract_inverted_index as Record<string, number[]> | null | undefined
+  const abstractInverted = raw.abstract_inverted_index
   let abstract = ''
-  if (abstractInverted !== undefined && abstractInverted !== null) {
+  if (typeof abstractInverted === 'object' && abstractInverted !== null && !Array.isArray(abstractInverted)) {
     const positions: Array<[number, string]> = []
-    for (const [word, indexes] of Object.entries(abstractInverted)) {
-      for (const index of indexes) positions.push([index, word])
+    for (const [word, indexes] of Object.entries(abstractInverted as Record<string, unknown>)) {
+      if (!Array.isArray(indexes)) continue
+      for (const index of indexes) {
+        if (typeof index === 'number') positions.push([index, word])
+      }
     }
     abstract = positions.sort((a, b) => a[0] - b[0]).map(p => p[1]).join(' ')
   }
@@ -154,7 +179,9 @@ function crossrefPaper(raw: Record<string, unknown>): Paper {
   const doi = typeof raw.DOI === 'string' ? raw.DOI.toLowerCase() : undefined
   const title = Array.isArray(raw.title) && typeof raw.title[0] === 'string' ? raw.title[0] : 'Untitled'
   const authors = Array.isArray(raw.author)
-    ? (raw.author as Array<{ given?: string; family?: string }>).map(a => [a.given, a.family].filter(Boolean).join(' ')).filter(Boolean)
+    ? (raw.author as Array<{ given?: string; family?: string } | null | undefined>)
+        .map(a => [a?.given, a?.family].filter(Boolean).join(' '))
+        .filter(Boolean)
     : []
   const issuedValue = raw.issued
   const dateParts = typeof issuedValue === 'object' && issuedValue !== null
@@ -183,7 +210,7 @@ function arxivPaper(raw: Record<string, unknown>): Paper {
   const arxivId = typeof raw.id === 'string' ? raw.id.split('/abs/').pop() ?? raw.id : ''
   const title = typeof raw.title === 'string' ? raw.title.replace(/\s+/g, ' ').trim() : 'Untitled'
   const authors = Array.isArray(raw.authors)
-    ? (raw.authors as Array<{ name?: string }>).map(a => a.name ?? '').filter(Boolean)
+    ? (raw.authors as Array<{ name?: string } | null | undefined>).map(a => a?.name ?? '').filter(Boolean)
     : []
   const published = typeof raw.published === 'string' ? new Date(raw.published).getFullYear() : undefined
   const summary = typeof raw.summary === 'string' ? raw.summary.replace(/\s+/g, ' ').trim() : ''
@@ -248,6 +275,39 @@ export async function searchCrossref(query: string, options: SearchOptions = {},
   return hits
 }
 
+/**
+ * Parse an arXiv Atom feed into hits. Defensive (§9.4): the feed is
+ * UNTRUSTED data — malformed XML, HTML error pages or garbage input yield
+ * `[]` (or only the well-formed entries) instead of throwing, and a single
+ * broken entry never fails the whole feed.
+ */
+export function parseArxivFeed(xml: string): SearchHit[] {
+  const hits: SearchHit[] = []
+  if (typeof xml !== 'string' || xml.trim() === '') return hits
+  const entryPattern = /<entry>([\s\S]*?)<\/entry>/g
+  let match: RegExpExecArray | null
+  while ((match = entryPattern.exec(xml)) !== null) {
+    const entry = match[1] ?? ''
+    const field = (name: string): string => {
+      const m = new RegExp(`<${name}[^>]*>([\\s\\S]*?)<\\/${name}>`).exec(entry)
+      return m !== null ? (m[1] ?? '').trim() : ''
+    }
+    const raw: Record<string, unknown> = {
+      id: field('id'),
+      title: field('title'),
+      summary: field('summary'),
+      published: field('published'),
+      authors: [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => ({ name: (m[1] ?? '').trim() })),
+    }
+    try {
+      hits.push({ paper: arxivPaper(raw), score: null })
+    } catch {
+      // Skip the malformed entry; keep whatever else parsed.
+    }
+  }
+  return hits
+}
+
 /** arXiv search: preprints (Atom feed, structured XML). */
 export async function searchArxiv(query: string, options: SearchOptions = {}, cache: ConnectorCache = NULL_CACHE): Promise<SearchHit[]> {
   const key = hashQuery('arxiv', query, options)
@@ -272,34 +332,25 @@ export async function searchArxiv(query: string, options: SearchOptions = {}, ca
   } finally {
     clearTimeout(timer)
   }
-  const hits: SearchHit[] = []
-  const entryPattern = /<entry>([\s\S]*?)<\/entry>/g
-  let match: RegExpExecArray | null
-  while ((match = entryPattern.exec(xml)) !== null) {
-    const entry = match[1] ?? ''
-    const field = (name: string): string => {
-      const m = new RegExp(`<${name}[^>]*>([\\s\\S]*?)<\\/${name}>`).exec(entry)
-      return m !== null ? (m[1] ?? '').trim() : ''
-    }
-    const raw: Record<string, unknown> = {
-      id: field('id'),
-      title: field('title'),
-      summary: field('summary'),
-      published: field('published'),
-      authors: [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => ({ name: (m[1] ?? '').trim() })),
-    }
-    hits.push({ paper: arxivPaper(raw), score: null })
-  }
+  const hits = parseArxivFeed(xml)
   cache.set(key, hits)
   return hits
 }
 
-/** Multi-source search with dedup; returns provenance per query (design §4.4 steps 2-3). */
+/**
+ * Multi-source search with dedup; returns provenance per query
+ * (design §4.4 steps 2-3). Failure transparency (§9.4): every source is
+ * recorded in `source_status` (ok|failed, with error text), so callers can
+ * never mistake a partially failed survey for a complete one. The legacy
+ * `failures: string[]` field is kept for compatibility (present only when
+ * non-empty).
+ */
 export async function multiSourceSearch(query: string, options: SearchOptions = {}, cache: ConnectorCache = NULL_CACHE): Promise<{
   hits: SearchHit[]
   queries: Array<{ source: ConnectorSource; query: string; run_at: string }>
   dedup_removed: number
   citation_edges: Array<{ source_paper_id: string; target_paper_id: string; kind: 'reference' }>
+  source_status: Array<{ source: ConnectorSource; status: 'ok' | 'failed'; error?: string }>
 }> {
   const runAt = new Date().toISOString()
   const [openalex, crossref, arxiv] = await Promise.allSettled([
@@ -314,18 +365,22 @@ export async function multiSourceSearch(query: string, options: SearchOptions = 
   ]
   const hits: SearchHit[] = []
   const failures: string[] = []
+  const sourceStatus: Array<{ source: ConnectorSource; status: 'ok' | 'failed'; error?: string }> = []
   for (const [source, settled] of [['openalex', openalex], ['crossref', crossref], ['arxiv', arxiv]] as const) {
     if (settled.status === 'fulfilled') {
       hits.push(...settled.value)
+      sourceStatus.push({ source, status: 'ok' })
     } else {
-      failures.push(`${source}: ${(settled.reason as Error).message}`)
+      const error = (settled.reason as Error).message
+      failures.push(`${source}: ${error}`)
+      sourceStatus.push({ source, status: 'failed', error })
     }
   }
   const { papers, removed } = dedupPapers(hits.map(h => h.paper))
   // Rebuild hits with deduped papers, preserving per-source order.
   const paperIds = new Set(papers.map(p => p.paper_id))
   const finalHits = hits.filter(h => paperIds.has(h.paper.paper_id))
-  return { hits: finalHits, queries, dedup_removed: removed, citation_edges: buildCitationEdges(finalHits), ...failures.length > 0 && { failures } }
+  return { hits: finalHits, queries, dedup_removed: removed, citation_edges: buildCitationEdges(finalHits), source_status: sourceStatus, ...failures.length > 0 && { failures } }
 }
 
 /**
