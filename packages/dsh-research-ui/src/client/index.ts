@@ -101,6 +101,14 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
 let activeTab = 'phase'
 let projectId: string | undefined
 
+/**
+ * Assigned by apply() to the full re-render closure. Module-level panel
+ * renderers (renderGates/renderRuns) call this after a decision/cancel so
+ * the panel refreshes immediately — the per-apply `render` local is not in
+ * their scope.
+ */
+let rerender: () => void = () => {}
+
 export function apply(): void {
   const host = document.createElement('div')
   host.id = 'dsh-scholar-ui'
@@ -145,6 +153,9 @@ export function apply(): void {
   const picker = el('select', 'ui-picker')
   picker.style.cssText = 'width:100%;margin-bottom:10px;background:#232b3d;color:#e6e9ef;border:1px solid #3a4356;border-radius:6px;padding:4px 8px'
   picker.onchange = () => { projectId = picker.value || undefined; void render() }
+  // The picker belongs between the tabs and the panel body — it was created
+  // but never appended before, so the project selector never rendered.
+  host.insertBefore(picker, body)
 
   const styleTab = (): void => {
     for (const [key, button] of tabButtons) {
@@ -199,6 +210,7 @@ export function apply(): void {
   }
 
   refresh.onclick = () => { void render() }
+  rerender = () => { void render() }
   void render()
   const timer = window.setInterval(() => { void render() }, 8000)
   window.addEventListener('beforeunload', () => window.clearInterval(timer), { once: true })
@@ -232,13 +244,13 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       approve.style.cssText = 'border:0;background:#2f9e44;color:#fff;border-radius:6px;padding:3px 10px;cursor:pointer'
       approve.onclick = async () => {
         await api(`/v1/gates/${encodeURIComponent(gate.gate_id ?? '')}/decisions`, { method: 'POST', body: JSON.stringify({ actor: 'web-user', decision: 'approved', reason: 'approved from Research OS panel' }) })
-        void render()
+        rerender()
       }
       const reject = el('button', 'ui-btn', '✕ Reject')
       reject.style.cssText = 'border:0;background:#e03131;color:#fff;border-radius:6px;padding:3px 10px;cursor:pointer'
       reject.onclick = async () => {
         await api(`/v1/gates/${encodeURIComponent(gate.gate_id ?? '')}/decisions`, { method: 'POST', body: JSON.stringify({ actor: 'web-user', decision: 'rejected', reason: 'rejected from Research OS panel' }) })
-        void render()
+        rerender()
       }
       actions.append(approve, reject)
     }
@@ -262,7 +274,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       cancel.style.cssText = 'border:1px solid #5c1f1f;background:#3a1f1f;color:#ffb3b3;border-radius:6px;padding:1px 8px;cursor:pointer;font-size:11px'
       cancel.onclick = async () => {
         await api(`/v1/jobs/${encodeURIComponent(job.job_id ?? '')}/cancel`, { method: 'POST', body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from Research OS panel' }) })
-        void render()
+        rerender()
       }
       row.appendChild(cancel)
     }
