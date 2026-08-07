@@ -138,16 +138,28 @@ else
   bad "manuscript extraction/assembly failed"; head -c 400 "$WORK/manuscript.json"; echo
 fi
 
-echo "== pdflatex in fixed build image (two passes, citation resolution) =="
+echo "== pdflatex + bibtex in fixed build image (citation resolution) =="
 if (cd "$WORK" && pdflatex -interaction=nonstopmode -halt-on-error paper.tex > pass1.log 2>&1); then
   ok "pdflatex pass 1 succeeded"
 else
   bad "pdflatex pass 1 failed"; tail -20 "$WORK/pass1.log" >&2 || true
 fi
+# bibtex pass resolves \cite keys; warnings about undefined citations are
+# expected on the first run (aux just collected them).
+if (cd "$WORK" && bibtex paper > bibtex.log 2>&1); then
+  ok "bibtex succeeded ($(grep -c '\\bibitem' "$WORK/paper.bbl" 2>/dev/null || echo 0) bibitems)"
+else
+  bad "bibtex failed"; tail -10 "$WORK/bibtex.log" >&2 || true
+fi
 if (cd "$WORK" && pdflatex -interaction=nonstopmode -halt-on-error paper.tex > pass2.log 2>&1); then
   ok "pdflatex pass 2 succeeded (citations resolved)"
 else
   bad "pdflatex pass 2 failed"; tail -20 "$WORK/pass2.log" >&2 || true
+fi
+if (cd "$WORK" && pdflatex -interaction=nonstopmode -halt-on-error paper.tex > pass3.log 2>&1); then
+  ok "pdflatex pass 3 succeeded (final)"
+else
+  bad "pdflatex pass 3 failed"; tail -20 "$WORK/pass3.log" >&2 || true
 fi
 if [[ -s "$WORK/paper.pdf" ]]; then
   ok "paper.pdf generated ($(wc -c < "$WORK/paper.pdf") bytes)"

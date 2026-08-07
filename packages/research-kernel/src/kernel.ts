@@ -1558,8 +1558,15 @@ export class ResearchKernel {
       }
       lines.push('\\section{Results}')
       if (evidenceRows.length > 0) {
+        // LaTeX tabular rows: '&'-separated, en dashes as '--' (§14.3: the
+        // fixed build image must compile; raw unicode dashes break pdflatex).
+        const latexRows = evidence.map(e => {
+          const claimsFor = (byEvidence.get(e.evidence_id) ?? []).map(c => c.claim_id).join(', ') || '--'
+          const ci = `${e.result.ci_low ?? '--'}--${e.result.ci_high ?? '--'}`
+          return `${escapeLatex(e.result.primary_metric)} & ${e.result.value} & ${e.result.baseline_value ?? '--'} & ${e.result.effect_size ?? '--'} & ${ci} & ${e.result.n_seeds ?? e.run_ids.length} & ${escapeLatex(e.analysis_method)} & ${escapeLatex(claimsFor)}`
+        })
         lines.push('\\begin{tabular}{llllllll}', '\\toprule', 'Metric & Value & Baseline & Effect & 95\\% CI & Seeds & Method & Claims \\\\', '\\midrule')
-        lines.push(...evidenceRows.map(r => `${r} \\\\`))
+        lines.push(...latexRows.map(r => `${r} \\\\`))
         lines.push('\\bottomrule', '\\end{tabular}')
       } else {
         lines.push('No verified evidence items yet — results table intentionally empty.')
