@@ -7,6 +7,7 @@
  */
 
 export type ResearchRole =
+  | 'none'
   | 'director'
   | 'scholar'
   | 'curator'
@@ -20,7 +21,7 @@ export type ResearchRole =
   | 'auditor'
 
 export const RESEARCH_ROLES: readonly ResearchRole[] = [
-  'director', 'scholar', 'curator', 'idea-panel', 'architect', 'engineer',
+  'none', 'director', 'scholar', 'curator', 'idea-panel', 'architect', 'engineer',
   'operator', 'statistician', 'writer', 'reviewer', 'auditor',
 ]
 
@@ -59,6 +60,7 @@ export const RESEARCH_TOOLS = [
 
 /** Tool surface per role (design §4.1 table). */
 export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
+  none: [],
   director: ['research_project', 'research_phase', 'research_gate_request', 'research_budget', 'research_status', 'research_panel', 'release_bundle'],
   scholar: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status'],
   curator: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status'],
@@ -72,8 +74,8 @@ export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
   auditor: ['claim_verify', 'manuscript_review', 'research_status'],
 }
 
-/** Default role for agents that never declared one. */
-export const DEFAULT_ROLE: ResearchRole = 'director'
+/** v2 §3.1: unknown/unregistered agents default to `none` (deny), NOT director. */
+export const DEFAULT_ROLE: ResearchRole = 'none'
 
 /** In-memory session → role registry (roles are set per session). */
 export class RoleRegistry {

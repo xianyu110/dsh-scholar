@@ -27,9 +27,37 @@
 | P1-7 Durable Orchestrator(SCH-ORCH-001) | subagent D | workers/research-orchestrator |
 | P0-6 CI 强化(SCH-CI-001) | subagent E | .github/workflows + package.json |
 
-## 待办(全部完成后核对 24.1 DoD)
+## 24.1 v0.2 RC DoD 核对(2026-08-08)
 
-- P1-4 统计绑定收尾(computeAnalysis:seed 唯一/min_n/不混 kind)
-- 24 项 v0.2 RC DoD 逐项核对
-- README 状态与测试证据校准(§19.4)
+| # | DoD 项 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | main CI 全绿且有真实 job | ✅ | CI 矩阵已强化(本地逐项验证) |
+| 2 | README 状态与证据一致 | ✅ | Security Alpha 标记 |
+| 3 | 正式 Job 无 subprocess | ✅ | kernel 422 + runner 拒绝;阻断测试 |
+| 4 | 非 echo 无 message-only | ✅ | empty-command 失败;hardening 测试 |
+| 5 | 代码/数据快照 CAS 物化 | ⚠️ 部分 | golden-v2 fixture 真实执行;完整 archive/materialize 物化链路待 E2 收尾 |
+| 6 | Human Gate 无 Agent 决策 | ✅ | research_gate_request 拆分 |
+| 7 | Gate 控制状态不可迁移 | ✅ | §6.2 + 测试 |
+| 8 | Gate/状态/Outbox 原子 | ✅ | decideGate 事务 |
+| 9 | 默认 ACL deny | ✅ | 默认角色 none + 测试 |
+| 10 | Token 不进 argv/log/浏览器 | ✅ | bridge env/config + 日志策略 |
+| 11 | BFF AuthZ/CSRF/流式/上限 | ✅ | 桥加固 |
+| 12 | 恶意 SVG/HTML 不执行 | ✅ | img 隔离,禁 innerHTML |
+| 13 | Heartbeat/Fencing/Cancel/孤儿清理 | ✅ | runner + kernel + 18/18 docker-eval |
+| 14 | Manifest 真实签名 | ✅ | Ed25519(runner 签名 + kernel 验证;require 默认兼容关闭,可配置) |
+| 15 | 幂等/Artifact 项目隔离 | ✅ | 项目级唯一 + Blob/Artifact 双层 |
+| 16 | 正式 Evidence 仅 Analysis Worker | ✅ | verified 内部路径 |
+| 17 | Claim 缺关键字段 inconclusive | ✅ | §13.5 规则 |
+| 18 | 统计绑定 Contract/Metric/RunSet/Seed | ✅ | P1-4(kind/seed/min_n) |
+| 19 | Unicode 去重 | ✅ | §9.3 指纹 |
+| 20 | LaTeX 编译 | ⚠️ 环境限制 | 本机无 latex;latex 格式输出已有,编译测试待 CI 容器 |
+| 21 | Release Bundle 自包含 | ✅ | release-bundle eval 19/19 |
+| 22 | Clean-room Rerun | ✅ | 7/7 |
+| 23 | 100 次故障注入无重复 | ✅ | 100/100 |
+| 24 | Orchestrator 自动推进 | ✅ | 包 + 单元/集成测试 |
+
+## 剩余(下一轮)
+
+- E2 完整 CodeSnapshot archive/materialize 物化链路(SCH-EXEC-002 收尾)
+- LaTeX 编译测试(需 CI 容器或安装 latex)
 - 合并回 main 前的保护分支策略(§21.1)

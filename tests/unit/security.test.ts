@@ -101,6 +101,22 @@ describe('prompt injection as untrusted data (design §4.9)', () => {
   })
 })
 
+describe('v2 §3.1 default-deny ACL', () => {
+  it('unregistered agents get role none and are denied research tools', async () => {
+    const { RoleRegistry } = await import('@dsh-scholar/research-plugin')
+    const roles = new RoleRegistry()
+    expect(roles.get('some-unknown-session')).toBe('none')
+    expect(roles.allows('none', 'research_project')).toBe(false)
+    expect(roles.allows('none', 'research_status')).toBe(false)
+    expect(roles.allows('none', 'literature_search')).toBe(false)
+    // Registered roles keep their surfaces.
+    roles.set('known-session', 'scholar')
+    expect(roles.get('known-session')).toBe('scholar')
+    expect(roles.allows('scholar', 'literature_search')).toBe(true)
+    expect(roles.allows('scholar', 'experiment_submit')).toBe(false)
+  })
+})
+
 describe('connector SSRF surface (design §4.4)', () => {
   it('search targets are fixed domains, not caller-provided URLs', async () => {
     // The connectors build URLs from query strings only; there is no
