@@ -2,7 +2,7 @@
  * Scholar connector + runner unit tests (design §11.1, §4.6).
  */
 import { describe, expect, it, vi } from 'vitest'
-import { buildPassages, dedupPapers, titleFingerprint } from '@dsh-scholar/scholar-connectors'
+import { buildCitationEdges, buildPassages, dedupPapers, titleFingerprint } from '@dsh-scholar/scholar-connectors'
 import { classifyFailure, extractMetrics } from '@dsh-scholar/runner-gateway'
 import type { Paper } from '@dsh-scholar/research-schemas'
 
@@ -48,6 +48,38 @@ describe('passage derivation (§4.4)', () => {
   it('skips papers without abstracts', () => {
     const now = new Date().toISOString()
     expect(buildPassages([{ paper_id: 'doi:1/x', title: 'No Abstract', authors: [], source: 'crossref', identifiers: {}, retrieved_at: now }])).toHaveLength(0)
+  })
+})
+
+describe('citation graph (§4.4 step 4)', () => {
+  it('builds intra-corpus edges from OpenAlex referenced_works', () => {
+    const now = new Date().toISOString()
+    const mk = (id: string, title: string, refs: string[] = []): SearchHit => ({
+      paper: { paper_id: `doi:${id}`, title, authors: [], source: 'openalex', identifiers: { doi: `10.1/${id}`, openalex: `https://api.openalex.org/W${id}` }, retrieved_at: now },
+      score: null,
+      ...refs.length > 0 && { references: refs },
+    })
+    const a = mk('a', 'Paper A', ['https://api.openalex.org/Wb', 'https://api.openalex.org/Wc'])
+    const b = mk('b', 'Paper B', ['https://api.openalex.org/Wa'])
+    const c = mk('c', 'Paper C')
+    const edges = buildCitationEdges([a, b, c])
+    expect(edges).toContainEqual({ source_paper_id: 'doi:a', target_paper_id: 'doi:b', kind: 'reference' })
+    expect(edges).toContainEqual({ source_paper_id: 'doi:a', target_paper_id: 'doi:c', kind: 'reference' })
+    expect(edges).toContainEqual({ source_paper_id: 'doi:b', target_paper_id: 'doi:a', kind: 'reference' })
+    expect(edges).toHaveLength(3)
+  })
+
+  it('ignores references outside the corpus and dedupes edges', () => {
+    const now = new Date().toISOString()
+    const mk = (id: string, title: string, refs: string[] = []): SearchHit => ({
+      paper: { paper_id: `doi:${id}`, title, authors: [], source: 'openalex', identifiers: { doi: `10.1/${id}`, openalex: `https://api.openalex.org/W${id}` }, retrieved_at: now },
+      score: null,
+      ...refs.length > 0 && { references: refs },
+    })
+    const a = mk('a', 'A', ['https://api.openalex.org/Wzzz', 'https://api.openalex.org/Wb', 'https://api.openalex.org/Wb'])
+    const b = mk('b', 'B')
+    const edges = buildCitationEdges([a, b])
+    expect(edges).toHaveLength(1) // only Wb resolves; duplicate Wb deduped
   })
 })
 

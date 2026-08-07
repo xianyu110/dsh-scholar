@@ -199,9 +199,22 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
 
 function renderRuns(body: HTMLElement, p: Projection): void {
   body.appendChild(el('div', 'ui-label', `⚙️ Runs (${(p.jobs ?? []).length})`))
+  const cancellable = new Set(['queued', 'running', 'retryable'])
   for (const job of (p.jobs ?? []).slice(-10).reverse()) {
-    const row = el('div', 'ui-job', `${job.job_id ?? ''} [${job.kind ?? ''}] ${job.status ?? ''}${job.error ? ` — ${job.error.slice(0, 60)}` : ''}`)
-    row.style.cssText = 'padding:3px 0;border-bottom:1px dashed #232b3d'
+    const row = el('div', 'ui-job')
+    row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px dashed #232b3d;gap:8px'
+    const text = el('span', 'ui-job-text', `${job.job_id ?? ''} [${job.kind ?? ''}] ${job.status ?? ''}${job.error ? ` — ${job.error.slice(0, 40)}` : ''}`)
+    row.appendChild(text)
+    if (job.job_id !== undefined && cancellable.has(job.status ?? '')) {
+      const cancel = el('button', 'ui-btn', '✕')
+      cancel.title = `cancel ${job.job_id}`
+      cancel.style.cssText = 'border:1px solid #5c1f1f;background:#3a1f1f;color:#ffb3b3;border-radius:6px;padding:1px 8px;cursor:pointer;font-size:11px'
+      cancel.onclick = async () => {
+        await api(`/v1/jobs/${encodeURIComponent(job.job_id ?? '')}/cancel`, { method: 'POST', body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from Research OS panel' }) })
+        void render()
+      }
+      row.appendChild(cancel)
+    }
     body.appendChild(row)
   }
   if ((p.jobs ?? []).length === 0) body.appendChild(el('div', 'ui-item', 'none'))
@@ -209,13 +222,48 @@ function renderRuns(body: HTMLElement, p: Projection): void {
 
 async function renderArtifacts(body: HTMLElement, projectId: string): Promise<void> {
   const artifacts = (await api<ArtifactRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/artifacts`)) ?? []
-  body.appendChild(el('div', 'ui-label', `📦 Artifacts (${artifacts.length})`))
+  body.appendChild(el('div', 'ui-label', `📦 Artifacts (${artifacts.length}, click to preview)`))
   for (const artifact of artifacts.slice(-15).reverse()) {
     const row = el('div', 'ui-artifact', `${artifact.kind ?? ''} · ${(artifact.artifact_id ?? '').slice(0, 18)}… · ${artifact.size_bytes ?? 0} B`)
-    row.style.cssText = 'padding:3px 0;border-bottom:1px dashed #232b3d;font-family:monospace;font-size:11px'
+    row.style.cssText = 'padding:3px 0;border-bottom:1px dashed #232b3d;font-family:monospace;font-size:11px;cursor:pointer'
+    row.title = 'click to preview'
+    row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
     body.appendChild(row)
   }
   if (artifacts.length === 0) body.appendChild(el('div', 'ui-item', 'none'))
+}
+
+/** Fetch an artifact blob through the bridge and show it in a modal. */
+async function previewArtifact(artifactId: string): Promise<void> {
+  try {
+    const response = await fetch(`${API}/v1/artifacts/${encodeURIComponent(artifactId)}`, { headers: { accept: 'application/octet-stream' } })
+    if (!response.ok) return
+    const text = await response.text()
+    const overlay = el('div', 'ui-overlay')
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:40px'
+    overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+    const modal = el('div', 'ui-modal')
+    modal.style.cssText = 'background:#1a2130;border:1px solid #3a4356;border-radius:10px;max-width:720px;max-height:70vh;overflow:auto;padding:14px 16px;color:#e6e9ef;font:12px/1.5 system-ui,sans-serif'
+    const header = el('div', 'ui-modal-header', `📦 ${artifactId.slice(0, 24)}…`)
+    header.style.cssText = 'font-weight:700;margin-bottom:10px;display:flex;justify-content:space-between'
+    const closeBtn = el('button', 'ui-btn', '×')
+    closeBtn.style.cssText = 'border:0;background:none;color:#8b93a7;font-size:15px;cursor:pointer'
+    closeBtn.onclick = () => overlay.remove()
+    header.appendChild(closeBtn)
+    modal.appendChild(header)
+    const trimmed = text.trim()
+    if (trimmed.startsWith('<svg')) {
+      const container = el('div', 'ui-svg')
+      container.innerHTML = trimmed
+      modal.appendChild(container)
+    } else {
+      const pre = el('pre', 'ui-pre', text.length > 6000 ? text.slice(0, 6000) + String.fromCharCode(10) + '… (truncated)' : text)
+      pre.style.cssText = 'white-space:pre-wrap;word-break:break-all;font-family:monospace;font-size:11px;margin:0'
+      modal.appendChild(pre)
+    }
+    overlay.appendChild(modal)
+    document.body.appendChild(overlay)
+  } catch { /* bridge unreachable */ }
 }
 
 async function renderEvidence(body: HTMLElement, projectId: string): Promise<void> {

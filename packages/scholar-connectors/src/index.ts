@@ -26,6 +26,8 @@ export interface SearchOptions {
 export interface SearchHit {
   paper: Paper
   score: number | null
+  /** OpenAlex referenced_works (raw API ids) for citation-graph building. */
+  references?: string[]
 }
 
 export interface ConnectorCache {
@@ -219,6 +221,7 @@ export async function searchOpenAlex(query: string, options: SearchOptions = {},
   const hits: SearchHit[] = (data.results ?? []).map(raw => ({
     paper: openAlexPaper(raw),
     score: typeof raw.relevance_score === 'number' ? raw.relevance_score : null,
+    ...Array.isArray(raw.referenced_works) && { references: (raw.referenced_works as string[]).map(String) },
   }))
   cache.set(key, hits)
   return hits
@@ -296,6 +299,7 @@ export async function multiSourceSearch(query: string, options: SearchOptions = 
   hits: SearchHit[]
   queries: Array<{ source: ConnectorSource; query: string; run_at: string }>
   dedup_removed: number
+  citation_edges: Array<{ source_paper_id: string; target_paper_id: string; kind: 'reference' }>
 }> {
   const runAt = new Date().toISOString()
   const [openalex, crossref, arxiv] = await Promise.allSettled([
@@ -321,7 +325,39 @@ export async function multiSourceSearch(query: string, options: SearchOptions = 
   // Rebuild hits with deduped papers, preserving per-source order.
   const paperIds = new Set(papers.map(p => p.paper_id))
   const finalHits = hits.filter(h => paperIds.has(h.paper.paper_id))
-  return { hits: finalHits, queries, dedup_removed: removed, ...failures.length > 0 && { failures } }
+  return { hits: finalHits, queries, dedup_removed: removed, citation_edges: buildCitationEdges(finalHits), ...failures.length > 0 && { failures } }
+}
+
+/**
+ * Build citation edges among the returned hits (design §4.4 step 4): an edge
+ * source->target exists when the source's OpenAlex referenced_works contains
+ * the target's OpenAlex id. Only intra-corpus edges are kept, so snapshots
+ * stay self-contained.
+ */
+export function buildCitationEdges(hits: SearchHit[]): Array<{ source_paper_id: string; target_paper_id: string; kind: 'reference' }> {
+  const byOpenAlexId = new Map<string, string>()
+  for (const hit of hits) {
+    const openalexId = hit.paper.identifiers.openalex
+    if (typeof openalexId === 'string') byOpenAlexId.set(openalexId, hit.paper.paper_id)
+  }
+  const edges: Array<{ source_paper_id: string; target_paper_id: string; kind: 'reference' }> = []
+  for (const hit of hits) {
+    const source = hit.paper.paper_id
+    for (const ref of hit.references ?? []) {
+      const target = byOpenAlexId.get(ref)
+      if (target !== undefined && target !== source) {
+        edges.push({ source_paper_id: source, target_paper_id: target, kind: 'reference' })
+      }
+    }
+  }
+  // 去重
+  const seen = new Set<string>()
+  return edges.filter(edge => {
+    const key = `${edge.source_paper_id}|${edge.target_paper_id}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** Resolve one DOI/arXiv id to a paper (design §1.4: identifier resolution). */

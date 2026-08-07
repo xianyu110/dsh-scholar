@@ -338,8 +338,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         // Quote-level passages derived from abstracts (design §4.4 step 5),
         // all tagged untrusted so later agents treat them as data.
         passages: buildPassages(papers),
+        // Intra-corpus citation edges from OpenAlex referenced_works (§4.4 step 4).
+        citation_edges: result.citation_edges,
       })
-      return { ok: true, snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length, passages: snapshot.passages.length, dedup_removed: result.dedup_removed }
+      return { ok: true, snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length, passages: snapshot.passages.length, citation_edges: snapshot.citation_edges.length, dedup_removed: result.dedup_removed }
     },
   }))
 
