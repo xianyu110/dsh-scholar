@@ -46,7 +46,7 @@ export interface ResearchPluginConfig {
   /** Unattended runs never block on questions; gates park the project. */
   unattended?: boolean
   /** Per-role model routing for spawned panel children (design §8.5). */
-  models?: Partial<Record<'scholar' | 'idea-panel' | 'reviewer', string>>
+  models?: Record<string, string>
   /** Directory for connector response caches (defaults under dataDir). */
   cacheDir?: string
 }
@@ -140,3 +140,4 @@ export function scratchCacheDir(): string {
 }
 
 export { KernelSidecar, resolveDshHome, RoleRegistry, type ResearchRole }
+export { applyPatchToWorkspace, snapshotWorkspace } from './tools.js'

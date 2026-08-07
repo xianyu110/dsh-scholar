@@ -61,13 +61,14 @@ DSH 进程退出**不会丢失**研究状态(SQLite 权威状态)。
 ```bash
 pnpm install
 bash scripts/link-dsh-deps.sh        # 链接 DSH 安装的 @deepseek-ai/* 类型(本地类型检查)
-pnpm run build                        # 构建全部包
-pnpm test                             # 单元测试(31)
+pnpm run build                        # 构建全部包(含 client bundle)
+pnpm test                             # 单元测试(41,含安全基线)
 bash tests/fault-injection/run-fault-tests.sh   # 故障注入(6,含跨进程并发 Gate CAS)
-bash tests/e2e/golden-path.sh         # 黄金路径 e2e(14,可选 --live-connectors)
+bash tests/e2e/golden-path.sh         # 黄金路径 e2e(15,可选 --live-connectors)
 bash evals/fault-stress.sh 100        # §11.4 恢复门槛:100 次 kill -9 压力
 bash evals/survey-eval.sh --live      # §11.3 Survey 评测(真实连接器 recall@K)
 bash evals/clean-room-rerun.sh        # §13.1 DoD#9:空环境重跑复现
+bash evals/security-eval 见 tests/unit/security.test.ts
 ```
 
 ## 仓库结构(设计 §8.2 映射)
