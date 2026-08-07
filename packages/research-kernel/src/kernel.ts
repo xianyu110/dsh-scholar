@@ -1179,7 +1179,13 @@ export class ResearchKernel {
    * percentile bootstrap 95% CI and effect size vs the baseline run. Writes
    * one analysis artifact; numbers in manuscripts must come from this.
    */
-  computeAnalysis(projectId: string, contractId?: string, metric?: string): {
+  computeAnalysis(projectId: string, contractId?: string, metric?: string, options: {
+    /** Minimum completed seeds required (v2 §13.6; default 1 keeps compat). */
+    minimum_n?: number
+    /** Restrict to these job kinds (v2 §13.6: never mix kinds). Defaults to
+     * formal; falls back to non-baseline kinds only when no formal exists. */
+    kinds?: string[]
+  } = {}): {
     artifact_id: string
     chart_artifact: string
     contract_id: string | null
@@ -1192,14 +1198,17 @@ export class ResearchKernel {
     ci_high: number
     baseline_value: number | null
     effect_size: number | null
+    used_kinds: string[]
     generated_at: string
   } {
     const project = this.getProject(projectId)
     const jobs = this.listJobs(projectId).filter(j => j.status === 'succeeded' && j.run_manifest !== null)
-    const metricValues: Array<{ run_id: string; job_id: string; value: number; seed?: number }> = []
+    const metricValues: Array<{ run_id: string; job_id: string; kind: string; value: number; seed?: number }> = []
     let baselineValue: number | null = null
+    let formalSeen = false
     for (const job of jobs) {
       if (contractId !== undefined && job.contract_id !== contractId) continue
+      if (job.kind === 'formal') formalSeen = true
       const metricsArtifact = job.run_manifest?.metrics_artifact
       if (typeof metricsArtifact !== 'string') continue
       const sha = metricsArtifact.replace(/^sha256:/, '')
@@ -1208,17 +1217,40 @@ export class ResearchKernel {
       for (const entry of parsed.metrics ?? []) {
         if (entry.value === undefined || entry.metric === undefined) continue
         if (metric !== undefined && entry.metric !== metric) continue
-        const targetMetric = entry.metric
         if (job.kind === 'baseline') {
           baselineValue = entry.value
         } else {
-          metricValues.push({ run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id, job_id: job.job_id, value: entry.value, seed: entry.seed })
+          metricValues.push({
+            run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id,
+            job_id: job.job_id,
+            kind: job.kind,
+            value: entry.value,
+            seed: entry.seed,
+          })
         }
-        void targetMetric
       }
     }
+    // v2 §13.6: never mix job kinds. Prefer formal runs; only when a contract
+    // has none, fall back to the other non-baseline kinds (explicitly noted).
+    let allowedKinds = options.kinds ?? ['formal']
+    const hasFormal = formalSeen
+    if (options.kinds === undefined && !hasFormal) allowedKinds = ['pilot', 'smoke', 'analysis', 'reproduce']
+    const kindFiltered = metricValues.filter(v => allowedKinds.includes(v.kind))
+    metricValues.length = 0
+    metricValues.push(...kindFiltered)
+    const usedKinds = [...new Set(kindFiltered.map(v => v.kind))]
     if (metricValues.length === 0) {
       throw new KernelError(422, 'no_metrics', 'no succeeded runs with metrics artifacts found for analysis')
+    }
+    // Seed uniqueness (v2 §13.6): duplicate seeds within one analysis are
+    // rejected — mixing seeds across runs would bias the paired statistics.
+    const seeds = metricValues.filter(v => v.seed !== undefined).map(v => v.seed!)
+    if (new Set(seeds).size !== seeds.length) {
+      throw new KernelError(422, 'duplicate_seeds', `duplicate seeds in analysis run set: ${seeds.join(', ')}`)
+    }
+    const minimumN = options.minimum_n ?? 1
+    if (metricValues.length < minimumN) {
+      throw new KernelError(422, 'minimum_seeds_not_met', `analysis requires >= ${minimumN} runs, got ${metricValues.length}`)
     }
     const values = metricValues.map(v => v.value)
     const mean = values.reduce((a, b) => a + b, 0) / values.length
@@ -1229,7 +1261,7 @@ export class ResearchKernel {
     const result = {
       contract_id: contractId ?? null,
       metric: metric ?? 'auto',
-      runs: metricValues,
+      runs: metricValues.map(({ kind: _kind, ...rest }) => rest),
       mean: round(mean),
       sd: round(sd),
       n: values.length,
@@ -1247,7 +1279,7 @@ export class ResearchKernel {
     this.emit(projectId, 'artifact.registered', { artifact_id: artifact.artifact_id, kind: 'analysis' })
     // Deterministic chart artifact bound to the same analysis numbers (§11.3).
     const chart = this.buildChartSvg(projectId, { artifact_id: artifact.artifact_id, ...result })
-    return { artifact_id: artifact.artifact_id, chart_artifact: chart.chart_artifact, ...result, generated_at: nowIso() }
+    return { artifact_id: artifact.artifact_id, chart_artifact: chart.chart_artifact, used_kinds: usedKinds, ...result, generated_at: nowIso() }
   }
 
   /**
