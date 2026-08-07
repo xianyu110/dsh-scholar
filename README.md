@@ -124,5 +124,6 @@ E4(Runner/Contract/Baseline/正式运行)、E5(统计分析+Claim+图表)、E6
 (确定性论文+评审+BibTeX+复现包)、E7(Web 面板:阶段/Gate/预算/Runs/
 Artifacts/Evidence)、E8(安全测试、100 次故障压力、clean-room rerun、
 成本计量、评测体系)。已登记后续需求:独立 GUI 插件包
-(`docs/gui-plugin-plan.md`);演进项:Team/Cluster 部署(§9.2)、docker
-Runner 实测(本机无容器运行时)。
+(`docs/gui-plugin-plan.md`);演进项:Team/Cluster 部署(§9.2)。docker Runner 已在本机
+docker 29.1.3 实测(evals/docker-eval.sh 11/11:非 root/禁网/1g 内存 OOM 强制/
+容器内失败分类/孤儿容器清理)。

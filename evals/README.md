@@ -8,12 +8,14 @@
 | `tests/unit/security.test.ts` | §11.4 安全:越权/注入/路径穿越/SSRF 面 | patch/快照路径逃逸、注入即数据、metrics 抗干扰、env 精简、连接器无 URL 参数 | 10/10 |
 | `tests/fault-injection/*` | §11.2 P0 恢复用例 | kill -9、租约恢复、幂等、跨进程并发 Gate CAS | 6/6 |
 | `tests/e2e/golden-path.sh` | §13.3 黄金路径 | 全生命周期含分析/图表/BibTeX | 15/15 |
+| `docker-eval.sh` | §4.6.1 Runner 安全合同 | 真实 docker:非 root/禁网/1g 内存 OOM 强制/容器内失败分类/孤儿容器清理 | 11/11 |
+| `baseline-eval.sh` | §11.3 Baseline | 复现容差内接受、容差外阻止比较 | 3/3 |
+| `experiment-eval.sh` | §11.3 Experiment | 7 场景失败分类、成功率、预算硬停止 | 11/11 |
 
 ## 环境限制(已记录)
 
-- **容器运行时**:本开发机无 docker/podman,`--mode docker` 的 Runner
-  (禁网/非 root/内存 CPU 限制)未实测;`--mode subprocess` 已通过全套测试,
-  但它不是安全边界(design §4.6.1、附录 D)。正式实验部署必须提供容器运行时。
+- **容器运行时**:已在本机安装 docker 29.1.3 并完成 `--mode docker` 实测
+  (`evals/docker-eval.sh` 11/11,含 1g 内存 OOM 强制与孤儿容器清理)。
 - **live 连接器评测**依赖外网;离线模式覆盖去重与指纹。
 
 ## 运行全部

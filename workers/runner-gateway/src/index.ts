@@ -13,7 +13,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -152,6 +152,12 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number): Pro
     error = e.message
     exitCode = typeof e.code === 'number' ? e.code : -1
     if (e.killed === true) error = `timed out after ${timeoutMs}ms`
+  } finally {
+    // `--rm` only cleans up when the docker CLIENT exits normally; if the
+    // client is killed (timeout, gateway crash) the container survives as an
+    // orphan. Force-remove it best-effort so runs never leak containers
+    // (design §4.6.1 resource limits + cleanup).
+    await execFileAsync('docker', ['rm', '-f', container], { timeout: 10000 }).catch(() => undefined)
   }
   return { run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout, stderr, error }
 }
@@ -163,6 +169,10 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number): Pro
 export async function executeJob(job: JobRecord, options: RunnerOptions): Promise<{ job: JobRecord; run: RunOutcome }> {
   const { client, owner, mode = 'subprocess', timeoutMs = 60000, maxLogBytes = 4 * 1024 * 1024 } = options
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-scholar-run-'))
+  // Container mode runs as a non-root uid (65534): the workdir and the
+  // injected script must be world-traversable/readable for the container
+  // user to reach them (mkdtempSync defaults to 0700).
+  chmodSync(workDir, 0o755)
 
   let run: RunOutcome
   if (job.kind === 'echo' || (job.command.length === 0 && typeof job.payload.message === 'string')) {
@@ -180,7 +190,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     }
   } else if (job.kind === 'smoke' && job.payload.script !== undefined && typeof job.payload.script === 'string') {
     // Injected smoke script runs inside the isolated workdir.
-    writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o700 })
+    writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
     run = mode === 'docker'
       ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs)
       : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes)

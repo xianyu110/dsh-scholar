@@ -48,7 +48,12 @@
   Home 挂载、进程/内存/磁盘/GPU/时间限制、默认禁网。
 - Docker 模式(`--mode docker`):`docker run --rm --network none --user
   65534:65534 --memory 1g --cpus 1 --tmpfs /tmp`(`workers/runner-gateway/
-  src/index.ts:runDocker`)。
+  src/index.ts:runDocker`)。**已在真实 docker 29.1.3 环境实测通过**
+  (`evals/docker-eval.sh` 11/11):非 root(uid 65534)、禁网(fetch 失败)、
+  1g 内存限制强制生效(写入型 hog 5s 打满、10s 内被 cgroup OOM 杀并分类
+  resources)、容器内失败分类正确。另修复了 runner 崩溃/超时导致的
+  **孤儿容器泄漏**(docker CLI 被 kill 时 `--rm` 不清理,现 finally
+  `docker rm -f` 兜底)。
 - **subprocess 模式不是安全边界**:`--mode subprocess` 仅用于本地 smoke/
   开发,使用 fresh temp dir + 精简 env + timeout;任何正式实验必须走容器
   (设计 §4.6.1、附录 D)。
