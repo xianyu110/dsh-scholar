@@ -56,8 +56,13 @@
 | 23 | 100 次故障注入无重复 | ✅ | 100/100 |
 | 24 | Orchestrator 自动推进 | ✅ | 包 + 单元/集成测试 |
 
-## 剩余(下一轮)
+## 最终状态(2026-08-08)
 
-- E2 完整 CodeSnapshot archive/materialize 物化链路(SCH-EXEC-002 收尾)
-- LaTeX 编译测试(需 CI 容器或安装 latex)
-- 合并回 main 前的保护分支策略(§21.1)
+- **24.1 DoD 全部达成**:CI 全矩阵 6 job 真实全绿(unit/security-blocking/
+  docker-eval/golden-path-v2/clean-room/**latex-compile**);物化链路
+  (archive→CAS→materialize→容器执行)完成;Orchestrator 自动推进完成。
+- 全量本地验证:159 单元 · 13/13 hardening · 6/6 阻断 · 26/26 golden-v2 ·
+  15/15 e2e · 18/18 docker · 19/19 release-bundle · 7/7 clean-room ·
+  100/100 故障压力。
+- 待办:合并回 main(§21.1:required checks + 保护分支已按 CI 矩阵配置);
+  24.2"全自动科研"表述的最终发布评审。
