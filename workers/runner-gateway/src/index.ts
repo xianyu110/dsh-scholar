@@ -68,6 +68,9 @@ export function extractMetrics(stdout: string): Array<{ metric: string; value: n
 /** Failure classification per design §4.6.2 (deterministic rules). */
 export function classifyFailure(outcome: RunOutcome): { failure_class: JobRecord['failure_class']; error: string } {
   if (outcome.exit_code === 0) return { failure_class: null, error: '' }
+  if (outcome.error !== undefined && /empty command/i.test(outcome.error)) {
+    return { failure_class: 'code_error', error: outcome.error }
+  }
   const combined = `${outcome.stderr}\n${outcome.stdout}`.toLowerCase()
   if (outcome.error !== undefined && /timed out|timeout/i.test(outcome.error)) {
     return { failure_class: 'resources', error: `job timed out: ${outcome.error}` }
@@ -168,6 +171,25 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number): Pro
  */
 export async function executeJob(job: JobRecord, options: RunnerOptions): Promise<{ job: JobRecord; run: RunOutcome }> {
   const { client, owner, mode = 'subprocess', timeoutMs = 60000, maxLogBytes = 4 * 1024 * 1024 } = options
+  // §3.2 / ADR-004: formal-class jobs must run in a container runtime.
+  // Subprocess is only for trusted smoke fixtures and echoes — never for
+  // baseline/pilot/formal/reproduce (design §1.2 "明确不做", §12.3).
+  const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+  if (SECURE_KINDS.includes(job.kind) && mode !== 'docker') {
+    const rejected = await client.completeJob({
+      job_id: job.job_id,
+      owner,
+      status: 'failed',
+      failure_class: 'environment',
+      error: `job kind ${job.kind} requires container execution (runner mode=docker); host subprocess is prohibited (v2 §3.2)`,
+    }).catch(() => null)
+    if (rejected !== null) return { job: rejected, run: {
+      run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: -1,
+      started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+      stdout: '', stderr: '', error: `rejected: ${job.kind} requires container execution`,
+    } }
+    throw new Error(`formal job ${job.job_id} rejected before execution (subprocess mode)`)
+  }
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-scholar-run-'))
   // Container mode runs as a non-root uid (65534): the workdir and the
   // injected script must be world-traversable/readable for the container
@@ -175,10 +197,9 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   chmodSync(workDir, 0o755)
 
   let run: RunOutcome
-  if (job.kind === 'echo' || (job.command.length === 0 && typeof job.payload.message === 'string')) {
-    // Echo-style jobs execute nothing on the host: pure in-process manifest.
-    // A non-echo job with an empty command and a `message` payload is treated
-    // the same way (deterministic stdout for fixtures/metrics tests).
+  if (job.kind === 'echo') {
+    // Echo jobs execute nothing: pure in-process fixture (the ONLY kind that
+    // may succeed without executing code — §3.2 invariant 1).
     const message = typeof job.payload.message === 'string' ? job.payload.message : `echo ${job.job_id}`
     run = {
       run_id: `run_${randomUUID().slice(0, 12)}`,
@@ -187,6 +208,19 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       finished_at: new Date().toISOString(),
       stdout: message,
       stderr: '',
+    }
+  } else if (job.command.length === 0 && !(job.kind === 'smoke' && typeof job.payload.script === 'string')) {
+    // §3.2 invariant 2 / P0-2: a non-echo job with no command must FAIL —
+    // empty-command or message-only "success" is a synthetic fixture and is
+    // prohibited for real experiments.
+    run = {
+      run_id: `run_${randomUUID().slice(0, 12)}`,
+      exit_code: 2,
+      started_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      stdout: '',
+      stderr: '',
+      error: 'empty command: non-echo jobs must execute real code (v2 §3.2)',
     }
   } else if (job.kind === 'smoke' && job.payload.script !== undefined && typeof job.payload.script === 'string') {
     // Injected smoke script runs inside the isolated workdir.

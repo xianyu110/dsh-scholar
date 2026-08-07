@@ -672,9 +672,16 @@ export class ResearchKernel {
     contract_id?: string | null
     max_attempts?: number
   }): JobRecord {
-    this.getProject(input.project_id)
+    const project = this.getProject(input.project_id)
     const existing = this.db.prepare('SELECT * FROM jobs WHERE idempotency_key = ?').get(input.idempotency_key) as JobRow | undefined
     if (existing !== undefined) return jobFromRow(existing)
+    // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
+    // isolated-subprocess is rejected at submission time (kernel layer).
+    const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+    if (SECURE_KINDS.includes(input.kind) && project.execution.runner_profile === 'isolated-subprocess') {
+      throw new KernelError(422, 'container_execution_required',
+        `job kind ${input.kind} requires a container runner profile (got ${project.execution.runner_profile}); host subprocess is prohibited (v2 §3.2)`)
+    }
     const job: JobRecord = {
       job_id: `job_${randomUUID().slice(0, 12)}`,
       project_id: input.project_id,
