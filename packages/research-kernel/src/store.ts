@@ -205,6 +205,7 @@ function migrateArtifactsProjectScoped(db: DatabaseSync): void {
   const pkCount = info.filter(c => c.pk > 0).length
   if (pkCount >= 2) return
   db.exec(`
+    DROP TABLE IF EXISTS artifacts_v2;
     CREATE TABLE artifacts_v2 (
       artifact_id TEXT NOT NULL,
       project_id TEXT NOT NULL,
@@ -232,6 +233,7 @@ function migrateJobsProjectIdempotency(db: DatabaseSync): void {
   const globalUnique = indexes.some(idx => idx.unique === 1 && idx.origin !== 'pk' && idx.name !== 'idx_jobs_project_idempotency')
   if (!globalUnique) return
   db.exec(`
+    DROP TABLE IF EXISTS jobs_v2;
     CREATE TABLE jobs_v2 (
       job_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -251,10 +253,12 @@ function migrateJobsProjectIdempotency(db: DatabaseSync): void {
       error TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      lease_generation INTEGER,
+      lease_generation INTEGER NOT NULL DEFAULT 0,
+      code_snapshot_id TEXT,
       UNIQUE(project_id, idempotency_key)
     );
-    INSERT INTO jobs_v2 SELECT * FROM jobs;
+INSERT INTO jobs_v2 (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at, lease_generation, code_snapshot_id)
+      SELECT job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at, COALESCE(lease_generation, 0), code_snapshot_id FROM jobs;
     DROP TABLE jobs;
     ALTER TABLE jobs_v2 RENAME TO jobs;
     CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);

@@ -67,10 +67,12 @@ if ! grep -q '"@dsh-scholar/research-plugin"' "$TEST_HOME/profiles/$PROFILE/pack
   DSH_HOME="$TEST_HOME" "$DEV_CLI" plugin --profile "$PROFILE" add "$REPO" || true
 fi
 
-# 4. Boot the isolated instance.
+# 4. Boot the isolated instance. The SOURCE CLI (tsx) is used instead of the
+#    prebuilt lib/bin.js: the built artifact predates profile patch-layer
+#    id-targeted config overrides, so kernel.port overrides silently fail
+#    with it (the plugin then spawns on the default 7412).
 echo "starting isolated test DSH: http://127.0.0.1:$WEB_PORT (DSH_HOME=$TEST_HOME, kernel :$KERNEL_PORT)"
-cd /home/dev/Desktop/test-lzszq
-DSH_HOME="$TEST_HOME" setsid nohup node "$BIN" web --host 127.0.0.1 --port "$WEB_PORT" \
+DSH_HOME="$TEST_HOME" setsid nohup "$DEV_CLI" web --host 127.0.0.1 --port "$WEB_PORT" \
   >> "$TEST_HOME/test-web.log" 2>&1 < /dev/null &
 echo "pid $! — log: $TEST_HOME/test-web.log"
 
