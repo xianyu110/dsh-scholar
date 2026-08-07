@@ -258,6 +258,7 @@ export class ResearchClient {
     text: string
     artifact_id: string
     claims_used: number
+    bibtex: string
   }> {
     return this.request('POST', `/v1/projects/${projectId}/manuscripts/build`, { format, include_limitations: includeLimitations })
   }

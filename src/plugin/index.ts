@@ -45,6 +45,8 @@ export interface ResearchPluginConfig {
   defaultMode?: 'gate-only' | 'full-auto'
   /** Unattended runs never block on questions; gates park the project. */
   unattended?: boolean
+  /** Per-role model routing for spawned panel children (design §8.5). */
+  models?: Partial<Record<'scholar' | 'idea-panel' | 'reviewer', string>>
   /** Directory for connector response caches (defaults under dataDir). */
   cacheDir?: string
 }
@@ -93,7 +95,7 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
   })
 
   // Research tool surface (design §4.1) with per-role ACL (§1.3 least privilege).
-  registerResearchTools({ tools: ctx.tools }, { client, cache, ctx: ctx as never, roles })
+  registerResearchTools({ tools: ctx.tools }, { client, cache, ctx: ctx as never, roles, modelFor: (role) => config.models?.[role] })
 
   // Role-based ACL: deny research tools outside the caller role's surface.
   const researchToolSet = new Set<string>(RESEARCH_TOOLS)

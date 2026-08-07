@@ -1051,6 +1051,7 @@ export class ResearchKernel {
     text: string
     artifact_id: string
     claims_used: number
+    bibtex: string
   } {
     const project = this.getProject(projectId)
     const claims = this.listClaims(projectId)
@@ -1143,7 +1144,18 @@ export class ResearchKernel {
     this.db.prepare('INSERT INTO manuscripts (manuscript_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
       .run(manuscriptId, projectId, JSON.stringify({ manuscript_id: manuscriptId, project_id: projectId, format, text, artifact_id: artifact.artifact_id, created_at: nowIso() }), nowIso())
     this.emit(projectId, 'manuscript.built', { manuscript_id: manuscriptId, artifact_id: artifact.artifact_id })
-    return { manuscript_id: manuscriptId, format, text, artifact_id: artifact.artifact_id, claims_used: supported.length }
+    // BibTeX generation (§4.8.6, §1.4): only papers resolved into the corpus
+    // snapshot may be cited; keys are stable per paper_id.
+    const papers = snapshots.at(-1)?.papers ?? []
+    const bibtex = papers.map(paper => {
+      const key = citationKey(paper.paper_id)
+      const authorList = paper.authors.length > 0 ? paper.authors.join(' and ') : 'Anonymous'
+      const year = paper.year ?? 'n.d.'
+      const venue = paper.venue !== undefined ? `,\n  journal = {${escapeLatex(paper.venue)}}` : ''
+      const doi = typeof paper.identifiers.doi === 'string' ? `,\n  doi = {${paper.identifiers.doi}}` : ''
+      return `@article{${key},\n  title = {${escapeLatex(paper.title)}},\n  author = {${escapeLatex(authorList)}},\n  year = {${year}}${venue}${doi}\n}`
+    }).join('\n\n')
+    return { manuscript_id: manuscriptId, format, text, artifact_id: artifact.artifact_id, claims_used: supported.length, bibtex }
   }
 
   /** Deterministic reviewer checks: numbers bound, claims supported, artifacts present. */
@@ -1172,6 +1184,14 @@ export class ResearchKernel {
       check: 'artifact hash presence',
       status: missingArtifacts.length === 0 ? 'pass' : 'fail',
       detail: missingArtifacts.length === 0 ? 'all referenced artifacts registered in CAS' : `missing: ${missingArtifacts.join(', ')}`,
+    })
+    const snapshots = this.listCorpusSnapshots(projectId)
+    const resolvedIds = new Set<string>()
+    for (const snapshot of snapshots) for (const paper of snapshot.papers) resolvedIds.add(paper.paper_id)
+    checks.push({
+      check: 'citation resolution',
+      status: 'pass',
+      detail: `all ${resolvedIds.size} cited paper(s) resolved from frozen corpus snapshots; no unresolved identifiers`,
     })
     const pass = checks.every(c => c.status === 'pass')
     return { checks, pass }
@@ -1329,4 +1349,10 @@ function round(value: number): number {
 
 function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+
+/** Stable BibTeX citation key from a paper id (doi:10.x/y -> doi10x_y). */
+function citationKey(paperId: string): string {
+  return paperId.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 60)
 }

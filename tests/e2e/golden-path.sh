@@ -134,7 +134,9 @@ CHART_SVG=$(curl -s -m 3 "http://127.0.0.1:$PORT/v1/artifacts/$CHART" | head -c 
 say "9. manuscript + reviewer checks → WRITING/REVIEWING"
 DRAFT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscripts/build" -d '{"format":"markdown","include_limitations":true}' | jqfield manuscript_id)
 REVIEW=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscript-review" | jqfield pass)
+BIBTEX=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscripts/build" -d '{"format":"markdown","include_limitations":true}' | jqfield bibtex)
 [[ -n "$DRAFT" && "$REVIEW" == "true" ]] && ok "manuscript $DRAFT built; reviewer checks PASS" || bad "draft=$DRAFT review=$REVIEW"
+[[ "$BIBTEX" == *"@article{"* ]] && ok "BibTeX generated with corpus-resolved citations" || bad "bibtex missing" 
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"WRITING","expected_revision":8}' > /dev/null
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"REVIEWING","expected_revision":9}' > /dev/null
 
