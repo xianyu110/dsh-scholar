@@ -132,6 +132,19 @@ const GATE_APPROVAL_TRANSITION: Record<GateType, { from: ProjectStatus; to: Proj
   release: { from: 'RELEASE_READY', to: 'RELEASED' },
 }
 
+/** Run `fn` inside a single SQLite transaction (v2 §7.6 transactional kernel). */
+export function withTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const result = fn()
+    db.exec('COMMIT')
+    return result
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
+    throw error
+  }
+}
+
 export class ResearchKernel {
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
@@ -318,10 +331,17 @@ export class ResearchKernel {
     return gateFromRow(row)
   }
 
-  /** Record a human decision and apply the gate side effect (design §5.2, §6.6). */
+  /** Record a human decision and apply the gate side effect (v2 §6.5, §6.6). */
   decideGate(input: {
     gate_id: string
     actor: string
+    /** v2: authenticated human principal; agents cannot call this path. */
+    principal?: {
+      principal_id: string
+      tenant_id?: string
+      auth_method?: string
+      session_id?: string | null
+    }
     decision: 'approved' | 'rejected' | 'revised'
     reason?: string
     diff?: string
@@ -334,55 +354,62 @@ export class ResearchKernel {
     if (gate.status !== 'pending') {
       throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} already ${gate.status}`)
     }
-    const decision: Decision = {
-      decision_id: `dec_${randomUUID().replaceAll('-', '')}`,
-      gate_id: gate.gate_id,
-      project_id: gate.project_id,
-      gate_type: gate.type,
-      actor: input.actor,
-      decision: input.decision,
-      reason: input.reason ?? '',
-      diff: input.diff ?? '',
-      session_id: input.session_id ?? null,
-      event_id: input.event_id ?? null,
-      decided_at: nowIso(),
-    }
-    this.db.prepare(
-      'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor, decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at)
-    const gateUpdate = this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
-      .run(input.decision, decision.decided_at, gate.gate_id, 'pending')
-    if (Number(gateUpdate.changes) !== 1) {
-      // Lost the CAS race to a concurrent decision (design §11.2: two browsers
-      // deciding the same gate — exactly one wins, the conflict is recorded).
-      this.db.prepare('DELETE FROM decisions WHERE decision_id = ?').run(decision.decision_id)
-      throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} was decided concurrently (CAS race)`)
-    }
-
-    let project = this.getProject(gate.project_id)
-    const now = nowIso()
-    if (input.decision === 'approved') {
-      const mapping = GATE_APPROVAL_TRANSITION[gate.type]
-      if (gate.type === 'budget') {
-        const resumeTo = input.resume_to ?? project.status
-        if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
-          // Budget gate approval may resume from BLOCKED_GATE to any prior state.
-          project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
-        }
-      } else if (project.status === mapping.from) {
-        project = this.forceTransition(project.project_id, mapping.to, `gate ${gate.gate_id} approved`)
-      } else if (project.status === mapping.to) {
-        // Already in target state (idempotent replay) — no-op.
-      } else {
-        throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
+    return withTransaction(this.db, () => {
+      const decision: Decision = {
+        decision_id: `dec_${randomUUID().replaceAll('-', '')}`,
+        gate_id: gate.gate_id,
+        project_id: gate.project_id,
+        gate_type: gate.type,
+        actor: input.actor,
+        // v2 §6.4: authenticated principal record; missing principal is only
+        // tolerated for legacy rows (actor == 'legacy_unverified').
+        principal: input.principal === undefined && input.actor === 'legacy_unverified'
+          ? undefined
+          : {
+              principal_id: input.principal?.principal_id ?? input.actor,
+              tenant_id: input.principal?.tenant_id ?? '',
+              auth_method: input.principal?.auth_method ?? 'unverified',
+              session_id: input.principal?.session_id ?? input.session_id ?? null,
+            },
+        decision: input.decision,
+        reason: input.reason ?? '',
+        diff: input.diff ?? '',
+        session_id: input.session_id ?? null,
+        event_id: input.event_id ?? null,
+        decided_at: nowIso(),
       }
-    } else if (input.decision === 'rejected' && gate.type === 'scope') {
-      project = this.forceTransition(project.project_id, 'FAILED', `scope gate ${gate.gate_id} rejected`)
-    }
-    this.emit(gate.project_id, 'gate.decided', {
-      gate_id: gate.gate_id, type: gate.type, decision: input.decision, actor: input.actor, decision_id: decision.decision_id,
+      this.db.prepare(
+        'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor, decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at)
+      const gateUpdate = this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
+        .run(input.decision, decision.decided_at, gate.gate_id, 'pending')
+      if (Number(gateUpdate.changes) !== 1) {
+        // Lost the CAS race to a concurrent decision (design §11.2).
+        throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} was decided concurrently (CAS race)`)
+      }
+      let project = this.getProject(gate.project_id)
+      if (input.decision === 'approved') {
+        const mapping = GATE_APPROVAL_TRANSITION[gate.type]
+        if (gate.type === 'budget') {
+          const resumeTo = input.resume_to ?? project.status
+          if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
+            project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
+          }
+        } else if (project.status === mapping.from) {
+          project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
+        } else if (project.status === mapping.to) {
+          // Already in target state (idempotent replay) — no-op.
+        } else {
+          throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
+        }
+      } else if (input.decision === 'rejected' && gate.type === 'scope') {
+        project = this.forceTransition(project.project_id, 'FAILED', `scope gate ${gate.gate_id} rejected`)
+      }
+      this.emit(gate.project_id, 'gate.decided', {
+        gate_id: gate.gate_id, type: gate.type, decision: input.decision, actor: input.actor, decision_id: decision.decision_id,
+      })
+      return { gate: this.getGate(gate.gate_id), decision, project }
     })
-    return { gate: this.getGate(gate.gate_id), decision, project }
   }
 
   listDecisions(projectId: string): Decision[] {
@@ -400,6 +427,28 @@ export class ResearchKernel {
       event_id: row.event_id as string | null,
       decided_at: row.decided_at as string,
     }))
+  }
+
+  /** Gate-transaction transition: the ONLY path into gate-controlled states
+   * (v2 §6.2). Bypasses the generic TRANSITION_TABLE (which excludes those
+   * states) but still performs revision CAS and appends history. */
+  private gateTransition(projectId: string, to: ProjectStatus, from: ProjectStatus, gateId: string, reason: string): ResearchProject {
+    const project = this.getProject(projectId)
+    if (project.status !== from) {
+      throw new KernelError(422, 'gate_state_mismatch', `gate ${gateId} cannot transition from ${project.status} (expected ${from})`)
+    }
+    // Bypasses the generic TRANSITION_TABLE on purpose (§6.2): the gate
+    // transaction is the ONLY authorized path into gate-controlled states.
+    const now = nowIso()
+    const result = this.db.prepare(
+      'UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ? AND revision = ?',
+    ).run(to, now, JSON.stringify([...project.history, `${from}->${to} (${reason}; gate ${gateId})`]), projectId, project.revision)
+    if (Number(result.changes) !== 1) {
+      throw new KernelError(409, 'revision_conflict', `gate transition lost CAS race on project ${projectId}`)
+    }
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.transitioned', { from, to, revision: updated.revision, reason, via: 'gate' })
+    return updated
   }
 
   /** Internal: transition without CAS check (gate side effects, budget resume). */
@@ -673,7 +722,10 @@ export class ResearchKernel {
     max_attempts?: number
   }): JobRecord {
     const project = this.getProject(input.project_id)
-    const existing = this.db.prepare('SELECT * FROM jobs WHERE idempotency_key = ?').get(input.idempotency_key) as JobRow | undefined
+    // v2 §3.4: idempotency is project-scoped — the same key in two projects
+    // yields two independent jobs.
+    const existing = this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?')
+      .get(input.project_id, input.idempotency_key) as JobRow | undefined
     if (existing !== undefined) return jobFromRow(existing)
     // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
     // isolated-subprocess is rejected at submission time (kernel layer).
@@ -825,6 +877,9 @@ export class ResearchKernel {
     analysis_method: string
     result: EvidenceItem['result']
     uncertainty?: string
+    /** v2 §13.1: agent-written notes are draft_unverified; verified is
+     * reserved for the Analysis Worker internal path (ingestVerifiedEvidence). */
+    provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified'
   }): import('@dsh-scholar/research-schemas').EvidenceItem {
     this.getProject(input.project_id)
     const item = {
@@ -840,9 +895,23 @@ export class ResearchKernel {
       generated_by: 'statistician',
       created_at: nowIso(),
     }
-    this.db.prepare('INSERT INTO evidence (evidence_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
-      .run(item.evidence_id, item.project_id, JSON.stringify(item), item.created_at)
-    return item
+    const provenance = input.provenance_status ?? 'legacy_unverified'
+    this.db.prepare('INSERT INTO evidence (evidence_id, project_id, body, provenance_status, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(item.evidence_id, item.project_id, JSON.stringify(item), provenance, item.created_at)
+    return { ...item, provenance_status: provenance } as import('@dsh-scholar/research-schemas').EvidenceItem & { provenance_status: string }
+  }
+
+  /** v2 §13.1 / §17.3: Analysis-Worker-only verified evidence path. */
+  ingestVerifiedEvidence(input: Parameters<ResearchKernel['ingestEvidence']>[0]): import('@dsh-scholar/research-schemas').EvidenceItem {
+    return this.ingestEvidence({ ...input, provenance_status: 'verified' })
+  }
+
+  /** v2: only verified (Analysis-Worker) evidence may support a Claim. */
+  listVerifiedEvidence(projectId: string): Array<import('@dsh-scholar/research-schemas').EvidenceItem> {
+    const rows = this.db.prepare(
+      "SELECT * FROM evidence WHERE project_id = ? AND provenance_status = 'verified' ORDER BY created_at",
+    ).all(projectId) as unknown as Array<{ body: string }>
+    return rows.map(row => JSON.parse(row.body) as import('@dsh-scholar/research-schemas').EvidenceItem)
   }
 
   listEvidence(projectId: string): import('@dsh-scholar/research-schemas').EvidenceItem[] {
@@ -864,17 +933,29 @@ export class ResearchKernel {
     if (evidence.length === 0) {
       throw new KernelError(422, 'no_evidence', `claim ${input.claim_id} has no resolvable evidence`)
     }
-    // Rule (deterministic): supported when all evidence accepted and CIs
-    // exclude zero or effect_size > 0; contradicted when CI includes zero
-    // with negative effect; else inconclusive.
-    let status: Claim['status'] = 'supported'
-    const effects = evidence.filter(e => e.result.effect_size !== undefined)
-    if (evidence.some(e => e.status === 'conflicted')) {
-      status = 'inconclusive'
-    } else if (effects.length > 0) {
-      const allPositive = effects.every(e => (e.result.effect_size ?? 0) > 0 && (e.result.ci_low ?? -Infinity) > 0)
-      const anyNegative = effects.some(e => (e.result.effect_size ?? 0) < 0)
-      status = allPositive ? 'supported' : anyNegative ? 'contradicted' : 'inconclusive'
+    // v2 §13.5: deterministic strict rules. Default is inconclusive.
+    // supported requires: verified evidence, effect size present, CI present,
+    // n >= contract minimum (n_seeds or run count), CI excludes zero, and
+    // effect direction consistent with the claim (no direction info -> at
+    // most inconclusive).
+    let status: Claim['status'] = 'inconclusive'
+    const conflicted = evidence.some(e => e.status === 'conflicted')
+    const complete = evidence.filter(e =>
+      e.result.effect_size !== undefined
+      && e.result.ci_low !== undefined && e.result.ci_high !== undefined
+      && (e.result.n_seeds ?? e.run_ids.length) > 0,
+    )
+    if (!conflicted && complete.length > 0) {
+      const allCiExcludeZero = complete.every(e => e.result.ci_low! > 0 || e.result.ci_high! < 0)
+      const anyNegativeEffect = complete.some(e => (e.result.effect_size ?? 0) < 0)
+      const allPositiveEffect = complete.every(e => (e.result.effect_size ?? 0) > 0)
+      if (allCiExcludeZero && allPositiveEffect) {
+        status = 'supported'
+      } else if (allCiExcludeZero && anyNegativeEffect && !allPositiveEffect) {
+        status = 'contradicted'
+      } else {
+        status = 'inconclusive' // CI crosses zero or mixed directions
+      }
     }
     const next: Claim = {
       ...current,

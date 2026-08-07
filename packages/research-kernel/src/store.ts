@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   contract_id TEXT,
-  idempotency_key TEXT NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL,
   kind TEXT NOT NULL,
   command TEXT NOT NULL DEFAULT '[]',
   payload TEXT NOT NULL DEFAULT '{}',
@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS evidence (
   evidence_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   body TEXT NOT NULL,
+  provenance_status TEXT NOT NULL DEFAULT 'legacy_unverified',
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS claims (
@@ -147,6 +148,8 @@ CREATE TABLE IF NOT EXISTS manuscripts (
 );
 CREATE INDEX IF NOT EXISTS idx_gates_project ON gates(project_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
+-- v2 §3.4 invariant 2: idempotency_key is unique per (project_id, idempotency_key).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_project_idempotency ON jobs(project_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
 CREATE INDEX IF NOT EXISTS idx_ideas_project ON ideas(project_id);
 CREATE INDEX IF NOT EXISTS idx_contracts_project ON contracts(project_id);
@@ -167,7 +170,58 @@ export function openDatabase(path: string): DatabaseSync {
   } else if (Number(row.value) !== SCHEMA_VERSION) {
     throw new Error(`research-kernel schema version mismatch: db=${row.value} expected=${SCHEMA_VERSION}`)
   }
+  // v2 forward migrations on pre-existing databases.
+  ensureColumn(db, 'evidence', 'provenance_status', "TEXT NOT NULL DEFAULT 'legacy_unverified'")
+  migrateJobsProjectIdempotency(db)
   return db
+}
+
+/**
+ * v2 §7.2 migration: the legacy jobs table had a GLOBAL UNIQUE on
+ * idempotency_key, which breaks project-scoped idempotency (§3.4 #2).
+ * Rebuild the table (copy -> verify -> atomic rename) when a global unique
+ * index on idempotency_key exists.
+ */
+function migrateJobsProjectIdempotency(db: DatabaseSync): void {
+  const indexes = db.prepare(`PRAGMA index_list('jobs')`).all() as unknown as Array<{ name: string; unique: number; origin: string }>
+  const globalUnique = indexes.some(idx => idx.unique === 1 && idx.origin !== 'pk' && idx.name !== 'idx_jobs_project_idempotency')
+  if (!globalUnique) return
+  db.exec(`
+    CREATE TABLE jobs_v2 (
+      job_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      contract_id TEXT,
+      idempotency_key TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      command TEXT NOT NULL DEFAULT '[]',
+      payload TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL,
+      failure_class TEXT,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      heartbeat_at TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      run_manifest TEXT,
+      error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(project_id, idempotency_key)
+    );
+    INSERT INTO jobs_v2 SELECT * FROM jobs;
+    DROP TABLE jobs;
+    ALTER TABLE jobs_v2 RENAME TO jobs;
+    CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_project_idempotency ON jobs(project_id, idempotency_key);
+  `)
+}
+
+/** Add a column to an existing table if absent (v2 additive migrations). */
+export function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>
+  if (!cols.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+  }
 }
 
 /** Row shape for projects. */

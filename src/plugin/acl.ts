@@ -28,7 +28,7 @@ export const RESEARCH_ROLES: readonly ResearchRole[] = [
 export const RESEARCH_TOOLS = [
   'research_project',
   'research_phase',
-  'research_gate',
+  'research_gate_request',
   'research_budget',
   'research_status',
   'research_panel',
@@ -43,7 +43,7 @@ export const RESEARCH_TOOLS = [
   'experiment_submit',
   'experiment_status',
   'experiment_cancel',
-  'evidence_ingest',
+  'evidence_note_create',
   'claim_create',
   'claim_verify',
   'analysis_build',
@@ -59,14 +59,14 @@ export const RESEARCH_TOOLS = [
 
 /** Tool surface per role (design §4.1 table). */
 export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
-  director: ['research_project', 'research_phase', 'research_gate', 'research_budget', 'research_status', 'research_panel', 'release_bundle'],
+  director: ['research_project', 'research_phase', 'research_gate_request', 'research_budget', 'research_status', 'research_panel', 'release_bundle'],
   scholar: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status'],
   curator: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status'],
   'idea-panel': ['idea_create', 'idea_compare', 'novelty_audit', 'literature_search', 'research_status'],
   architect: ['experiment_register', 'research_status', 'experiment_status'],
   engineer: ['workspace_snapshot', 'patch_apply', 'baseline_prepare', 'baseline_verify', 'test_run', 'research_status', 'experiment_status'],
   operator: ['experiment_submit', 'experiment_status', 'experiment_cancel', 'research_status'],
-  statistician: ['evidence_ingest', 'claim_create', 'claim_verify', 'analysis_build', 'research_status', 'experiment_status'],
+  statistician: ['evidence_note_create', 'claim_create', 'claim_verify', 'analysis_build', 'research_status', 'experiment_status'],
   writer: ['manuscript_build', 'research_status'],
   reviewer: ['manuscript_review', 'claim_verify', 'research_status'],
   auditor: ['claim_verify', 'manuscript_review', 'research_status'],

@@ -129,6 +129,9 @@ const evidenceSchema = z.object({
   analysis_method: z.string().min(1),
   result: z.record(z.unknown()),
   uncertainty: z.string().optional(),
+  // v2 §13.1: agent-facing write defaults to draft_unverified; 'verified' is
+  // the Analysis-Worker internal path (ingestVerifiedEvidence).
+  provenance_status: z.enum(['draft_unverified', 'legacy_unverified', 'verified']).optional(),
 })
 
 const claimVerifySchema = z.object({

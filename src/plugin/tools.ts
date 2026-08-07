@@ -167,9 +167,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }))
 
+  const GATE_CONTROLLED = ['SCOPED', 'IDEA_APPROVED', 'CONTRACT_APPROVED', 'RELEASED']
   ctx.tools.register(researchTool({
     name: 'research_phase',
-    description: 'Advance a Research Project along the state machine (DRAFT→SCOPED→SURVEYING→IDEATING→IDEA_APPROVED→BASELINE_REPRO→CONTRACT_APPROVED→EXPERIMENTING→EVIDENCE_READY→WRITING→REVIEWING→RELEASE_READY→RELEASED/ARCHIVED, FAILED/STOPPED/BLOCKED_GATE). Requires expected_revision (from the last project read) for CAS safety; illegal transitions are rejected by the Kernel.',
+    description: 'Advance a Research Project along NON-gate states (v2 §6.2): gate-controlled states (SCOPED, IDEA_APPROVED, CONTRACT_APPROVED, RELEASED) are rejected here — they can only be entered by the human gate transaction. Requires expected_revision for CAS safety; illegal transitions are rejected by the Kernel.',
     parameters: {
       to: { type: 'string', required: true },
       expected_revision: { type: 'integer', required: true },
@@ -178,6 +179,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
+      if (GATE_CONTROLLED.includes(args.to)) {
+        throw new Error(`research_phase cannot enter gate-controlled state ${args.to} — a human gate decision is required (v2 §6.2)`)
+      }
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       const project = await client.transition(projectId, args.to, args.expected_revision, args.reason)
@@ -186,21 +190,15 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
   }))
 
   ctx.tools.register(researchTool({
-    name: 'research_gate',
-    description: 'Create or decide human gates (scope|idea|contract|budget|release). `decide` records actor/decision/reason/diff in the Ledger and applies the gate side effect (scope approve→SCOPED, idea approve→IDEA_APPROVED, contract approve→CONTRACT_APPROVED, budget approve→resume, release approve→RELEASED). Gates are the human accountability surface: in unattended mode they leave the project BLOCKED_GATE instead of blocking.',
+    name: 'research_gate_request',
+    description: 'REQUEST a human gate (scope|idea|contract|budget|release) or list gates (v2 §6.6): agents create Gate Requests; HUMAN DECISIONS ARE NOT POSSIBLE THROUGH AGENT TOOLS — only the authenticated BFF/human path may decide a gate. Unattended projects park at BLOCKED_GATE instead of blocking.',
     parameters: {
-      action: { type: 'string', required: true, enum: ['create', 'decide', 'list'] },
+      action: { type: 'string', required: true, enum: ['create', 'list'] },
       project_id: OPT_STRING,
       type: { type: 'string', enum: ['scope', 'idea', 'contract', 'budget', 'release'] },
       title: OPT_STRING,
       summary: OPT_STRING,
       payload_json: OPT_STRING,
-      gate_id: OPT_STRING,
-      actor: OPT_STRING,
-      decision: { type: 'string', enum: ['approved', 'rejected', 'revised'] },
-      reason: OPT_STRING,
-      diff: OPT_STRING,
-      resume_to: OPT_STRING,
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
@@ -210,7 +208,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         return { ok: true, gates: await client.listGates(projectId) }
       }
       if (args.action === 'create') {
-        if (args.type === undefined || args.title === undefined) throw new Error('research_gate create requires `type` and `title`')
+        if (args.type === undefined || args.title === undefined) throw new Error('research_gate_request create requires `type` and `title`')
         const projectId = await resolveProjectId(client, sessionId, args.project_id)
         if (projectId === undefined) throw new Error('no project_id and no session-linked project')
         const gate = await client.createGate({
@@ -221,21 +219,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
           payload: parseJsonObject(args.payload_json, 'payload_json'),
           session_id: sessionId ?? null,
         })
-        return { ok: true, gate }
-      }
-      if (args.action === 'decide') {
-        if (args.gate_id === undefined || args.decision === undefined) throw new Error('research_gate decide requires `gate_id` and `decision`')
-        const actor = args.actor ?? (sessionId !== undefined ? `session:${sessionId}` : 'human')
-        const result = await client.decideGate({
-          gate_id: args.gate_id,
-          actor,
-          decision: args.decision,
-          reason: args.reason,
-          diff: args.diff,
-          session_id: sessionId ?? null,
-          resume_to: args.resume_to,
-        })
-        return { ok: true, ...result }
+        return { ok: true, gate, note: 'human decision required via the authenticated Web panel / BFF (agents cannot decide gates)' }
       }
       throw new Error(`unknown action ${args.action}`)
     },
@@ -824,8 +808,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
   // ── evidence (Statistician / Auditor) ────────────────────────────────────
 
   ctx.tools.register(researchTool({
-    name: 'evidence_ingest',
-    description: 'Ingest a deterministic statistical EvidenceItem (source_type run|analysis|external-passage|reproduction, run_ids, artifact_refs sha256:, analysis_method, result with primary_metric/value/effect_size/ci_low/ci_high/n_seeds). Only Statistician/Auditor may write evidence.',
+    name: 'evidence_note_create',
+    description: 'Create a DRAFT UNVERIFIED evidence note (v2 §13.1): agents may propose notes for discussion, but only the deterministic Analysis Worker may write VERIFIED evidence that supports Claims. Notes are never accepted as Claim support.',
     parameters: {
       project_id: OPT_STRING,
       source_type: { type: 'string', required: true, enum: ['run', 'analysis', 'external-passage', 'reproduction'] },
@@ -850,8 +834,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         analysis_method: args.analysis_method,
         result,
         uncertainty: args.uncertainty ?? '',
+        provenance_status: 'draft_unverified',
       })
-      return { ok: true, evidence: item }
+      return { ok: true, evidence: item, note: 'draft_unverified — cannot support Claims until an Analysis Worker produces verified evidence' }
     },
   }))
 

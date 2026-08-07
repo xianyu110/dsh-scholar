@@ -28,13 +28,20 @@ export const Gate = z.object({
 })
 export type Gate = z.infer<typeof Gate>
 
-/** Append-only human decision record (design §6.6: actor, diff, reason kept forever). */
+/** Append-only human decision record (v2 §6.4: authenticated principal, diff, reason kept forever). */
 export const Decision = z.object({
   decision_id: z.string().min(1),
   gate_id: z.string().min(1),
   project_id: z.string().min(1),
   gate_type: GateType,
+  /** v2: authenticated human principal; 'legacy_unverified' marks pre-v2 rows. */
   actor: z.string().min(1),
+  principal: z.object({
+    principal_id: z.string().min(1),
+    tenant_id: z.string().default(''),
+    auth_method: z.string().default('dsh-session'),
+    session_id: z.string().nullable().default(null),
+  }).optional(),
   decision: z.enum(['approved', 'rejected', 'revised']),
   reason: z.string().default(''),
   diff: z.string().default(''),

@@ -36,10 +36,21 @@ describe('project state machine', () => {
   it('transitions only with matching expected_revision (CAS)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    expect(() => kernel.transition(project.project_id, 'SCOPED', 5)).toThrow(KernelError)
-    const moved = kernel.transition(project.project_id, 'SCOPED', 0)
-    expect(moved.status).toBe('SCOPED')
-    expect(moved.revision).toBe(1)
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' })
+    // project is SCOPED now (gate-controlled entry)
+    expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+    expect(() => kernel.transition(project.project_id, 'SURVEYING', 5)).toThrow(KernelError)
+    const moved = kernel.transition(project.project_id, 'SURVEYING', 1)
+    expect(moved.status).toBe('SURVEYING')
+    expect(moved.revision).toBe(2)
+    kernel.close()
+  })
+
+  it('v2 §6.2: generic transition cannot enter gate-controlled states', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expect(() => kernel.transition(project.project_id, 'SCOPED', 0)).toThrow(/not allowed/)
     kernel.close()
   })
 
@@ -50,18 +61,44 @@ describe('project state machine', () => {
     kernel.close()
   })
 
-  it('walks the golden path state sequence', () => {
+  it('walks the golden path state sequence via gates + transitions', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const seq = ['SCOPED', 'SURVEYING', 'IDEATING', 'IDEA_APPROVED', 'BASELINE_REPRO', 'CONTRACT_APPROVED', 'EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY', 'RELEASED']
-    let rev = 0
-    for (const to of seq) {
-      const next = kernel.transition(project.project_id, to, rev)
-      expect(next.status).toBe(to)
-      rev = next.revision
+    const decide = (type: 'scope' | 'idea' | 'contract' | 'release'): ResearchProject => {
+      const gate = kernel.createGate({ project_id: project.project_id, type, title: `${type} gate` })
+      return kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' }).project
     }
+    let p = decide('scope')                       // DRAFT -> SCOPED (gate)
+    expect(p.status).toBe('SCOPED')
+    p = kernel.transition(p.project_id, 'SURVEYING', p.revision) // SCOPED -> SURVEYING
+    p = kernel.transition(p.project_id, 'IDEATING', p.revision)  // SURVEYING -> IDEATING
+    p = decide('idea')                            // IDEATING -> IDEA_APPROVED (gate)
+    p = kernel.transition(p.project_id, 'BASELINE_REPRO', p.revision)
+    p = decide('contract')                        // BASELINE_REPRO -> CONTRACT_APPROVED (gate)
+    p = kernel.transition(p.project_id, 'EXPERIMENTING', p.revision)
+    p = kernel.transition(p.project_id, 'EVIDENCE_READY', p.revision)
+    p = kernel.transition(p.project_id, 'WRITING', p.revision)
+    p = kernel.transition(p.project_id, 'REVIEWING', p.revision)
+    p = kernel.transition(p.project_id, 'RELEASE_READY', p.revision)
+    p = decide('release')                         // RELEASE_READY -> RELEASED (gate)
+    expect(p.status).toBe('RELEASED')
     const events = kernel.listEvents(project.project_id)
-    expect(events.filter(e => e.kind === 'project.transitioned')).toHaveLength(seq.length)
+    expect(events.filter(e => e.kind === 'project.transitioned').length).toBeGreaterThanOrEqual(10)
+    kernel.close()
+  })
+})
+
+describe('v2 §3.4 project isolation', () => {
+  it('same idempotency_key in different projects yields independent jobs', () => {
+    const kernel = freshKernel()
+    const a = kernel.createProject({ name: 'a', workspace: '/a', brief: makeBrief() })
+    const b = kernel.createProject({ name: 'b', workspace: '/b', brief: makeBrief() })
+    const ja = kernel.submitJob({ project_id: a.project_id, idempotency_key: 'shared-key', kind: 'echo' })
+    const jb = kernel.submitJob({ project_id: b.project_id, idempotency_key: 'shared-key', kind: 'echo' })
+    expect(ja.job_id).not.toBe(jb.job_id)
+    // Re-submission inside the SAME project still dedupes.
+    const ja2 = kernel.submitJob({ project_id: a.project_id, idempotency_key: 'shared-key', kind: 'echo' })
+    expect(ja2.job_id).toBe(ja.job_id)
     kernel.close()
   })
 })
@@ -254,9 +291,10 @@ describe('§11.2 recovery & concurrency cases', () => {
     expect(kernel.getProjectBySession('session-old')?.project_id).toBe(project.project_id)
     expect(other.session_id).toBeNull()
     // Phase is not duplicated on resume: revision/status stay monotonic.
-    const moved = kernel.transition(project.project_id, 'SCOPED', project.revision)
-    expect(moved.revision).toBe(1)
-    expect(kernel.transition(project.project_id, 'SURVEYING', moved.revision).status).toBe('SURVEYING')
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    const approved = kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(approved.project.revision).toBe(1)
+    expect(kernel.transition(project.project_id, 'SURVEYING', 1).status).toBe('SURVEYING')
     kernel.close()
   })
 
@@ -288,7 +326,7 @@ describe('claims and evidence', () => {
   it('verifyClaim marks supported when CIs exclude zero', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const item = kernel.ingestEvidence({
+    const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['r1'], artifact_refs: ['sha256:' + 'b'.repeat(64)],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
     })
@@ -302,7 +340,7 @@ describe('claims and evidence', () => {
   it('verifyClaim marks contradicted on negative effects', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const item = kernel.ingestEvidence({
+    const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['r1'], artifact_refs: [],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.7, baseline_value: 0.8, effect_size: -0.1, ci_low: -0.18, ci_high: -0.02, n_seeds: 5 },
     })
@@ -341,7 +379,7 @@ describe('corpus + ideas + manuscript', () => {
     expect(kernel.getIdea(card.idea_id).status).toBe('proposed')
 
     const analysis = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ f1: 0.9 }) })
-    const item = kernel.ingestEvidence({
+    const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['r1', 'r2'], artifact_refs: [analysis.artifact_id],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 2 },
     })

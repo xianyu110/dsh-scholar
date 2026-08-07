@@ -221,7 +221,7 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${input.project_id}/claims`, input)
   }
 
-  ingestEvidence(input: Record<string, unknown>): Promise<EvidenceItem> {
+  ingestEvidence(input: Record<string, unknown> & { provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified' }): Promise<EvidenceItem> {
     return this.request('POST', `/v1/projects/${String(input.project_id)}/evidence`, input)
   }
 
