@@ -23,6 +23,9 @@ Idea 生成、Baseline 复现、实验预注册与隔离执行,到 Claim-Evidenc
 # ./scripts/dsh-dev plugin --profile web add github:lzszq/dsh-scholar#main
 ```
 
+> 📖 **完整使用教程见 [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md)**(安装、专属
+> GUI 面板、Gate 审批、从项目创建到复现包的 10 步流程、常见问题)。
+
 ## 启动与使用
 
 ```bash
