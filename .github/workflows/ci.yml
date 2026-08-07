@@ -48,3 +48,32 @@ jobs:
         run: bash tests/security/run-hardening-tests.sh
       - name: v2 blocking tests
         run: bash tests/security/run-all-v2-blocking-tests.sh
+
+  latex-compile:
+    # §14.3 / §19.2 latex-compiles (blocking): the LaTeX manuscript from
+    # POST /v1/projects/{id}/manuscripts/build {format:'latex'} must compile
+    # in a FIXED build image — ubuntu-latest + texlive-latex-base +
+    # texlive-latex-recommended (booktabs, used by the generated paper, ships
+    # in texlive-latex-recommended). Without pdflatex the test would SKIP, so
+    # this job installs the fixed image BEFORE running tests/security/
+    # run-latex-tests.sh — that makes the compile gate real.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone sub-packages
+        run: |
+          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+      - name: Install fixed LaTeX build image (texlive)
+        run: sudo apt-get install -y texlive-latex-base texlive-latex-recommended
+      - name: §14.3 / §19.2 latex-compiles blocking test
+        run: bash tests/security/run-latex-tests.sh
