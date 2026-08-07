@@ -1,129 +1,62 @@
-# DSH Research OS (`@dsh-scholar/research-plugin`)
+# DSH Research OS(`@dsh-scholar/research-plugin`)
+
+> ⚠️ **正在开发中(work in progress)**:接口与行为可能随时变化,暂不建议用于
+> 生产科研流程。当前能力与已知边界见下文与 `docs/`。
 
 一个可作为 **DSH(DeepSeek Harness)插件**使用的全自动科研系统:从领域论文调研、
 Idea 生成、Baseline 复现、实验预注册与隔离执行,到 Claim-Evidence 账本、
-论文与私有复现包生成。按设计文档
-`DSH_fully_automated_scientific_research_plugin_execution_design_document.md`
-实施,采用「DSH 控制面 + Research Kernel + 隔离 Runner」三层架构。
+论文与私有复现包生成。设计依据
+`DSH_fully_automated_scientific_research_plugin_execution_design_document.md`。
 
-## 能力速览
+## 安装
 
-| 层 | 组件 | 职责 |
-|---|---|---|
-| DSH 插件 | `src/plugin/` | kernel sidecar 生命周期、27 个科研工具(带角色 ACL)、12 个 `/research` 命令、research-core skill、`/research-api` Web 桥 + 浏览器面板(E7) |
-| Research Kernel | `packages/research-kernel/` | 项目状态机 + Gate(CAS 原子决策)、Research Ledger(SQLite)、Artifact CAS、durable Job Store、预算策略、事件 outbox、多种子统计分析(mean/sd/bootstrap-95%CI/效应量)+ SVG 图表 |
-| 科研服务 | `packages/scholar-connectors/` | OpenAlex/Crossref/arXiv 受控连接、缓存、去重、快照 |
-| 隔离执行 | `workers/runner-gateway/` | 租约/心跳/恢复、echo/smoke 作业、RunManifest 签名、失败分类 |
-| 共享契约 | `packages/research-schemas/` `packages/research-client/` | Zod 权威 schema + 类型化 Kernel 客户端 |
-
-## 快速开始(作为 DSH 插件使用)
-
-前置:DSH dev checkout(`/home/dev/Desktop/test-lzszq`,提供 `dsh` profile/plugin
-命令);本仓库已推送到 GitHub。
+前置:DSH dev checkout(提供 `dsh` profile/plugin 命令),以及本仓库:
 
 ```bash
-# 1) 安装到任意 profile(web 或新建 research-headless)
+# 安装到 DSH 的 web profile(或任意 profile)
 ./scripts/dsh-dev plugin --profile web add /home/dev/Desktop/dsh-scholar
-#    或从 GitHub 安装:
+# 或从 GitHub 安装:
 # ./scripts/dsh-dev plugin --profile web add github:lzszq/dsh-scholar#main
+```
 
-# 2) 启动 Web
+## 启动与使用
+
+```bash
+# 启动 DSH Web(插件会自动拉起 Research Kernel sidecar,:7412)
 ./scripts/dsh-dev --profile web
-
-# 3) 在 Web 会话中使用
-/research new my-study '{"problem":"...","scope":"...","primary_metrics":["macro_f1"]}'
-/research status
-/research survey "temporal action localization"
-/research ideas
-# 实验编排由模型调用 research_* 工具完成;Gate 由人类批准。
 ```
 
-无头模式(CI/无人值守):
+在 Web 会话中:
 
 ```bash
-./scripts/dsh-dev --profile research-headless "/research new demo && /research status"
+/research new my-study '{"problem":"...","scope":"...","primary_metrics":["macro_f1"]}'   # 创建项目 + Scope Gate
+/research status                                                                          # 阶段/预算/Runs/证据/Gate
+/research survey "temporal action localization"                                           # 文献调研 → Corpus 快照
+/research ideas                                                                           # 查看候选 Idea
+/research contract '{"idea_id":"...","dataset_id":"...","baseline":"...","treatment":"...","primary_metric":"..."}'
+/research run formal                                                                      # 提交隔离实验作业
+/research write                                                                            # 从证据账本生成论文草稿
+/research review / export / release                                                        # 评审 / 私有复现包 / Release Gate(人工)
 ```
 
-插件安装后自动完成:spawn/reuse Kernel sidecar(127.0.0.1:7412,
-`$DSH_HOME/research-kernel/` 持久化)、注册工具与命令、挂载 skill。
-DSH 进程退出**不会丢失**研究状态(SQLite 权威状态)。
+- 研究编排(Gate 批准、Idea 生成、实验设计等)由模型通过 `research_*` 工具完成;
+  关键 Gate(Idea/Contract/预算/发布)由**人类批准**。
+- 无头模式(CI/无人值守):`./scripts/dsh-dev --profile research-headless "<task>"`
+- 独立测试实例(与生产 GUI 隔离):`bash scripts/start-test-dsh.sh` → `http://127.0.0.1:3081`
 
-## /research 命令面(设计附录 A)
+## 可选组件
 
-`new` `status` `survey` `ideas` `reproduce` `contract` `run` `evidence` `write`
-`review` `export` `release` — 见 `src/plugin/commands.ts`;27 个 `research_*`
-工具(含 `research_panel` 并行子代理面板、`workspace_snapshot`/`patch_apply`/
-`baseline_prepare`/`test_run`/`analysis_build`/`idea_compare`)见
-`src/plugin/tools.ts`;角色工具 ACL 见 `src/plugin/acl.ts`。
+- **独立 GUI 面板**:`dsh plugin --profile web add packages/dsh-research-ui`
+  (标签页:Phase/Gates/Runs/Artifacts/Evidence/Budget,面板内 Gate 审批)
 
-## 开发
+## 文档
 
-```bash
-pnpm install
-bash scripts/link-dsh-deps.sh        # 链接 DSH 安装的 @deepseek-ai/* 类型(本地类型检查)
-pnpm run build                        # 构建全部包(含 client bundle)
-pnpm test                             # 单元测试(41,含安全基线)
-bash tests/fault-injection/run-fault-tests.sh   # 故障注入(6,含跨进程并发 Gate CAS)
-bash tests/e2e/golden-path.sh         # 黄金路径 e2e(15,可选 --live-connectors)
-bash evals/fault-stress.sh 100        # §11.4 恢复门槛:100 次 kill -9 压力
-bash evals/survey-eval.sh --live      # §11.3 Survey 评测(真实连接器 recall@K)
-bash evals/clean-room-rerun.sh        # §13.1 DoD#9:空环境重跑复现
-bash evals/security-eval 见 tests/unit/security.test.ts
-```
-
-## 仓库结构(设计 §8.2 映射)
-
-```text
-src/plugin/            dsh-research-plugin(根包即 bundle)
-packages/research-kernel    apps/research-kernel
-packages/research-schemas   research-schemas(+fixtures/migrations)
-packages/research-client    research-client
-packages/scholar-connectors scholar-connectors
-workers/runner-gateway      workers/runner-gateway
-skills/research-core        skills/research-core
-configs/                    research-web/headless overlay 参考
-tests/                      unit + fault-injection + e2e
-docs/                       design-notes(RSP-001)、security-baseline(RSP-012)
-plugins/research-core/.dsh-plugin  repository-plugin 静态 skill 包(GitHub 可装)
-```
-
-## 安全立场(设计 §1.2 / §4.9 / RSP-012)
-
-- 不启用 danger-full-access、通用 web_fetch、MCP、Cordis 自指工具;
-  默认权限保持 workspace-write + ask。
-- 不可信实验代码不进 DSH 宿主:Runner 独立进程,容器模式禁网/非 root/
-  无 socket;subprocess 模式仅限本地 smoke。
-- Writer 只读 Evidence Ledger;数字/引用必须绑定 artifact;Release Gate
-  默认未批准,不存在自动发布路径。
-- 外部文献文本一律视为不可信数据。
-
-## 独立测试实例
-
-`bash scripts/start-test-dsh.sh` 在完全隔离的 DSH 环境(`~/.dsh-scholar-test`,
-web :3081, kernel :17412)启动第二个 DSH 用于测试本项目,与生产 GUI(:3080)
-互不影响。详见 `docs/test-instance-plan.md`。
-
-## 独立 GUI 插件(已实现)
-
-`packages/dsh-research-ui` — 独立安装的标签页 GUI 插件:Phase/Gates(面板内
-审批)/Runs/Artifacts/Evidence/Budget,自带 kernel sidecar 与
-`/research-ui-api` 桥,可与主插件并存(实测:测试实例 3081 双插件+双 kernel)。
-安装:`dsh plugin --profile web add packages/dsh-research-ui`。
-需求与设计记录:`docs/gui-plugin-plan.md`。
-
-## Roadmap / 已登记需求
-
-- **GUI 面板增强**(已登记):React + slots 槽位集成、主题/i18n、Runs 取消按钮、
-  artifact 预览。
+- 设计与需求记录:`docs/design-notes.md`、`docs/security-baseline.md`、
+  `docs/gui-plugin-plan.md`、`docs/test-instance-plan.md`
+- 评测与测试:`evals/`、`tests/`(单元、故障注入、黄金路径 e2e、docker 隔离实测)
 
 ## 状态
 
-设计文档 13.1 MVP DoD 十项全部达成并有测试证据:E0/E1(插件/持久项目)、
-E2(学术连接器+快照+passage+去重)、E3(Idea+新颖性+Pareto+并行面板)、
-E4(Runner/Contract/Baseline/正式运行)、E5(统计分析+Claim+图表)、E6
-(确定性论文+评审+BibTeX+复现包)、E7(Web 面板:阶段/Gate/预算/Runs/
-Artifacts/Evidence)、E8(安全测试、100 次故障压力、clean-room rerun、
-成本计量、评测体系)。已登记后续需求:独立 GUI 插件包
-(`docs/gui-plugin-plan.md`);演进项:Team/Cluster 部署(§9.2)。docker Runner 已在本机
-docker 29.1.3 实测(evals/docker-eval.sh 11/11:非 root/禁网/1g 内存 OOM 强制/
-容器内失败分类/孤儿容器清理)。
+- **开发中**:核心流程已实现并通过自动化测试(详见 `evals/README.md` 与
+  `docs/security-baseline.md`);接口未冻结。
+- 已知演进项:Team/Cluster 部署(§9.2)、GUI 面板 React 化、更多领域包。
