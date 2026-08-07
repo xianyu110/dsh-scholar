@@ -132,6 +132,15 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  workers/research-orchestrator:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   workers/runner-gateway:
     dependencies:
       '@dsh-scholar/research-client':
