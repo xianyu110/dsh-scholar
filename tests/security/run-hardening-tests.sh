@@ -59,6 +59,64 @@ E2=$(api "http://127.0.0.1:$PORT/v1/jobs/$J2" | node -e "let d='';process.stdin.
 M2=$(api "http://127.0.0.1:$PORT/v1/jobs/$J2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.run_manifest?.metrics_artifact??'none'))})")
 [[ "$M2" == "none" ]] && ok "no metrics artifact for fake run" || bad "metrics artifact should be absent"
 
+echo "== SCH-JOB-001/002: subprocess heartbeat renews lease; cancel terminates the real process =="
+# Dedicated kernel+runner pair with fast heartbeat/cancel polling (the main
+# pair keeps default timings). No docker needed: subprocess execution must
+# honor the same durable-job contract (§12.6).
+PORT2=$((PORT + 1))
+nohup node "$KERNEL_BIN" --db "$WORK/kernel2.db" --cas "$WORK/cas2" --port "$PORT2" > "$WORK/kernel2.log" 2>&1 &
+KERNEL2_PID=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT2/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT2" --owner harden2 --poll-ms 150 --timeout-ms 30000 --heartbeat-ms 1500 --cancel-poll-ms 1000 > "$WORK/runner2.log" 2>&1 &
+RUNNER2_PID=$!
+sleep 0.5
+PROJ2=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects" -d "{\"name\":\"harden2\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+ok "durable-jobs project $PROJ2"
+
+# Long-running subprocess (node timeout 90s; the runner's 30s timeout would
+# only fire if cancel failed — the assertions below would then fail loudly).
+# The marker is split across variables so pgrep never matches this script.
+M1="zzq-cancel"; M2="marker-98765"
+JL=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects/$PROJ2/jobs" -d "{\"idempotency_key\":\"h-cancel\",\"kind\":\"smoke\",\"payload\":{\"script\":\"node -e \\\"setTimeout(function(){},90000); //$M1-$M2\\\"\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+S=""
+for _ in $(seq 1 40); do
+  S=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+  [[ "$S" == "running" ]] && break; sleep 0.25
+done
+[[ "$S" == "running" ]] && ok "long subprocess job running ($JL)" || bad "long subprocess job not running: $S"
+
+H1=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).heartbeat_at??''))")
+HB=no
+for _ in $(seq 1 30); do
+  H2=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).heartbeat_at??''))")
+  [[ -n "$H2" && "$H2" != "$H1" ]] && HB=yes && break
+  sleep 0.3
+done
+[[ "$HB" == "yes" ]] && ok "subprocess heartbeat renewed lease while running ($H1 → $H2)" || bad "subprocess heartbeat_at never advanced (H1=$H1)"
+
+# Find the REAL executing process (the marker lives in node's argv).
+CHILD=""
+for _ in $(seq 1 50); do
+  CHILD=$(pgrep -f "$M1-$M2" | head -1 || true)
+  [ -n "$CHILD" ] && break
+  sleep 0.2
+done
+[[ -n "$CHILD" ]] && ok "execution process found (pid $CHILD)" || bad "no execution process found"
+
+CSTATUS=$(api -X POST "http://127.0.0.1:$PORT2/v1/jobs/$JL/cancel" -d '{"actor":"harden","reason":"cancel must terminate execution"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+[[ "$CSTATUS" == "cancelled" ]] && ok "kernel accepted cancel → job cancelled" || bad "cancel returned $CSTATUS"
+GONE=no
+for _ in $(seq 1 40); do
+  if ! pgrep -f "$M1-$M2" > /dev/null 2>&1; then GONE=yes; break; fi
+  sleep 0.3
+done
+[[ "$GONE" == "yes" ]] && ok "execution process terminated after cancel" || bad "execution process still alive after cancel!"
+sleep 1
+FINAL=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+[[ "$FINAL" == "cancelled" ]] && ok "subprocess job stays cancelled after runner teardown" || bad "job status after cancel: $FINAL"
+
+kill "$RUNNER2_PID" "$KERNEL2_PID" 2>/dev/null || true
+
 kill "$RUNNER_PID" "$KERNEL_PID" 2>/dev/null || true
 rm -rf "$WORK"
 echo "hardening-tests: $PASS passed, $FAIL failed"

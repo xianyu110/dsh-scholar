@@ -110,6 +110,64 @@ S4=$(wait_job "dk-code")
 C=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d).find(x=>x.idempotency_key==='dk-code');console.log(j?.failure_class??'')})")
 [[ "$C" == "code_error" ]] && ok "container failure classified: code_error" || bad "expected code_error got '$C'"
 
+echo "== SCH-JOB-001/002: durable jobs — heartbeat renewal + cancel kills the real container =="
+# Dedicated kernel+runner pair with fast heartbeat/cancel polling so the
+# assertions complete in seconds; the main pair above keeps its own timings.
+PORT2=$((PORT + 1))
+nohup node "$KERNEL_BIN" --db "$WORK/kernel2.db" --cas "$WORK/cas2" --port "$PORT2" > "$WORK/kernel2.log" 2>&1 &
+KERNEL2_PID=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT2/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT2" --owner docker-eval2 --poll-ms 150 --mode docker --timeout-ms 30000 --heartbeat-ms 1500 --cancel-poll-ms 1000 --key-file "$WORK/runner2.pem" > "$WORK/runner2.log" 2>&1 &
+RUNNER2_PID=$!
+sleep 1
+PROJ2=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects" -d "{\"name\":\"docker-eval2\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+ok "durable-jobs project $PROJ2"
+
+# Long-running container (sleep 120 ≫ the 30s runner timeout): the ONLY way it
+# ends is our cancel — otherwise the assertions fail loudly.
+JL=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects/$PROJ2/jobs" -d '{"idempotency_key":"dk-cancel","kind":"smoke","payload":{"script":"sleep 120"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+S=""
+for _ in $(seq 1 40); do
+  S=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+  [[ "$S" == "running" ]] && break; sleep 0.25
+done
+[[ "$S" == "running" ]] && ok "long job running ($JL)" || bad "long job not running: $S"
+
+# §12.6 heartbeat: heartbeat_at advances while the job runs (1.5s interval).
+H1=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).heartbeat_at??''))")
+HB=no
+for _ in $(seq 1 30); do
+  H2=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).heartbeat_at??''))")
+  [[ -n "$H2" && "$H2" != "$H1" ]] && HB=yes && break
+  sleep 0.3
+done
+[[ "$HB" == "yes" ]] && ok "heartbeat renewed lease while running ($H1 → $H2)" || bad "heartbeat_at never advanced (H1=$H1)"
+
+# The container must actually exist before we cancel it.
+CID=""
+for _ in $(seq 1 25); do
+  CID=$(docker ps --format '{{.Names}}' | grep '^dsh-scholar-' | head -1 || true)
+  [ -n "$CID" ] && break
+  sleep 0.2
+done
+[[ -n "$CID" ]] && ok "container $CID running before cancel" || bad "no dsh-scholar-* container before cancel"
+
+# Cancel: the kernel flips the job; the runner's cancel watcher terminates the
+# real container and confirms removal (design §12.6).
+CSTATUS=$(api -X POST "http://127.0.0.1:$PORT2/v1/jobs/$JL/cancel" -d '{"actor":"docker-eval","reason":"cancel must kill the container"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+[[ "$CSTATUS" == "cancelled" ]] && ok "kernel accepted cancel → job cancelled" || bad "cancel returned $CSTATUS"
+GONE=no
+for _ in $(seq 1 40); do
+  if ! docker ps --format '{{.Names}}' | grep -q '^dsh-scholar-'; then GONE=yes; break; fi
+  sleep 0.3
+done
+[[ "$GONE" == "yes" ]] && ok "container terminated and removed after cancel (no dsh-scholar-* residue)" || bad "dsh-scholar-* container still present after cancel!"
+sleep 1
+FINAL=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+[[ "$FINAL" == "cancelled" ]] && ok "job stays cancelled after runner teardown (no failed/succeeded flip)" || bad "job status after cancel: $FINAL"
+
+kill "$RUNNER2_PID" "$KERNEL2_PID" 2>/dev/null || true
+
 kill "$RUNNER_PID" "$KERNEL_PID" 2>/dev/null || true
 rm -rf "$WORK"
 echo "docker-eval: $PASS passed, $FAIL failed"
