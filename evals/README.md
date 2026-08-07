@@ -11,6 +11,8 @@
 | `docker-eval.sh` | §4.6.1 Runner 安全合同 | 真实 docker:非 root/禁网/1g 内存 OOM 强制/容器内失败分类/孤儿容器清理 | 11/11 |
 | `baseline-eval.sh` | §11.3 Baseline | 复现容差内接受、容差外阻止比较 | 3/3 |
 | `experiment-eval.sh` | §11.3 Experiment | 7 场景失败分类、成功率、预算硬停止 | 11/11 |
+| `release-bundle/run-release-eval.sh` | §14.4/§14.5 自包含 Release Bundle(SCH-REL-001) | 真实归档:kernel API→build-bundle.sh→verify-bundle.sh→clean-room reproduce.sh(docker 重跑+容差) | 19/19 |
+| `tests/security/run-release-bundle-tests.sh` | §19.2 / SCH-REL-001 阻断 | bundle 自包含(结构+哈希)、reproduce.sh 可执行、metrics §12.5 schema、in-bundle verify.sh | 8/8 |
 
 ## 环境限制(已记录)
 
@@ -61,5 +63,37 @@ bash evals/survey-eval.sh --live         # 需外网
 
 ```bash
 bash evals/golden-path-v2/run-golden-v2.sh
+```
+
+## Release Bundle(design §14.4/§14.5,Ticket SCH-REL-001)
+
+`evals/release-bundle/` 把 kernel 的 release-bundle 端点(只返回
+`bundle_id/artifact_id`,内容是 JSON 清单)扩展为**真实自包含归档**的打包与
+校验链路。kernel 不改动——归档组装完全在脚本层完成,数据全部来自 kernel API:
+
+| 脚本 | 作用 |
+|---|---|
+| `build-bundle.sh <port> <project-id> <out-dir> [release-bundle-response.json]` | 从 kernel API 组装 §14.4 目录:manifest.json(`bundle_schema_version: 2` + 每个 artifact 的 path/sha256/kind)、`manuscript/`(paper.md + references.bib + figures/)、`runs/{contracts,manifests,metrics,logs}/`、`analysis/`(aggregate.json + outputs/)、`data/dataset-manifest.json`(contracts data 字段)、`environment/system-info.json`、`LICENSES/`、`AI_USAGE.md`、`reproduce.sh`(clean-room 重跑驱动)、`verify.sh`(= verify-bundle.sh 的字节拷贝,自包含) |
+| `verify-bundle.sh <bundle-dir>` | §14.5 第 1 步校验:manifest schema=2、每个 artifact 文件存在且 sha256 匹配、manuscript 文件、reproduce.sh/verify.sh 可执行、runs/metrics 至少一个 §12.5 形状文件(schema_version + metrics 数组)、analysis/aggregate.json 含 mean/effect_size;PASS/FAIL 清单 + 退出码 |
+| `run-release-eval.sh [--keep-bundle <dir>]` | 主入口:临时 kernel(随机端口 + mkdtemp DB)+ subprocess runner → 项目/contract → 2 个真实 smoke 作业(script 输出 metrics JSON 行,非 echo 空命令)→ POST /analysis → corpus/evidence/claim → POST /release-bundle → build-bundle.sh → 双 verify → **clean-room 重跑**(杀掉原 kernel,仅凭 bundle 在全新 kernel+runner 中重跑作业与分析,容差内对比,写 reproducibility-report.json) |
+
+注意点:
+
+- smoke 作业用 `kind=smoke` + `payload.script` 输出 `{"metric":...,"value":...}`
+  JSON 行(非 echo 空命令被禁,v2 §3.2);subprocess 与 docker 均可。
+- kernel 的 `listArtifacts` 把 metadata 作为未解析的 JSON 字符串返回,因此
+  build-bundle.sh 对 `kind='analysis'` 的 artifact 按**内容**区分 runner 的
+  metrics artifact(`{run_id, job_id, metrics}`)与 computeAnalysis 聚合
+  (`{analysis: {mean, ...}}`),并把前者规范化为 §12.5 形状
+  (补 `schema_version`、contract_id/seed,原始字段保留在 `raw_metric`)。
+- `reproduce.sh` 是 bundle 内的 clean-room 驱动:需要 `KERNEL_BIN`/`RUNNER_BIN`
+  环境变量指向 DSH 运行时;`--mode auto` 在 docker 可用时用 docker 模式
+  (formal 类作业必需),否则仅限 echo/smoke-only bundle 用 subprocess。
+- 最近一次:`19/19`(eval)+ `8/8`(security 阻断),clean-room 重跑
+  `mean_diff=0 ≤ 0.001`,docker 模式。
+
+```bash
+bash evals/release-bundle/run-release-eval.sh --keep-bundle /tmp/my-bundle
+bash tests/security/run-release-bundle-tests.sh
 ```
 
