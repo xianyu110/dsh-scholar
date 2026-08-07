@@ -85,6 +85,10 @@ export const JobRecord = z.object({
   lease_owner: z.string().nullable().default(null),
   lease_expires_at: z.string().nullable().default(null),
   heartbeat_at: z.string().nullable().default(null),
+  /** §12.6: bumped on every claim; old-generation runners are fenced out. */
+  lease_generation: z.number().int().nonnegative().nullable().default(null),
+  /** §12.6: opaque lease token returned at claim time; persisted in payload.__lease_token. */
+  lease_token: z.string().nullable().default(null),
   attempts: z.number().int().nonnegative().default(0),
   max_attempts: z.number().int().positive().default(3),
   run_manifest: z.record(z.unknown()).nullable().default(null),
@@ -93,6 +97,14 @@ export const JobRecord = z.object({
   updated_at: z.string(),
 })
 export type JobRecord = z.infer<typeof JobRecord>
+
+/** Registered runner Ed25519 public key for RunManifest signing (§12.7). */
+export const RunnerKey = z.object({
+  key_id: z.string().min(1),
+  public_key_pem: z.string().min(1),
+  created_at: z.string(),
+})
+export type RunnerKey = z.infer<typeof RunnerKey>
 
 /** Budget accounting record (design §4.2 Budget & Policy). */
 export const BudgetRecord = z.object({

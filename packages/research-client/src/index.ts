@@ -7,7 +7,7 @@
 
 import type {
   ArtifactRecord, Claim, CorpusSnapshot, Decision, EvidenceItem, ExperimentContract, Gate,
-  IdeaCard, JobRecord, KernelEvent, ResearchProject, SessionLink,
+  IdeaCard, JobRecord, KernelEvent, ResearchProject, RunnerKey, SessionLink,
 } from '@dsh-scholar/research-schemas'
 
 export class KernelUnavailableError extends Error {
@@ -195,12 +195,27 @@ export class ResearchClient {
     return this.request('GET', `/v1/projects/${projectId}/jobs`)
   }
 
-  completeJob(input: { job_id: string; owner: string; status: 'succeeded' | 'failed' | 'cancelled'; run_manifest?: Record<string, unknown>; failure_class?: string | null; error?: string }): Promise<JobRecord> {
+  completeJob(input: {
+    job_id: string
+    owner: string
+    status: 'succeeded' | 'failed' | 'cancelled'
+    run_manifest?: Record<string, unknown>
+    failure_class?: string | null
+    error?: string
+    /** §12.6 lease fencing: pass the values returned by claimJobs to prove liveness. */
+    lease_generation?: number | null
+    lease_token?: string | null
+  }): Promise<JobRecord> {
     return this.request('POST', `/v1/jobs/${input.job_id}/status`, input)
   }
 
-  heartbeatJob(jobId: string, owner: string): Promise<JobRecord> {
-    return this.request('POST', `/v1/jobs/${jobId}/heartbeat`, { owner })
+  /** §12.6: heartbeat carries the claim's generation/token when available. */
+  heartbeatJob(jobId: string, owner: string, leaseGeneration?: number | null, leaseToken?: string | null): Promise<JobRecord> {
+    return this.request('POST', `/v1/jobs/${jobId}/heartbeat`, {
+      owner,
+      lease_generation: leaseGeneration ?? null,
+      lease_token: leaseToken ?? null,
+    })
   }
 
   cancelJob(jobId: string, actor: string, reason?: string): Promise<JobRecord> {
@@ -209,6 +224,15 @@ export class ResearchClient {
 
   claimJobs(owner: string, limit = 1, leaseTtlSeconds = 300): Promise<JobRecord[]> {
     return this.request('POST', '/v1/jobs-claim/run', { owner, limit, lease_ttl_seconds: leaseTtlSeconds })
+  }
+
+  /** §12.7: register a runner Ed25519 public key for manifest verification. */
+  registerRunnerKey(input: { key_id: string; public_key_pem: string }): Promise<RunnerKey> {
+    return this.request('POST', '/v1/runner-keys', input)
+  }
+
+  listRunnerKeys(): Promise<RunnerKey[]> {
+    return this.request('GET', '/v1/runner-keys')
   }
 
   recoverExpiredLeases(): Promise<{ recovered: number }> {

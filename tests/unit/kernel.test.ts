@@ -4,6 +4,7 @@
  * manuscript determinism (design §11.1, §11.2).
  */
 import { describe, expect, it } from 'vitest'
+import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,6 +21,50 @@ function makeBrief(overrides: Record<string, unknown> = {}) {
     problem: 'p', scope: 's', questions: [], primary_metrics: ['m'],
     resources: '', risks: [], target_outputs: ['paper'], target_venue: null,
     baseline_repo: null, domain: 'ml', ...overrides,
+  }
+}
+
+/** Assert a KernelError with an exact HTTP status + error code. */
+function expectKernelError(fn: () => unknown, status: number, code: string): void {
+  try {
+    fn()
+    throw new Error('expected KernelError to be thrown')
+  } catch (error) {
+    expect(error).toBeInstanceOf(KernelError)
+    expect((error as KernelError).status).toBe(status)
+    expect((error as KernelError).code).toBe(code)
+  }
+}
+
+/**
+ * §12.7 signing helper mirroring the runner-gateway contract exactly:
+ * payload_sha256 = sha256(canonicalJson(manifest)) BEFORE the envelope is
+ * attached; the Ed25519 signature covers canonicalJson(manifest +
+ * runner_key_id + payload_sha256); canonicalJson sorts top-level keys.
+ * (Uses crypto.sign(null, …) — createSign('ed25519') is rejected on Node ≥ 24.)
+ */
+function signManifest(manifest: Record<string, unknown>, privateKey: KeyObject, keyId: string): Record<string, unknown> {
+  const canonical = (m: Record<string, unknown>): string => JSON.stringify(m, Object.keys(m).sort())
+  const payloadSha256 = createHash('sha256').update(canonical(manifest)).digest('hex')
+  const signed = { ...manifest, runner_key_id: keyId, payload_sha256: payloadSha256 }
+  const signature = sign(null, Buffer.from(canonical(signed), 'utf8'), privateKey).toString('base64')
+  return { ...signed, signature }
+}
+
+/** A realistic manifest payload (with a nested `resources` object). */
+function makeManifest(job: { job_id: string; project_id: string }, metricsArtifact: string): Record<string, unknown> {
+  return {
+    run_id: 'run_test_1',
+    job_id: job.job_id,
+    project_id: job.project_id,
+    code_commit: 'abc123',
+    command: ['python', 'train.py', '--seed', '11'],
+    resources: { gpu: 1, cpu: 8, memory_gb: 32 },
+    started_at: '2026-01-01T00:00:00.000Z',
+    finished_at: '2026-01-01T01:00:00.000Z',
+    exit_code: 0,
+    metrics_artifact: metricsArtifact,
+    log_artifact: metricsArtifact,
   }
 }
 
@@ -394,6 +439,212 @@ describe('corpus + ideas + manuscript', () => {
 
     const bundle = kernel.releaseBundle(project.project_id)
     expect(bundle.release_gate).toBe('unapproved')
+    kernel.close()
+  })
+})
+
+describe('§12.6 lease fencing (SCH-JOB-001)', () => {
+  it('claim returns lease_owner/lease_generation/lease_token; generation bumps on re-claim', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f1', kind: 'smoke' })
+    const [first] = kernel.claimJobs('runner-1', 1, 8)
+    expect(first?.lease_owner).toBe('runner-1')
+    expect(first?.lease_generation).toBe(1)
+    expect(first?.lease_token).toMatch(/^lt_/)
+    // The opaque token must not leak into the public payload.
+    expect(JSON.stringify(first?.payload ?? {})).not.toContain('__lease_token')
+    // Expire + re-claim: generation advances, token rotates.
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    const [second] = kernel.claimJobs('runner-1', 60, 8)
+    expect(second?.lease_generation).toBe(2)
+    expect(second?.lease_token).not.toBe(first?.lease_token)
+    kernel.close()
+  })
+
+  it('stale-runner-fencing-token-rejected: old generation/token cannot complete the job', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f2', kind: 'smoke' })
+    const [claim1] = kernel.claimJobs('runner-1', 1, 8)
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    // The SAME runner re-claims: old process still holds generation 1 + token 1.
+    const [claim2] = kernel.claimJobs('runner-1', 60, 8)
+    expect(claim2?.lease_generation).toBe(2)
+    // Old credentials -> 409 lease_stale (owner matches, generation/token stale).
+    expectKernelError(
+      () => kernel.completeJob({
+        job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
+        lease_generation: claim1?.lease_generation ?? 0, lease_token: claim1?.lease_token ?? '',
+      }),
+      409, 'lease_stale',
+    )
+    // Job must still be running — the stale completion changed nothing.
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // Current credentials -> success.
+    const done = kernel.completeJob({
+      job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
+      lease_generation: claim2?.lease_generation ?? 0, lease_token: claim2?.lease_token ?? '',
+    })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
+  it('stale heartbeat is rejected with 409 lease_stale; current token renews', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f3', kind: 'smoke' })
+    const [claim1] = kernel.claimJobs('runner-1', 1, 8)
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    const [claim2] = kernel.claimJobs('runner-1', 60, 8)
+    expectKernelError(
+      () => kernel.heartbeatJob(job.job_id, 'runner-1', claim1?.lease_generation ?? 0, claim1?.lease_token ?? ''),
+      409, 'lease_stale',
+    )
+    const heartbeated = kernel.heartbeatJob(job.job_id, 'runner-1', claim2?.lease_generation ?? 0, claim2?.lease_token ?? '')
+    expect(heartbeated.heartbeat_at).not.toBeNull()
+    kernel.close()
+  })
+
+  it('legacy heartbeat/complete without generation/token keep the owner-only check', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f4', kind: 'smoke' })
+    kernel.claimJobs('runner-1', 60, 8)
+    expect(kernel.heartbeatJob(job.job_id, 'runner-1').heartbeat_at).not.toBeNull()
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded' })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+})
+
+describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
+  function signedJobSetup(overrides: { requireSignedManifest?: boolean } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-sig-'))
+    const kernel = new ResearchKernel({
+      dbPath: join(dir, 'kernel.db'),
+      casRoot: join(dir, 'cas'),
+      requireSignedManifest: overrides.requireSignedManifest,
+    })
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', payload: {} })
+    kernel.claimJobs('runner-1', 60, 8)
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+    const keyId = 'runner-key-test-1'
+    const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    kernel.registerRunnerKey({ key_id: keyId, public_key_pem: publicPem })
+    return { kernel, job, metrics, privateKey, keyId }
+  }
+
+  it('manifest-signature-invalid-rejected: forged signature -> 422; valid signature -> succeeded', () => {
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    const canonical = (m: Record<string, unknown>): string => JSON.stringify(m, Object.keys(m).sort())
+    // Attacker tamper: payload_sha256 is honestly recomputed over the mutated
+    // payload (hash check passes), but the signature still covers the ORIGINAL
+    // payload -> the Ed25519 verification must fail.
+    const forged = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    forged.exit_code = 1
+    // Recompute the hash over the payload ONLY (envelope fields excluded),
+    // exactly like the kernel does — the signature still covers the original.
+    const { signature: _sig, runner_key_id: _rid, payload_sha256: _ph, ...payloadOnly } = forged
+    forged.payload_sha256 = createHash('sha256').update(canonical(payloadOnly)).digest('hex')
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: forged }),
+      422, 'manifest_signature_invalid',
+    )
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // A signature made with a DIFFERENT key is also invalid.
+    const otherKey = generateKeyPairSync('ed25519')
+    const crossSigned = signManifest(makeManifest(job, metrics.artifact_id), otherKey.privateKey, keyId)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: crossSigned }),
+      422, 'manifest_signature_invalid',
+    )
+    // Correct signature -> accepted.
+    const good = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: good })
+    expect(done.status).toBe('succeeded')
+    expect(done.run_manifest?.signature).toBe(good.signature)
+    kernel.close()
+  })
+
+  it('payload_sha256 mismatch is rejected even with a valid signature', () => {
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    signed.payload_sha256 = '0'.repeat(64)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      422, 'manifest_hash_mismatch',
+    )
+    kernel.close()
+  })
+
+  it('signature referencing an unregistered runner key -> 422 manifest_key_unknown', () => {
+    const { kernel, job, metrics, privateKey } = signedJobSetup()
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, 'runner-key-never-registered')
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      422, 'manifest_key_unknown',
+    )
+    kernel.close()
+  })
+
+  it('registerRunnerKey rejects non-Ed25519 keys', () => {
+    const kernel = freshKernel()
+    const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    expectKernelError(
+      () => kernel.registerRunnerKey({ key_id: 'rsa-key', public_key_pem: rsa.publicKey.export({ type: 'spki', format: 'pem' }).toString() }),
+      422, 'runner_key_invalid',
+    )
+    expectKernelError(
+      () => kernel.registerRunnerKey({ key_id: 'garbage', public_key_pem: 'not a pem' }),
+      422, 'runner_key_invalid',
+    )
+    kernel.close()
+  })
+
+  it('requireSignedManifest (kernel option) rejects unsigned manifests', () => {
+    const { kernel, job } = signedJobSetup({ requireSignedManifest: true })
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
+      422, 'manifest_signature_required',
+    )
+    kernel.close()
+  })
+
+  it('project integrity require_signed_manifest rejects unsigned manifests', () => {
+    const { kernel, job } = signedJobSetup()
+    // Flag stored on the project's integrity record (raw JSON, read verbatim).
+    kernel.db.prepare('UPDATE projects SET integrity = ? WHERE project_id = ?')
+      .run(JSON.stringify({ require_signed_manifest: true }), job.project_id)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
+      422, 'manifest_signature_required',
+    )
+    kernel.close()
+  })
+
+  it('manifest job/project identity mismatch is rejected', () => {
+    const { kernel, job, metrics } = signedJobSetup()
+    const manifest = makeManifest(job, metrics.artifact_id)
+    manifest.job_id = 'job_some_other'
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: manifest }),
+      422, 'manifest_job_mismatch',
+    )
+    kernel.close()
+  })
+
+  it('manifest lease generation mismatch is rejected (fencing inside the manifest)', () => {
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    const manifest = makeManifest(job, metrics.artifact_id)
+    manifest.lease = { generation: 99 }
+    const signed = signManifest(manifest, privateKey, keyId)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      422, 'manifest_lease_mismatch',
+    )
     kernel.close()
   })
 })

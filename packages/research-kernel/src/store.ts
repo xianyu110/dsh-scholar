@@ -100,12 +100,18 @@ CREATE TABLE IF NOT EXISTS jobs (
   lease_owner TEXT,
   lease_expires_at TEXT,
   heartbeat_at TEXT,
+  lease_generation INTEGER,
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   run_manifest TEXT,
   error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runner_keys (
+  key_id TEXT PRIMARY KEY,
+  public_key_pem TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS evidence (
   evidence_id TEXT PRIMARY KEY,
@@ -173,6 +179,8 @@ export function openDatabase(path: string): DatabaseSync {
   }
   // v2 forward migrations on pre-existing databases.
   ensureColumn(db, 'evidence', 'provenance_status', "TEXT NOT NULL DEFAULT 'legacy_unverified'")
+  // §12.6 lease fencing: generation counter, bumped on every claim.
+  ensureColumn(db, 'jobs', 'lease_generation', 'INTEGER')
   migrateJobsProjectIdempotency(db)
   migrateArtifactsProjectScoped(db)
   return db
@@ -235,6 +243,7 @@ function migrateJobsProjectIdempotency(db: DatabaseSync): void {
       error TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      lease_generation INTEGER,
       UNIQUE(project_id, idempotency_key)
     );
     INSERT INTO jobs_v2 SELECT * FROM jobs;
@@ -301,12 +310,21 @@ export interface JobRow {
   lease_owner: string | null
   lease_expires_at: string | null
   heartbeat_at: string | null
+  /** §12.6 lease fencing: bumped on every claim; stale generations are rejected. */
+  lease_generation: number | null
   attempts: number
   max_attempts: number
   run_manifest: string | null
   error: string
   created_at: string
   updated_at: string
+}
+
+/** Row shape for registered runner signing keys (§12.7). */
+export interface RunnerKeyRow {
+  key_id: string
+  public_key_pem: string
+  created_at: string
 }
 
 /** Lightweight row shape for the event outbox. */

@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
-# §19.2 P0 blocking test: manifest-missing-artifact-rejected.
+# §19.2 P0/P1 blocking tests:
+#   - manifest-missing-artifact-rejected   (P0)
+#   - stale-runner-fencing-token-rejected  (P1, SCH-JOB-001 / §12.6)
+#   - manifest-signature-invalid-rejected  (P1, SCH-MANIFEST-001 / §12.7)
 #
 # A run manifest that references artifacts which do not exist in the CAS must
 # be rejected at job completion (HTTP 422, error code manifest_refs_missing);
 # the job must stay running and never be marked succeeded with a dangling
 # manifest.
 #
-# Current kernel: completeJob() -> verifyArtifactRefs() enforces this.
+# A runner holding a STALE lease (old generation/token after the job was
+# recovered and re-claimed) must not be able to complete the job even when its
+# owner name still matches: HTTP 409, error code lease_stale.
+#
+# A run manifest carrying an Ed25519 signature that does not cover its payload
+# must be rejected (HTTP 422, manifest_signature_invalid) while the correct
+# signature is accepted.
+#
+# Current kernel: completeJob() -> verifyArtifactRefs() enforces the artifact
+# rule; completeJob()/heartbeatJob() enforce lease fencing; verifyRunManifest()
+# enforces signature + payload hash + runner key registration.
 #
 # Usage: bash tests/security/run-manifest-tests.sh
 set -eu
@@ -84,6 +97,112 @@ if [[ "$CODE2" == "200" && "$S2" == "succeeded" ]]; then
   ok "control: manifest with real artifact -> HTTP 200, job succeeded"
 else
   bad "control broken: HTTP $CODE2 status $S2"
+fi
+
+say "Test: stale-runner-fencing-token-rejected (SCH-JOB-001, §12.6)"
+J3=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"fence-1","kind":"echo","payload":{"message":"fence"}}' | jfield '.job_id')
+C1=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-fence","lease_ttl_seconds":1,"limit":8}')
+G1=$(printf '%s' "$C1" | jfield '[0].lease_generation')
+T1=$(printf '%s' "$C1" | jfield '[0].lease_token')
+if [[ "$G1" != "1" || -z "$T1" ]]; then
+  bad "claim must return lease_generation=1 and a lease_token (got gen=$G1 token=$T1)"
+  exit 1
+fi
+ok "claim returned lease_generation=$G1 + lease_token"
+# Let the 1s lease expire, recover it, and let the SAME owner re-claim: the
+# old process now holds a stale generation/token pair.
+sleep 1.2
+REC=$(api -X POST "$BASE/v1/recover/leases" | jfield '.recovered')
+[[ "$REC" -ge 1 ]] || { bad "lease recovery expected >=1, got $REC"; exit 1; }
+C2=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-fence","lease_ttl_seconds":60,"limit":8}')
+G2=$(printf '%s' "$C2" | jfield '[0].lease_generation')
+T2=$(printf '%s' "$C2" | jfield '[0].lease_token')
+[[ "$G2" == "2" && -n "$T2" && "$T2" != "$T1" ]] || { bad "re-claim must bump generation to 2 and rotate the token (got gen=$G2)"; exit 1; }
+# Stale credentials -> 409 lease_stale; job must remain running.
+CODE3=$(curl -s -o "$WORK/resp3.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J3/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-fence\",\"status\":\"succeeded\",\"lease_generation\":$G1,\"lease_token\":\"$T1\"}")
+ERR3=$(jfield '.error.code' < "$WORK/resp3.json")
+S3=$(api "$BASE/v1/jobs/$J3" | jfield '.status')
+if [[ "$CODE3" == "409" && "$ERR3" == "lease_stale" && "$S3" == "running" ]]; then
+  ok "stale generation/token -> HTTP 409 lease_stale; job still '$S3'"
+else
+  bad "expected 409 lease_stale, got HTTP $CODE3 (error=$ERR3), job status '$S3'"
+fi
+# Current credentials -> success.
+CODE4=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J3/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-fence\",\"status\":\"succeeded\",\"lease_generation\":$G2,\"lease_token\":\"$T2\"}")
+S4=$(api "$BASE/v1/jobs/$J3" | jfield '.status')
+if [[ "$CODE4" == "200" && "$S4" == "succeeded" ]]; then
+  ok "current generation/token -> HTTP 200, job succeeded"
+else
+  bad "expected 200 with current token, got HTTP $CODE4 status $S4"
+fi
+
+say "Test: manifest-signature-invalid-rejected (SCH-MANIFEST-001, §12.7)"
+# Ed25519 helper scripts (node) — write them into the scratch dir.
+cat > "$WORK/gen-key.mjs" <<'EOF'
+import { generateKeyPairSync } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
+const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+writeFileSync(process.argv[2], privateKey.export({ type: 'pkcs8', format: 'pem' }).toString())
+writeFileSync(process.argv[3], publicKey.export({ type: 'spki', format: 'pem' }).toString())
+EOF
+cat > "$WORK/sign-manifest.mjs" <<'EOF'
+// args: jobId projectId metricsArtifact privateKeyPath keyId leaseGeneration mode
+import { createHash, sign } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+const [jobId, projectId, metricsArtifact, keyPath, keyId, generation, mode] = process.argv.slice(2)
+const canonical = (m) => JSON.stringify(m, Object.keys(m).sort())
+const privateKey = readFileSync(keyPath, 'utf8')
+const manifest = {
+  run_id: `run_shell_${Date.now()}`,
+  job_id: jobId,
+  project_id: projectId,
+  code_commit: 'abc123',
+  command: ['echo', 'hello'],
+  resources: { gpu: 0, cpu: 1, memory_gb: 1 },
+  started_at: new Date().toISOString(),
+  finished_at: new Date().toISOString(),
+  exit_code: 0,
+  metrics_artifact: metricsArtifact,
+}
+if (generation !== '' && generation !== '0' && generation !== 'undefined') manifest.lease = { generation: Number(generation) }
+const payloadSha256 = createHash('sha256').update(canonical(manifest)).digest('hex')
+const signed = { ...manifest, runner_key_id: keyId, payload_sha256: payloadSha256 }
+const signature = sign(null, Buffer.from(canonical(signed), 'utf8'), privateKey).toString('base64')
+const envelope = { ...signed, signature }
+if (mode === 'bad') {
+  // Forgery: tamper with the payload and honestly recompute the hash, but the
+  // signature still covers the ORIGINAL payload -> must fail verification.
+  envelope.exit_code = 1
+  const { signature: _s, runner_key_id: _r, payload_sha256: _p, ...payloadOnly } = envelope
+  envelope.payload_sha256 = createHash('sha256').update(canonical(payloadOnly)).digest('hex')
+}
+process.stdout.write(JSON.stringify(envelope))
+EOF
+node "$WORK/gen-key.mjs" "$WORK/runner-key.pem" "$WORK/runner-key.pub"
+KEY_BODY=$(node -e "process.stdout.write(JSON.stringify({ key_id: 'runner-key-shell', public_key_pem: require('fs').readFileSync(process.argv[1], 'utf8') }))" "$WORK/runner-key.pub")
+KEY_ID=$(api -X POST "$BASE/v1/runner-keys" -d "$KEY_BODY" | jfield '.key_id')
+[[ "$KEY_ID" == "runner-key-shell" ]] || { bad "runner key registration failed (got $KEY_ID)"; exit 1; }
+ok "registered Ed25519 runner key runner-key-shell"
+ART2=$(api -X POST "$BASE/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\"analysis\",\"content_base64\":\"$META_B64\"}" | jfield '.artifact_id')
+J4=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"sig-1","kind":"echo","payload":{"message":"sig"}}' | jfield '.job_id')
+C4=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-sig","lease_ttl_seconds":60,"limit":8}')
+G4=$(printf '%s' "$C4" | jfield '[0].lease_generation')
+BAD=$(node "$WORK/sign-manifest.mjs" "$J4" "$PROJ" "$ART2" "$WORK/runner-key.pem" "runner-key-shell" "$G4" bad)
+CODE5=$(curl -s -o "$WORK/resp5.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J4/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-sig\",\"status\":\"succeeded\",\"run_manifest\":$BAD}")
+ERR5=$(jfield '.error.code' < "$WORK/resp5.json")
+S5=$(api "$BASE/v1/jobs/$J4" | jfield '.status')
+if [[ "$CODE5" == "422" && "$ERR5" == "manifest_signature_invalid" && "$S5" == "running" ]]; then
+  ok "forged manifest signature -> HTTP 422 manifest_signature_invalid; job still '$S5'"
+else
+  bad "expected 422 manifest_signature_invalid, got HTTP $CODE5 (error=$ERR5), job status '$S5'"
+fi
+GOOD=$(node "$WORK/sign-manifest.mjs" "$J4" "$PROJ" "$ART2" "$WORK/runner-key.pem" "runner-key-shell" "$G4" good)
+CODE6=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J4/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-sig\",\"status\":\"succeeded\",\"run_manifest\":$GOOD}")
+S6=$(api "$BASE/v1/jobs/$J4" | jfield '.status')
+if [[ "$CODE6" == "200" && "$S6" == "succeeded" ]]; then
+  ok "correct manifest signature -> HTTP 200, job succeeded"
+else
+  bad "expected 200 with valid signature, got HTTP $CODE6 status $S6"
 fi
 
 say "Summary: $PASS passed, $FAIL failed"

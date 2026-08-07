@@ -14,6 +14,8 @@ export interface KernelServerOptions {
   port?: number
   /** Optional static bearer token for local loopback auth. */
   token?: string
+  /** §12.7: require signed run manifests (also settable on the kernel itself). */
+  requireSignedManifest?: boolean
 }
 
 const idSchema = z.string().min(1)
@@ -100,6 +102,14 @@ const jobCompleteSchema = z.object({
   run_manifest: z.record(z.unknown()).optional(),
   failure_class: z.enum(['environment', 'resources', 'code_error', 'data_issue', 'no_improvement', 'unstable_results', 'budget_exhausted', 'unknown']).nullable().optional(),
   error: z.string().optional(),
+  // §12.6 lease fencing: when provided, both must match the current lease.
+  lease_generation: z.number().int().nonnegative().nullable().optional(),
+  lease_token: z.string().nullable().optional(),
+})
+
+const runnerKeySchema = z.object({
+  key_id: z.string().min(1),
+  public_key_pem: z.string().min(1),
 })
 
 const ideaSchema = z.object({
@@ -445,12 +455,20 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           if (id !== undefined && sub === 'status' && method === 'POST') {
             const input = jobCompleteSchema.parse(body)
-            ok(res, kernel.completeJob({ job_id: id, ...input }))
+            ok(res, kernel.completeJob({
+              job_id: id, ...input,
+              lease_generation: input.lease_generation ?? null,
+              lease_token: input.lease_token ?? null,
+            }))
             return
           }
           if (id !== undefined && sub === 'heartbeat' && method === 'POST') {
-            const input = z.object({ owner: z.string().min(1) }).parse(body)
-            ok(res, kernel.heartbeatJob(id, input.owner))
+            const input = z.object({
+              owner: z.string().min(1),
+              lease_generation: z.number().int().nonnegative().nullable().optional(),
+              lease_token: z.string().nullable().optional(),
+            }).parse(body)
+            ok(res, kernel.heartbeatJob(id, input.owner, input.lease_generation ?? null, input.lease_token ?? null))
             return
           }
           if (id !== undefined && sub === 'cancel' && method === 'POST') {
@@ -491,6 +509,18 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           break
         }
+        case 'runner-keys': {
+          if (method === 'POST' && id === undefined) {
+            const input = runnerKeySchema.parse(body)
+            send(res, 201, kernel.registerRunnerKey(input))
+            return
+          }
+          if (method === 'GET' && id === undefined) {
+            ok(res, kernel.listRunnerKeys())
+            return
+          }
+          break
+        }
         case 'recover': {
           if (method === 'POST' && id === 'leases') {
             ok(res, { recovered: kernel.recoverExpiredLeases() })
@@ -511,6 +541,8 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
 /** Start the kernel API server; returns the listening server. */
 export function startKernelServer(options: KernelServerOptions): Promise<{ server: Server; url: string; port: number }> {
   const { kernel, host = '127.0.0.1', port = 7412, token } = options
+  // §12.7 server-level startup parameter (see also KernelOptions.requireSignedManifest).
+  if (options.requireSignedManifest !== undefined) kernel.requireSignedManifest = options.requireSignedManifest
   const server = createServer((req, res) => route(req, res, kernel, token))
   return new Promise((resolve, reject) => {
     server.once('error', reject)

@@ -5,7 +5,7 @@
  * @module @dsh-scholar/research-kernel/kernel
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
@@ -13,11 +13,11 @@ import {
   ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CorpusSnapshot, Decision,
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
-  SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
+  RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
   buildProjectId, type ArtifactKind, type GateType, type JobStatus, type ProjectStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
-import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow } from './store.js'
+import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 
 export interface KernelOptions {
   /** SQLite database path (defaults to `:memory:`). */
@@ -26,6 +26,8 @@ export interface KernelOptions {
   casRoot?: string
   /** Kernel identity used for leases. */
   instanceId?: string
+  /** §12.7: reject unsigned run manifests at job completion (default: compatible, accept). */
+  requireSignedManifest?: boolean
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -89,6 +91,12 @@ function gateFromRow(row: GateRow): Gate {
 }
 
 function jobFromRow(row: JobRow): JobRecord {
+  const payload = jsonParse(row.payload, {} as Record<string, unknown>)
+  // §12.6: the opaque lease token is persisted inside payload.__lease_token
+  // (avoids a schema column); surface it as a first-class field and keep the
+  // public payload clean.
+  const leaseToken = typeof payload.__lease_token === 'string' ? payload.__lease_token : null
+  if (leaseToken !== null) delete payload.__lease_token
   return {
     job_id: row.job_id,
     project_id: row.project_id,
@@ -96,12 +104,14 @@ function jobFromRow(row: JobRow): JobRecord {
     idempotency_key: row.idempotency_key,
     kind: row.kind as JobRecord['kind'],
     command: jsonParse(row.command, [] as string[]),
-    payload: jsonParse(row.payload, {}),
+    payload,
     status: row.status as JobStatus,
     failure_class: row.failure_class as JobRecord['failure_class'],
     lease_owner: row.lease_owner,
     lease_expires_at: row.lease_expires_at,
     heartbeat_at: row.heartbeat_at,
+    lease_generation: row.lease_generation ?? null,
+    lease_token: leaseToken,
     attempts: row.attempts,
     max_attempts: row.max_attempts,
     run_manifest: jsonParse(row.run_manifest, null),
@@ -149,11 +159,14 @@ export class ResearchKernel {
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
   readonly instanceId: string
+  /** §12.7: when true, unsigned run manifests are rejected at completion. */
+  requireSignedManifest: boolean
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
+    this.requireSignedManifest = options.requireSignedManifest ?? false
   }
 
   close(): void {
@@ -763,6 +776,8 @@ export class ResearchKernel {
       lease_owner: null,
       lease_expires_at: null,
       heartbeat_at: null,
+      lease_generation: null,
+      lease_token: null,
       attempts: 0,
       max_attempts: input.max_attempts ?? 3,
       run_manifest: null,
@@ -796,31 +811,45 @@ export class ResearchKernel {
     return rows.map(jobFromRow)
   }
 
-  /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3). */
+  /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3, §12.6).
+   * Every claim bumps `lease_generation` and issues a fresh opaque
+   * `lease_token`; runners must echo both on heartbeat/complete, and stale
+   * generations are fenced out (an old runner can never finish the job). */
   claimJobs(owner: string, leaseTtlSeconds = 300, limit = 8): JobRecord[] {
     const now = nowIso()
-    const expired = new Date(Date.now() - leaseTtlSeconds * 1000).toISOString()
     const rows = this.db.prepare(
       `SELECT * FROM jobs WHERE status = 'queued' OR (status = 'retryable' AND attempts < max_attempts) ORDER BY created_at LIMIT ?`,
     ).all(limit) as unknown as JobRow[]
     const claimed: JobRecord[] = []
     const update = this.db.prepare(
-      `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
+      `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, lease_generation = COALESCE(lease_generation, 0) + 1, payload = ?, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
     )
     for (const row of rows) {
       const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
-      const result = update.run(owner, leaseExpires, now, now, row.job_id)
+      const payload = jsonParse(row.payload, {} as Record<string, unknown>)
+      const leaseToken = `lt_${randomUUID().replaceAll('-', '')}${randomUUID().slice(0, 8)}`
+      payload.__lease_token = leaseToken
+      const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
       if (Number(result.changes) === 1) claimed.push(jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow))
     }
-    void expired
     return claimed
   }
 
-  /** Renew a lease (heartbeat); rejects when owned by another instance. */
-  heartbeatJob(jobId: string, owner: string, leaseTtlSeconds = 300): JobRecord {
+  /**
+   * Renew a lease (heartbeat); rejects when owned by another instance.
+   * §12.6: when `generation`/`token` are provided the lease is fenced —
+   * both must match the CURRENT lease, otherwise 409 `lease_stale`.
+   * Legacy callers that pass neither keep the old owner-only check.
+   */
+  heartbeatJob(jobId: string, owner: string, generation?: number | null, token?: string | null, leaseTtlSeconds = 300): JobRecord {
     const job = this.getJob(jobId)
     if (job.lease_owner !== null && job.lease_owner !== owner) {
       throw new KernelError(409, 'lease_conflict', `job ${jobId} leased by ${job.lease_owner}`)
+    }
+    const fenced = (generation !== undefined && generation !== null) || (token !== undefined && token !== null)
+    if (fenced && (job.lease_generation !== (generation ?? null) || job.lease_token !== (token ?? null))) {
+      throw new KernelError(409, 'lease_stale',
+        `job ${jobId} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${generation ?? 'n/a'} token ${token ?? 'n/a'}`)
     }
     const now = nowIso()
     const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
@@ -837,7 +866,16 @@ export class ResearchKernel {
     return Number(result.changes)
   }
 
-  /** Finalize a job with a validated RunManifest (design §4.6.1, §6.5). */
+  /**
+   * Finalize a job with a validated RunManifest (design §4.6.1, §6.5, §12.6-12.7).
+   * §12.6 fencing: when `lease_generation`/`lease_token` are provided both must
+   * match the CURRENT lease — a stale runner (old generation/token) is rejected
+   * with 409 `lease_stale` even if its owner matches. Legacy callers that pass
+   * neither keep the old owner-only check.
+   * §12.7: when the manifest carries an Ed25519 `signature`, the kernel
+   * verifies runner key registration, payload hash and signature; when it does
+   * not, the manifest is accepted unless the kernel/project requires signing.
+   */
   completeJob(input: {
     job_id: string
     owner: string
@@ -845,6 +883,8 @@ export class ResearchKernel {
     run_manifest?: Record<string, unknown>
     failure_class?: JobRecord['failure_class']
     error?: string
+    lease_generation?: number | null
+    lease_token?: string | null
   }): JobRecord {
     const job = this.getJob(input.job_id)
     if (job.lease_owner !== null && job.lease_owner !== input.owner) {
@@ -853,12 +893,29 @@ export class ResearchKernel {
     if (job.status !== 'running') {
       throw new KernelError(409, 'job_not_running', `job ${input.job_id} is ${job.status}, not running`)
     }
+    // §12.6 strict lease fencing when generation/token are supplied.
+    const fence = (input.lease_generation !== undefined && input.lease_generation !== null) || (input.lease_token !== undefined && input.lease_token !== null)
+    if (fence && (job.lease_generation !== (input.lease_generation ?? null) || job.lease_token !== (input.lease_token ?? null))) {
+      throw new KernelError(409, 'lease_stale',
+        `job ${input.job_id} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${input.lease_generation ?? 'n/a'} token ${input.lease_token ?? 'n/a'}`)
+    }
+    if (input.run_manifest !== undefined) {
+      this.verifyRunManifest(input.run_manifest, job)
+    }
     if (input.status === 'succeeded' && input.run_manifest !== undefined) {
       const refs = collectManifestRefs(input.run_manifest)
       if (refs.length > 0) {
         const { ok, missing } = this.verifyArtifactRefs(refs)
         if (!ok) {
           throw new KernelError(422, 'manifest_refs_missing', `run manifest references missing artifacts: ${missing.join(', ')}`)
+        }
+        // §12.7: artifacts must exist AND belong to the job's project.
+        for (const ref of refs) {
+          try {
+            this.getArtifact(job.project_id, ref)
+          } catch {
+            throw new KernelError(422, 'manifest_refs_missing', `artifact ${ref} is not registered in project ${job.project_id}`)
+          }
         }
       }
     }
@@ -871,6 +928,103 @@ export class ResearchKernel {
       job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,
     })
     return jobRecord
+  }
+
+  /**
+   * §12.7: register a runner Ed25519 public key used to verify RunManifest
+   * signatures. Rejects non-Ed25519 / unparseable PEMs (422 runner_key_invalid).
+   */
+  registerRunnerKey(input: { key_id: string; public_key_pem: string }): RunnerKey {
+    let publicKey: KeyObject
+    try {
+      publicKey = createPublicKey(input.public_key_pem)
+    } catch (error) {
+      throw new KernelError(422, 'runner_key_invalid', `public_key_pem is not a valid public key: ${(error as Error).message}`)
+    }
+    if (publicKey.asymmetricKeyType !== 'ed25519') {
+      throw new KernelError(422, 'runner_key_invalid', `runner key ${input.key_id} must be Ed25519, got ${publicKey.asymmetricKeyType}`)
+    }
+    const record: RunnerKey = { key_id: input.key_id, public_key_pem: input.public_key_pem, created_at: nowIso() }
+    this.db.prepare(
+      'INSERT INTO runner_keys (key_id, public_key_pem, created_at) VALUES (?, ?, ?) ON CONFLICT(key_id) DO UPDATE SET public_key_pem = excluded.public_key_pem, created_at = excluded.created_at',
+    ).run(record.key_id, record.public_key_pem, record.created_at)
+    return record
+  }
+
+  listRunnerKeys(): RunnerKey[] {
+    const rows = this.db.prepare('SELECT * FROM runner_keys ORDER BY created_at').all() as unknown as RunnerKeyRow[]
+    return rows.map(row => ({ key_id: row.key_id, public_key_pem: row.public_key_pem, created_at: row.created_at }))
+  }
+
+  /**
+   * §12.7: verify a run manifest against the job it claims to belong to.
+   *  - identity: job_id/project_id/contract_id/lease.generation must match the
+   *    job when present (422 manifest_*_mismatch);
+   *  - signature: when `signature` is present the runner key must be
+   *    registered (422 manifest_key_unknown), the canonical payload hash must
+   *    match `payload_sha256` when provided (422 manifest_hash_mismatch) and
+   *    the Ed25519 signature must verify (422 manifest_signature_invalid);
+   *  - unsigned manifests are accepted by default (backward compatible) and
+   *    rejected only when the kernel or project requires signing
+   *    (422 manifest_signature_required).
+   * Field-level checks only: partial manifests (legacy callers) keep working.
+   */
+  private verifyRunManifest(manifest: Record<string, unknown>, job: JobRecord): void {
+    // Job/Project/Contract matching (§12.7) — only when the fields are present.
+    if (manifest.job_id !== undefined && manifest.job_id !== job.job_id) {
+      throw new KernelError(422, 'manifest_job_mismatch', `run manifest job_id ${String(manifest.job_id)} does not match job ${job.job_id}`)
+    }
+    if (manifest.project_id !== undefined && manifest.project_id !== job.project_id) {
+      throw new KernelError(422, 'manifest_project_mismatch', `run manifest project_id ${String(manifest.project_id)} does not match project ${job.project_id}`)
+    }
+    if (manifest.contract_id !== undefined && (job.contract_id === null || manifest.contract_id !== job.contract_id)) {
+      throw new KernelError(422, 'manifest_contract_mismatch',
+        `run manifest contract_id ${String(manifest.contract_id)} does not match job contract ${job.contract_id ?? 'none'}`)
+    }
+    // Lease fencing recorded inside the manifest (§12.6/§12.7).
+    const lease = manifest.lease
+    if (typeof lease === 'object' && lease !== null && typeof (lease as { generation?: unknown }).generation === 'number'
+      && job.lease_generation !== null && (lease as { generation: number }).generation !== job.lease_generation) {
+      throw new KernelError(422, 'manifest_lease_mismatch',
+        `run manifest lease generation ${String((lease as { generation: number }).generation)} does not match job lease generation ${job.lease_generation}`)
+    }
+
+    const signature = manifest.signature
+    if (typeof signature !== 'string' || signature === '') {
+      // No signature: accept by default; enforce only when required.
+      const integrity = this.getProject(job.project_id).integrity as Record<string, unknown>
+      if (this.requireSignedManifest || integrity.require_signed_manifest === true) {
+        throw new KernelError(422, 'manifest_signature_required', 'run manifest must be signed (require_signed_manifest)')
+      }
+      return
+    }
+    const runnerKeyId = manifest.runner_key_id
+    if (typeof runnerKeyId !== 'string' || runnerKeyId === '') {
+      throw new KernelError(422, 'manifest_key_unknown', 'run manifest carries a signature but no runner_key_id')
+    }
+    const keyRow = this.db.prepare('SELECT * FROM runner_keys WHERE key_id = ?').get(runnerKeyId) as RunnerKeyRow | undefined
+    if (keyRow === undefined) {
+      throw new KernelError(422, 'manifest_key_unknown', `runner key ${runnerKeyId} is not registered`)
+    }
+    // Signed payload = the manifest minus its signature field, canonicalized.
+    const { signedPayload, signatureBytes } = stripManifestSignature(manifest)
+    const payloadSha256 = manifest.payload_sha256
+    if (typeof payloadSha256 === 'string' && payloadSha256 !== '') {
+      const actual = sha256Hex(manifestHashPayload(manifest))
+      if (actual !== payloadSha256) {
+        throw new KernelError(422, 'manifest_hash_mismatch', `payload_sha256 mismatch: got ${actual}, manifest claims ${payloadSha256}`)
+      }
+    }
+    let publicKey: KeyObject
+    try {
+      publicKey = createPublicKey(keyRow.public_key_pem)
+    } catch {
+      throw new KernelError(422, 'manifest_key_unknown', `runner key ${runnerKeyId} is not a valid public key`)
+    }
+    const valid = verify(null, Buffer.from(canonicalJson(signedPayload), 'utf8'), publicKey, signatureBytes)
+    if (!valid) {
+      throw new KernelError(422, 'manifest_signature_invalid', `run manifest signature verification failed for key ${runnerKeyId}`)
+    }
   }
 
   cancelJob(jobId: string, actor: string, reason = ''): JobRecord {
@@ -1396,6 +1550,37 @@ function collectManifestRefs(manifest: Record<string, unknown>): string[] {
     if (typeof value === 'string' && value.startsWith('sha256:')) refs.push(value)
   }
   return refs
+}
+
+/**
+ * §12.7: canonical JSON used for manifest hashing/signing — top-level keys
+ * sorted, no whitespace. This MUST match the runner's canonicalization
+ * (workers/runner-gateway `canonicalJson`/`signManifest`) so signatures
+ * verify end-to-end: `JSON.stringify(obj, sortedTopLevelKeys)`.
+ */
+export function canonicalJson(value: Record<string, unknown>): string {
+  return JSON.stringify(value, Object.keys(value).sort())
+}
+
+function sha256Hex(data: string): string {
+  return createHash('sha256').update(data, 'utf8').digest('hex')
+}
+
+/**
+ * §12.7: the payload a runner hashes is the manifest WITHOUT its envelope
+ * fields (runner_key_id, payload_sha256, signature) — matches the runner's
+ * `payload_sha256 = sha256(canonicalJson(manifest))` computed before the
+ * envelope is attached.
+ */
+function manifestHashPayload(manifest: Record<string, unknown>): string {
+  const { signature: _signature, runner_key_id: _keyId, payload_sha256: _payloadHash, ...payload } = manifest
+  return canonicalJson(payload)
+}
+
+/** Manifest minus its `signature` field + the base64 signature bytes (§12.7). */
+function stripManifestSignature(manifest: Record<string, unknown>): { signedPayload: Record<string, unknown>; signatureBytes: Buffer } {
+  const { signature, ...signedPayload } = manifest
+  return { signedPayload, signatureBytes: Buffer.from(String(signature), 'base64') }
 }
 
 

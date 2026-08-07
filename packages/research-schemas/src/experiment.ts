@@ -81,6 +81,7 @@ export const RunManifest = z.object({
   run_id: z.string().min(1),
   contract_id: z.string().min(1),
   job_id: z.string().min(1),
+  project_id: z.string().optional(),
   code_commit: z.string().min(1),
   container_digest: z.string().default(''),
   data_hash: z.string().default(''),
@@ -98,5 +99,11 @@ export const RunManifest = z.object({
   log_artifact: z.string().optional(), // sha256:...
   checkpoint_artifact: z.string().optional(), // sha256:...
   signed_by: z.string().default('runner-gateway'),
+  /** §12.6: lease generation at run time; kernel fences stale generations. */
+  lease: z.object({ generation: z.number().int().nonnegative() }).optional(),
+  /** §12.7: Ed25519 envelope — runner_key_id + payload hash + signature. */
+  runner_key_id: z.string().optional(),
+  payload_sha256: z.string().optional(),
+  signature: z.string().optional(),
 })
 export type RunManifest = z.infer<typeof RunManifest>
