@@ -1,7 +1,11 @@
 # DSH Research OS(`@dsh-scholar/research-plugin`)
 
-> ⚠️ **正在开发中(work in progress)**:接口与行为可能随时变化,暂不建议用于
-> 生产科研流程。当前能力与已知边界见下文与 `docs/`。
+> ⚠️ **Security Alpha / Architecture Prototype(v0.2 整改中)**
+>
+> 按 `DSH_Scholar_v2.0.md` 整改路线推进:正式实验强制容器执行、Human Gate
+> 不可被模型绕过、正式 Evidence 仅由 Analysis Worker 生成、Release Bundle
+> 只能私有导出。**禁止作为无人值守正式科研系统发布**;`full-auto` 仅限
+> fixture 评测项目。当前分支:`hardening/v0.2`。
 
 一个可作为 **DSH(DeepSeek Harness)插件**使用的全自动科研系统:从领域论文调研、
 Idea 生成、Baseline 复现、实验预注册与隔离执行,到 Claim-Evidence 账本、
@@ -57,6 +61,7 @@ Idea 生成、Baseline 复现、实验预注册与隔离执行,到 Claim-Evidenc
 
 ## 状态
 
-- **开发中**:核心流程已实现并通过自动化测试(详见 `evals/README.md` 与
-  `docs/security-baseline.md`);接口未冻结。
-- 已知演进项:Team/Cluster 部署(§9.2)、GUI 面板 React 化、更多领域包。
+- **Security Alpha**(整改中):P0 安全项(宿主执行、假实验、Gate 绕过、
+  Evidence 伪造、Web 认证)为当前阻断项;正式实验仅限容器执行。
+- 接口未冻结;`main` 不作发布分支,开发在 `hardening/v0.2`。
+- 已有 Evidence 标记为 `legacy_unverified`,不得进入对外稿件。
