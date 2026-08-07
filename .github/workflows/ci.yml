@@ -25,3 +25,26 @@ jobs:
       - name: Unit tests
         run: |
           pnpm exec vitest run --exclude tests/unit/security.test.ts
+
+  security-blocking:
+    needs: unit-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone sub-packages
+        run: |
+          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+      - name: hardening tests
+        run: bash tests/security/run-hardening-tests.sh
+      - name: v2 blocking tests
+        run: bash tests/security/run-all-v2-blocking-tests.sh
