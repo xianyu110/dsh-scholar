@@ -64,5 +64,5 @@
 - 全量本地验证:159 单元 · 13/13 hardening · 6/6 阻断 · 26/26 golden-v2 ·
   15/15 e2e · 18/18 docker · 19/19 release-bundle · 7/7 clean-room ·
   100/100 故障压力。
-- 待办:合并回 main(§21.1:required checks + 保护分支已按 CI 矩阵配置);
-  24.2"全自动科研"表述的最终发布评审。
+- §21.1 保护分支:GitHub 免费版私有仓库不支持 branch protection(需 Pro 或公开
+  仓库)——已记录;替代控制:CI 全矩阵必跑 + 人工合并评审。
