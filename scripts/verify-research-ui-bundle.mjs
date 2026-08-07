@@ -12,6 +12,14 @@ if (typeof clientPath !== 'string' || !clientPath.startsWith('./')) {
 
 const bundleUrl = new URL(clientPath.slice(2), repositoryRoot)
 const bundle = await readFile(bundleUrl, 'utf8')
+
+// §15.4: untrusted artifacts must never be rendered through HTML-string
+// sinks; the bundle must not contain the innerHTML pattern at all (client
+// renders with textContent and blob-URL <img>/<embed> only).
+if (bundle.includes('innerHTML')) {
+  throw new Error(`${clientPath} uses innerHTML (design §15.4 forbids rendering untrusted artifacts via innerHTML)`)
+}
+
 let handoff
 const window = {
   __ModuleLoader__: {

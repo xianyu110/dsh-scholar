@@ -8,6 +8,44 @@
 
 const API = '/research-ui-api'
 
+/**
+ * Bridge token bootstrap (design §15.3). Resolution order:
+ * 1. `window.__DSH_BOOT__.researchUi.token` if the host injected one, else
+ * 2. GET /research-ui-api/session-token (same-origin only; 404 when token
+ *    mode is disabled on the host).
+ * The token is attached as `Authorization: Bearer <token>` to every request.
+ */
+let tokenPromise: Promise<string | undefined> | null = null
+
+function bootToken(): string | undefined {
+  const boot = (window as unknown as { __DSH_BOOT__?: { researchUi?: { token?: string } } }).__DSH_BOOT__
+  return boot?.researchUi?.token
+}
+
+async function fetchSessionToken(): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${API}/session-token`, { headers: { accept: 'application/json' }, cache: 'no-store' })
+    if (!response.ok) return undefined
+    const data = (await response.json()) as { token?: string }
+    return typeof data.token === 'string' && data.token.length > 0 ? data.token : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Resolve the bridge token once and cache it (invalidated on 401). */
+function resolveBridgeToken(): Promise<string | undefined> {
+  if (tokenPromise === null) {
+    tokenPromise = (async () => bootToken() ?? (await fetchSessionToken()))()
+  }
+  return tokenPromise
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await resolveBridgeToken()
+  return token !== undefined ? { authorization: `Bearer ${token}` } : {}
+}
+
 interface Projection {
   project?: {
     project_id?: string; name?: string; status?: string; revision?: number
@@ -35,16 +73,29 @@ function el(tag: string, className: string, text?: string): HTMLElement {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
-  try {
-    const response = await fetch(`${API}${path}`, {
-      headers: { accept: 'application/json', ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}) },
-      ...init,
-    })
-    if (!response.ok) return null
-    return (await response.json()) as T
-  } catch {
-    return null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(`${API}${path}`, {
+        ...init,
+        headers: {
+          ...(init?.headers as Record<string, string> | undefined),
+          accept: 'application/json',
+          ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(await authHeaders()),
+        },
+      })
+      if (response.status === 401 && attempt === 0) {
+        // Token may have rotated: re-resolve once, then retry.
+        tokenPromise = null
+        continue
+      }
+      if (!response.ok) return null
+      return (await response.json()) as T
+    } catch {
+      return null
+    }
   }
+  return null
 }
 
 let activeTab = 'phase'
@@ -233,31 +284,81 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
   if (artifacts.length === 0) body.appendChild(el('div', 'ui-item', 'none'))
 }
 
-/** Fetch an artifact blob through the bridge and show it in a modal. */
+/** Download link backed by a blob URL (used for non-previewable types). */
+function downloadLink(blob: Blob, name: string): HTMLElement {
+  const link = el('a', 'ui-download', '⬇ Download file')
+  link.href = URL.createObjectURL(blob)
+  link.download = name
+  link.style.cssText = 'color:#7fb3ff;text-decoration:underline'
+  return link
+}
+
+/**
+ * Fetch an artifact blob through the bridge and show it in a modal.
+ * Security (design §15.4): untrusted artifacts are never rendered through
+ * HTML-string sinks. SVG/PDF/images are shown via blob URLs (script
+ * execution is isolated/disabled in these contexts); HTML is download-only;
+ * text is rendered with textContent.
+ */
 async function previewArtifact(artifactId: string): Promise<void> {
   try {
-    const response = await fetch(`${API}/v1/artifacts/${encodeURIComponent(artifactId)}`, { headers: { accept: 'application/octet-stream' } })
+    const response = await fetch(`${API}/v1/artifacts/${encodeURIComponent(artifactId)}`, {
+      headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
+    })
     if (!response.ok) return
-    const text = await response.text()
+    const blob = await response.blob()
     const overlay = el('div', 'ui-overlay')
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:40px'
-    overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+    const blobUrls: string[] = []
+    const revoke = (): void => { for (const url of blobUrls) URL.revokeObjectURL(url) }
+    overlay.onclick = (event) => { if (event.target === overlay) { revoke(); overlay.remove() } }
     const modal = el('div', 'ui-modal')
     modal.style.cssText = 'background:#1a2130;border:1px solid #3a4356;border-radius:10px;max-width:720px;max-height:70vh;overflow:auto;padding:14px 16px;color:#e6e9ef;font:12px/1.5 system-ui,sans-serif'
     const header = el('div', 'ui-modal-header', `📦 ${artifactId.slice(0, 24)}…`)
     header.style.cssText = 'font-weight:700;margin-bottom:10px;display:flex;justify-content:space-between'
     const closeBtn = el('button', 'ui-btn', '×')
     closeBtn.style.cssText = 'border:0;background:none;color:#8b93a7;font-size:15px;cursor:pointer'
-    closeBtn.onclick = () => overlay.remove()
+    closeBtn.onclick = () => { revoke(); overlay.remove() }
     header.appendChild(closeBtn)
     modal.appendChild(header)
-    const trimmed = text.trim()
-    if (trimmed.startsWith('<svg')) {
-      const container = el('div', 'ui-svg')
-      container.innerHTML = trimmed
-      modal.appendChild(container)
+    const contentType = (blob.type ?? '').toLowerCase()
+    const text = contentType.startsWith('text/') ? await blob.text() : undefined
+    const trimmed = text?.trim() ?? ''
+    const isSvg = contentType === 'image/svg+xml' || trimmed.startsWith('<svg')
+    const isHtml = contentType === 'text/html' || /^<!doctype html/i.test(trimmed) || trimmed.startsWith('<html')
+    if (isSvg) {
+      // SVG as <img src=blobUrl>: no script execution, no innerHTML (§15.4).
+      const url = URL.createObjectURL(blob)
+      blobUrls.push(url)
+      const img = document.createElement('img')
+      img.src = url
+      img.alt = artifactId
+      img.style.cssText = 'max-width:100%;max-height:60vh;background:#fff'
+      modal.appendChild(img)
+    } else if (isHtml) {
+      // HTML is untrusted markup: never innerHTML, download only (§15.4).
+      modal.appendChild(el('div', 'ui-warn', '⚠️ HTML preview is disabled for security (design §15.4) — download the file instead.'))
+      modal.appendChild(downloadLink(blob, artifactId))
+    } else if (contentType.startsWith('image/')) {
+      const url = URL.createObjectURL(blob)
+      blobUrls.push(url)
+      const img = document.createElement('img')
+      img.src = url
+      img.alt = artifactId
+      img.style.cssText = 'max-width:100%;max-height:60vh;background:#fff'
+      modal.appendChild(img)
+    } else if (contentType === 'application/pdf') {
+      const url = URL.createObjectURL(blob)
+      blobUrls.push(url)
+      const embed = document.createElement('embed')
+      embed.src = url
+      embed.type = 'application/pdf'
+      embed.style.cssText = 'width:100%;height:60vh'
+      modal.appendChild(embed)
+      modal.appendChild(downloadLink(blob, artifactId))
     } else {
-      const pre = el('pre', 'ui-pre', text.length > 6000 ? text.slice(0, 6000) + String.fromCharCode(10) + '… (truncated)' : text)
+      const content = text ?? (await blob.text())
+      const pre = el('pre', 'ui-pre', content.length > 6000 ? content.slice(0, 6000) + String.fromCharCode(10) + '… (truncated)' : content)
       pre.style.cssText = 'white-space:pre-wrap;word-break:break-all;font-family:monospace;font-size:11px;margin:0'
       modal.appendChild(pre)
     }
