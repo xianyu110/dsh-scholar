@@ -14,6 +14,26 @@
 const API = '/research-ui-api'
 
 /**
+ * Standalone-mode overrides: when running outside the DSH host (the
+ * standalone web plugin), the API base is the same-origin `/v1` proxy and
+ * the bridge token comes from a local login instead of the DSH boot
+ * manifest. Both default to the DSH-hosted values.
+ */
+let apiBase: string | undefined
+let tokenProvider: (() => Promise<string | undefined>) | undefined
+let overlayRoot: ShadowRoot | null = null
+
+export function setStandaloneBridge(options: {
+  base: string
+  token: () => Promise<string | undefined>
+  overlay: ShadowRoot
+}): void {
+  apiBase = options.base
+  tokenProvider = options.token
+  overlayRoot = options.overlay
+}
+
+/**
  * Bridge token bootstrap (design §15.3). Resolution order:
  * 1. `window.__DSH_BOOT__.researchUi.token` if the host injected one, else
  * 2. GET /research-ui-api/session-token (same-origin only; 404 when token
@@ -47,8 +67,16 @@ function resolveBridgeToken(): Promise<string | undefined> {
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
+  if (tokenProvider !== undefined) {
+    const token = await tokenProvider()
+    return token !== undefined && token !== '' ? { authorization: `Bearer ${token}` } : {}
+  }
   const token = await resolveBridgeToken()
   return token !== undefined ? { authorization: `Bearer ${token}` } : {}
+}
+
+function base(): string {
+  return apiBase ?? API
 }
 
 interface Projection {
@@ -168,7 +196,7 @@ function pill(status: string | undefined): HTMLElement {
 async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await fetch(`${API}${path}`, {
+      const response = await fetch(`${base()}${path}`, {
         ...init,
         headers: {
           ...(init?.headers as Record<string, string> | undefined),
@@ -204,34 +232,44 @@ let lastError: string | undefined
  */
 let rerender: () => void = () => {}
 
-export function apply(): void {
+export interface ApplyOptions {
+  /** Standalone full-page mode (the independent web plugin): the panel
+   * fills the viewport instead of floating over the DSH host page. */
+  fullscreen?: boolean
+}
+
+export function apply(options: ApplyOptions = {}): void {
+  const fullscreen = options.fullscreen === true
   const host = document.createElement('div')
   host.id = 'dsh-scholar-ui'
-  host.style.cssText = 'position:fixed;right:12px;bottom:64px;width:430px;max-height:min(76vh,760px);z-index:9999;font:12px/1.5 system-ui,sans-serif'
+  host.style.cssText = fullscreen
+    ? 'position:fixed;inset:0;z-index:9999;font:14px/1.5 system-ui,sans-serif'
+    : 'position:fixed;right:12px;bottom:64px;width:430px;max-height:min(76vh,760px);z-index:9999;font:12px/1.5 system-ui,sans-serif'
   const root = host.attachShadow({ mode: 'open' })
 
   const style = el('style')
   style.textContent = `
 :host { all: initial; }
 * { box-sizing: border-box; margin: 0; }
-.panel { display:flex; flex-direction:column; height:100%; max-height:inherit; background:#0e1320; color:#dbe2ee; border:1px solid #263049; border-radius:14px; overflow:hidden; box-shadow:0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.02) inset; font:12px/1.5 system-ui,sans-serif; }
-.header { display:flex; align-items:center; gap:8px; padding:11px 14px; background:linear-gradient(180deg,#151b2c,#101624); border-bottom:1px solid #232d45; }
-.header .logo { font-size:14px; filter:drop-shadow(0 0 6px rgba(77,159,255,.5)); }
-.header .title { font:700 13px/1 system-ui,sans-serif; color:#eef2fa; letter-spacing:.2px; }
+.panel { display:flex; flex-direction:column; height:100%; max-height:inherit; background:#0e1320; color:#dbe2ee; border:1px solid #263049; border-radius:${fullscreen ? 0 : 14}px; overflow:hidden; box-shadow:${fullscreen ? 'none' : '0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.02) inset'}; font:12px/1.5 system-ui,sans-serif; }
+${fullscreen ? '.panel { font-size:13px; }' : ''}
+.header { display:flex; align-items:center; gap:8px; padding:${fullscreen ? '14px 20px' : '11px 14px'}; background:linear-gradient(180deg,#151b2c,#101624); border-bottom:1px solid #232d45; }
+.header .logo { font-size:${fullscreen ? 18 : 14}px; filter:drop-shadow(0 0 6px rgba(77,159,255,.5)); }
+.header .title { font:700 ${fullscreen ? 15 : 13}px/1 system-ui,sans-serif; color:#eef2fa; letter-spacing:.2px; }
 .header .spacer { flex:1; }
 .hbtn { border:1px solid #2b3652; background:#182034; color:#aab6cc; border-radius:8px; padding:3px 9px; cursor:pointer; font:600 11px/1.6 system-ui,sans-serif; }
 .hbtn:hover { background:#1f2942; color:#eef2fa; border-color:#3a4a70; }
 .hbtn:active { transform:translateY(1px); }
 .hbtn.ghost { border:0; background:none; color:#76839c; font-size:15px; padding:2px 6px; }
 .hbtn.ghost:hover { color:#eef2fa; background:#182034; }
-.tabs { display:flex; gap:2px; padding:0 10px; background:#0f1522; border-bottom:1px solid #1f2940; }
-.tab { flex:1; border:0; background:none; color:#7c88a3; padding:9px 2px 8px; cursor:pointer; font:600 11px/1 system-ui,sans-serif; border-bottom:2px solid transparent; letter-spacing:.3px; }
+.tabs { display:flex; gap:2px; padding:0 ${fullscreen ? 20 : 10}px; background:#0f1522; border-bottom:1px solid #1f2940; }
+.tab { flex:1; border:0; background:none; color:#7c88a3; padding:${fullscreen ? '12px 2px 11px' : '9px 2px 8px'}; cursor:pointer; font:600 ${fullscreen ? 12 : 11}px/1 system-ui,sans-serif; border-bottom:2px solid transparent; letter-spacing:.3px; }
 .tab:hover { color:#c9d3e5; }
 .tab.active { color:#eef2fa; border-bottom-color:#4d9fff; }
-.body { flex:1; overflow-y:auto; padding:12px 14px 10px; scrollbar-width:thin; scrollbar-color:#2b3652 transparent; }
+.body { flex:1; overflow-y:auto; padding:${fullscreen ? '18px 22px 14px' : '12px 14px 10px'}; scrollbar-width:thin; scrollbar-color:#2b3652 transparent; }
 .body::-webkit-scrollbar { width:8px; }
 .body::-webkit-scrollbar-thumb { background:#2b3652; border-radius:4px; }
-.picker { width:100%; margin-bottom:11px; background:#151b2c; color:#dbe2ee; border:1px solid #2b3652; border-radius:9px; padding:6px 9px; font:600 11px/1.4 system-ui,sans-serif; outline:none; }
+.picker { width:100%; margin-bottom:11px; background:#151b2c; color:#dbe2ee; border:1px solid #2b3652; border-radius:9px; padding:${fullscreen ? '8px 11px' : '6px 9px'}; font:600 ${fullscreen ? 12 : 11}px/1.4 system-ui,sans-serif; outline:none; }
 .picker:focus { border-color:#4d9fff; }
 .section-label { font:700 10px/1.4 system-ui,sans-serif; color:#5d6b88; text-transform:uppercase; letter-spacing:1px; margin:14px 0 6px; }
 .section-label:first-child { margin-top:0; }
@@ -317,7 +355,15 @@ export function apply(): void {
   const close = el('button', 'hbtn ghost', '×')
   close.title = 'collapse'
   close.onclick = () => { panel.style.display = 'none' }
-  header.append(refresh, close)
+  if (fullscreen) {
+    // Standalone mode: an in-panel project creator (the DSH host provides
+    // /research new; the standalone web plugin must be self-sufficient).
+    const newBtn = el('button', 'hbtn', '＋ New Project')
+    newBtn.onclick = () => { openNewProjectModal(root) }
+    header.append(newBtn, refresh)
+  } else {
+    header.append(refresh, close)
+  }
   panel.appendChild(header)
 
   // ── tabs ──
@@ -367,7 +413,7 @@ export function apply(): void {
     }
     const target = projectId ?? projects[0]?.project_id
     if (target === undefined) {
-      body.replaceChildren(el('div', 'empty', 'No research projects yet — run /research new <name> in the session.'))
+      body.replaceChildren(el('div', 'empty', 'No research projects yet — create one with the ＋ New Project button.'))
       return
     }
     const projection = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
@@ -596,12 +642,12 @@ function downloadLink(blob: Blob, name: string): HTMLElement {
  */
 async function previewArtifact(artifactId: string): Promise<void> {
   try {
-    const response = await fetch(`${API}/v1/artifacts/${encodeURIComponent(artifactId)}`, {
+    const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(artifactId)}`, {
       headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
     })
     if (!response.ok) return
     const blob = await response.blob()
-    const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+    const root = overlayRoot ?? (document.querySelector('#dsh-scholar-ui')?.shadowRoot ?? null)
     if (root === undefined || root === null) return
     const overlay = el('div', 'overlay')
     const blobUrls: string[] = []
@@ -763,4 +809,106 @@ function budgetRow(label: string, value: number, max: number | undefined, prefix
   const val = el('span', 'budget-val', `${prefix}${value.toFixed(digits)}${max !== undefined ? ` / ${prefix}${max}` : ''}`)
   row.appendChild(val)
   return row
+}
+
+/* ─────────────────────────── standalone project creator ─────────────────────────── */
+
+/**
+ * Standalone web plugin: modal form that creates a project + Scope Gate via
+ * the same kernel API the /research new command uses. Rendered with
+ * textContent-only inputs (no HTML sinks, design §15.4).
+ */
+function openNewProjectModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+
+  const header = el('div', 'modal-header', '＋ New Research Project')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const field = (label: string, placeholder: string, value = ''): HTMLInputElement => {
+    const lab = el('label', 'section-label', label)
+    lab.style.cssText = 'display:block;margin:10px 0 4px'
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.placeholder = placeholder
+    input.value = value
+    input.style.cssText = 'width:100%;background:#151b2c;color:#dbe2ee;border:1px solid #2b3652;border-radius:8px;padding:7px 10px;font:12px/1.4 system-ui,sans-serif;outline:none'
+    input.onfocus = () => { input.style.borderColor = '#4d9fff' }
+    input.onblur = () => { input.style.borderColor = '#2b3652' }
+    modal.appendChild(lab)
+    modal.appendChild(input)
+    return input
+  }
+
+  const nameInput = field('Project name', 'e.g. shift-localization')
+  const problemInput = field('Problem statement', 'e.g. Does uncertainty weighting help under domain shift?')
+  const metricInput = field('Primary metric', 'e.g. mAP@0.5')
+
+  const err = el('div', 'error-banner')
+  err.style.cssText = 'display:none;margin-top:10px'
+  modal.appendChild(err)
+
+  const actions = el('div', 'row')
+  actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
+  const cancel = el('button', 'hbtn', 'Cancel')
+  cancel.onclick = () => overlay.remove()
+  const create = el('button', 'btn approve', 'Create Project')
+  create.style.cssText = 'padding:7px 18px'
+  create.onclick = async () => {
+    const name = nameInput.value.trim()
+    if (name === '') {
+      err.textContent = 'Project name is required.'
+      err.style.display = 'block'
+      return
+    }
+    err.style.display = 'none'
+    create.disabled = true
+    create.textContent = 'Creating…'
+    const project = await api<{ project_id?: string; status?: string }>('/v1/projects', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        workspace: `/research/${name}`,
+        brief: {
+          problem: problemInput.value.trim() || 'To be specified in the Scope Gate.',
+          scope: 'To be specified in the Scope Gate.',
+          questions: [],
+          primary_metrics: metricInput.value.trim() !== '' ? [metricInput.value.trim()] : [],
+          resources: '',
+          risks: [],
+          target_outputs: ['conference-paper'],
+          target_venue: null,
+          baseline_repo: null,
+          domain: 'machine-learning',
+        },
+        mode: 'gate-only',
+      }),
+    })
+    if (project === null || project.project_id === undefined) {
+      err.textContent = 'Create failed — is the kernel reachable?'
+      err.style.display = 'block'
+      create.disabled = false
+      create.textContent = 'Create Project'
+      return
+    }
+    // Scope Gate, exactly like /research new.
+    await api(`/v1/projects/${encodeURIComponent(project.project_id)}/gates`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'scope', title: `Scope Gate — ${name}`, summary: 'Approve the research scope, data policy, budget and target venue.' }),
+    })
+    projectId = project.project_id
+    overlay.remove()
+    rerender()
+  }
+  actions.append(cancel, create)
+  modal.appendChild(actions)
+
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  nameInput.focus()
 }

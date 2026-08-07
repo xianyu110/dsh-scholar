@@ -14,6 +14,32 @@
 
 ## 2. 启动专属科研 GUI
 
+### 2a. 完全独立的 Web 插件(推荐,不依赖 dsh web)
+
+**不启动任何 `dsh web` 进程**——research-ui 包自带 HTTP server、kernel
+sidecar 和全屏界面,从零到可用只跑一个命令:
+
+```bash
+cd /home/dev/Desktop/dsh-scholar
+bash scripts/start-standalone-ui.sh    # http://127.0.0.1:18610
+```
+
+- 首次启动会生成访问 token,打印在终端并保存到
+  `~/.dsh-scholar-standalone/research-ui-standalone/standalone-token`;
+- 浏览器打开 **http://127.0.0.1:18610**,粘贴 token 解锁(存 localStorage);
+- 界面包含 **＋ New Project**(创建项目 + Scope Gate)、Phase 流水线、
+  Gates(人类 Approve/Reject)、Runs、Artifacts、Evidence、Budget;
+- 数据保存在 `~/.dsh-scholar-standalone/`,与生产/测试实例完全隔离;
+- 端口可用环境变量覆盖:`DSH_SCHOLAR_STANDALONE_PORT`(默认 18610)、
+  `DSH_SCHOLAR_STANDALONE_KERNEL_PORT`(默认 17413)、
+  `DSH_SCHOLAR_STANDALONE_DATA`(默认 `~/.dsh-scholar-standalone`)。
+
+> 认证与安全:所有 `/v1/*` 请求要求 `Authorization: Bearer <token>`;
+> 非 GET 请求做同源 CSRF 校验;body 上限 16 MiB——与 DSH 桥接同款姿态
+> (design §15.2/§15.3)。`--no-token` 可关闭(仅回环,不推荐)。
+
+### 2b. 测试实例(嵌入 dsh web 的面板版)
+
 ```bash
 cd /home/dev/Desktop/dsh-scholar
 bash scripts/start-test-dsh.sh        # 幂等:初始化 profile + 安装插件 + 启动
