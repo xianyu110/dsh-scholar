@@ -1,0 +1,45 @@
+{
+  "name": "@dsh-scholar/research-ui",
+  "version": "0.1.0",
+  "description": "DSH Research OS — standalone GUI plugin: phase/gates/budget/runs/artifacts/evidence panels with gate approval interactions (design E7, docs/gui-plugin-plan.md). Ships its own kernel sidecar + /research-ui-api bridge, so it works alone or alongside the main plugin.",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "private": true,
+  "main": "lib/host/index.js",
+  "types": "lib/host/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/host/index.d.ts",
+      "import": "./lib/host/index.js",
+      "default": "./lib/host/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshClient": {
+    "inject": [],
+    "platform": "web"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown --config tsdown.config.ts && node ../../scripts/verify-research-ui-bundle.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@dsh-scholar/research-kernel": "file:../research-kernel"
+  },
+  "peerDependencies": {
+    "cordis": ">=4.0.0-rc.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsdown": "0.22.2",
+    "typescript": "^5.7.0"
+  }
+}

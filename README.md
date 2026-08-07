@@ -103,11 +103,18 @@ plugins/research-core/.dsh-plugin  repository-plugin 静态 skill 包(GitHub 可
 web :3081, kernel :17412)启动第二个 DSH 用于测试本项目,与生产 GUI(:3080)
 互不影响。详见 `docs/test-instance-plan.md`。
 
+## 独立 GUI 插件(已实现)
+
+`packages/dsh-research-ui` — 独立安装的标签页 GUI 插件:Phase/Gates(面板内
+审批)/Runs/Artifacts/Evidence/Budget,自带 kernel sidecar 与
+`/research-ui-api` 桥,可与主插件并存(实测:测试实例 3081 双插件+双 kernel)。
+安装:`dsh plugin --profile web add packages/dsh-research-ui`。
+需求与设计记录:`docs/gui-plugin-plan.md`。
+
 ## Roadmap / 已登记需求
 
-- **独立 GUI 插件**(已登记):当前 E7 面板为内嵌轻量 client module;后续拆分为
-  `packages/dsh-research-ui` 独立 client-plugin(React 槽位 + RPC + Gate 交互 +
-  Runs/Artifacts/Evidence 面板),详见 `docs/gui-plugin-plan.md`。
+- **GUI 面板增强**(已登记):React + slots 槽位集成、主题/i18n、Runs 取消按钮、
+  artifact 预览。
 
 ## 状态
 

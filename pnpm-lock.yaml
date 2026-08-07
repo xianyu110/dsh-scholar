@@ -49,6 +49,25 @@ importers:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@24.13.3)(tsx@4.23.8)
 
+  packages/dsh-research-ui:
+    dependencies:
+      '@dsh-scholar/research-kernel':
+        specifier: file:../research-kernel
+        version: link:../research-kernel
+      cordis:
+        specifier: '>=4.0.0-rc.7'
+        version: 4.0.0-rc.7
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      tsdown:
+        specifier: 0.22.2
+        version: 0.22.2(tsx@4.23.8)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   packages/research-client:
     dependencies:
       '@dsh-scholar/research-schemas':

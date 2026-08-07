@@ -1,9 +1,9 @@
-# 需求:DSH Research OS 独立 GUI 插件(后续阶段)
+# 需求:DSH Research OS 独立 GUI 插件(已实现)
 
-> 状态:**需求已登记**(2026-08-07)。当前 MVP 已内嵌一个轻量面板
-> (见下「现状」),本文件定义后续将其独立为完整 GUI 插件的需求与路径。
-> 关联设计文档:§4.1 工具面、§5.2 Gate 设计(Web 面板)、§8.2 目录
-> (`packages/dsh-research-ui`)、§10.3 E7 UI、§13.1 MVP DoD #2。
+> 状态:**已实现**(2026-08-07,`packages/dsh-research-ui`)。本文档保留为
+> 需求与设计记录;实现与验证见下文「实现记录」。关联设计文档:§4.1 工具面、
+> §5.2 Gate 设计(Web 面板)、§8.2 目录(`packages/dsh-research-ui`)、
+> §10.3 E7 UI、§13.1 MVP DoD #2。
 
 ## 1. 现状(已实现,内嵌)
 
@@ -72,7 +72,27 @@ packages/dsh-research-ui/        # 独立 client-plugin bundle(platform: web)
 - [ ] 独立包可单独构建/发布;卸载后主插件功能不受影响;
 - [ ] headless 模式不受影响(无 httpServer 时面板/桥自动跳过)。
 
-## 3. 排期建议
+## 3. 实现记录(2026-08-07,已完成 M1-M3 务实版)
+
+| 里程碑 | 实现 | 验证 |
+|---|---|---|
+| M1 骨架+构建+面板 | `packages/dsh-research-ui`:host 半(独立 kernel sidecar + `/research-ui-api` 桥)+ client(标签页:Phase/Gates/Runs/Artifacts/Evidence/Budget),tsdown 打包 `lib/client.js` + bundle verify | 构建 ✓,boot manifest 自动加载 ✓ |
+| M2 全量面板 | 六个标签页全部由 Kernel 投影/API 驱动;项目下拉选择;8s 轮询 | 测试实例实测 ✓ |
+| M3 Gate 交互 | 面板内 Approve/Reject 按钮 → `decideGate`(CAS 原子,actor=web-user,reason 可追溯) | 实测:approve→SCOPED、reject 记录 ✓ |
+
+**双插件共存**:主插件(kernel :17412,/research-api)与 UI 包(独立 kernel
+:17413,/research-ui-api)在测试实例同时安装运行,互不冲突;sidecar 有
+"复用健康 kernel"逻辑,配置同端口时可共享。
+
+**依赖**:UI 包独立可用(自带 kernel+桥);推荐与主插件同装以使用工具/命令面。
+面板决策写入 Kernel Decision 账本 + 事件 outbox;SessionEvent 层面的同步
+通过会话内工具调用完成(面板本身是 Web 交互,不经 agent loop)。
+
+## 4. 后续增强(登记)
+- React + `ctx.slots` 槽位集成(替换原生 DOM 面板,进入 conversation 布局);
+- 主题/i18n;Runs 面板取消按钮;artifact 预览(SVG 图表内嵌)。
+
+## 5. 排期建议(已并入实现)
 | 里程碑 | 内容 |
 |---|---|
 | M1 | 独立包骨架 + tsdown 构建 + 槽位注册 + phase/gates 面板 |
