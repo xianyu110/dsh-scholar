@@ -96,6 +96,12 @@ plugins/research-core/.dsh-plugin  repository-plugin 静态 skill 包(GitHub 可
   默认未批准,不存在自动发布路径。
 - 外部文献文本一律视为不可信数据。
 
+## Roadmap / 已登记需求
+
+- **独立 GUI 插件**(已登记):当前 E7 面板为内嵌轻量 client module;后续拆分为
+  `packages/dsh-research-ui` 独立 client-plugin(React 槽位 + RPC + Gate 交互 +
+  Runs/Artifacts/Evidence 面板),详见 `docs/gui-plugin-plan.md`。
+
 ## 状态
 
 已实现并验证:E0/E1(插件/持久项目)、E2(学术连接器+快照)、E3(Idea+

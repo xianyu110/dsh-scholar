@@ -19,8 +19,11 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && pnpm -r --filter './packages/*' --filter './workers/*' run build",
-    "test": "vitest run",
+    "build": "pnpm run build:plugin && pnpm -r --filter './packages/*' --filter './workers/*' run build",
+    "build:plugin": "tsc -p tsconfig.json && pnpm run bundle:client",
+    "bundle:client": "tsdown --config tsdown.client.config.ts && pnpm run verify:client-bundle",
+    "verify:client-bundle": "node scripts/verify-client-bundle.mjs",
+    "test": "pnpm run build:plugin && vitest run",
     "test:watch": "vitest",
     "test:fault": "bash tests/fault-injection/run-fault-tests.sh",
     "lint": "tsc --noEmit",
@@ -41,6 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "tsdown": "0.22.2",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
@@ -53,7 +57,7 @@
       "default": "./lib/index.js"
     },
     "./client": {
-      "default": "./lib/client-panel.js"
+      "default": "./lib/client.js"
     },
     "./package.json": "./package.json"
   },
