@@ -96,6 +96,12 @@ plugins/research-core/.dsh-plugin  repository-plugin 静态 skill 包(GitHub 可
   默认未批准,不存在自动发布路径。
 - 外部文献文本一律视为不可信数据。
 
+## 独立测试实例
+
+`bash scripts/start-test-dsh.sh` 在完全隔离的 DSH 环境(`~/.dsh-scholar-test`,
+web :3081, kernel :17412)启动第二个 DSH 用于测试本项目,与生产 GUI(:3080)
+互不影响。详见 `docs/test-instance-plan.md`。
+
 ## Roadmap / 已登记需求
 
 - **独立 GUI 插件**(已登记):当前 E7 面板为内嵌轻量 client module;后续拆分为
