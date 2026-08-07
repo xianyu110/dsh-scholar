@@ -81,6 +81,30 @@ for _ in $(seq 1 60); do
   curl -sf -m 2 "http://127.0.0.1:$WEB_PORT" > /dev/null 2>&1 && break
   sleep 1
 done
+
+# 6. Wait for BOTH kernels (main plugin sidecar + research-ui sidecar).
+#    Both may open the same SQLite DB; a cold start can race on the
+#    migration write-lock, leaving the main kernel dead while the web
+#    process itself looks healthy — /research then hangs with no response.
+#    Detect that here instead of letting it surface as "no reaction".
+for _ in $(seq 1 30); do
+  K1=$(curl -sf -m 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" > /dev/null 2>&1 && echo ok || echo down)
+  K2=$(curl -sf -m 1 "http://127.0.0.1:7412/v1/health" > /dev/null 2>&1 && echo ok || echo down)
+  [ "$K1" = ok ] && [ "$K2" = ok ] && break
+  sleep 1
+done
+if [ "$K1" != ok ] || [ "$K2" != ok ]; then
+  echo ""
+  echo "WARNING: kernel(s) not healthy after startup:"
+  echo "  main plugin kernel  :$KERNEL_PORT -> $K1"
+  echo "  research-ui kernel  :7412         -> $K2"
+  echo "  web log tail:"
+  tail -20 "$TEST_HOME/test-web.log" 2>/dev/null || true
+  echo ""
+  echo "If :$KERNEL_PORT is down, restart once more (cold-start DB lock race):"
+  echo "  pkill -f 'apps/cli/src/bin.ts web'; pkill -f 'research-kernel/lib/bin/kernel.js'; sleep 2; bash scripts/start-test-dsh.sh"
+fi
+
 echo ""
 echo "verification:"
 echo "  curl -s http://127.0.0.1:$WEB_PORT/research-api/v1/health"
