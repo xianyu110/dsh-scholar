@@ -77,3 +77,68 @@ jobs:
         run: sudo apt-get install -y texlive-latex-base texlive-latex-recommended
       - name: §14.3 / §19.2 latex-compiles blocking test
         run: bash tests/security/run-latex-tests.sh
+
+  docker-eval:
+    needs: unit-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone sub-packages
+        run: |
+          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+      - name: Docker isolation eval (blocking)
+        run: bash evals/docker-eval.sh
+
+  golden-path-v2:
+    needs: unit-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone sub-packages
+        run: |
+          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+      - name: Golden Path v2 real-execution eval (blocking)
+        run: bash evals/golden-path-v2/run-golden-v2.sh
+
+  clean-room:
+    needs: unit-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone sub-packages
+        run: |
+          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+      - name: Clean-room rerun eval (blocking)
+        run: bash evals/clean-room-rerun.sh
+      - name: Golden-path e2e (docker)
+        run: bash tests/e2e/golden-path.sh
