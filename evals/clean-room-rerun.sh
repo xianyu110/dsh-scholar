@@ -25,7 +25,8 @@ say "clean-room rerun: fresh kernel + runner, no inherited context"
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KERNEL_PID=$!
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done
-nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner clean-room --poll-ms 200 > "$WORK/runner.log" 2>&1 &
+if ! docker info > /dev/null 2>&1; then echo "clean-room-rerun requires docker"; exit 2; fi
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner clean-room --poll-ms 200 --mode docker > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
 sleep 0.5
 
@@ -34,9 +35,9 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"clean-ro
 ok "fresh project $PROJ created in clean room"
 
 # baseline + 2 formal runs with deterministic metrics
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"cr-baseline","kind":"baseline","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8000,\"seed\":0}"}}' > /dev/null
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"cr-formal-1","kind":"formal","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8123,\"seed\":11}"}}' > /dev/null
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"cr-formal-2","kind":"formal","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8245,\"seed\":23}"}}' > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'cr-baseline', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8000, seed: 0}) + \"'\"}}))")" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'cr-formal-1', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8123, seed: 11}) + \"'\"}}))")" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'cr-formal-2', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8245, seed: 23}) + \"'\"}}))")" > /dev/null
 for _ in $(seq 1 60); do
   N=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded').length)})")
   [[ "$N" == "3" ]] && break
@@ -56,16 +57,16 @@ rm -rf "$WORK/kernel.db" "$WORK/kernel.db-wal" "$WORK/kernel.db-shm"
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel2.log" 2>&1 &
 KERNEL_PID=$!
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done
-nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner clean-room-2 --poll-ms 200 > "$WORK/runner2.log" 2>&1 &
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner clean-room-2 --poll-ms 200 --mode docker > "$WORK/runner2.log" 2>&1 &
 RUNNER_PID=$!
 sleep 0.5
 ok "fresh kernel booted (old DB deleted); CAS artifacts still readable"
 
 # 4. Replay the bundle: re-create project + jobs with the SAME payloads.
 PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"clean-room-rerun\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d '{"idempotency_key":"rerun-baseline","kind":"baseline","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8000,\"seed\":0}"}}' > /dev/null
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d '{"idempotency_key":"rerun-formal-1","kind":"formal","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8123,\"seed\":11}"}}' > /dev/null
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d '{"idempotency_key":"rerun-formal-2","kind":"formal","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8245,\"seed\":23}"}}' > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'rerun-baseline', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8000, seed: 0}) + \"'\"}}))")" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'rerun-formal-1', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8123, seed: 11}) + \"'\"}}))")" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'rerun-formal-2', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8245, seed: 23}) + \"'\"}}))")" > /dev/null
 for _ in $(seq 1 60); do
   N=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded').length)})")
   [[ "$N" == "3" ]] && break

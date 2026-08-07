@@ -21,25 +21,26 @@ api() { curl -sf -H 'content-type: application/json' "$@"; }
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KERNEL_PID=$!
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done
-nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner eval-baseline --poll-ms 150 > "$WORK/runner.log" 2>&1 &
+if ! docker info > /dev/null 2>&1; then echo "baseline-eval requires docker (formal jobs are container-only)"; exit 2; fi
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner eval-baseline --poll-ms 150 --mode docker > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
 sleep 1
 
 BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":"https://github.com/example/baseline","domain":"machine-learning"}'
 
 reproduce() { # <idempotency> <metric-value>
-  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"$1\",\"kind\":\"baseline\",\"payload\":{\"message\":\"{\\\"metric\\\":\\\"f1\\\",\\\"value\\\":$2,\\\"seed\\\":0}\"}}" > /dev/null
+  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: process.argv[1], kind: 'smoke', payload: { script: \"echo '\" + JSON.stringify({metric: 'f1', value: Number(process.argv[2]), seed: 0}) + \"'\" }}))" "$1" "$2")" > /dev/null
 }
 
 verify() { # <job-key> <expected> <tolerance>
-  PORT="$PORT" PROJ="$PROJ" api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | PORT="$PORT" EXPECTED="$2" TOLERANCE="$3" node --input-type=module -e "
+  PORT="$PORT" PROJ="$PROJ" api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | PORT="$PORT" PROJ="$PROJ" EXPECTED="$2" TOLERANCE="$3" node --input-type=module -e "
     let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{
       const jobs=JSON.parse(d)
       const job=jobs.find(x=>x.idempotency_key==='$1')
       if(!job){console.log('no job');process.exit(1)}
       const art=job.run_manifest?.metrics_artifact
       if(!art){console.log('no metrics artifact');process.exit(1)}
-      const res=await fetch('http://127.0.0.1:'+process.env.PORT+'/v1/artifacts/'+encodeURIComponent(art))
+      const res=await fetch('http://127.0.0.1:'+process.env.PORT+'/v1/artifacts/'+encodeURIComponent(art)+'?project_id='+process.env.PROJ)
       const txt=await res.text()
       const parsed=JSON.parse(txt)
       const m=(parsed.metrics||[]).find(x=>x.metric==='f1')

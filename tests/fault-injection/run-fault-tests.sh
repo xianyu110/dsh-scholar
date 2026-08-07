@@ -45,7 +45,8 @@ BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resour
 say "Test 1: kill -9 kernel between transitions → restart → state intact"
 start_kernel boot1 || { bad "kernel failed to start"; exit 1; }
 PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"fault1\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"session_id\":\"s1\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"SCOPED","expected_revision":0}' > /dev/null
+GATE1=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -H 'content-type: application/json' -d '{"type":"scope","title":"Scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE1/decisions" -d '{"actor":"human-pi","principal":{"principal_id":"u1"},"decision":"approved"}' > /dev/null
 stop_kernel
 start_kernel boot2 || { bad "kernel failed to restart"; exit 1; }
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
