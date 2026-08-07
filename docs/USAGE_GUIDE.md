@@ -140,6 +140,15 @@ Agent 工具只有 `research_gate_request`(创建/列出);`research_phase` 不�
 ```
 无人值守不会阻塞:遇到 Gate 时项目进入 BLOCKED_GATE,等待人类在 GUI 处理。
 
+**一键 10 步完整演示**(连接测试实例 kernel `:17412` + 独立 docker runner,
+自动跑完:项目/Scope Gate→人类审批→文献快照→Idea/反查重→Idea Gate→
+baseline 代码归档+容器复现→Contract 冻结→3 seeds 正式执行→分析/Evidence/
+Claim→论文/评审/复现包/Release Gate,14 项断言全绿):
+
+```bash
+timeout 400 bash evals/demo-full-flow.sh
+```
+
 ## 6. 常见问题
 
 | 问题 | 处理 |
