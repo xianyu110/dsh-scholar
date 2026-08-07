@@ -111,8 +111,11 @@ web :3081, kernel :17412)启动第二个 DSH 用于测试本项目,与生产 GUI
 
 ## 状态
 
-已实现并验证:E0/E1(插件/持久项目)、E2(学术连接器+快照)、E3(Idea+
-新颖性+并行 Idea Panel)、E4(Runner/Contract/Baseline/正式运行)、E5(统计
-分析+Claim+图表)、E6(确定性论文/评审/复现包)、E7(Web 面板:阶段/Gate/
-预算/Runs/Artifacts/Evidence)、E8 主体(100 次故障注入压力、clean-room
-rerun、安全基线)。Team/Cluster 部署(§9.2)与多模型路由(§8.5)为演进项。
+设计文档 13.1 MVP DoD 十项全部达成并有测试证据:E0/E1(插件/持久项目)、
+E2(学术连接器+快照+passage+去重)、E3(Idea+新颖性+Pareto+并行面板)、
+E4(Runner/Contract/Baseline/正式运行)、E5(统计分析+Claim+图表)、E6
+(确定性论文+评审+BibTeX+复现包)、E7(Web 面板:阶段/Gate/预算/Runs/
+Artifacts/Evidence)、E8(安全测试、100 次故障压力、clean-room rerun、
+成本计量、评测体系)。已登记后续需求:独立 GUI 插件包
+(`docs/gui-plugin-plan.md`);演进项:Team/Cluster 部署(§9.2)、docker
+Runner 实测(本机无容器运行时)。
