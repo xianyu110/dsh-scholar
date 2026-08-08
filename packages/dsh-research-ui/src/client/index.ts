@@ -1797,6 +1797,8 @@ function renderSidebar(
  * Clicking a message opens the dsh-web "details" side panel.
  */
 let chatDetailIndex = -1
+/** Chat transcript search (dsh-web session search feel). */
+let chatSearchQuery = ''
 
 async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const shell = el('div')
@@ -1804,13 +1806,38 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
 
   const column = el('div')
   column.style.cssText = 'flex:1;display:flex;flex-direction:column;min-width:0'
+
+  // Transcript search box (dsh-web "Search sessions" on the chat itself):
+  // filters which messages are shown; matches are highlighted.
+  const searchRow = el('div')
+  searchRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:8px'
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.placeholder = '🔍 Search conversation…'
+  searchInput.value = chatSearchQuery
+  searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none'
+  searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
+  searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
+  searchInput.oninput = () => { chatSearchQuery = searchInput.value; rerender() }
+  const clearSearch = el('button', 'hbtn', '×')
+  clearSearch.title = 'clear search'
+  clearSearch.style.cssText = 'padding:0 7px'
+  clearSearch.onclick = () => {
+    chatSearchQuery = ''
+    rerender()
+  }
+  searchRow.append(searchInput, clearSearch)
+  column.appendChild(searchRow)
+
   const stream = el('div')
   stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
   if (chatMessages.length === 0) {
     chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
   }
+  const searchQ = chatSearchQuery.trim().toLowerCase()
   for (let i = 0; i < chatMessages.length; i++) {
     const msg = chatMessages[i]!
+    if (searchQ !== '' && !msg.text.toLowerCase().includes(searchQ)) continue
     const bubble = el('div')
     bubble.style.cssText = msg.role === 'user'
       ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;word-break:break-word;font-size:12px;cursor:pointer'
@@ -1851,6 +1878,11 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       : 'align-self:flex-start;color:var(--text-3);font-size:9px;margin-top:-4px'
     stamp.textContent = msg.time
     stream.appendChild(stamp)
+  }
+  if (searchQ !== '' && stream.childElementCount === 0) {
+    const empty = el('div', 'empty', `No messages match "${chatSearchQuery.trim()}".`)
+    empty.style.cssText = 'padding:10px 2px'
+    stream.appendChild(empty)
   }
   // dsh-web behavior: always scroll to the newest message.
   stream.scrollTop = stream.scrollHeight
@@ -1914,30 +1946,45 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     input.style.height = 'auto'
     input.style.height = `${Math.min(input.scrollHeight, 120)}px`
   }
-  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
-  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  input.onfocus = () => {
+    input.style.borderColor = 'var(--accent)'
+    if (input.value.trim().startsWith('/')) renderCompletions(true)
+  }
+  input.onblur = () => {
+    input.style.borderColor = 'var(--border)'
+    completionBox.style.display = 'none'
+    completionOpen = false
+  }
   input.oninput = () => {
     chatDraft = input.value
     autosize()
     renderCompletions()
   }
-  // dsh-web "/" command completion: a small suggestion list under the
-  // composer while the draft starts with "/" (or "/research ").
+  // dsh-web "/" command completion: typing "/" (or focusing with "/")
+  // opens the command palette under the composer; typing filters it.
   const completionBox = el('div')
-  completionBox.style.cssText = 'display:none;flex-direction:column;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);overflow:hidden'
-  const renderCompletions = (): void => {
+  completionBox.style.cssText = 'display:none;flex-direction:column;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);overflow:hidden;max-height:40vh;overflow-y:auto'
+  let completionOpen = false
+  const renderCompletions = (force = false): void => {
     const draft = input.value.trim()
     const match = /^\/(?:research\s+)?([a-z]*)$/i.exec(draft)
-    if (match === null || draft.startsWith('/research ')) {
+    const shouldOpen = (force || completionOpen) && (match !== null || draft.startsWith('/research '))
+    if (!shouldOpen) {
       completionBox.style.display = 'none'
+      completionOpen = false
       return
     }
-    const prefix = (match[1] ?? '').toLowerCase()
-    const hits = CHAT_COMMANDS.filter(([name]) => name.startsWith(prefix)).slice(0, 7)
+    const prefix = (match?.[1] ?? '').toLowerCase()
+    // With no prefix show the whole palette; with a prefix filter it.
+    const hits = prefix === ''
+      ? CHAT_COMMANDS.slice(0, 10)
+      : CHAT_COMMANDS.filter(([name]) => name.startsWith(prefix)).slice(0, 10)
     if (hits.length === 0) {
       completionBox.style.display = 'none'
+      completionOpen = false
       return
     }
+    completionOpen = true
     completionBox.replaceChildren()
     for (const [name, line] of hits) {
       const row = el('button')
