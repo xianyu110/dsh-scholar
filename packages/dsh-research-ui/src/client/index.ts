@@ -1080,6 +1080,28 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     if (ideas.length > 5) card.appendChild(el('div', 'muted', `… and ${ideas.length - 5} more`))
     body.appendChild(card)
   }
+  // dsh-web data panel: ExperimentContracts of this project.
+  if (projectId !== undefined && (p.counts?.contracts ?? 0) > 0) {
+    const contracts = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/contracts`)) ?? []
+    body.appendChild(el('div', 'section-label', `Contracts (${contracts.length})`))
+    const card = el('div', 'card')
+    for (const c of contracts.slice(0, 5)) {
+      const row = el('div', 'row')
+      row.style.cssText = 'padding:4px 0;align-items:flex-start'
+      row.appendChild(el('span', 'artifact-kind', String(c.status ?? '?')))
+      const bodyEl = el('div', 'grow')
+      bodyEl.style.cssText = 'min-width:0'
+      const title = el('div', '', `${String((c as Record<string, unknown>).methods?.baseline ?? '?')} vs ${String((c as Record<string, unknown>).methods?.treatment ?? '?')}`)
+      title.style.cssText = 'font-size:11.5px;color:var(--text)'
+      const id = el('div', 'muted mono', fmtId(String(c.contract_id ?? '')))
+      id.style.cssText = 'font-size:9px'
+      bodyEl.append(title, id)
+      row.appendChild(bodyEl)
+      card.appendChild(row)
+    }
+    if (contracts.length > 5) card.appendChild(el('div', 'muted', `… and ${contracts.length - 5} more`))
+    body.appendChild(card)
+  }
   if (history.length > 0) {
     body.appendChild(el('div', 'section-label', 'Audit history'))
     for (const h of history) {
@@ -2610,6 +2632,8 @@ function showToast(root: ShadowRoot | null, text: string): void {
   const existing = root.querySelector('.toast')
   existing?.remove()
   const toast = el('div', 'toast', text)
+  toast.setAttribute('role', 'status')
+  toast.setAttribute('aria-live', 'polite')
   toast.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:10001;background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:99px;padding:6px 16px;font:600 11.5px/1.4 system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3);pointer-events:none;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
   root.appendChild(toast)
   setTimeout(() => toast.remove(), 2400)
@@ -2629,6 +2653,8 @@ function openNotificationsModal(root: ShadowRoot): void {
   header.appendChild(closeBtn)
   modal.appendChild(header)
   const list = el('div')
+  list.setAttribute('role', 'log')
+  list.setAttribute('aria-live', 'polite')
   list.style.cssText = 'max-height:46vh;overflow-y:auto'
   if (notifHistory.length === 0) {
     list.appendChild(el('div', 'empty', 'No notifications yet.'))
@@ -3588,7 +3614,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   exportChatBtn.title = 'export conversation as markdown'
   exportChatBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   exportChatBtn.onclick = () => {
-    const lines = ['# Research OS conversation', '', ...chatMessages.map(m => {
+    const activeName = chatSessions.find(x => x.id === chatActiveId)?.name ?? 'conversation'
+    const lines = [`# Research OS conversation — ${activeName}`, '', ...chatMessages.map(m => {
       const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**Research OS**'
       return `## ${role} · ${m.time}\n\n${m.text}\n`
     })]
