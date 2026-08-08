@@ -4148,6 +4148,13 @@ function openGlobalSearchModal(root: ShadowRoot): void {
     const count = el('div', 'muted', `${kindHits.length} hit(s) across ${projects.length} project(s) — ↑/↓ to select, Enter to open.`)
     count.style.cssText = 'margin-bottom:8px;font-size:11px'
     results.appendChild(count)
+    // dsh-web live counts: refresh the kind chips with the hit totals.
+    const kindTotals: Record<string, number> = { claim: 0, evidence: 0, artifact: 0 }
+    for (const h of hits) kindTotals[h.kind] = (kindTotals[h.kind] ?? 0) + 1
+    chipsRow.querySelectorAll('button').forEach((b, i) => {
+      const [key, label] = GS_KINDS[i]!
+      b.textContent = key === 'all' ? `All (${hits.length})` : `${label} (${kindTotals[key] ?? 0})`
+    })
     for (let i = 0; i < kindHits.length; i++) {
       const h = kindHits[i]!
       const row = el('div')
