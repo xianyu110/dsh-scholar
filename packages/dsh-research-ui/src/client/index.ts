@@ -4285,6 +4285,26 @@ function openGlobalSearchModal(root: ShadowRoot): void {
         tabSave()
         rerender()
       }
+      // dsh-web context menu: copy the hit or open its project.
+      row.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const ctxRoot = rootHost()
+        if (ctxRoot === null) return
+        openContextMenu(ctxRoot, event.clientX, event.clientY, [
+          { label: '⧉ Copy text', onPick: () => copyText(h.text) },
+          {
+            label: 'Open project',
+            onPick: () => {
+              overlay.remove()
+              projectId = h.projectId
+              activeTab = h.kind === 'artifact' ? 'artifacts' : 'evidence'
+              tabSave()
+              rerender()
+            },
+          },
+        ])
+      }
       rowEls.push(row)
       results.appendChild(row)
     }
