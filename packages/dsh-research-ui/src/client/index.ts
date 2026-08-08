@@ -119,9 +119,9 @@ function readTheme(): 'light' | 'dark' {
   }
 }
 
-function writeTheme(theme: 'light' | 'dark'): void {
+function writeTheme(theme: 'light' | 'dark' | string | undefined): void {
   try {
-    localStorage.setItem(THEME_KEY, theme)
+    localStorage.setItem(THEME_KEY, theme === 'dark' ? 'dark' : 'light')
   } catch { /* private mode */ }
 }
 
@@ -850,7 +850,8 @@ export function apply(): void {
   const tabs = el('div', 'tabs')
   tabs.setAttribute('role', 'tablist')
   tabs.setAttribute('aria-label', 'Research workspace sections')
-  const TAB_GROUPS = [
+  type TabDef = readonly [key: string, label: string, description: string]
+  const TAB_GROUPS: Array<{ label: string; tabs: TabDef[] }> = [
     {
       label: 'Research',
       tabs: [
@@ -999,11 +1000,11 @@ export function apply(): void {
     const now = Date.now()
     if (now - lastKernelCheck > 5000) {
       lastKernelCheck = now
-      const health = await api<{ ok?: boolean }>('/v1/health')
+      const health = await api<{ ok?: boolean; instance?: string }>('/v1/health')
       kernelOnline = health !== null && health.ok === true
       // dsh-web status dot: reflect bridge health immediately.
       kernelDot.style.background = kernelOnline ? 'var(--tone-green)' : 'var(--tone-red)'
-      kernelDot.title = kernelOnline ? `kernel connected · ${health.instance ?? ''} — click for settings` : 'kernel unreachable — click for settings'
+      kernelDot.title = kernelOnline ? `kernel connected · ${health?.instance ?? ''} — click for settings` : 'kernel unreachable — click for settings'
     }
     // Project list drives the standalone workspace sidebar.
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
@@ -1025,11 +1026,15 @@ export function apply(): void {
       body.prepend(banner)
     }
     const target = projectId ?? projects[0]?.project_id
-    let projection: Projection | null = null
+    type LoadedProjection = Projection & { project: NonNullable<Projection['project']> }
+    let projection: LoadedProjection | null = null
     if (target !== undefined) {
-      projection = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
-      if (projection === null || projection.project === undefined) projection = null
-      else projectId = projection.project.project_id
+      const fetched = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
+      if (fetched === null || fetched.project === undefined) projection = null
+      else {
+        projectId = fetched.project.project_id
+        projection = { ...fetched, project: fetched.project }
+      }
     }
     if (projection !== null && booting) booting = false
     syncTitle(projection?.project?.name)
@@ -1452,7 +1457,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       row.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openIdeaDetailModal(root, idea)
+        if (root != null) openIdeaDetailModal(root, idea)
       }
       // dsh-web drawer: one-click idea details.
       const ideaBtn = el('button', 'hbtn', '⧉')
@@ -1461,7 +1466,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       ideaBtn.onclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openIdeaDetailModal(root, idea)
+        if (root != null) openIdeaDetailModal(root, idea)
       }
       row.appendChild(ideaBtn)
       // dsh-web context menu: details / copy id.
@@ -1469,7 +1474,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
         event.preventDefault()
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root === null) return
+        if (root == null) return
         const iid = String(idea.idea_id ?? '')
         openContextMenu(root, event.clientX, event.clientY, [
           { label: '⧉ Details', onPick: () => openIdeaDetailModal(root, idea) },
@@ -1496,8 +1501,9 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       row.appendChild(el('span', 'artifact-kind', String(c.status ?? '?')))
       const bodyEl = el('div', 'grow')
       bodyEl.style.cssText = 'min-width:0'
-      const cRecord = c as Record<string, unknown>
-      const title = el('div', '', `${String(cRecord.methods?.baseline ?? '?')} vs ${String(cRecord.methods?.treatment ?? '?')}${typeof cRecord.version === 'number' ? ` · v${cRecord.version}` : ''}`)
+      const cRecord = c as Record<string, Record<string, unknown> | unknown>
+      const methods = (typeof cRecord.methods === 'object' && cRecord.methods !== null ? cRecord.methods : {}) as Record<string, unknown>
+      const title = el('div', '', `${String(methods.baseline ?? '?')} vs ${String(methods.treatment ?? '?')}${typeof cRecord.version === 'number' ? ` · v${cRecord.version}` : ''}`)
       title.style.cssText = 'font-size:11.5px;color:var(--text)'
       const id = el('div', 'muted mono', fmtId(String(c.contract_id ?? '')))
       id.style.cssText = 'font-size:9px'
@@ -1507,7 +1513,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       row.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openContractDetailModal(root, c)
+        if (root != null) openContractDetailModal(root, c)
       }
       // dsh-web drawer: one-click contract details.
       const contractBtn = el('button', 'hbtn', '⧉')
@@ -1516,7 +1522,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       contractBtn.onclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openContractDetailModal(root, c)
+        if (root != null) openContractDetailModal(root, c)
       }
       row.appendChild(contractBtn)
       // dsh-web context menu: details / copy id.
@@ -1524,7 +1530,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
         event.preventDefault()
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root === null) return
+        if (root == null) return
         const cid = String(c.contract_id ?? '')
         openContextMenu(root, event.clientX, event.clientY, [
           { label: '⧉ Details', onPick: () => openContractDetailModal(root, c) },
@@ -1776,7 +1782,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       event.preventDefault()
       event.stopPropagation()
       const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-      if (root === null) return
+      if (root == null) return
       const items: ContextMenuItem[] = []
       if (gate.gate_id !== undefined) {
         items.push({ label: 'Copy gate ID', hint: gate.gate_id, onPick: () => copyText(gate.gate_id!) })
@@ -1961,7 +1967,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       detailsBtn.onclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) void openJobDetailModal(root, job.job_id!)
+        if (root != null) void openJobDetailModal(root, job.job_id!)
       }
       row.appendChild(detailsBtn)
       // dsh-web "open terminal": jump to the Terminal tab for this run.
@@ -1993,7 +1999,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       event.stopPropagation()
       if (job.job_id === undefined) return
       const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-      if (root !== null) void openJobDetailModal(root, job.job_id)
+      if (root != null) void openJobDetailModal(root, job.job_id)
     }
     // dsh-web context menu: details / copy id / cancel.
     card.oncontextmenu = (event) => {
@@ -2001,7 +2007,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       event.stopPropagation()
       if (job.job_id === undefined) return
       const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-      if (root === null) return
+      if (root == null) return
       const jid = job.job_id
       const items: ContextMenuItem[] = [
         { label: '⧉ Details', onPick: () => { void openJobDetailModal(root, jid) } },
@@ -2236,7 +2242,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
         event.preventDefault()
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root === null || artifact.artifact_id === undefined) return
+        if (root == null || artifact.artifact_id === undefined) return
         const aid = artifact.artifact_id
         openContextMenu(root, event.clientX, event.clientY, [
           { label: '⧉ Preview', onPick: () => { void previewArtifact(aid) } },
@@ -2247,7 +2253,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       row.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openArtifactDetailModal(root, artifact)
+        if (root != null) openArtifactDetailModal(root, artifact)
       }
       listEl.appendChild(row)
     }
@@ -2332,7 +2338,7 @@ async function previewArtifact(artifactId: string): Promise<void> {
     if (!response.ok) return
     const blob = await response.blob()
     const root = overlayRoot ?? (document.querySelector('#dsh-scholar-ui')?.shadowRoot ?? null)
-    if (root === undefined || root === null) return
+    if (root == null) return
     const overlay = el('div', 'overlay')
     const blobUrls: string[] = []
     const revoke = (): void => { for (const url of blobUrls) URL.revokeObjectURL(url) }
@@ -2461,7 +2467,7 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       claimBtn.onclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openClaimDetailModal(root, claim)
+        if (root != null) openClaimDetailModal(root, claim)
       }
       top.appendChild(claimBtn)
       card.appendChild(top)
@@ -2469,14 +2475,14 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       card.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openClaimDetailModal(root, claim)
+        if (root != null) openClaimDetailModal(root, claim)
       }
       // dsh-web context menu: details / copy id.
       card.oncontextmenu = (event) => {
         event.preventDefault()
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root === null || claim.claim_id === undefined) return
+        if (root == null || claim.claim_id === undefined) return
         const cid = claim.claim_id
         openContextMenu(root, event.clientX, event.clientY, [
           { label: '⧉ Details', onPick: () => openClaimDetailModal(root, claim) },
@@ -2522,7 +2528,7 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       detailsBtn.onclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openEvidenceDetailModal(root, item)
+        if (root != null) openEvidenceDetailModal(root, item)
       }
       row.appendChild(detailsBtn)
       card.appendChild(row)
@@ -2560,14 +2566,14 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       card.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root !== null) openEvidenceDetailModal(root, item)
+        if (root != null) openEvidenceDetailModal(root, item)
       }
       // dsh-web context menu: details / copy id.
       card.oncontextmenu = (event) => {
         event.preventDefault()
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root === null || item.evidence_id === undefined) return
+        if (root == null || item.evidence_id === undefined) return
         const eid = item.evidence_id
         openContextMenu(root, event.clientX, event.clientY, [
           { label: '⧉ Details', onPick: () => openEvidenceDetailModal(root, item) },
@@ -2763,7 +2769,7 @@ function renderBudget(body: HTMLElement, p: Projection): void {
   detailBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
   detailBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-    if (root !== null) openBudgetDetailModal(root, p)
+    if (root != null) openBudgetDetailModal(root, p)
   }
   labelRow.appendChild(detailBtn)
   body.appendChild(labelRow)
@@ -2822,7 +2828,8 @@ function budgetRow(label: string, value: number, max: number | undefined, prefix
  * the same kernel API the /research new command uses. Rendered with
  * textContent-only inputs (no HTML sinks, design §15.4).
  */
-function openNewProjectModal(root: ShadowRoot): void {
+function openNewProjectModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -3020,7 +3027,7 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
     return
   }
   modal.removeChild(loading)
-  const proj = p.project
+  const proj = p.project as import('@dsh-scholar/research-schemas').ResearchProject
   const row = (label: string, value: string): void => {
     const r = el('div', 'row')
     r.style.cssText = 'padding:4px 0;align-items:flex-start'
@@ -3482,7 +3489,8 @@ const SHORTCUTS: Array<[string, string]> = [
 ]
 
 /** dsh-web shortcut reference modal. */
-function openShortcutsModal(root: ShadowRoot): void {
+function openShortcutsModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -3506,7 +3514,7 @@ function openShortcutsModal(root: ShadowRoot): void {
   root.appendChild(overlay)
 }
 
-const CHAT_COMMANDS: Array<[string, string]> = [
+const CHAT_COMMANDS: Array<[string, string, string]> = [
   ['help', '/research help', 'list every command with usage'],
   ['new', '/research new demo1', 'create a project + Scope Gate'],
   ['list', '/research list', 'list all projects'],
@@ -3534,7 +3542,8 @@ const CHAT_COMMANDS: Array<[string, string]> = [
  * reopenings of the palette. */
 let paletteQuery = ''
 
-function openCommandsModal(root: ShadowRoot): void {
+function openCommandsModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -3641,7 +3650,8 @@ function openCommandsModal(root: ShadowRoot): void {
  * endpoint), access token state, theme and conversation controls. Reads
  * live kernel health through the bridge.
  */
-async function openSettingsModal(root: ShadowRoot): Promise<void> {
+async function openSettingsModal(root: ShadowRoot | null | undefined): Promise<void> {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -3715,7 +3725,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
     const reveal = el('button', 'hbtn', 'Show')
     reveal.style.cssText = 'padding:1px 8px'
     reveal.onclick = async () => {
-      const t = await tokenProvider()
+      const t = await tokenProvider?.()
       tokValue.textContent = t ?? '(none)'
       reveal.remove()
     }
@@ -3723,8 +3733,8 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
     copyTok.title = 'copy token'
     copyTok.style.cssText = 'padding:1px 8px'
     copyTok.onclick = async () => {
-      const t = await tokenProvider()
-      if (t !== null && t !== undefined) copyText(t)
+      const t = await tokenProvider?.()
+      if (t != null) copyText(t)
     }
     tokRow.append(tokLabel, tokValue, reveal, copyTok)
     modal.appendChild(tokRow)
@@ -3837,7 +3847,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   accentSelect.value = currentAccent
   accentSelect.onchange = () => {
     accentSet(accentSelect.value)
-    const hostEl = document.querySelector('#dsh-scholar-ui')
+    const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
     const dark = hostEl?.dataset.theme === 'dark'
     const name = accentSelect.value
     const c = dark ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
@@ -3865,7 +3875,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   radiusSelect.value = currentRadius
   radiusSelect.onchange = () => {
     radiusSet(radiusSelect.value)
-    const hostEl = document.querySelector('#dsh-scholar-ui')
+    const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
     hostEl?.style.setProperty('--panel-radius', radiusValue())
     rerender()
   }
@@ -3888,7 +3898,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   textureSelect.value = currentTexture
   textureSelect.onchange = () => {
     textureSet(textureSelect.value)
-    const hostEl = document.querySelector('#dsh-scholar-ui')
+    const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
     if (hostEl !== null) hostEl.dataset.texture = textureValue()
     rerender()
   }
@@ -3994,7 +4004,8 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
 /* ─────────────────────────── about modal ─────────────────────────── */
 
 /** dsh-web "About": version, architecture and feature-surface summary. */
-function openAboutModal(root: ShadowRoot): void {
+function openAboutModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -4179,7 +4190,7 @@ function openContextMenu(root: ShadowRoot, x: number, y: number, items: ContextM
 function copyText(text: string): void {
   const confirm = (): void => {
     const root = rootHost()
-    if (root !== null) showToast(root, `Copied: ${text.length > 48 ? `${text.slice(0, 48)}…` : text}`)
+    if (root != null) showToast(root, `Copied: ${text.length > 48 ? `${text.slice(0, 48)}…` : text}`)
   }
   const fallback = (): void => {
     const ta = document.createElement('textarea')
@@ -4212,7 +4223,7 @@ function showToast(root: ShadowRoot | null, text: string): void {
   }
   notifPersist()
   notifUnread += 1
-  if (root === null) return
+  if (root == null) return
   const existing = root.querySelector('.toast')
   existing?.remove()
   const toast = el('div', 'toast', text)
@@ -4226,7 +4237,8 @@ function showToast(root: ShadowRoot | null, text: string): void {
 }
 
 /** dsh-web notification centre modal. */
-function openNotificationsModal(root: ShadowRoot): void {
+function openNotificationsModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   notifMarkRead()
   rerender()
   const overlay = el('div', 'overlay')
@@ -4318,7 +4330,8 @@ function openNotificationsModal(root: ShadowRoot): void {
  * dsh-web command history: every executed command (from the persisted
  * history) in a compact list; clicking one re-fills the composer.
  */
-function openCommandHistoryModal(root: ShadowRoot): void {
+function openCommandHistoryModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -4416,7 +4429,8 @@ function openCommandHistoryModal(root: ShadowRoot): void {
  * dsh-web cross-session search: queries every project's claims and
  * evidence for a keyword and lists the hits.
  */
-function openGlobalSearchModal(root: ShadowRoot): void {
+function openGlobalSearchModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -4648,7 +4662,8 @@ function openGlobalSearchModal(root: ShadowRoot): void {
 /** Cross-session transcript search (dsh-web "search all sessions"). */
 let sessionSearchQuery = ''
 
-function openSessionSearchModal(root: ShadowRoot): void {
+function openSessionSearchModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -4775,7 +4790,8 @@ function openSessionSearchModal(root: ShadowRoot): void {
 /** Quick project switcher (dsh-web Ctrl/Cmd+P): filter + ↑/↓ + Enter. */
 let projectSwitchQuery = ''
 
-function openProjectSwitcherModal(root: ShadowRoot): void {
+function openProjectSwitcherModal(root: ShadowRoot | null | undefined): void {
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -5506,7 +5522,7 @@ function chatSessionRename(id: string): void {
   const session = chatSessions.find(s => s.id === id)
   if (session === undefined) return
   const root = rootHost()
-  if (root === null) return
+  if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -5953,7 +5969,7 @@ function renderSidebar(
   newBtn.setAttribute('aria-label', 'New project')
   newBtn.onclick = () => {
     const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
-    if (root !== null) openNewProjectModal(root)
+    if (root != null) openNewProjectModal(root)
   }
   head.appendChild(newBtn)
   sidebar.appendChild(head)
@@ -6087,7 +6103,7 @@ function renderSidebar(
         event.preventDefault()
         event.stopPropagation()
         const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
-        if (root === null || p.project_id === undefined) return
+        if (root == null || p.project_id === undefined) return
         const id = p.project_id
         const isArchived = p.status === 'ARCHIVED'
         const ctxItems: ContextMenuItem[] = [
@@ -6120,7 +6136,7 @@ function renderSidebar(
         event.stopPropagation()
         if (p.project_id === undefined) return
         const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
-        if (root !== null) void openProjectDetailModal(root, p.project_id)
+        if (root != null) void openProjectDetailModal(root, p.project_id)
       }
       // dsh-web "session actions": rename + archive/restore (hover only).
       const actionsWrap = el('span')
@@ -6131,7 +6147,7 @@ function renderSidebar(
         event.stopPropagation()
         if (p.project_id === undefined) return
         const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
-        if (root !== null) openRenameModal(root, p.project_id, p.name ?? '', () => rerender())
+        if (root != null) openRenameModal(root, p.project_id, p.name ?? '', () => rerender())
       }
       const archived = p.status === 'ARCHIVED'
       const arcBtn = el('span', 'ws-rename', archived ? '↩' : '🗄')
@@ -6170,7 +6186,7 @@ function renderSidebar(
   settingsBtn.title = 'connection, token and appearance settings'
   settingsBtn.onclick = () => {
     const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
-    if (root !== null) openSettingsModal(root)
+    if (root != null) openSettingsModal(root)
   }
   if (!sidebarSelecting) {
     const selectBtn = el('button', 'hbtn', '☑ Select')
@@ -6644,7 +6660,7 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
       event.preventDefault()
       event.stopPropagation()
       const root = rootHost()
-      if (root === null) return
+      if (root == null) return
       const ctxItems: ContextMenuItem[] = [
         { label: 'Open', onPick: () => chatSessionSelect(s.id) },
         { label: '✎ Rename', onPick: () => chatSessionRename(s.id) },
@@ -6844,7 +6860,7 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
   globalBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   globalBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-    if (root !== null) openGlobalSearchModal(root)
+    if (root != null) openGlobalSearchModal(root)
   }
   // dsh-web cross-session search: every chat session's transcript.
   const allBtn = el('button', 'hbtn', '🔎 all')
@@ -6852,7 +6868,7 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
   allBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   allBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-    if (root !== null) openSessionSearchModal(root)
+    if (root != null) openSessionSearchModal(root)
   }
   searchRow.appendChild(globalBtn)
   searchRow.appendChild(allBtn)
@@ -6876,7 +6892,7 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
   historyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   historyBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-    if (root !== null) openCommandHistoryModal(root)
+    if (root != null) openCommandHistoryModal(root)
   }
   searchRow.appendChild(historyBtn)
   // dsh-web share: export the whole transcript as markdown.
@@ -7080,9 +7096,9 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
       }
       const next = msg.text.split('Next actions:')[1]?.split('\n\n')[0]?.split('\n').filter(l => l.trim().startsWith('- ')).map(l => l.trim().slice(2)).slice(0, 3).join('; ') ?? '—'
       grid.appendChild(chatFieldCell('Next', next || '—'))
-      const pending = pendingMatch !== null ? pendingMatch[1].split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
+      const pending = pendingMatch !== null ? (pendingMatch[1] ?? '').split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
       grid.appendChild(chatFieldCell('Pending gates', pending || 'none'))
-      const jobs = jobsMatch !== null ? jobsMatch[1].split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
+      const jobs = jobsMatch !== null ? (jobsMatch[1] ?? '').split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
       grid.appendChild(chatFieldCell('Jobs', jobs || 'none'))
       if (budgetMatch !== null) {
         grid.appendChild(chatFieldCell('Budget', `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
@@ -7451,7 +7467,7 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
       event.preventDefault()
       event.stopPropagation()
       const root = rootHost()
-      if (root === null) return
+      if (root == null) return
       const items: ContextMenuItem[] = [
         { label: '⧉ Copy text', onPick: () => copyText(msg.text) },
         { label: '⧉ Copy md', onPick: () => copyText(textToMarkdown(msg.text)) },
@@ -7579,7 +7595,7 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
 
   // dsh-web "details" side panel: raw transcript of the selected message.
   const detailMsg = chatDetailIndex >= 0 && chatDetailIndex < chatMessages.length ? chatMessages[chatDetailIndex] : null
-  if (detailMsg !== null) {
+  if (detailMsg != null) {
     const panel = el('div')
     panel.style.cssText = 'width:240px;flex-shrink:0;margin-left:10px;border-left:1px solid var(--border);padding-left:12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto'
     const headRow = el('div', 'row')

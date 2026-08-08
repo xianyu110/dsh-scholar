@@ -35,7 +35,7 @@
 | UI-01 | standalone-only 单一 UI | 基本具备，待 CI 运行 | 根轻面板、两个 DSH HTTP bridge、UI Cordis host/patch 与 client floating 死分支已删除；manifest/files allowlist、docs verifier 和 standalone CI build 已接入，尚需 clean checkout 实跑 |
 | UI-02 | i18n zh/en | 部分 | locale adapter + zh/en 字典(common/shell/standalone/terminal/manuscript)+ 设置语言切换与即时重渲染已实现;manuscript 工作台 chrome 已全部走 t();独立解锁页在首帧前选择 locale(dsh.locale→navigator.languages→navigator.language→zh)、<html lang> 动态化、中文词典 DOMContentLoaded 应用,Playwright 验证 zh 全量生效;tab 标签/其余视图 chrome 仍有硬编码,UI-04 拆分时一并迁移 |
 | UI-03 | standalone locale/theme adapter | 部分 | 已去除 DSH slots/LocaleFace 目标；当前仍是硬编码文案和局部 localStorage |
-| UI-04 | browser client strict typecheck | 未达成 | UI tsconfig 当前只覆盖 standalone Node 文件；将 client 纳入 `tsc` 会暴露状态 tuple、nullability、ShadowRoot 和作用域错误，必须在拆分巨型 client 时全部清零 |
+| UI-04 | browser client strict typecheck | 已实现 | tsconfig.client.json 将 client 纳入 strict+noUncheckedIndexedAccess 检查并清零(93 个错误):TAB_GROUPS 显式 tuple 类型、modal 签名放宽 ShadowRoot|null|undefined+入口 guard、projection.project 归一化为非可选、writeTheme 接受 string、health/workspace 类型补全、tokenProvider 闭包安全、Element→HTMLElement 转型、正则索引可选链;已并入 research-ui typecheck 脚本 |
 | UI-05 | standalone settings runtime | 代码已修，待 UI 验收 | Auto refresh timer 与暗色 Accent 移到可达作用域，删除 DSH boot token 文案；需补浏览器交互测试 |
 | ART-01 | standalone binary/SSE 流式 | 代码已修，待验收 | proxy 已改为 Web stream 转发、保留 media headers 并处理 source/client 中断；需补真实 PDF/image/SSE round-trip CI |
 | ART-02 | media type | 已实现 | 迁移 0004 增加 media_type/file_name 列;GET /v1/artifacts/:id 按存储类型服务(pdf→application/pdf、log→text/plain)、ETag+If-None-Match 304、Content-Disposition(inline/attachment)、单区间 Range 206/416;runner 上传 run log 带 media_type;单测 3 项;真实库原地迁移验证 |
