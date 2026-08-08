@@ -1,38 +1,71 @@
 # DSH Scholar
 
-> Security Alpha / Architecture Prototype。默认 gate-only，禁止作为无人值守正式科研系统发布。
+DSH Scholar 是运行在 DeepSeek Harness（DSH）上的科研工作台，面向机器学习、数据科学、生物信息学等纯计算研究场景。
 
-DSH Scholar 是 DeepSeek Harness 的可恢复科研工作台：以 Research Kernel 保存权威项目状态，以隔离 Runner 执行真实计算，以 Claim–Evidence 账本追溯结论，并以 Human Gate 管理范围、Idea、合同、预算和发布。
+它把研究问题、文献、Idea、实验合同、代码与数据快照、运行记录、统计证据和论文稿件组织在同一个可恢复工作流中。DSH Agent 可以协助检索、提出方案、生成实验 Patch、执行受控计算和撰写稿件；Research Kernel 保存权威状态，隔离 Runner 执行真实计算，Claim–Evidence 账本负责追溯结论，Human Gate 负责关键决策。
 
-## 文档是生成权威
+## 使用边界
 
-从 [docs/README.md](docs/README.md) 开始。该目录已经整合桌面 v2.0 设计稿、旧 docs、当前 dsh-scholar 实现和 DSH 宿主代码，定义产品、架构、领域模型、HTTP/事件、存储、DSH 集成、Runner、UI、i18n、实时 Terminal、TeX Workbench、安全、部署和验收。
+DSH Scholar 的目标是辅助研究，而不是代替研究者承担决策和发布责任。
 
-任何新增需求或修复必须同步对应 Markdown、验收和当前差距；只改代码视为未完成。
+- 默认使用 `gate-only` 模式；Scope、Idea、Experiment Contract、Budget 和 Release 必须由人类审批。
+- Agent 不能批准 Human Gate、伪造正式 Evidence、绕过实验合同或自动公开发布。
+- 正式实验必须从不可变代码和数据快照启动，并在隔离 Runner 中真实执行。
+- 论文中的正式数字必须能够追溯到受控 Run 和 accepted Evidence，不能直接来自聊天内容或普通 stdout。
+- `full-auto` 只允许用于 CI、演示和确定性 fixture，不得用于真实项目、私有数据或公开发布。
+- 项目聚焦纯计算研究，不适用于临床决策、人体试验、湿实验、生物安全、武器或其他高风险研究。
 
-当前实现与目标差距见 [docs/hardening-v0.2-status.md](docs/hardening-v0.2-status.md)。尤其是实时 Terminal、版本化 TeX 编辑/编译、完整 BFF Principal 和全页面 i18n 仍是目标能力，不应被描述成当前已完成。
+## 开发状态
 
-## 安装与启动
+项目仍处于 **Security Alpha / Architecture Prototype** 阶段，适合开发、评测和人工监督下的私有实验，不应作为无人值守的正式科研系统使用。
 
-前置：DSH checkout、Node.js 24、pnpm 11；正式执行和完整测试需要 Docker。
+当前仓库已经具备 Research Kernel、DSH 插件、Web UI、Runner、统计分析、学术连接器、持久编排、Claim–Evidence、LaTeX 输出、发布包和测试基础。以下 v2 能力仍在开发：
 
-~~~bash
+- 实时 Terminal：查看命令、stdout/stderr、退出状态和可恢复日志流；
+- TeX Workbench：编辑 `.tex`/`.bib`、编译、查看诊断和 PDF；
+- 全页面中英文 i18n；
+- 完整的认证 Principal、项目级 AuthZ、`/v2` API 和显式数据库迁移。
+
+当前状态与目标差距见 [docs/hardening-v0.2-status.md](docs/hardening-v0.2-status.md)。
+
+## 如何使用
+
+### 1. 准备环境
+
+需要 Node.js 24、pnpm 11 和一个可用的 DSH 源码 checkout。正式 Runner 和完整测试还需要 Docker。
+
+```bash
+export DSH_SCHOLAR_DSH_ROOT=/absolute/path/to/dsh
 pnpm install --frozen-lockfile
-./scripts/link-dsh-deps.sh
+bash scripts/link-dsh-deps.sh
 pnpm build
+```
 
-# DSH 嵌入测试实例：http://127.0.0.1:3081
+### 2. 启动 DSH 嵌入模式
+
+```bash
 bash scripts/start-test-dsh.sh
+```
 
-# 当前独立 UI：http://127.0.0.1:18610
+启动后访问 <http://127.0.0.1:3081>。默认使用隔离目录 `~/.dsh-scholar-test`，Research Kernel 监听 `127.0.0.1:17412`。
+
+### 3. 启动独立 UI
+
+```bash
 bash scripts/start-standalone-ui.sh
-~~~
+```
 
-当前 Kernel 使用 /v1；目标生成规范使用 /v2。使用说明见 [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)，实例与迁移期命令见 [docs/test-instance-plan.md](docs/test-instance-plan.md)。
+启动后访问 <http://127.0.0.1:18610>，并使用脚本输出位置中的访问令牌登录。默认令牌文件为：
 
-## 当前命令面
+```text
+~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
+```
 
-~~~text
+### 4. 使用研究命令
+
+在 DSH 中通过 `/research` 推进研究流程：
+
+```text
 /research new <name> [brief-json]
 /research status
 /research survey <query>
@@ -45,28 +78,18 @@ bash scripts/start-standalone-ui.sh
 /research review
 /research export
 /research release
-~~~
+```
 
-目标 v2 还统一提供 help/list/gates/jobs/claims；当前 UI 中这些快捷命令存在实现差距，见状态文档。正式 run 必须先建立真实 code snapshot，并在 payload 中带 contract_id/code_snapshot_id；不能直接复制空参数示例。
+正式 `run` 必须绑定已经批准的 Experiment Contract 和真实 Code Snapshot。完整流程、Gate 停点和参数说明见 [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)。
 
-## 开发专用 Cordis self-mod
+### 5. 启用开发期 Cordis self-modification
 
-只在隔离、loopback、人工审批的开发实例启用：
+仅在隔离、loopback、人工监督的开发实例中使用：
 
-~~~bash
+```bash
 DSH_SCHOLAR_ENABLE_SELFMOD=1 bash scripts/start-selfmod-dev.sh
-~~~
+```
 
-它会加载 @deepseek-ai/dsh-tool-cordis，提供 cordis_inspect、cordis_mount、cordis_unmount。该 VM 不是安全边界，生产、headless、shared 和 unattended 配置保持禁用。动态变化需要保留时必须转成源码、测试和 Markdown。
+该模式会启用 `cordis_inspect`、`cordis_mount` 和 `cordis_unmount`。Cordis VM 不是安全边界，禁止在生产、共享、headless 或 unattended 环境启用。
 
-## 验证
-
-~~~bash
-pnpm build
-pnpm typecheck
-pnpm test
-pnpm test:security
-pnpm test:all
-~~~
-
-历史测试计数不是当前通过证据；以当次 CI 和 [docs/acceptance-tests.md](docs/acceptance-tests.md) 为准。
+项目规范和后续开发要求以 [docs/README.md](docs/README.md) 为准。
