@@ -30,8 +30,8 @@
 | RUN-01 | 正式 Docker/快照/fencing | 基本具备 | 默认 Runner CLI 仍 subprocess；签名 enforcement 默认兼容关闭；integrity require_signed_manifest Schema 未持久化 |
 | RUN-02 | 完整容器基线 | 部分 | 当前 flags 有 network/user/memory/cpu/tmpfs，但需 read-only、cap-drop、no-new-privileges、pids 等完整策略 |
 | TERM-01 | 实时有序终端 | 已实现 | 全链路已落地并 e2e 验证:terminal_frames/terminal_retention 表、kernel append/list(单调 seq、幂等、lease fencing、8 MiB 有界保留+dropped/truncated)、POST /v1/jobs/{id}/terminal-frames、GET /v1/jobs/{id}/terminal SSE(subscribed/chunk/gap/exit、心跳、gap 语义)、runner-gateway onChunk 实时批量上报(200ms/64 帧、job 身份 run、exit 帧)、Terminal tab(运行选择/通道/ANSI 白名单/状态栏/lastSeq 续传);单测 4 项+Playwright e2e;验收测试与 CI 待跑 |
-| TEX-01 | TeX workspace/editor/version | 未实现 | buildManuscript 只生成字符串和 Artifact，无文件树/保存/CAS version |
-| TEX-02 | latex-compile Job/诊断/PDF | 部分 | eval 脚本能 pdflatex/bibtex；产品接口和 UI 不存在；Job kind 不含 latex-compile |
+| TEX-01 | TeX workspace/editor/version | 基本具备 | 后端已落地:tex-workspace.ts(独立 WAL、tex_documents/tex_files/tex_snapshots/tex_builds、normalizePath、expected_version CAS 写 409、snapshot 冻结 manifest)+ kernel 集成(createProject 存 parse 后 brief、generateTexWorkspace paper.tex+main.bib、/v1/documents/{tree,file,moves,history,snapshots,builds});UI 已落地:Manuscript tab(文件树/编辑器 Ctrl+S/dirty+conflict/snapshot builds 诊断/PDF 预览下载),Playwright 验证渲染与无请求风暴;单测 4 项;验收测试待跑 |
+| TEX-02 | latex-compile Job/诊断/PDF | 部分 | Job kind 已含 latex-compile(submitJob 校验 tex_document_id+tex_revision、豁免 code_snapshot_required)、runner-gateway SECURE_KINDS 含 latex-compile、build queued→latex-compile job 链路已通;容器内 TeX 物化(快照映射/安装 pdflatex)与 PDF artifact 产出仍未实现 |
 | UI-01 | standalone-only 单一 UI | 基本具备，待 CI 运行 | 根轻面板、两个 DSH HTTP bridge、UI Cordis host/patch 与 client floating 死分支已删除；manifest/files allowlist、docs verifier 和 standalone CI build 已接入，尚需 clean checkout 实跑 |
 | UI-02 | i18n zh/en | 部分 | locale adapter(resolve/subscribe/setLocale/t)+zh/en 字典(common/shell/standalone)+设置语言切换与即时重渲染已实现;其余 chrome 迁移与解锁页接入进行中 |
 | UI-03 | standalone locale/theme adapter | 部分 | 已去除 DSH slots/LocaleFace 目标；当前仍是硬编码文案和局部 localStorage |
