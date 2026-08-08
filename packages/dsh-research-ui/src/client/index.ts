@@ -545,6 +545,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const shortcutsBtn = el('button', 'hbtn', '⌨ Shortcuts')
   shortcutsBtn.title = 'keyboard shortcuts'
   shortcutsBtn.onclick = () => { openShortcutsModal(root) }
+  const bellBtn = el('button', 'hbtn', '🔔')
+  bellBtn.title = 'notifications'
+  bellBtn.onclick = () => { openNotificationsModal(root) }
   const modeBadge = el('span', 'hbtn')
   modeBadge.textContent = '🧭 gate-only'
   modeBadge.title = 'research mode: every gate requires a human decision'
@@ -585,7 +588,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   densityApply(panel)
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
-    header.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, densitySelect, themeBtn, refresh)
+    header.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, themeBtn, refresh)
   } else {
     header.append(themeBtn, refresh, close)
   }
@@ -773,6 +776,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   chatLoad()
   historyLoad()
   tabLoad()
+  notifLoad()
   void render()
   const startTimer = (): number | null => {
     if (!autoRefreshEnabled()) return null
@@ -1973,8 +1977,31 @@ function rootHost(): ShadowRoot | null {
   return hostEl !== null ? hostEl.shadowRoot : null
 }
 
-/** dsh-web toast: a transient status pill bottom-center (2.4s). */
+/** dsh-web notification centre: toast history (persisted, 30 max). */
+const NOTIF_KEY = 'dsh-scholar-ui-notifs'
+let notifHistory: Array<{ text: string; time: string }> = []
+function notifLoad(): void {
+  try {
+    const raw = localStorage.getItem(NOTIF_KEY)
+    if (raw === null) return
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed)) {
+      notifHistory = parsed.filter((n): n is { text: string; time: string } => typeof n === 'object' && n !== null && typeof (n as { text?: unknown }).text === 'string').slice(-30)
+    }
+  } catch { /* private mode */ }
+}
+function notifPersist(): void {
+  try { localStorage.setItem(NOTIF_KEY, JSON.stringify(notifHistory.slice(-30))) } catch { /* private mode */ }
+}
+function notifClear(): void {
+  notifHistory = []
+  notifPersist()
+}
+
+/** dsh-web toast: a transient status pill bottom-center (2.4s), recorded. */
 function showToast(root: ShadowRoot | null, text: string): void {
+  notifHistory.push({ text, time: new Date().toLocaleTimeString() })
+  notifPersist()
   if (root === null) return
   const existing = root.querySelector('.toast')
   existing?.remove()
@@ -1982,6 +2009,45 @@ function showToast(root: ShadowRoot | null, text: string): void {
   toast.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:10001;background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:99px;padding:6px 16px;font:600 11.5px/1.4 system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3);pointer-events:none;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
   root.appendChild(toast)
   setTimeout(() => toast.remove(), 2400)
+}
+
+/** dsh-web notification centre modal. */
+function openNotificationsModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:480px;max-width:92vw'
+  const header = el('div', 'modal-header', '🔔 Notifications')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+  const list = el('div')
+  list.style.cssText = 'max-height:46vh;overflow-y:auto'
+  if (notifHistory.length === 0) {
+    list.appendChild(el('div', 'empty', 'No notifications yet.'))
+  }
+  for (let i = notifHistory.length - 1; i >= 0; i--) {
+    const n = notifHistory[i]!
+    const row = el('div')
+    row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2)'
+    const text = el('div', 'grow', n.text)
+    text.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
+    const time = el('span', 'muted', n.time)
+    time.style.cssText = 'font-size:9px;flex-shrink:0'
+    row.append(text, time)
+    list.appendChild(row)
+  }
+  modal.appendChild(list)
+  const clearBtn = el('button', 'hbtn', '🗑 Clear all')
+  clearBtn.style.cssText = 'margin-top:10px'
+  clearBtn.onclick = () => {
+    notifClear()
+    overlay.remove()
+  }
+  modal.appendChild(clearBtn)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
 }
 
 /* ─────────────────────────── command history modal ─────────────────────────── */
@@ -2809,7 +2875,16 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
   }
   const searchQ = chatSearchQuery.trim().toLowerCase()
-  for (let i = 0; i < chatMessages.length; i++) {
+  // dsh-web virtualized feel: window the transcript to the newest 80
+  // messages (search/commands-only views render everything).
+  const windowed = searchQ === '' && !chatCommandsOnly && chatMessages.length > 80
+  const startIdx = windowed ? chatMessages.length - 80 : 0
+  if (windowed) {
+    const notice = el('div', 'muted', `Showing the newest 80 of ${chatMessages.length} messages — ↑/↓ walk history, or search to see more.`)
+    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+    stream.appendChild(notice)
+  }
+  for (let i = startIdx; i < chatMessages.length; i++) {
     const msg = chatMessages[i]!
     if (searchQ !== '' && !msg.text.toLowerCase().includes(searchQ)) continue
     if (chatCommandsOnly && msg.role !== 'user') continue
@@ -2848,6 +2923,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isSurvey = msg.role === 'assistant' && msg.text.startsWith('Survey complete:')
     const isRun = msg.role === 'assistant' && /Job \*\*[^*]+\*\* \[[^\]]+\] submitted/.test(msg.text)
     const isEvidence = msg.role === 'assistant' && /Evidence \*\*[^*]+\*\* ingested/.test(msg.text)
+    const isGate = msg.role === 'assistant' && /Gate \*\*[^*]+\*\* (?:created|opened)/.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
       const phaseMatch = /phase `([^`]+)` rev (\d+)/.exec(msg.text)
@@ -2911,6 +2987,27 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         grid.appendChild(chatFieldCell('Status', evMatch[2] ?? ''))
       }
       structured = grid
+    } else if (isGate && searchQ === '') {
+      // dsh-web gate card: gate id + a jump-to-Gates action.
+      const gateMatch = /Gate \*\*([^*]+)\*\*/.exec(msg.text)
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '⛩️'))
+      head.appendChild(el('span', 'pname', gateMatch?.[1] ?? 'gate'))
+      head.appendChild(el('span', 'grow'))
+      head.appendChild(pill('pending'))
+      card.appendChild(head)
+      const go = el('button', 'hbtn', '→ open Gates tab')
+      go.style.cssText = 'align-self:flex-start'
+      go.onclick = () => {
+        activeTab = 'gates'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(go)
+      structured = card
     }
     const lineCount = msg.text.split('\n').length
     const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === '' && structured === null
