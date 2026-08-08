@@ -66,3 +66,17 @@
   100/100 故障压力。
 - §21.1 保护分支:GitHub 免费版私有仓库不支持 branch protection(需 Pro 或公开
   仓库)——已记录;替代控制:CI 全矩阵必跑 + 人工合并评审。
+
+## dsh web 复刻进度(rounds 43–100)
+
+> 独立 Web 插件(research-ui :18610 + kernel sidecar :17413,nginx 8443 代理)持续
+> 把 dsh web 的功能面搬过来;每轮实现 → build 验证 → Playwright 实测 → 168 单测
+> → 提交推送 `hardening/v0.2`。命令结果卡片(12 类)、会话体系、弹窗体系
+> (17+ modal)、右键菜单(项目/会话/任务/工件/证据/声明/Gate/消息)、快捷键
+> (Ctrl+K/P/Tab/1..9、Alt+1..7、Ctrl+↑↓、Home/End、/、?、Esc)、主题
+> (light/dark/accent/radius/texture/density)、通知(聚合/单条删除/复制/99+ 封顶)、
+> 全局搜索(claims/evidence/artifacts、kind chips 实时计数、键盘导航)、
+> 项目收藏(★ 置顶)、会话(拖拽排序/复制/导出 JSON+md/备份恢复/未读记忆)、
+> 批量操作(全选/归档/取消/下载)、Compare(多列 grid 修复+max/min 高亮+CSV/md)、
+> Gate 决策(理由输入/resume_to 修复/决策溯源)、无障碍(role=dialog 自动装饰/
+> aria-current/aria-pressed/aria-live/navigation)、性能(隐藏页暂停刷新)等已复刻。

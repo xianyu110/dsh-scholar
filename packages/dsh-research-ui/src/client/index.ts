@@ -6239,6 +6239,42 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       chatDetailIndex = chatDetailIndex === i ? -1 : i
       rerender()
     }
+    // dsh-web context menu: copy / reply / pin / details.
+    bubble.oncontextmenu = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const root = rootHost()
+      if (root === null) return
+      const items: ContextMenuItem[] = [
+        { label: '⧉ Copy text', onPick: () => copyText(msg.text) },
+        { label: '⧉ Copy md', onPick: () => copyText(textToMarkdown(msg.text)) },
+        {
+          label: '↩ Reply',
+          onPick: () => {
+            chatDraft = ''
+            chatQuoteTarget = { index: i, text: msg.text }
+            rerender()
+            setTimeout(() => {
+              const hostEl = document.querySelector('#dsh-scholar-ui')
+              const rootEl = hostEl !== null ? hostEl.shadowRoot : null
+              const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+              ta?.focus()
+            }, 120)
+          },
+        },
+        {
+          label: msg.pinned === true ? '★ Unpin' : '☆ Pin',
+          onPick: () => {
+            msg.pinned = !msg.pinned
+            chatPersist()
+            chatSessionsPersist()
+            rerender()
+          },
+        },
+        { label: '⧉ Details', onPick: () => { chatDetailIndex = i; rerender() } },
+      ]
+      openContextMenu(root, event.clientX, event.clientY, items)
+    }
     stream.appendChild(bubble)
     // dsh-web message actions: user messages get a copy button too (the
     // assistant/error actions below add copy + quote-reply).
