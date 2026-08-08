@@ -74,7 +74,9 @@ else
 fi
 
 say "Test (control): evidence WITH effect_size + CI can be supported"
-E2=$(api -X POST "$BASE/v1/projects/$PROJ/evidence" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"accuracy","value":0.91,"baseline_value":0.86,"effect_size":0.05,"ci_low":0.01,"ci_high":0.09,"p_value":0.01,"n_seeds":5}}' | jfield '.evidence_id')
+# Control evidence goes through the WORKER-verified internal route
+# (EVID-01: public evidence is draft/legacy and never supports a claim).
+E2=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d '{"project_id":"'"$PROJ"'","source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"accuracy","value":0.91,"baseline_value":0.86,"effect_size":0.05,"ci_low":0.01,"ci_high":0.09,"p_value":0.01,"n_seeds":5}}' | jfield '.evidence_id')
 C2=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"The treatment improves accuracy (effect with CI)","scope":{"dataset":"d1","split":"test"}}' | jfield '.claim_id')
 S2=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C2\",\"evidence_ids\":[\"$E2\"]}" | jfield '.status')
 if [[ "$S2" == "supported" ]]; then
@@ -84,7 +86,7 @@ else
 fi
 
 say "Test (control): negative effect with CI -> contradicted (direction rule exists)"
-E3=$(api -X POST "$BASE/v1/projects/$PROJ/evidence" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"accuracy","value":0.80,"baseline_value":0.86,"effect_size":-0.06,"ci_low":-0.10,"ci_high":-0.02,"n_seeds":5}}' | jfield '.evidence_id')
+E3=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d '{"project_id":"'"$PROJ"'","source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"accuracy","value":0.80,"baseline_value":0.86,"effect_size":-0.06,"ci_low":-0.10,"ci_high":-0.02,"n_seeds":5}}' | jfield '.evidence_id')
 C3=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"The treatment hurts accuracy","scope":{"dataset":"d1","split":"test"}}' | jfield '.claim_id')
 S3=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C3\",\"evidence_ids\":[\"$E3\"]}" | jfield '.status')
 if [[ "$S3" == "contradicted" ]]; then
