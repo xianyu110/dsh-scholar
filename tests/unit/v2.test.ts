@@ -159,6 +159,38 @@ describe('v2 project adapter', () => {
     })
   })
 
+  it('GET /v2/health reports protocol/schema versions and capabilities', async () => {
+    const kernel = freshKernel()
+    await withServer(kernel, async (base) => {
+      const r = await fetch(`${base}/v2/health`)
+      expect(r.status).toBe(200)
+      const h = await r.json() as { ok: boolean; protocol_version: number; schema_version: number; database_id: string; capabilities: string[] }
+      expect(h.ok).toBe(true)
+      expect(h.protocol_version).toBe(2)
+      expect(h.schema_version).toBeGreaterThanOrEqual(6)
+      expect(h.database_id.length).toBeGreaterThan(0)
+      for (const cap of ['terminal_stream', 'tex_workspace', 'latex_compile', 'signed_manifest', 'clean_room', 'locales']) {
+        expect(h.capabilities).toContain(cap)
+      }
+    })
+  })
+
+  it('errors carry request_id + retryable; X-Request-Id is echoed', async () => {
+    const kernel = freshKernel()
+    await withServer(kernel, async (base) => {
+      const r = await fetch(`${base}/v1/projects/nope`, { headers: { 'x-request-id': 'req_abc' } })
+      expect(r.status).toBe(404)
+      const body = await r.json() as { error: { code: string; request_id: string; retryable: boolean } }
+      expect(body.error.code).toBe('project_not_found')
+      expect(body.error.request_id).toBe('req_abc')
+      expect(body.error.retryable).toBe(false)
+      // Without the header a request id is still present.
+      const r2 = await fetch(`${base}/v1/projects/nope`)
+      const b2 = await r2.json() as { error: { request_id: string } }
+      expect(b2.error.request_id).toMatch(/^req_/)
+    })
+  })
+
   it('request hash is deterministic over the body', () => {
     const h1 = createHash('sha256').update(JSON.stringify(makeBody())).digest('hex')
     const h2 = createHash('sha256').update(JSON.stringify(makeBody())).digest('hex')

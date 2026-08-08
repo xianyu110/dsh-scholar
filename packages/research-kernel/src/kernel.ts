@@ -795,6 +795,18 @@ export class ResearchKernel {
     return rows.filter(r => !this.cas.has(r.sha256))
   }
 
+  // ── identity (api-contracts.md §3 /v2/health) ────────────────────────────
+
+  schemaVersion(): number {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value?: string } | undefined
+    return row !== undefined ? Number(row.value) : 0
+  }
+
+  databaseId(): string {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = 'database_id'").get() as { value?: string } | undefined
+    return row?.value ?? ''
+  }
+
   // ── artifacts (CAS) ──────────────────────────────────────────────────────
 
   registerArtifact(input: {

@@ -149,6 +149,18 @@ if [ -n "$MP" ]; then
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/rsp_nonexistent")
   [ "$R" = "404" ] && ok "API-01: unknown project -> 404" || fail "API-01: unknown -> $R"
 fi
+# ── §9: job-scoped routes (terminal SSE) check membership before streaming ──
+if [ "$memready" = 1 ] && [ -n "$MP" ]; then
+  # Submit a job on the member project, then verify the terminal SSE route.
+  JID=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -X POST "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/jobs" \
+    -d '{"idempotency_key":"mem-job-1","kind":"echo","payload":{"message":"hi"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.job_id||'')})")
+  [ -n "$JID" ] && ok "API-01: member job created ($JID)" || fail "API-01: job create"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/jobs/$JID/terminal" -m 5 || true)
+  [ "$R" = "200" ] && ok "API-01: PI opens terminal SSE -> 200" || fail "API-01: PI terminal -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/jobs/$JID/terminal" -m 5 || true)
+  [ "$R" = "404" ] && ok "API-01: non-member terminal SSE -> 404" || fail "API-01: non-member terminal -> $R"
+fi
+
 kill "$MEM_PID" "$MEM2_PID" 2>/dev/null || true
 for _ in $(seq 1 15); do
   if ! ss -ltn 2>/dev/null | grep -qE ":$MEM_WEB |:$((MEM_WEB + 2)) "; then break; fi

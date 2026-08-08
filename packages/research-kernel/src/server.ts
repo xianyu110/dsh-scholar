@@ -241,6 +241,14 @@ function readJson(req: IncomingMessage): Promise<unknown> {
   })
 }
 
+function errorEnvelope(code: string, message: string): Record<string, unknown> {
+  // api-contracts.md §1: stable retryable flags for the documented codes.
+  const retryableCodes = new Set(['lease_conflict', 'lease_stale', 'upload_offset_conflict', 'document_version_conflict'])
+  return { code, message, request_id: currentRequestId, retryable: retryableCodes.has(code) }
+}
+
+let currentRequestId = 'req_unknown'
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
   res.writeHead(status, {
@@ -256,20 +264,23 @@ function ok(res: ServerResponse, body: unknown): void {
 
 function fail(res: ServerResponse, error: unknown): void {
   if (error instanceof KernelError) {
-    send(res, error.status, { error: { code: error.code, message: error.message } })
+    send(res, error.status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof TexError) {
     // CAS write conflicts and invalid TeX paths map to HTTP semantics.
     const status = error.code === 'document_version_conflict' ? 409 : 422
-    send(res, status, { error: { code: error.code, message: error.message } })
+    send(res, status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof z.ZodError) {
     const issues = error.issues.map(i => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ')
-    send(res, 422, { error: { code: 'validation_error', message: issues } })
+    send(res, 422, { error: errorEnvelope('validation_error', issues) })
   } else {
-    send(res, 500, { error: { code: 'internal', message: (error as Error).message ?? String(error) } })
+    send(res, 500, { error: errorEnvelope('internal', (error as Error).message ?? String(error)) })
   }
 }
 
 function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined): void {
+  currentRequestId = typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id'] !== ''
+    ? req.headers['x-request-id']
+    : `req_${Math.random().toString(36).slice(2, 12)}`
   if (token !== undefined) {
     const provided = req.headers.authorization
     if (provided !== `Bearer ${token}`) {
@@ -999,6 +1010,19 @@ async function handleV2(ctx: {
     if (!members.some(m => m.principal_id === principal)) {
       throw new KernelError(404, 'project_not_found', 'project not found or access denied')
     }
+  }
+  if (id === undefined && sub === undefined && method === 'GET' && url.pathname === '/v2/health') {
+    // api-contracts.md §3: capability discovery with protocol/schema version.
+    send(res, 200, {
+      ok: true,
+      instance_id: kernel.instanceId,
+      protocol_version: 2,
+      schema_version: kernel.schemaVersion(),
+      database_id: kernel.databaseId(),
+      capabilities: ['terminal_stream', 'tex_workspace', 'latex_compile', 'signed_manifest', 'clean_room', 'locales'],
+      time: new Date().toISOString(),
+    })
+    return
   }
   if (id === undefined && method === 'POST') {
     // POST /v2/projects — Idempotency-Key REQUIRED (api-contracts §4).

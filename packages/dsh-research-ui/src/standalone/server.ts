@@ -379,6 +379,30 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     if (members === null) return false
     return members.some(m => m.principal_id === options.principal)
   }
+  // Job-scoped routes (/v1/jobs/:id/*, e.g. the terminal SSE) resolve the
+  // job's project through the kernel first — the BFF checks membership
+  // BEFORE streaming (api-contracts.md §9: job_log_read + membership).
+  const jobProjectCache = new Map<string, Promise<string | null>>()
+  async function jobProjectId(jobId: string): Promise<string | null> {
+    const key = `j:${jobId}`
+    let hit = jobProjectCache.get(key)
+    if (hit === undefined) {
+      hit = fetch(`${endpoint}/v1/jobs/${encodeURIComponent(jobId)}`, {
+        headers: { accept: 'application/json' },
+      }).then(async (r) => {
+        if (!r.ok) return null
+        const j = await r.json() as { project_id?: string }
+        return typeof j.project_id === 'string' ? j.project_id : null
+      }).catch(() => null)
+      jobProjectCache.set(key, hit)
+    }
+    return hit
+  }
+  function jobIdFromPath(pathname: string): string | null {
+    const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'jobs') return parts[2] ?? null
+    return null
+  }
   function projectIdFromPath(pathname: string): string | null {
     const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
     if (parts.length >= 3 && (parts[0] === 'v1' || parts[0] === 'v2') && parts[1] === 'projects') return parts[2] ?? null
@@ -523,6 +547,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           if (projectId !== null && !(await isProjectMember(projectId))) {
             sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
             return
+          }
+          // Job-scoped routes: resolve the owning project before streaming.
+          const jobId = jobIdFromPath(url.pathname)
+          if (jobId !== null) {
+            const ownerProject = await jobProjectId(jobId)
+            if (ownerProject === null || !(await isProjectMember(ownerProject))) {
+              sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
+              return
+            }
           }
           // The projects LIST is filtered to the operator's memberships.
           if (url.pathname === '/v1/projects' && method === 'GET') {
