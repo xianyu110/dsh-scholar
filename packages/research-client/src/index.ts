@@ -261,6 +261,21 @@ export class ResearchClient {
     return this.request('POST', `/v1/jobs/${jobId}/cancel`, { actor, reason })
   }
 
+  /** execution-runtime.md §6: upload a batch of terminal frames (Runner side). */
+  appendTerminalFrames(jobId: string, runId: string, frames: Array<{
+    seq: number
+    stream_seq?: number | null
+    channel?: 'stdout' | 'stderr' | null
+    text?: string | null
+    byte_offset?: number | null
+    byte_length?: number | null
+    frame_kind: 'chunk' | 'gap' | 'exit'
+    lease_generation?: number
+    payload_json?: string
+  }>): Promise<{ appended: number; last_seq: number }> {
+    return this.request('POST', `/v1/jobs/${jobId}/terminal-frames`, { run_id: runId, frames })
+  }
+
   claimJobs(owner: string, limit = 1, leaseTtlSeconds = 300): Promise<JobRecord[]> {
     return this.request('POST', '/v1/jobs-claim/run', { owner, limit, lease_ttl_seconds: leaseTtlSeconds })
   }

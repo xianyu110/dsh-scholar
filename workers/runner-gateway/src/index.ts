@@ -44,6 +44,8 @@ export interface RunnerOptions {
   signal?: AbortSignal
   /** Ed25519 signing key for the RunManifest (design §12.7). */
   signingKey?: RunnerSigningKey
+  /** §12.6 lease generation of the claim; carried on terminal frames. */
+  leaseGeneration?: number | null
 }
 
 export interface RunOutcome {
@@ -304,6 +306,8 @@ interface SpawnCaptureOptions {
   signal?: AbortSignal
   /** Container name when this spawn is `docker run` (registered for cancelRun). */
   container?: string
+  /** execution-runtime.md §6: live terminal frames during execution. */
+  onChunk?: (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number) => void
 }
 
 /**
@@ -320,6 +324,8 @@ function spawnCaptured(command: string[], options: SpawnCaptureOptions): Promise
     const stderrChunks: Buffer[] = []
     let outBytes = 0
     let errBytes = 0
+    let outOffset = 0
+    let errOffset = 0
     let timedOut = false
     let cancelled = false
     let bufferExceeded = false
@@ -376,6 +382,9 @@ function spawnCaptured(command: string[], options: SpawnCaptureOptions): Promise
         killTree()
         return
       }
+      // §6 live terminal frames: emit as they arrive, before buffering.
+      options.onChunk?.('stdout', chunk.toString('utf8'), outOffset, chunk.length)
+      outOffset += chunk.length
       stdoutChunks.push(chunk)
     })
     child.stderr?.on('data', (chunk: Buffer) => {
@@ -385,6 +394,8 @@ function spawnCaptured(command: string[], options: SpawnCaptureOptions): Promise
         killTree()
         return
       }
+      options.onChunk?.('stderr', chunk.toString('utf8'), errOffset, chunk.length)
+      errOffset += chunk.length
       stderrChunks.push(chunk)
     })
     child.on('error', (error: Error) => { spawnError = error.message })
@@ -392,18 +403,26 @@ function spawnCaptured(command: string[], options: SpawnCaptureOptions): Promise
   })
 }
 
-async function runSubprocess(command: string[], cwd: string, timeoutMs: number, maxLogBytes: number, jobId: string, signal?: AbortSignal): Promise<RunOutcome> {
+async function runSubprocess(
+  command: string[], cwd: string, timeoutMs: number, maxLogBytes: number, jobId: string, signal?: AbortSignal,
+  onChunk?: (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number) => void,
+  runId = `run_${randomUUID().slice(0, 12)}`,
+): Promise<RunOutcome> {
   const startedAt = new Date().toISOString()
   const env = {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     HOME: cwd,
     TMPDIR: cwd,
   }
-  const result = await spawnCaptured(command, { cwd, env, timeoutMs, maxLogBytes, jobId, signal })
-  return { run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
+  const result = await spawnCaptured(command, { cwd, env, timeoutMs, maxLogBytes, jobId, signal, onChunk })
+  return { run_id: runId, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
 }
 
-async function runDocker(command: string[], cwd: string, timeoutMs: number, jobId: string, signal?: AbortSignal, image = 'node:22-alpine'): Promise<RunOutcome> {
+async function runDocker(
+  command: string[], cwd: string, timeoutMs: number, jobId: string, signal?: AbortSignal, image = 'node:22-alpine',
+  onChunk?: (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number) => void,
+  runId = `run_${randomUUID().slice(0, 12)}`,
+): Promise<RunOutcome> {
   const startedAt = new Date().toISOString()
   const container = `dsh-scholar-${randomUUID().slice(0, 8)}`
   const args = [
@@ -429,6 +448,7 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number, jobI
       jobId,
       signal,
       container,
+      onChunk,
     })
   } finally {
     // `--rm` only cleans up when the docker CLIENT exits normally; if the
@@ -437,7 +457,7 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number, jobI
     // (design §4.6.1 resource limits + cleanup, §12.6 cancel confirmation).
     await execFileAsync('docker', ['rm', '-f', container], { timeout: 10000 }).catch(() => undefined)
   }
-  return { run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
+  return { run_id: runId, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
 }
 
 /**
@@ -446,6 +466,39 @@ async function runDocker(command: string[], cwd: string, timeoutMs: number, jobI
  */
 export async function executeJob(job: JobRecord, options: RunnerOptions): Promise<{ job: JobRecord; run: RunOutcome }> {
   const { client, owner, mode = 'subprocess', timeoutMs = 60000, maxLogBytes = 4 * 1024 * 1024, signal, signingKey } = options
+  // §6 terminal frames: the terminal run identity is the JOB id (the kernel
+  // stores frames under (job, run) and the SSE endpoint defaults run_id to
+  // the job id); the ledger run_id stays `run_…` in the manifest.
+  const runId = job.job_id
+  const leaseGeneration = options.leaseGeneration ?? undefined
+  const pendingFrames: Array<{
+    seq: number; stream_seq?: number | null; channel?: 'stdout' | 'stderr' | null
+    text?: string | null; byte_offset?: number | null; byte_length?: number | null
+    frame_kind: 'chunk' | 'gap' | 'exit'; lease_generation?: number; payload_json?: string
+  }> = []
+  let frameSeq = 0
+  let streamSeq = 0
+  let frameFlushTimer: NodeJS.Timeout | undefined
+  const flushFrames = (): void => {
+    if (pendingFrames.length === 0) return
+    const batch = pendingFrames.splice(0, pendingFrames.length)
+    void client.appendTerminalFrames(job.job_id, runId, batch).catch(() => undefined)
+  }
+  const onChunk = (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number): void => {
+    frameSeq += 1
+    streamSeq += 1
+    pendingFrames.push({
+      seq: frameSeq, stream_seq: streamSeq, channel, text,
+      byte_offset: byteOffset, byte_length: byteLength, frame_kind: 'chunk',
+      ...(leaseGeneration !== undefined ? { lease_generation: leaseGeneration } : {}),
+    })
+    if (pendingFrames.length >= 64) {
+      if (frameFlushTimer !== undefined) { clearTimeout(frameFlushTimer); frameFlushTimer = undefined }
+      flushFrames()
+    } else if (frameFlushTimer === undefined) {
+      frameFlushTimer = setTimeout(() => { frameFlushTimer = undefined; flushFrames() }, 200)
+    }
+  }
   // §3.2 / ADR-004: formal-class jobs must run in a container runtime.
   // Subprocess is only for trusted smoke fixtures and echoes — never for
   // baseline/pilot/formal/reproduce (design §1.2 "明确不做", §12.3).
@@ -510,7 +563,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     // may succeed without executing code — §3.2 invariant 1).
     const message = typeof job.payload.message === 'string' ? job.payload.message : `echo ${job.job_id}`
     run = {
-      run_id: `run_${randomUUID().slice(0, 12)}`,
+      run_id: runId,
       exit_code: 0,
       started_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),
@@ -522,7 +575,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     // empty-command or message-only "success" is a synthetic fixture and is
     // prohibited for real experiments.
     run = {
-      run_id: `run_${randomUUID().slice(0, 12)}`,
+      run_id: runId,
       exit_code: 2,
       started_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),
@@ -534,14 +587,31 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     // Injected smoke script runs inside the isolated workdir.
     writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
     run = mode === 'docker'
-      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image)
-      : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal)
+      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
+      : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
   } else {
     const command = job.command.length > 0 ? job.command : ['true']
     run = mode === 'docker'
-      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image)
-      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal)
+      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
+      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
   }
+
+  // §6 terminal exit frame: the process-side facts (exit code, truncation).
+  // The business terminal state is still decided by completeJob below.
+  if (frameFlushTimer !== undefined) { clearTimeout(frameFlushTimer); frameFlushTimer = undefined }
+  frameSeq += 1
+  pendingFrames.push({
+    seq: frameSeq,
+    frame_kind: 'exit',
+    ...(leaseGeneration !== undefined ? { lease_generation: leaseGeneration } : {}),
+    payload_json: JSON.stringify({
+      exit_code: run.exit_code,
+      signal: null,
+      timed_out: run.error !== undefined && run.error.includes('timed out'),
+      cancelled: cancelledJobs.has(job.job_id),
+    }),
+  })
+  flushFrames()
 
   // Cancel already landed (design §12.6): the kernel holds the authoritative
   // `cancelled` state — never complete it, never re-run the manifest path.
