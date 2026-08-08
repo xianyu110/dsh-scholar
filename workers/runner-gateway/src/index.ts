@@ -13,7 +13,7 @@
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -138,6 +138,129 @@ export function materializeCodeSnapshot(files: Map<string, Buffer>, workDir: str
   }
   return count
 }
+
+/**
+ * §12 (TEX-02): frozen TeX workspace manifest carried in the latex-compile
+ * job payload (`payload.tex_snapshot`, produced by POST /v1/documents/:id/
+ * builds). File CONTENT is fetched from the kernel per file and verified
+ * against the manifest content_hash before the container sees it.
+ */
+export interface TexSnapshotManifest {
+  schema_version: number
+  document_id: string
+  revision: number
+  root_file: string
+  files: Array<{ path: string; version: number; content_hash: string }>
+  frozen_at?: string
+}
+
+/**
+ * Fetch every file of a frozen TeX snapshot from the kernel into `workDir`
+ * (path-traversal protected; hash-verified). Returns the file count.
+ */
+export async function materializeTexWorkspace(
+  client: Pick<ResearchClient, 'getDocumentFile'>,
+  manifest: TexSnapshotManifest,
+  workDir: string,
+): Promise<number> {
+  if (typeof manifest.document_id !== 'string' || manifest.document_id === '' || !Array.isArray(manifest.files)) {
+    throw new Error('tex snapshot manifest is missing document_id or files')
+  }
+  if (typeof manifest.root_file !== 'string' || manifest.root_file === '' || /[;&|`$"'\\ \t\n]/.test(manifest.root_file)) {
+    throw new Error(`tex snapshot root_file is unsafe for the build script: ${manifest.root_file}`)
+  }
+  const absRoot = resolve(workDir)
+  let count = 0
+  for (const entry of manifest.files) {
+    const rel = typeof entry.path === 'string' ? entry.path : ''
+    if (rel === '' || rel.startsWith('/') || rel.split('/').some(part => part === '..')) {
+      throw new Error(`tex snapshot contains an unsafe path: ${rel}`)
+    }
+    const file = await client.getDocumentFile(manifest.document_id, rel)
+    if (file === null) {
+      throw new Error(`tex snapshot file unreadable from kernel: ${rel} (document ${manifest.document_id})`)
+    }
+    const target = resolve(absRoot, rel)
+    if (!target.startsWith(`${absRoot}${sep}`) && target !== absRoot) {
+      throw new Error(`tex snapshot path escapes workDir: ${rel}`)
+    }
+    if (entry.content_hash !== undefined && entry.content_hash !== '') {
+      const actual = createHash('sha256').update(file.content).digest('hex')
+      if (actual !== entry.content_hash) {
+        throw new Error(`tex snapshot integrity mismatch for ${rel}: got ${actual}, manifest claims ${entry.content_hash}`)
+      }
+    }
+    mkdirSync(resolve(target, '..'), { recursive: true })
+    writeFileSync(target, file.content)
+    count++
+  }
+  return count
+}
+
+/**
+ * Parse the pdflatex .log into structured diagnostics: '!' errors (with the
+ * following context line) and Warning/Overfull lines. Anything else is
+ * ignored — raw log bytes stay on the log artifact (gui-plugin-plan §13.4:
+ * TeX raw diagnostics are content, not chrome).
+ */
+export interface LatexDiagnostic { level: 'error' | 'warning' | 'info'; message: string }
+
+export function parseLatexDiagnostics(logText: string): LatexDiagnostic[] {
+  const lines = logText.split('\n')
+  const out: LatexDiagnostic[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    if (line.startsWith('!')) {
+      const context = lines[i + 1]?.trim() ?? ''
+      out.push({ level: 'error', message: `${line.slice(1).trim()}${context !== '' ? ` — ${context}` : ''}` })
+    } else if (/^(.*Warning|Overfull|Underfull).*$/i.test(line) && !/LaTeX Warning: (Citation|Reference)/.test(line)) {
+      // Citation/Reference lines are pass-1 noise; skip.
+      const msg = line.trim()
+      if (msg.startsWith('(') && msg.includes('))')) continue
+      out.push({ level: 'warning', message: msg })
+    }
+  }
+  return out.slice(0, 200)
+}
+
+/** In-container build script: copy the frozen workspace files (explicit
+ * manifest list — never the /work tree, whose /outputs sub-mount would make
+ * cp recurse into its own destination) to the writable /outputs/work, then
+ * pdflatex (3 passes) + bibtex there. /work is mounted read-only, so
+ * compiling in-place would fail on the first .aux write. */
+export function buildLatexRunScript(rootFile: string, engine = 'pdflatex', files: string[] = [rootFile]): string {
+  const base = rootFile.replace(/\.tex$/i, '')
+  const copyLines = files
+    .filter(f => f !== 'outputs' && !f.startsWith('outputs/'))
+    .map(f => `cp -R "/work/${f}" "$OUT/work/" 2>/dev/null || exit 9`)
+    .join('\n')
+  return `#!/bin/sh
+set +e
+OUT=/outputs
+mkdir -p "$OUT/work"
+chmod 777 "$OUT/work" 2>/dev/null
+${copyLines}
+cd "$OUT/work" || exit 1
+ROOT="${base}"
+${engine} -interaction=nonstopmode -halt-on-error -file-line-error -recorder -no-shell-escape "$ROOT.tex" > "$OUT/pass1.log" 2>&1
+BIB=0
+if command -v bibtex > /dev/null 2>&1; then bibtex "$ROOT" > "$OUT/bibtex.log" 2>&1; BIB=$?; fi
+${engine} -interaction=nonstopmode -halt-on-error -file-line-error -recorder -no-shell-escape "$ROOT.tex" > "$OUT/pass2.log" 2>&1
+P2=$?
+${engine} -interaction=nonstopmode -halt-on-error -file-line-error -recorder -no-shell-escape "$ROOT.tex" > "$OUT/pass3.log" 2>&1
+P3=$?
+PASS=$P2
+[ "$P3" -gt "$PASS" ] 2>/dev/null && PASS=$P3
+if [ -f "$ROOT.pdf" ]; then cp "$ROOT.pdf" "$OUT/paper.pdf"; fi
+if [ -f "$ROOT.log" ]; then cp "$ROOT.log" "$OUT/tex.log"; fi
+for aux in "$ROOT.aux" "$ROOT.bbl" "$ROOT.blg" "$ROOT.fls"; do
+  if [ -f "$aux" ]; then cp "$aux" "$OUT/"; fi
+done
+printf 'latex pass exit: %s\\nbibtex exit: %s\\n' "$PASS" "$BIB"
+exit "$PASS"
+`
+}
+
 
 /**
  * §12.5 (SCH-EXEC-002): parse the fixed-schema metrics file written
@@ -553,10 +676,31 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     rmSync(workDir, { recursive: true, force: true })
     throw error
   }
-  // §12.2: image digest from the JobSpec binding (kernel default: node:22-alpine).
+  // §12 (TEX-02): latex-compile binds a FROZEN TeX snapshot — fetch its
+  // files from the kernel, hash-verify them against the manifest, and build
+  // the fixed-image compile script (pdflatex×3 + bibtex) instead of running
+  // job.command. The container only ever sees this materialized workspace.
+  const texSnapshot = job.kind === 'latex-compile' ? job.payload.tex_snapshot : undefined
+  if (texSnapshot !== undefined) {
+    try {
+      const manifest = texSnapshot as TexSnapshotManifest
+      const materialized = await materializeTexWorkspace(client, manifest, workDir)
+      if (materialized === 0) {
+        throw new Error(`tex snapshot ${manifest.document_id} materialized zero files`)
+      }
+      const engine = typeof job.payload.engine === 'string' && job.payload.engine !== '' ? job.payload.engine : 'pdflatex'
+      const fileList = manifest.files.map((f: { path: string }) => f.path)
+      writeFileSync(join(workDir, 'run.sh'), buildLatexRunScript(manifest.root_file, engine, fileList), { mode: 0o755 })
+    } catch (error) {
+      rmSync(workDir, { recursive: true, force: true })
+      throw error
+    }
+  }
+  // §12.2: image digest from the JobSpec binding (kernel defaults: TeX
+  // build image for latex-compile, node:22-alpine otherwise).
   const image = typeof job.payload.image_digest === 'string' && job.payload.image_digest !== ''
     ? job.payload.image_digest
-    : 'node:22-alpine'
+    : (job.kind === 'latex-compile' ? 'texlive/texlive:latest' : 'node:22-alpine')
 
   let run: RunOutcome
   if (job.kind === 'echo') {
@@ -590,6 +734,12 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     run = mode === 'docker'
       ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
       : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
+  } else if (texSnapshot !== undefined) {
+    // TEX-02: the frozen-workspace build script is the only thing executed.
+    const command = ['sh', '/work/run.sh']
+    run = mode === 'docker'
+      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
+      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
   } else {
     const command = job.command.length > 0 ? job.command : ['true']
     run = mode === 'docker'
@@ -651,6 +801,65 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       file_name: `run-${run.run_id}.log`,
     })
     manifest.log_artifact = logArtifact.artifact_id
+
+    // §12 (TEX-02): latex-compile outcome — PDF, full log, structured
+    // diagnostics and aux/bbl/blg/fls as content-addressed artifacts
+    // (api-contracts.md §builds); the kernel maps them onto the tex_builds
+    // row in completeJob.
+    if (job.kind === 'latex-compile' && texSnapshot !== undefined) {
+      const texManifest = texSnapshot as TexSnapshotManifest
+      let pdfArtifact: string | null = null
+      let texLogArtifact: string | null = null
+      let diagnostics: LatexDiagnostic[] = []
+      const pdfPath = join(outputsDir, 'paper.pdf')
+      if (existsSync(pdfPath)) {
+        const pdf = readFileSync(pdfPath)
+        const rec = await client.registerArtifact({
+          project_id: job.project_id,
+          kind: 'pdf',
+          content_base64: pdf.toString('base64'),
+          media_type: 'application/pdf',
+          file_name: 'paper.pdf',
+          metadata: { run_id: run.run_id, job_id: job.job_id, tex_document_id: texManifest.document_id, tex_revision: texManifest.revision },
+        })
+        pdfArtifact = rec.artifact_id
+      }
+      const logPath = join(outputsDir, 'tex.log')
+      if (existsSync(logPath)) {
+        const logText = readFileSync(logPath, 'utf8')
+        diagnostics = parseLatexDiagnostics(logText)
+        const rec = await client.registerArtifact({
+          project_id: job.project_id,
+          kind: 'log',
+          content_base64: Buffer.from(logText).toString('base64'),
+          media_type: 'text/plain; charset=utf-8',
+          file_name: `tex-${texManifest.revision}.log`,
+          metadata: { run_id: run.run_id, job_id: job.job_id, tex_document_id: texManifest.document_id, tex_revision: texManifest.revision },
+        })
+        texLogArtifact = rec.artifact_id
+      }
+      const aux: Record<string, string> = {}
+      for (const f of readdirSync(outputsDir)) {
+        if (/\\.(aux|bbl|blg|fls)$/.test(f)) aux[f] = readFileSync(join(outputsDir, f), 'base64')
+      }
+      let auxArtifact: string | null = null
+      if (Object.keys(aux).length > 0) {
+        const rec = await client.registerArtifact({
+          project_id: job.project_id,
+          kind: 'data',
+          content_base64: Buffer.from(JSON.stringify(aux)).toString('base64'),
+          media_type: 'application/json',
+          file_name: `tex-${texManifest.revision}-aux.json`,
+          metadata: { run_id: run.run_id, job_id: job.job_id },
+        })
+        auxArtifact = rec.artifact_id
+      }
+      manifest.tex_pdf_artifact = pdfArtifact
+      manifest.tex_log_artifact = texLogArtifact
+      manifest.tex_aux_artifact = auxArtifact
+      manifest.tex_diagnostics = diagnostics
+      manifest.tex = { document_id: texManifest.document_id, revision: texManifest.revision, root_file: texManifest.root_file }
+    }
 
     // §12.5 (SCH-EXEC-002): formal metrics come from the fixed-schema metrics
     // FILE written in-container to the output contract path (host mirror:

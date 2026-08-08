@@ -385,6 +385,20 @@ export class ResearchClient {
     }
   }
 
+  /** TeX workspace file content at the given path (TEX-02 runner materialization). */
+  async getDocumentFile(documentId: string, path: string): Promise<{ path: string; version: number; content: string } | null> {
+    try {
+      const response = await fetch(`${this.endpoint}/v1/documents/${encodeURIComponent(documentId)}/file?path=${encodeURIComponent(path)}`, {
+        headers: { accept: 'application/json', ...this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {} },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!response.ok) return null
+      return await response.json() as { path: string; version: number; content: string }
+    } catch {
+      return null
+    }
+  }
+
   // ── budget / events ──────────────────────────────────────────────────────
 
   recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): Promise<Record<string, unknown>> {

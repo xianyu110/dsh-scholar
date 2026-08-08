@@ -492,7 +492,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             send(res, 201, record)
             return
           }
-          if (id !== undefined && method === 'GET' && sub === undefined) {
+          if (id !== undefined && (method === 'GET' || method === 'HEAD') && sub === undefined) {
             // v2: project-scoped lookup via ?project_id=; legacy unqualified
             // lookup resolves only when the blob has a single project record.
             const projectId = url.searchParams.get('project_id') ?? undefined
@@ -516,6 +516,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               res.writeHead(304, { etag, 'cache-control': 'no-store' })
               res.end()
               return
+            }
+            const headOnly = method === 'HEAD'
+            const endBody = (status: number, headers: Record<string, string>, body?: Buffer): void => {
+              if (headOnly) { res.writeHead(status, headers); res.end(); return }
+              res.writeHead(status, headers)
+              res.end(body)
             }
             const fileName = record.file_name ?? `${record.kind}-${record.artifact_id.slice(0, 16)}`
             const disposition = record.kind === 'pdf' || record.kind === 'chart' || record.kind === 'paper'
@@ -542,8 +548,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
                 return
               }
               if (end < start) start = 0
-              res.writeHead(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) })
-              res.end(content.subarray(start, end + 1))
+              endBody(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) }, content.subarray(start, end + 1))
               return
             }
             if (match !== null && (match[1] !== '' || match[2] !== '')) {
@@ -552,12 +557,10 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               let end = content.byteLength - 1
               if (match[1] !== '') start = Math.min(Number(match[1]), content.byteLength - 1)
               if (match[2] !== '') start = Math.max(0, content.byteLength - Number(match[2]))
-              res.writeHead(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) })
-              res.end(content.subarray(start, end + 1))
+              endBody(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) }, content.subarray(start, end + 1))
               return
             }
-            res.writeHead(200, baseHeaders)
-            res.end(content)
+            endBody(200, baseHeaders, content)
             return
           }
           break
@@ -695,7 +698,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             ok(res, kernel.texSnapshot(id, input.expected_revision))
             return
           }
-          if (id !== undefined && sub === 'builds' && method === 'GET') {
+          if (id !== undefined && sub === 'builds' && subId === undefined && method === 'GET') {
             ok(res, kernel.texListBuilds(id))
             return
           }

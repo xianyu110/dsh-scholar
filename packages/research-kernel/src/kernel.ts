@@ -1026,7 +1026,7 @@ export class ResearchKernel {
     // §12.2: image digest default; the rest of the binding travels in payload.
     const payload = {
       ...(input.payload ?? {}),
-      image_digest: input.image_digest ?? (SECURE_KINDS.includes(input.kind) ? 'node:22-alpine' : ''),
+      image_digest: input.image_digest ?? (input.kind === 'latex-compile' ? 'texlive/texlive:latest' : (SECURE_KINDS.includes(input.kind) ? 'node:22-alpine' : '')),
       ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
       ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
     }
@@ -1198,6 +1198,21 @@ export class ResearchKernel {
     this.emit(job.project_id, 'job.updated', {
       job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,
     })
+    // §12 (TEX-02): a latex-compile completion finalizes its tex_builds row
+    // (status/diagnostics/PDF/log from the runner manifest).
+    if (job.kind === 'latex-compile' && input.run_manifest !== undefined) {
+      const manifest = input.run_manifest as Record<string, unknown>
+      const buildRow = this.db.prepare('SELECT build_id FROM tex_builds WHERE job_id = ?').get(job.job_id) as { build_id: string } | undefined
+      if (buildRow !== undefined) {
+        const diagnostics = Array.isArray(manifest.tex_diagnostics) ? manifest.tex_diagnostics : []
+        this.texUpdateBuild(buildRow.build_id, {
+          status: input.status === 'succeeded' ? 'succeeded' : (input.status === 'cancelled' ? 'cancelled' : 'failed'),
+          diagnostics: JSON.stringify(diagnostics),
+          pdf_artifact: typeof manifest.tex_pdf_artifact === 'string' ? manifest.tex_pdf_artifact : null,
+          log_artifact: typeof manifest.tex_log_artifact === 'string' ? manifest.tex_log_artifact : null,
+        })
+      }
+    }
     return jobRecord
   }
 

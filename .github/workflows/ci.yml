@@ -142,3 +142,30 @@ jobs:
         run: bash evals/clean-room-rerun.sh
       - name: Golden-path e2e (docker)
         run: bash tests/e2e/golden-path.sh
+
+  tex-compile-e2e:
+    # TEX-02 end-to-end: frozen TeX snapshot -> texlive container compile ->
+    # PDF/diagnostics artifacts -> tex_builds finalized (evals/latex-compile-e2e.sh).
+    # The fixed TeX image is pulled BEFORE the script's image gate so the
+    # compile assertion is real; the script SKIPs (exit 0) without docker.
+    needs: unit-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build standalone sub-packages
+        run: |
+          pnpm -r --filter './packages/*' --filter './workers/*' run build
+      - name: Pull fixed TeX build image
+        run: docker pull texlive/texlive:latest
+      - name: latex-compile e2e (docker)
+        run: bash evals/latex-compile-e2e.sh
