@@ -3571,7 +3571,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   convRow.style.cssText = 'padding:4px 0'
   const convLabel = el('span', '', 'Transcript')
   convLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const convValue = el('span', 'mono', `${chatMessages.length} messages`)
+  const convValue = el('span', 'mono', `${chatSessions.length} session(s) · ${chatMessages.length} messages`)
   convValue.style.cssText = 'font-size:11px'
   const clearBtn = el('button', 'hbtn', 'Clear')
   clearBtn.style.cssText = 'padding:1px 8px'
@@ -5124,6 +5124,8 @@ function renderSidebar(
       }
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+      // dsh-web tooltip: full identity of the project on hover.
+      item.title = `${p.name ?? ''} · ${p.status ?? ''} · ${p.project_id ?? ''}`
       // dsh-web context menu: right-click on a project row.
       item.oncontextmenu = (event) => {
         event.preventDefault()
