@@ -285,6 +285,8 @@ let lastError: string | undefined
 /** Kernel reachability (dsh-web offline indicator). */
 let kernelOnline = true
 let lastKernelCheck = 0
+/** First-paint skeleton (dsh-web loading feel). */
+let booting = true
 
 /**
  * Assigned by apply() to the full re-render closure. Module-level panel
@@ -547,12 +549,19 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   modeBadge.textContent = '🧭 gate-only'
   modeBadge.title = 'research mode: every gate requires a human decision'
   modeBadge.style.cssText = 'cursor:default;opacity:.9'
-  // dsh-web "Collapse sidebar": toggles the workspace sidebar width.
+  // dsh-web "Collapse sidebar": toggles the workspace sidebar width
+  // (persisted, dsh-web layout memory).
+  const SIDEBAR_KEY = 'dsh-scholar-ui-sidebar'
   let sidebarCollapsed = false
+  try { sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === 'collapsed' } catch { /* private mode */ }
+  const sidebarPersist = (): void => {
+    try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? 'collapsed' : 'expanded') } catch { /* private mode */ }
+  }
   const sidebarToggle = el('button', 'hbtn', '◧')
   sidebarToggle.title = 'collapse / expand sidebar'
   sidebarToggle.onclick = () => {
     sidebarCollapsed = !sidebarCollapsed
+    sidebarPersist()
     if (sidebar !== null) sidebar.classList.toggle('collapsed', sidebarCollapsed)
     if (main !== null) main.classList.toggle('expanded', sidebarCollapsed)
     sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
@@ -634,6 +643,17 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   const render = async (): Promise<void> => {
     styleTabs()
+    // dsh-web skeleton: placeholders while the first paint loads.
+    if (booting) {
+      const skel = el('div')
+      skel.style.cssText = 'display:flex;flex-direction:column;gap:10px;padding:14px'
+      for (let i = 0; i < 4; i++) {
+        const bar = el('div')
+        bar.style.cssText = `height:14px;border-radius:6px;background:var(--bg-3);animation:pulse 1.6s ease-in-out infinite;width:${92 - i * 12}%`
+        skel.appendChild(bar)
+      }
+      body.replaceChildren(skel)
+    }
     // dsh-web offline indicator: throttled kernel health probe.
     const now = Date.now()
     if (now - lastKernelCheck > 5000) {
@@ -667,6 +687,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       if (projection === null || projection.project === undefined) projection = null
       else projectId = projection.project.project_id
     }
+    if (projection !== null && booting) booting = false
     if (fullscreen && sidebar !== null) {
       // dsh-web sidebar stats: counts of the active project under its row.
       renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() }, projection?.counts)
@@ -831,12 +852,19 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const onResize = (): void => {
     if (!fullscreen || sidebar === null) return
     const narrow = window.innerWidth < 920
-    if (narrow !== sidebarCollapsed) {
-      sidebarCollapsed = narrow
-      sidebar.classList.toggle('collapsed', sidebarCollapsed)
-      if (main !== null) main.classList.toggle('expanded', sidebarCollapsed)
-      sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
+    // Narrow viewports force-collapse; wide ones keep the user's choice
+    // (persisted layout memory).
+    if (narrow && !sidebarCollapsed) {
+      sidebarCollapsed = true
+      sidebar.classList.add('collapsed')
+      if (main !== null) main.classList.add('expanded')
+      sidebarToggle.textContent = '◨'
     }
+  }
+  if (sidebarCollapsed && sidebar !== null) {
+    sidebar.classList.add('collapsed')
+    if (main !== null) main.classList.add('expanded')
+    sidebarToggle.textContent = '◨'
   }
   onResize()
   window.addEventListener('resize', onResize)
@@ -3018,8 +3046,11 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     pre.style.cssText = 'white-space:pre-wrap;word-break:break-all;font:10.5px/1.5 ui-monospace,Menlo,monospace;color:var(--text-2);margin:0'
     pre.textContent = detailMsg.text
     panel.appendChild(pre)
+    // dsh-web share: copy raw or as markdown.
+    const copyRow = el('div', 'row')
+    copyRow.style.cssText = 'gap:6px'
     const copyRaw = el('button', 'hbtn', '⧉ copy raw')
-    copyRaw.style.cssText = 'align-self:flex-start'
+    copyRaw.style.cssText = 'padding:0 8px;font-size:9px'
     copyRaw.onclick = () => {
       void navigator.clipboard.writeText(detailMsg.text).then(
         () => { copyRaw.textContent = '✓ copied' },
@@ -3027,7 +3058,20 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       )
       setTimeout(() => { copyRaw.textContent = '⧉ copy raw' }, 1600)
     }
-    panel.appendChild(copyRaw)
+    copyRow.appendChild(copyRaw)
+    const copyMd = el('button', 'hbtn', '⧉ copy md')
+    copyMd.title = 'copy as markdown (## heading, - bullet, [link](url))'
+    copyMd.style.cssText = 'padding:0 8px;font-size:9px'
+    copyMd.onclick = () => {
+      const md = textToMarkdown(detailMsg.text)
+      void navigator.clipboard.writeText(md).then(
+        () => { copyMd.textContent = '✓ copied' },
+        () => { copyMd.textContent = 'copy failed' },
+      )
+      setTimeout(() => { copyMd.textContent = '⧉ copy md' }, 1600)
+    }
+    copyRow.appendChild(copyMd)
+    panel.appendChild(copyRow)
     shell.appendChild(panel)
   }
   shell.appendChild(column)
@@ -3250,6 +3294,27 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   column.appendChild(completionBox)
 
   body.appendChild(shell)
+}
+
+/** Convert a chat answer back to markdown source (dsh-web copy-as-md). */
+function textToMarkdown(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  for (const raw of lines) {
+    const line = raw.trimEnd()
+    if (/^```/.test(line) || /^#{1,3}\s/.test(line) || /^[-*•]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+      out.push(line)
+      continue
+    }
+    if (/^\|/.test(line)) {
+      const cells = line.split('|').map(c => c.trim()).filter((c, i, arr) => !(i === 0 && c === '') && !(i === arr.length - 1 && c === ''))
+      if (cells.every(c => /^:?-{2,}:?$/.test(c))) continue
+      out.push(`| ${cells.join(' | ')} |`)
+      continue
+    }
+    out.push(line)
+  }
+  return out.join('\n')
 }
 
 /** Structured chat field cell (status/survey cards). */
