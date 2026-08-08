@@ -4096,10 +4096,14 @@ function openGlobalSearchModal(root: ShadowRoot): void {
     if (event.key === 'Enter') {
       event.preventDefault()
       if (selIdx >= 0 && rowEls[selIdx] !== undefined) {
-        // dsh-web jump: open the selected hit's project on the Evidence tab.
+        // dsh-web jump: open the selected hit's project on the right tab.
         rowEls[selIdx]!.click()
+      } else if (rowEls.length > 0 && input.value.trim() === lastQuery) {
+        // dsh-web default: Enter with no selection opens the first hit
+        // (only when the results match the current query — never stale).
+        rowEls[0]!.click()
       } else {
-        void runSearch()
+        runSearchSafe()
       }
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (rowEls.length === 0) return
@@ -4111,9 +4115,14 @@ function openGlobalSearchModal(root: ShadowRoot): void {
   // dsh-web search-as-you-type: live search with a 350ms debounce (Enter
   // still triggers an immediate search).
   let debounceTimer: number | undefined
+  let lastQuery = ''
+  const runSearchSafe = (): void => {
+    lastQuery = input.value.trim()
+    void runSearch()
+  }
   input.oninput = () => {
     if (debounceTimer !== undefined) window.clearTimeout(debounceTimer)
-    debounceTimer = window.setTimeout(() => { void runSearch() }, 350)
+    debounceTimer = window.setTimeout(() => { runSearchSafe() }, 350)
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
@@ -4166,9 +4175,13 @@ function openProjectSwitcherModal(root: ShadowRoot): void {
     rows.length = 0
     selIdx = -1
     const q = projectSwitchQuery.trim().toLowerCase()
-    const filtered = q === '' ? projects : projects.filter(p =>
+    let filtered = q === '' ? projects : projects.filter(p =>
       (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q),
     )
+    // dsh-web starred projects sort first, mirroring the sidebar.
+    if (favProjects.size > 0) {
+      filtered = [...filtered].sort((a, b) => (favProjects.has(b.project_id ?? '') ? 1 : 0) - (favProjects.has(a.project_id ?? '') ? 1 : 0))
+    }
     if (filtered.length === 0) {
       list.appendChild(el('div', 'empty', `No projects match "${projectSwitchQuery.trim()}".`))
       return
