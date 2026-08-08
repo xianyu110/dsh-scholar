@@ -30,18 +30,18 @@ function tableInfo(db: DatabaseSync, table: string): Array<{ name: string; pk: n
 describe('explicit migrations', () => {
   afterEach(() => {
     // The rollback test appends a failing migration; always restore.
-    while (MIGRATIONS.length > 5) MIGRATIONS.pop()
+    while (MIGRATIONS.length > 6) MIGRATIONS.pop()
   })
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(4)
+    expect(SCHEMA_VERSION).toBe(5)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('4')
+    expect(meta.schema_version).toBe('5')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members'])
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
@@ -61,7 +61,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('4')
+    expect(version).toBe('5')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -105,7 +105,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('4')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('5')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -154,8 +154,8 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(5)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('4')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(6)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('5')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })

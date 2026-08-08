@@ -477,6 +477,29 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           break
         }
+        case 'members': {
+          if (id !== undefined && method === 'GET' && sub === undefined) {
+            ok(res, kernel.listProjectMembers(id))
+            return
+          }
+          if (id !== undefined && method === 'POST' && sub === undefined) {
+            const input = z.object({
+              principal_id: z.string().min(1),
+              role: z.enum(['pi', 'researcher', 'operator', 'auditor', 'viewer']),
+              tenant_id: z.string().optional(),
+              actor: z.string().min(1),
+            }).parse(body)
+            ok(res, kernel.addProjectMember({ project_id: id, ...input }))
+            return
+          }
+          if (id !== undefined && sub !== undefined && method === 'DELETE') {
+            const input = z.object({ actor: z.string().min(1) }).parse(body)
+            kernel.removeProjectMember({ project_id: id, principal_id: sub, actor: input.actor })
+            ok(res, { ok: true })
+            return
+          }
+          break
+        }
         case 'artifacts': {
           if (method === 'POST' && id === undefined) {
             const input = artifactSchema.parse(body)

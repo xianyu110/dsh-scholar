@@ -263,8 +263,72 @@ export class ResearchKernel {
       project.created_at, project.updated_at, JSON.stringify(project.history),
     )
     if (project.session_id !== null) this.linkSession(project.session_id, project.project_id)
+    // API-01 foundation: the creator becomes the first PI member
+    // (reconstruction-contracts.md §7: "Project creator 成为 pi").
+    const creator = (input as { creator_principal_id?: string }).creator_principal_id
+    if (creator !== undefined && creator !== '') {
+      this.db.prepare(`INSERT INTO project_members (project_id, principal_id, tenant_id, role, created_at, updated_at)
+        VALUES (?, ?, ?, 'pi', ?, ?)`)
+        .run(project.project_id, creator, (input as { creator_tenant_id?: string }).creator_tenant_id ?? '', project.created_at, project.created_at)
+    }
     this.emit(project.project_id, 'project.created', { project_id: project.project_id, name: project.name })
     return project
+  }
+
+  // ── project membership (API-01 foundation, reconstruction-contracts §7) ──
+
+  listProjectMembers(projectId: string): Array<{
+    project_id: string; principal_id: string; tenant_id: string; role: string; created_at: string; updated_at: string
+  }> {
+    this.getProject(projectId)
+    const rows = this.db.prepare('SELECT * FROM project_members WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as Array<{
+      project_id: string; principal_id: string; tenant_id: string; role: string; created_at: string; updated_at: string
+    }>
+    return rows
+  }
+
+  addProjectMember(input: {
+    project_id: string
+    principal_id: string
+    role: 'pi' | 'researcher' | 'operator' | 'auditor' | 'viewer'
+    tenant_id?: string
+    actor: string
+  }): { project_id: string; principal_id: string; tenant_id: string; role: string; created_at: string; updated_at: string } {
+    const project = this.getProject(input.project_id)
+    // member_manage capability (reconstruction-contracts §7): the acting
+    // principal must already be a PI of the project.
+    const actorRow = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND principal_id = ?')
+      .get(input.project_id, input.actor) as { role: string } | undefined
+    if (actorRow?.role !== 'pi') {
+      throw new KernelError(403, 'member_manage_denied', `only an existing PI can manage members of ${input.project_id}`)
+    }
+    const now = nowIso()
+    const tenant = input.tenant_id ?? ''
+    this.db.prepare(`INSERT INTO project_members (project_id, principal_id, tenant_id, role, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, principal_id) DO UPDATE SET role = excluded.role, tenant_id = excluded.tenant_id, updated_at = excluded.updated_at`)
+      .run(input.project_id, input.principal_id, tenant, input.role, now, now)
+    this.emit(project.project_id, 'project.membership.updated', { project_id: input.project_id, principal_id: input.principal_id, role: input.role })
+    return { project_id: input.project_id, principal_id: input.principal_id, tenant_id: tenant, role: input.role, created_at: now, updated_at: now }
+  }
+
+  removeProjectMember(input: { project_id: string; principal_id: string; actor: string }): void {
+    this.getProject(input.project_id)
+    const actorRow = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND principal_id = ?')
+      .get(input.project_id, input.actor) as { role: string } | undefined
+    if (actorRow?.role !== 'pi') {
+      throw new KernelError(403, 'member_manage_denied', `only an existing PI can manage members of ${input.project_id}`)
+    }
+    const target = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND principal_id = ?')
+      .get(input.project_id, input.principal_id) as { role: string } | undefined
+    if (target === undefined) throw new KernelError(404, 'member_not_found', `member ${input.principal_id} not found in ${input.project_id}`)
+    if (target.role === 'pi') {
+      const piCount = (this.db.prepare('SELECT COUNT(*) AS n FROM project_members WHERE project_id = ? AND role = ?').get(input.project_id, 'pi') as { n: number }).n
+      if (piCount <= 1) {
+        throw new KernelError(422, 'last_pi_removal', 'the last PI of a project cannot be removed')
+      }
+    }
+    this.db.prepare('DELETE FROM project_members WHERE project_id = ? AND principal_id = ?').run(input.project_id, input.principal_id)
   }
 
   getProject(projectId: string): ResearchProject {

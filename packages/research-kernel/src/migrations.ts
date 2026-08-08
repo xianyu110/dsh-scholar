@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -463,6 +463,30 @@ const terminalTexCapabilities = (db: DatabaseSync, report: MigrationReport): voi
 }
 
 /**
+ * 0006 — project membership (API-01 foundation): creator is seeded as the
+ * first PI; roles follow reconstruction-contracts.md (last PI cannot be
+ * removed or demoted). BFF route-level enforcement lands with the v2
+ * migration; the model + APIs are the durable base.
+ */
+const projectMembers = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_members (
+      project_id TEXT NOT NULL,
+      principal_id TEXT NOT NULL,
+      tenant_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('pi','researcher','operator','auditor','viewer')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, principal_id),
+      FOREIGN KEY (project_id) REFERENCES projects(project_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_members_project ON project_members(project_id);
+  `)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.project_members = (db.prepare('SELECT COUNT(*) AS n FROM project_members').get() as { n: number }).n
+}
+
+/**
  * 0005 — authoritative code_snapshots registry (STORE-02): one row per
  * snapshotCodeArchive() call, binding snapshot_id to its archive/manifest
  * artifacts, source description, content hash, file count and size.
@@ -533,6 +557,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'Authoritative code_snapshots registry (STORE-02)',
     body: codeSnapshotRegistry.toString(),
     up: codeSnapshotRegistry,
+  },
+  {
+    id: '0006_project_members',
+    description: 'Project membership model (API-01 foundation)',
+    body: projectMembers.toString(),
+    up: projectMembers,
   },
 ]
 
