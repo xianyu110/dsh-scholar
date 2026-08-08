@@ -5352,7 +5352,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     }
     const wrap = el('span')
     wrap.style.cssText = 'display:inline-flex;align-items:center;gap:2px;border:1px solid var(--border);border-radius:8px;padding:1px 4px'
-    if (s.id === chatActiveId) wrap.style.cssText += ';border-color:var(--accent);background:var(--accent-soft)'
+    if (s.id === chatActiveId) {
+      wrap.style.cssText += ';border-color:var(--accent);background:var(--accent-soft)'
+      wrap.setAttribute('aria-current', 'true')
+    } else {
+      wrap.removeAttribute('aria-current')
+    }
     if (s.archived === true) wrap.style.cssText += ';opacity:.45'
     // dsh-web session tabs: drag to reorder the session list.
     wrap.draggable = true
@@ -6266,7 +6271,14 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const charsRow = el('div', 'row')
     charsRow.appendChild(el('span', 'muted', 'Chars'))
     charsRow.appendChild(el('span', 'mono', String(detailMsg.text.length)))
-    meta.append(roleRow, idxRow, timeRow, linesRow, charsRow)
+    // dsh-web depth: pin state and quote presence in the metadata.
+    const pinnedRow = el('div', 'row')
+    pinnedRow.appendChild(el('span', 'muted', 'Pinned'))
+    pinnedRow.appendChild(el('span', 'mono', detailMsg.pinned === true ? 'yes ★' : 'no'))
+    const quoteRow = el('div', 'row')
+    quoteRow.appendChild(el('span', 'muted', 'Quote'))
+    quoteRow.appendChild(el('span', 'mono', detailMsg.quote !== undefined ? `#${detailMsg.quote.index + 1}` : '—'))
+    meta.append(roleRow, idxRow, timeRow, linesRow, charsRow, pinnedRow, quoteRow)
     panel.appendChild(meta)
     // dsh-web "copy command": quick re-run for user messages.
     if (detailMsg.role === 'user') {
