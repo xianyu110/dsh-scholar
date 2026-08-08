@@ -1292,6 +1292,18 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
         if (root !== null) openIdeaDetailModal(root, idea)
       }
       row.appendChild(ideaBtn)
+      // dsh-web context menu: details / copy id.
+      row.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root === null) return
+        const iid = String(idea.idea_id ?? '')
+        openContextMenu(root, event.clientX, event.clientY, [
+          { label: '⧉ Details', onPick: () => openIdeaDetailModal(root, idea) },
+          ...(iid !== '' ? [{ label: 'Copy idea ID', hint: iid, onPick: () => copyText(iid) }] : []),
+        ])
+      }
       card.appendChild(row)
     }
     if (ideas.length > 5) card.appendChild(el('div', 'muted', `… and ${ideas.length - 5} more`))
@@ -1335,6 +1347,18 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
         if (root !== null) openContractDetailModal(root, c)
       }
       row.appendChild(contractBtn)
+      // dsh-web context menu: details / copy id.
+      row.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root === null) return
+        const cid = String(c.contract_id ?? '')
+        openContextMenu(root, event.clientX, event.clientY, [
+          { label: '⧉ Details', onPick: () => openContractDetailModal(root, c) },
+          ...(cid !== '' ? [{ label: 'Copy contract ID', hint: cid, onPick: () => copyText(cid) }] : []),
+        ])
+      }
       card.appendChild(row)
     }
     if (contracts.length > 5) card.appendChild(el('div', 'muted', `… and ${contracts.length - 5} more`))
