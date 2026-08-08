@@ -4071,7 +4071,12 @@ function openProjectSwitcherModal(root: ShadowRoot): void {
   input.onkeydown = (event) => {
     if (event.key === 'Enter') {
       event.preventDefault()
-      if (selIdx >= 0 && rows[selIdx] !== undefined) rows[selIdx]!.click()
+      if (selIdx >= 0 && rows[selIdx] !== undefined) {
+        rows[selIdx]!.click()
+      } else if (rows.length > 0) {
+        // dsh-web default: Enter with no selection picks the first row.
+        rows[0]!.click()
+      }
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (rows.length === 0) return
       event.preventDefault()
@@ -4749,6 +4754,8 @@ function renderSidebar(
   sidebar.appendChild(groupRow)
 
   const list = el('div', 'sidebar-list')
+  // dsh-web counts: the footer shows the filtered/total project counts.
+  const footLabel = el('span', '', `${projects.length} projects`)
   const renderRows = (): void => {
     list.replaceChildren()
     const q = sidebarQuery.trim().toLowerCase()
@@ -4756,6 +4763,10 @@ function renderSidebar(
     if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
     if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
     if (sidebarGroup === 'archived') filtered = filtered.filter(p => p.status === 'ARCHIVED')
+    // dsh-web counts: reflect the active filter in the footer.
+    footLabel.textContent = q === '' && sidebarGroup === 'all'
+      ? `${projects.length} projects`
+      : `${filtered.length}/${projects.length} projects`
     if (filtered.length === 0) {
       const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet — create one with ＋ above or /research new in Chat.' : 'No matches for the current filter.')
       empty.style.cssText = 'padding:10px 12px'
@@ -4891,7 +4902,6 @@ function renderSidebar(
 
   const foot = el('div', 'sidebar-foot')
   foot.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between'
-  const footLabel = el('span', '', `${projects.length} projects`)
   const settingsBtn = el('button', 'hbtn', '⚙ Settings')
   settingsBtn.title = 'connection, token and appearance settings'
   settingsBtn.onclick = () => {
@@ -6043,6 +6053,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
           return
         }
       }
+      void run()
+    } else if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      // dsh-web composer: Ctrl/Cmd+Enter also sends.
+      event.preventDefault()
       void run()
     } else if (event.key === 'Escape') {
       completionBox.style.display = 'none'
