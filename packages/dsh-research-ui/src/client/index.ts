@@ -639,6 +639,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   kernelDot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:var(--tone-amber);display:inline-block;flex-shrink:0'
   kernelDot.title = 'kernel status: checking…'
   kernelDot.setAttribute('aria-label', 'kernel status')
+  kernelDot.style.cursor = 'pointer'
+  kernelDot.onclick = () => { void openSettingsModal(root) }
   header.appendChild(kernelDot)
   const spacer = el('span', 'spacer')
   header.appendChild(spacer)
@@ -665,7 +667,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   close.setAttribute('aria-label', 'Collapse panel')
   close.onclick = () => { panel.style.display = 'none' }
   const commandsBtn = el('button', 'hbtn', '⌘ Commands')
-  commandsBtn.title = 'browse /research commands'
+  commandsBtn.title = 'browse /research commands (Ctrl/Cmd+K)'
   commandsBtn.setAttribute('aria-keyshortcuts', 'Control+K Meta+K')
   commandsBtn.onclick = () => { openCommandsModal(root) }
   const shortcutsBtn = el('button', 'hbtn', '⌨ Shortcuts')
@@ -833,7 +835,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       kernelOnline = health !== null && health.ok === true
       // dsh-web status dot: reflect bridge health immediately.
       kernelDot.style.background = kernelOnline ? 'var(--tone-green)' : 'var(--tone-red)'
-      kernelDot.title = kernelOnline ? `kernel connected · ${health.instance ?? ''}` : 'kernel unreachable'
+      kernelDot.title = kernelOnline ? `kernel connected · ${health.instance ?? ''} — click for settings` : 'kernel unreachable — click for settings'
     }
     // Project list: drives the sidebar (fullscreen) or the picker (float).
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
@@ -4052,7 +4054,9 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2);border-radius:6px;cursor:pointer'
       row.setAttribute('role', 'option')
       row.setAttribute('aria-selected', 'false')
-      row.appendChild(el('span', 'artifact-kind', h.kind.toUpperCase()))
+      // dsh-web icons: visual kind hint per hit.
+      const KIND_ICON: Record<string, string> = { claim: '🧾', evidence: '📊', artifact: '📦' }
+      row.appendChild(el('span', 'artifact-kind', `${KIND_ICON[h.kind] ?? ''} ${h.kind.toUpperCase()}`))
       const bodyEl = el('div', 'grow')
       bodyEl.style.cssText = 'min-width:0'
       const projEl = el('div', 'muted', h.status !== undefined ? `${h.project} · ${STATUS_META[h.status]?.label ?? h.status}` : h.project)
