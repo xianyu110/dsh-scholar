@@ -1423,7 +1423,13 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       gatesSelected.clear()
       rerender()
     }
-    bar.append(count, approveSel, rejectSel, doneSel)
+    const allBtn = el('button', 'hbtn', '☑ all')
+    allBtn.title = 'select all pending gates'
+    allBtn.onclick = () => {
+      for (const g of pFiltered) if (g.gate_id !== undefined) gatesSelected.add(g.gate_id)
+      renderList()
+    }
+    bar.append(count, allBtn, approveSel, rejectSel, doneSel)
     listEl.appendChild(bar)
   }
   for (const gate of pFiltered) {
@@ -1640,7 +1646,13 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       runsSelected.clear()
       rerender()
     }
-    bar.append(count, cancelSel, doneSel)
+    const allBtn = el('button', 'hbtn', '☑ all')
+    allBtn.title = 'select all cancellable runs'
+    allBtn.onclick = () => {
+      for (const j of jobs) if (j.job_id !== undefined && cancellable.has(j.status ?? '')) runsSelected.add(j.job_id)
+      rerender()
+    }
+    bar.append(count, allBtn, cancelSel, doneSel)
     body.appendChild(bar)
   }
   for (const job of jobs) {
@@ -1809,7 +1821,13 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
         artifactsSelected.clear()
         rerender()
       }
-      bar.append(count, downloadSel, doneSel)
+      const allBtn = el('button', 'hbtn', '☑ all')
+      allBtn.title = 'select all artifacts'
+      allBtn.onclick = () => {
+        for (const a of artifacts) if (a.artifact_id !== undefined) artifactsSelected.add(a.artifact_id)
+        renderList()
+      }
+      bar.append(count, allBtn, downloadSel, doneSel)
       listEl.appendChild(bar)
     }
     // dsh-web virtualized feel: window artifacts to the newest 15.
