@@ -110,21 +110,33 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Research OS — DSH Scholar</title>
 <style>
-  :root { color-scheme: dark; }
-  body { margin:0; background:#0a0e18; color:#dbe2ee; font:14px/1.5 system-ui,sans-serif; }
+  :root { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  body { margin:0; background:#f7f9fc; color:#1a2333; font:14px/1.5 system-ui,sans-serif; }
+  :root[data-theme="dark"] body { background:#0a0e18; color:#dbe2ee; }
   #boot-screen { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:9998; }
-  .card { background:#111726; border:1px solid #263049; border-radius:14px; padding:28px 34px; width:min(420px, 90vw); box-shadow:0 18px 60px rgba(0,0,0,.5); }
-  .card h1 { margin:0 0 6px; font-size:18px; color:#eef2fa; }
-  .card p { margin:0 0 16px; color:#8b97b0; font-size:12.5px; }
-  .card input { width:100%; box-sizing:border-box; background:#151b2c; color:#dbe2ee; border:1px solid #2b3652; border-radius:8px; padding:9px 12px; font:13px/1.4 ui-monospace,Menlo,monospace; outline:none; margin-bottom:12px; }
-  .card input:focus { border-color:#4d9fff; }
+  .card { background:#ffffff; border:1px solid #d9e1ee; border-radius:14px; padding:28px 34px; width:min(420px, 90vw); box-shadow:0 18px 60px rgba(30,45,80,.18); }
+  :root[data-theme="dark"] .card { background:#111726; border-color:#263049; box-shadow:0 18px 60px rgba(0,0,0,.5); }
+  .card h1 { margin:0 0 6px; font-size:18px; color:#1a2333; }
+  :root[data-theme="dark"] .card h1 { color:#eef2fa; }
+  .card p { margin:0 0 16px; color:#4a5a78; font-size:12.5px; }
+  :root[data-theme="dark"] .card p { color:#8b97b0; }
+  .card input { width:100%; box-sizing:border-box; background:#ffffff; color:#1a2333; border:1px solid #d9e1ee; border-radius:8px; padding:9px 12px; font:13px/1.4 ui-monospace,Menlo,monospace; outline:none; margin-bottom:12px; }
+  :root[data-theme="dark"] .card input { background:#151b2c; color:#dbe2ee; border-color:#2b3652; }
+  .card input:focus { border-color:#2563eb; }
+  :root[data-theme="dark"] .card input:focus { border-color:#4d9fff; }
   .card button { width:100%; background:linear-gradient(180deg,#2f9e44,#238636); color:#fff; border:0; border-radius:8px; padding:10px 14px; font:700 13px/1 system-ui,sans-serif; cursor:pointer; }
   .card button:hover { filter:brightness(1.12); }
-  .err { color:#f87171; font-size:12px; margin-top:10px; min-height:16px; }
-  .hint { margin-top:14px; color:#55627e; font-size:11px; }
+  .err { color:#dc2626; font-size:12px; margin-top:10px; min-height:16px; }
+  :root[data-theme="dark"] .err { color:#f87171; }
+  .hint { margin-top:14px; color:#6b7a99; font-size:11px; }
+  :root[data-theme="dark"] .hint { color:#55627e; }
+  .theme-toggle { position:fixed; top:14px; right:16px; z-index:9999; background:#ffffff; color:#1a2333; border:1px solid #d9e1ee; border-radius:8px; padding:5px 12px; cursor:pointer; font:600 12px/1.6 system-ui,sans-serif; }
+  :root[data-theme="dark"] .theme-toggle { background:#151b2c; color:#dbe2ee; border-color:#2b3652; }
 </style>
 </head>
 <body>
+<button id="theme-toggle" class="theme-toggle">🌙 Dark</button>
 <div id="boot-screen">
   <div class="card">
     <h1>🧪 Research OS</h1>
@@ -150,7 +162,22 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <script src="/client.js"></script>
 <script>
   (function () {
+    var THEME_KEY = 'dsh-scholar-ui-theme';
     var TOKEN_KEY = 'dsh-scholar-ui-token';
+    var root = document.documentElement;
+    var toggle = document.getElementById('theme-toggle');
+    function readTheme() { try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'; } catch (e) { return 'light'; } }
+    function paintTheme() {
+      var dark = readTheme() === 'dark';
+      root.setAttribute('data-theme', dark ? 'dark' : 'light');
+      toggle.textContent = dark ? '☀️ Light' : '🌙 Dark';
+    }
+    toggle.addEventListener('click', function () {
+      var next = readTheme() === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+      paintTheme();
+    });
+    paintTheme();
     var boot = document.getElementById('boot-screen');
     var input = document.getElementById('token-input');
     var err = document.getElementById('token-err');
