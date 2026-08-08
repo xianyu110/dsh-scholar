@@ -235,12 +235,13 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
 
 let activeTab = 'phase'
 const TAB_KEY = 'dsh-scholar-ui-tab'
+const TAB_IDS = ['chat', 'phase', 'gates', 'runs', 'artifacts', 'evidence', 'budget'] as const
 
 /** Restore the last active tab (dsh-web session restore feel). */
 function tabLoad(): void {
   try {
     const saved = localStorage.getItem(TAB_KEY)
-    if (saved !== null) activeTab = saved
+    if (saved !== null && TAB_IDS.some(id => id === saved)) activeTab = saved
   } catch { /* private mode */ }
 }
 
@@ -260,7 +261,7 @@ function autoRefreshSet(on: boolean): void {
 
 const ACCENT_KEY = 'dsh-scholar-ui-accent'
 const ACCENTS: Record<string, string> = {
-  blue: '#2563eb', violet: '#7c3aed', green: '#16a34a', amber: '#b45309',
+  blue: '#4176e6', violet: '#7c3aed', green: '#16a34a', amber: '#b45309',
 }
 
 /** Custom accent colour (dsh-web theming), persisted. */
@@ -272,7 +273,7 @@ function accentSet(name: string): void {
 }
 
 const RADIUS_KEY = 'dsh-scholar-ui-radius'
-const RADII: Record<string, string> = { small: '6px', normal: '12px', large: '18px' }
+const RADII: Record<string, string> = { small: '8px', normal: '12px', large: '16px' }
 
 /** Panel corner radius (dsh-web appearance preference), persisted. */
 function radiusValue(): string {
@@ -398,14 +399,16 @@ export function apply(options: ApplyOptions = {}): void {
   // Custom accent (dsh-web theming): override the CSS variable directly.
   // Dark-theme accent variants (dsh-web theming): brighter in dark mode.
   const ACCENT_DARK: Record<string, string> = {
-    blue: '#4d9fff', violet: '#a78bfa', green: '#34d399', amber: '#fbbf24',
+    blue: '#679efe', violet: '#a78bfa', green: '#34d399', amber: '#fbbf24',
   }
   const applyAccent = (): void => {
     const name = (Object.entries(ACCENTS).find(([, v]) => v === accentColor())?.[0] ?? 'blue')
     const c = host.dataset.theme === 'dark' ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
     // Custom properties live on the host element (ShadowRoot has no .style).
     host.style.setProperty('--accent', c)
-    host.style.setProperty('--accent-soft', `${c}1f`)
+    host.style.setProperty('--accent-soft', name === 'blue'
+      ? (host.dataset.theme === 'dark' ? '#34415b' : '#edf3fe')
+      : `${c}1f`)
     host.style.setProperty('--accent-text', c)
   }
   applyAccent()
@@ -439,26 +442,30 @@ export function apply(options: ApplyOptions = {}): void {
 :host { color-scheme: light; }
 :host([data-theme="dark"]) { color-scheme: dark; }
 :host {
-  --bg: #f7f9fc; --bg-2: #ffffff; --bg-3: #eef2f8;
-  --bg-input: #ffffff; --bg-hover: #e8eef7;
-  --border: #d9e1ee; --border-2: #e4eaf4; --border-strong: #b9c6da;
-  --text: #1a2333; --text-2: #4a5a78; --text-3: #6b7a99;
-  --accent: #2563eb; --accent-soft: #dbe7fd; --accent-text: #1d4ed8;
-  --header-grad: linear-gradient(180deg,#ffffff,#f2f6fc);
-  --shadow: 0 18px 60px rgba(30,45,80,.18), 0 0 0 1px rgba(255,255,255,.6) inset;
+  --bg: #ffffff; --bg-2: #ffffff; --bg-3: #f9fafb;
+  --bg-input: #ffffff; --bg-hover: rgba(38,49,72,.06);
+  --border: rgba(0,0,0,.10); --border-2: rgba(0,0,0,.04); --border-strong: rgba(0,0,0,.16);
+  --text: #0f1115; --text-2: #61666b; --text-3: #81858c;
+  --accent: #4176e6; --accent-soft: #edf3fe; --accent-text: #4176e6;
+  --header-grad: #ffffff;
+  --sidebar-fill: #f9fafb; --sidebar-selected: #ebeef2; --selector-fill: #f1f3f5; --bubble-bg: #edf3fe;
+  --shadow: 0 0 1px rgba(0,0,0,.2),0 0 4px rgba(0,0,0,.02),0 12px 32px rgba(0,0,0,.08);
+  --shadow-soft: 0 4px 10px rgba(0,0,0,.02),0 2px 4px rgba(0,0,0,.04);
   --tone-slate: #64748b; --tone-blue: #2563eb; --tone-cyan: #0891b2;
   --tone-violet: #7c3aed; --tone-green: #16a34a; --tone-amber: #b45309; --tone-red: #dc2626;
   --tone-slate-bg: #e8edf4; --tone-blue-bg: #dbe7fd; --tone-cyan-bg: #d5f1f6;
   --tone-violet-bg: #ece2fc; --tone-green-bg: #d9f2e2; --tone-amber-bg: #fbe9d0; --tone-red-bg: #fbe0de;
 }
 :host([data-theme="dark"]) {
-  --bg: #0e1320; --bg-2: #121829; --bg-3: #0f1522;
-  --bg-input: #151b2c; --bg-hover: #182034;
-  --border: #263049; --border-2: #1f2940; --border-strong: #3a4a70;
-  --text: #dbe2ee; --text-2: #8b97b0; --text-3: #5d6b88;
-  --accent: #4d9fff; --accent-soft: #1c3352; --accent-text: #bfe0ff;
-  --header-grad: linear-gradient(180deg,#151b2c,#101624);
-  --shadow: 0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.02) inset;
+  --bg: #151517; --bg-2: #232324; --bg-3: #1b1b1c;
+  --bg-input: #2c2c2e; --bg-hover: rgba(255,255,255,.08);
+  --border: rgba(255,255,255,.12); --border-2: rgba(255,255,255,.06); --border-strong: rgba(255,255,255,.20);
+  --text: #f9fafb; --text-2: #cfd3d6; --text-3: #adb2b8;
+  --accent: #679efe; --accent-soft: #34415b; --accent-text: #679efe;
+  --header-grad: #151517;
+  --sidebar-fill: #1b1b1c; --sidebar-selected: #35363a; --selector-fill: #1b1b1c; --bubble-bg: #2c2c2e;
+  --shadow: 0 0 1px rgba(0,0,0,.24),0 4px 12px rgba(0,0,0,.06),0 16px 48px rgba(0,0,0,.16);
+  --shadow-soft: none;
   --tone-slate: #8b93a7; --tone-blue: #4d9fff; --tone-cyan: #22d3ee;
   --tone-violet: #a78bfa; --tone-green: #34d399; --tone-amber: #fbbf24; --tone-red: #f87171;
   --tone-slate-bg: #232b3d; --tone-blue-bg: #1c3352; --tone-cyan-bg: #123a44;
@@ -556,8 +563,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .artifact-row:last-child { border-bottom:0; }
 .artifact-kind { font:600 9.5px/1.6 ui-monospace,Menlo,monospace; color:var(--text-2); background:var(--bg-3); border:1px solid var(--border); border-radius:5px; padding:1px 6px; flex-shrink:0; }
 /* dsh-web-style layout: left workspace sidebar + main column */
-.panel.row { flex-direction: row; }
-.main { flex:1; display:flex; flex-direction:column; min-width:0; }
+.panel.row { flex-direction:row; align-items:stretch; gap:0; }
+.main { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; height:100%; overflow:hidden; }
 .sidebar { width:230px; flex-shrink:0; display:flex; flex-direction:column; background:var(--bg-3); border-right:1px solid var(--border); overflow:hidden; }
 .sidebar-head { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border); }
 .sidebar-title { font:700 11px/1 system-ui,sans-serif; color:var(--text-2); letter-spacing:.8px; text-transform:uppercase; }
@@ -611,6 +618,173 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   .body { padding: 12px 10px 8px; }
   .chat-table { font-size: 9.5px; }
 }
+
+/* DSH Web visual baseline: the same surfaces, type rhythm and conversation chrome. */
+.panel { ${fullscreen ? 'border:0;' : ''} letter-spacing:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Helvetica Neue',Helvetica,Arial,sans-serif; }
+.mono,.project-title .pid,.stamp,.modal pre { font-family:'SF Mono','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,Courier,'PingFang SC','Microsoft YaHei'; }
+.body input[type="text"] { border-radius:22px !important; padding:8px 14px !important; font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif !important; }
+.header { flex:none; min-height:${fullscreen ? '48px' : '46px'}; gap:10px; padding:${fullscreen ? '8px 28px 4px 20px' : '7px 12px 3px'}; border-bottom:0; box-shadow:none; position:sticky; top:0; z-index:6; }
+.brand { display:flex; align-items:center; gap:8px; min-width:0; }
+.brand-mark { width:auto; height:auto; display:inline; flex:0 0 auto; border-radius:0; background:none; color:var(--text); box-shadow:none; font:700 17px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:-.05em; }
+.brand-copy { display:flex; align-items:baseline; flex-direction:row; gap:6px; min-width:0; }
+.header .title { font:500 ${fullscreen ? 14 : 13}px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
+.brand-subtitle { color:var(--text-3); font:400 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; white-space:nowrap; }
+.header-actions { display:flex; align-items:center; justify-content:flex-end; gap:4px; min-width:0; }
+.kernel-dot { width:7px; height:7px; border-radius:50%; display:inline-block; flex:0 0 auto; box-shadow:none; }
+.mode-badge { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 8px; border:0; border-radius:8px; color:var(--text-2); background:transparent; font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; white-space:nowrap; }
+.mode-badge::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--tone-green); box-shadow:none; }
+.hbtn { min-height:28px; border-color:transparent; border-radius:8px; padding:3px 8px; background:transparent; color:var(--text-2); font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; box-shadow:none; transition:background-color .1s cubic-bezier(.4,0,.2,1),color .1s cubic-bezier(.4,0,.2,1),opacity .1s cubic-bezier(.4,0,.2,1); }
+.hbtn:hover { transform:none; background:var(--bg-hover); color:var(--text); border-color:transparent; }
+.hbtn:active { transform:none; }
+.hbtn.icon-btn { min-width:28px; padding:3px 6px; font-size:15px; }
+.density-select { width:auto; min-height:28px; margin:0; padding:3px 22px 3px 8px; border:0; border-radius:8px; background-color:transparent; font-size:12px; line-height:18px; }
+.tabs { flex:none; min-height:44px; align-items:stretch; gap:0; padding:${fullscreen ? '0 28px' : '0 10px'}; overflow-x:auto; overflow-y:hidden; background:var(--bg); border-bottom:1px solid var(--border); scrollbar-width:none; }
+.tabs::-webkit-scrollbar { display:none; }
+.tab-group { display:flex; align-items:stretch; gap:12px; flex:0 0 auto; }
+.tab-group + .tab-group { margin-left:20px; padding-left:20px; border-left:1px solid var(--border-2); }
+.tab-group-label { align-self:center; color:var(--text-3); font:500 10px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:uppercase; letter-spacing:.06em; }
+.tab-group-tabs { display:flex; align-items:flex-end; gap:${fullscreen ? '20px' : '12px'}; }
+.tab { position:relative; flex:0 0 auto; min-height:35px; padding:8px 0 11px; border:0; border-radius:0; color:var(--text-3); background:transparent; font:500 ${fullscreen ? 13 : 11}px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; transition:color .1s cubic-bezier(.4,0,.2,1); }
+.tab:hover { color:var(--text); background:transparent; }
+.tab.active { color:var(--accent-text); background:transparent; border-bottom:3px solid var(--accent); }
+.body { min-height:0; background:var(--bg); padding:${fullscreen ? '20px 24px 16px' : '12px 14px 10px'}; scrollbar-gutter:stable; }
+.body.chat-active { display:flex; flex-direction:column; overflow:hidden; padding-bottom:0; }
+.body.chat-active > .project-title,
+.body.chat-active > .view-intro { flex:none; }
+.body.chat-active > .project-title { position:relative; top:auto; }
+.body.chat-active > .chat-shell { flex:1; height:auto; min-height:0; }
+.body.chat-active > .stamp { display:none; }
+.body.chat-active > .welcome,
+.body.chat-active > .skeleton { flex:1; min-height:0; overflow-y:auto; }
+.project-title { position:sticky; top:${fullscreen ? '-20px' : '-12px'}; z-index:2; margin:${fullscreen ? '-20px -24px 20px' : '-12px -14px 14px'}; padding:${fullscreen ? '8px 24px' : '7px 14px'}; min-height:44px; background:var(--bg); border-bottom:1px solid var(--border-2); backdrop-filter:none; }
+.project-heading { display:flex; align-items:center; flex-direction:row; gap:5px; min-width:0; }
+.project-kicker { color:var(--text-3); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; }
+.project-kicker::after { content:' /'; color:var(--text-3); }
+.project-title .pname { font:500 14px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
+.project-title .pid { margin-left:auto; background:transparent; border:1px solid transparent; }
+.project-title .pid:hover { background:var(--bg-hover); color:var(--text-2); }
+.view-intro { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin:0 0 16px; }
+.view-copy { min-width:0; }
+.view-title { color:var(--text); font:500 18px/26px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.view-description { margin-top:2px; color:var(--text-2); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.view-group { flex:none; margin-top:2px; padding:4px 8px; border-radius:8px; background:var(--bg-hover); color:var(--text-3); font:500 10px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:uppercase; letter-spacing:.05em; }
+.section-label { margin:20px 0 8px; color:var(--text-3); font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; }
+.card,.evidence-card { border-color:var(--border-2); border-radius:12px; padding:12px 16px; margin:8px 0; box-shadow:none; transition:background-color .1s cubic-bezier(.4,0,.2,1),border-color .1s cubic-bezier(.4,0,.2,1); }
+.card:hover,.evidence-card:hover { border-color:var(--border); box-shadow:none; }
+.card.border-amber { border-left:2px solid var(--tone-amber); border-top-color:var(--border-2); border-right-color:var(--border-2); border-bottom-color:var(--border-2); }
+.card.border-red { border-left:2px solid var(--tone-red); border-top-color:var(--border-2); border-right-color:var(--border-2); border-bottom-color:var(--border-2); }
+.card.border-green { border-left:2px solid var(--tone-green); border-top-color:var(--border-2); border-right-color:var(--border-2); border-bottom-color:var(--border-2); }
+.btn { min-height:34px; border-radius:8px; padding:7px 14px; font:500 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; box-shadow:none; transition:background-color .1s cubic-bezier(.4,0,.2,1),opacity .1s cubic-bezier(.4,0,.2,1); }
+.btn.primary { background:var(--accent); color:#fff; box-shadow:none; }
+.btn.approve { background:var(--tone-green); box-shadow:none; }
+.btn.reject { background:transparent; color:var(--tone-red); border:1px solid var(--tone-red); box-shadow:none; }
+.btn.reject:hover { background:var(--tone-red-bg); }
+.pipeline-wrap { overflow-x:auto; overflow-y:hidden; border-color:var(--border-2); border-radius:12px; padding:16px 12px 10px; background:var(--bg-2); box-shadow:none; scrollbar-width:thin; scrollbar-color:var(--border) transparent; scrollbar-gutter:stable; }
+.pipeline { min-width:780px; }
+.pstep { gap:7px; }
+.pstep .dot { width:10px; height:10px; background:var(--bg-2); }
+.pstep .lbl { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:9px; line-height:12px; letter-spacing:0; }
+.pstep.done .dot { box-shadow:none; }
+.pstep.current .dot { box-shadow:0 0 0 3px var(--accent-soft); animation:none; }
+.budget-track { height:8px; background:var(--bg-3); box-shadow:0 0 0 1px var(--border-2) inset; }
+.budget-fill { box-shadow:none !important; }
+.chip { background:var(--bg-2); border-color:var(--border); border-radius:999px; padding:4px 10px; box-shadow:none; }
+.artifact-kind { border:0; border-radius:6px; padding:2px 7px; background:var(--bg-3); color:var(--text-2); letter-spacing:0; }
+.artifact-row { min-height:40px; padding:8px; border-bottom-style:solid; }
+.empty { margin:8px 0; padding:20px 12px; border:0; border-radius:0; background:transparent; text-align:center; font-style:normal; }
+.error-banner,.connection-banner { border:0; border-radius:8px; box-shadow:none; }
+.overlay { background:rgba(0,0,0,.24); backdrop-filter:blur(2px); }
+:host([data-theme="dark"]) .overlay { background:rgba(0,0,0,.5); }
+.modal { border-color:var(--border-2); border-radius:24px; padding:0 24px 24px; box-shadow:var(--shadow); }
+.modal-header { position:sticky; top:0; z-index:1; min-height:60px; margin:0 -24px 16px; padding:12px 14px 8px 24px; background:var(--bg-2); border-bottom:0; border-radius:24px 24px 0 0; font:500 16px/24px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.sidebar { width:261px; padding:6px 12px; background:var(--sidebar-fill); border-right:1px solid var(--border-2); color:var(--text); transition:width .3s cubic-bezier(.4,0,.2,1); }
+.sidebar-brand-row { flex:none; display:flex; align-items:center; gap:8px; height:60px; padding:8px 4px; margin-bottom:16px; overflow:hidden; }
+.sidebar-wordmark { color:var(--text); font:700 18px/22px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:-.06em; }
+.sidebar-product { color:var(--text-3); font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.sidebar-head { min-height:36px; padding:0 0 0 12px; margin-bottom:4px; border-bottom:0; border-radius:12px; }
+.sidebar-title { color:var(--text-3); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; text-transform:none; }
+.sidebar-new { min-width:28px; min-height:28px; padding:3px 6px; border:0; border-radius:50%; background:transparent; color:var(--text-2); font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.sidebar-new:hover { background:var(--bg-hover); border-color:transparent; }
+.sidebar-search { flex:none; height:38px; margin:0 2px 12px !important; padding:0 14px !important; border:1px solid var(--border) !important; border-radius:24px !important; background:var(--selector-fill) !important; color:var(--text) !important; font:400 14px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif !important; }
+.sidebar-groups { display:flex; gap:4px; margin:0 2px 8px; padding:3px; border-radius:12px; background:var(--selector-fill); }
+.sidebar-filter { flex:1; min-height:28px; padding:3px 6px; border:0; border-radius:8px; background:transparent; color:var(--text-3); font:500 11px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; cursor:pointer; }
+.sidebar-filter:hover { background:var(--bg-hover); color:var(--text); }
+.sidebar-filter.active { background:var(--bg-2); color:var(--text); box-shadow:var(--shadow-soft); }
+.sidebar-list { padding:0 0 12px; scrollbar-gutter:stable; }
+.ws-item { position:relative; min-height:54px; gap:6px; padding:7px 8px; margin-bottom:4px; border-radius:8px; }
+.ws-item:hover { background:var(--bg-hover); }
+.ws-item.active { background:var(--sidebar-selected); box-shadow:none; }
+.ws-item.blocked { border:0; background:var(--tone-red-bg); }
+.ws-dot { width:8px; height:8px; box-shadow:none; }
+.ws-text { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.ws-name { flex:none; font:400 14px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.ws-status { color:var(--text-3); font:400 10px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
+.sidebar-foot { padding:8px 0 0; border-top:1px solid var(--border-2); }
+.sidebar.collapsed { width:56px; padding:18px 10px 6px; }
+.sidebar.collapsed .sidebar-brand-row { height:36px; justify-content:center; padding:0; margin-bottom:12px; }
+.sidebar.collapsed .sidebar-product,.sidebar.collapsed .sidebar-session-label,.sidebar.collapsed .sidebar-title,.sidebar.collapsed .sidebar-head > :not(:last-child),.sidebar.collapsed .sidebar-groups { display:none; }
+.sidebar.collapsed .sidebar-head { justify-content:center; padding:0; }
+.sidebar.collapsed .sidebar-list { padding:0; }
+.sidebar.collapsed .ws-item { width:36px; min-height:36px; justify-content:center; padding:0; }
+.sidebar.collapsed .ws-item > :not(.ws-dot) { display:none; }
+.welcome { min-height:${fullscreen ? 'calc(100vh - 132px)' : '340px'}; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:40px 24px; text-align:center; }
+.welcome-mark { width:auto; height:auto; display:inline; border-radius:0; background:none; color:var(--accent); box-shadow:none; font:500 24px/32px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.welcome-eyebrow { color:var(--text-3); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; }
+.welcome h1 { margin:0; color:var(--text); font:500 26px/32px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
+.welcome-copy { max-width:560px; color:var(--text-2); font:400 14px/22px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.welcome-steps { display:flex; justify-content:center; gap:8px; width:min(800px,100%); margin:8px 0 4px; text-align:left; }
+.welcome-step { display:flex; align-items:center; gap:8px; min-height:32px; padding:6px 10px; border:0; border-radius:12px; background:var(--bg-hover); color:var(--text-2); box-shadow:none; font-size:12px; line-height:18px; }
+.welcome-step-num { display:none; }
+.chat-shell { display:flex; flex-direction:row; height:100%; min-height:420px; }
+.chat-column { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden; }
+.chat-session-tabs { flex:none; display:flex; gap:8px; align-items:center; overflow-x:auto; flex-wrap:nowrap; max-width:100%; margin:0 -24px 8px; padding:0 24px 8px; border-bottom:1px solid var(--border-2); scrollbar-gutter:stable; }
+.chat-search-row { flex:none; display:flex; align-items:center; gap:6px; margin-bottom:8px; overflow-x:auto; padding-bottom:2px; scrollbar-gutter:stable; }
+.chat-stream-wrap { flex:1; display:flex; flex-direction:column; position:relative; min-height:0; overflow:hidden; }
+.chat-stream { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:16px; padding:16px 24px 24px; scrollbar-gutter:stable; }
+.chat-message { word-break:break-word; cursor:pointer; font:400 16px/24px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.chat-message.user { align-self:flex-end; max-width:calc(100% - 88px); padding:10px 16px; border:0; border-radius:22px; background:var(--bubble-bg); color:var(--text); }
+.chat-message.assistant { align-self:center; width:min(840px,100%); padding:0; border:0; border-radius:0; background:transparent; color:var(--text); }
+.chat-message.error { align-self:center; width:min(840px,100%); padding:8px 12px; border:0; border-radius:8px; background:var(--tone-red-bg); color:var(--tone-red); }
+.chat-message.selected { outline:2px solid var(--accent); outline-offset:4px; }
+.chat-running { align-self:center; width:min(840px,100%); display:flex; align-items:center; gap:8px; color:var(--text-2); font:400 14px/22px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.chat-dock { flex:none; position:relative; z-index:4; width:100%; padding:${fullscreen ? '8px 24px 12px' : '8px 14px 10px'}; border-top:1px solid var(--border-2); background:var(--bg); }
+.chat-dock[hidden] { display:none; }
+.chat-quote { width:100%; max-width:840px; margin-left:auto; margin-right:auto; }
+.chat-composer-row { flex:none; display:flex; align-items:flex-end; gap:8px; width:100%; max-width:840px; margin:0 auto; padding:0; }
+.chat-composer { flex:1; display:flex; flex-direction:column; gap:8px; padding:10px 10px 8px 16px; border:1px solid var(--border); border-radius:20px; background:var(--bg-input); box-shadow:var(--shadow-soft); }
+.chat-composer-input { width:100%; height:48px; min-height:48px; max-height:48px; padding:4px 0 0; resize:none; overflow-y:auto; border:0; outline:0; background:transparent; color:var(--text); font:400 16px/24px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; scrollbar-gutter:stable; }
+.chat-composer-input::placeholder { color:var(--text-3); }
+.chat-composer-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.chat-composer-tools { display:flex; align-items:center; gap:4px; min-width:0; }
+.chat-send { flex:none; display:grid; place-items:center; width:34px; height:34px; padding:0; border:0; border-radius:999px; background:var(--accent); color:#fff; font:600 18px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; cursor:pointer; }
+.chat-send:hover { filter:brightness(1.08); }
+.chat-send:disabled { opacity:.4; cursor:default; }
+.chat-completions { position:absolute; left:50%; bottom:calc(100% - 8px); z-index:7; width:min(800px,calc(100% - 48px)); max-width:800px; margin:0 !important; transform:translateX(-50%); border-radius:12px !important; box-shadow:var(--shadow); }
+.skeleton { display:flex; flex-direction:column; gap:12px; padding:18px; }
+.skeleton-bar { height:14px; border-radius:7px; background:linear-gradient(90deg,var(--bg-3),var(--bg-hover),var(--bg-3)); background-size:200% 100%; animation:shimmer 1.5s linear infinite; }
+@keyframes shimmer { to { background-position:-200% 0; } }
+@media (max-width: 1024px) {
+  .header-secondary,.mode-badge { display:none; }
+  .sidebar { width:240px; }
+  .tab-group-label { display:none; }
+  .tab-group + .tab-group { margin-left:16px; padding-left:16px; }
+  .chat-message.assistant,.chat-message.error { width:min(712px,100%); }
+  .chat-composer-row { max-width:712px; }
+}
+@media (max-width: 720px) {
+  .brand-subtitle,.header-command .long-label,.header-refresh .long-label,.header-notifications .long-label,.density-select { display:none; }
+  .header { padding:8px 10px; }
+  .header-actions { gap:4px; }
+  .tabs { padding-left:8px; padding-right:8px; overflow-x:auto; }
+  .tab-group + .tab-group { margin-left:12px; padding-left:12px; }
+  .body { padding:16px 12px 10px; }
+  .project-title { position:relative; top:auto; margin:-16px -12px 14px; padding:11px 12px; flex-wrap:wrap; }
+  .project-title .pid { width:100%; margin-left:0; }
+  .chat-dock { padding:8px 12px 10px; }
+  .welcome { min-height:calc(100vh - 120px); padding:32px 10px; }
+  .welcome-steps { flex-direction:column; }
+  .overlay { padding:14px; }
+}
 `
   root.appendChild(style)
 
@@ -633,12 +807,17 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   // ── header ──
   const header = el('div', 'header')
-  header.appendChild(el('span', 'logo', '🧪'))
-  header.appendChild(el('span', 'title', 'Research OS'))
+  const brand = el('div', 'brand')
+  brand.appendChild(el('span', 'brand-mark', 'dsh'))
+  const brandCopy = el('div', 'brand-copy')
+  brandCopy.appendChild(el('span', 'title', 'Research'))
+  brandCopy.appendChild(el('span', 'brand-subtitle', 'Workspace'))
+  brand.appendChild(brandCopy)
+  header.appendChild(brand)
   // dsh-web kernel status: live dot (green when the kernel answers, red
   // when the bridge is down; amber while checking).
-  const kernelDot = el('span')
-  kernelDot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:var(--tone-amber);display:inline-block;flex-shrink:0'
+  const kernelDot = el('span', 'kernel-dot')
+  kernelDot.style.background = 'var(--tone-amber)'
   kernelDot.title = 'kernel status: checking…'
   kernelDot.setAttribute('aria-label', 'kernel status')
   kernelDot.style.cursor = 'pointer'
@@ -646,12 +825,12 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   header.appendChild(kernelDot)
   const spacer = el('span', 'spacer')
   header.appendChild(spacer)
-  const themeBtn = el('button', 'hbtn')
+  const themeBtn = el('button', 'hbtn header-theme')
   themeBtn.setAttribute('aria-label', 'Toggle theme')
   themeBtn.setAttribute('aria-keyshortcuts', 'Control+Shift+T Meta+Shift+T')
   const paintTheme = (): void => {
     const dark = host.dataset.theme === 'dark'
-    themeBtn.textContent = dark ? '☀️ Light' : '🌙 Dark'
+    themeBtn.textContent = dark ? 'Light' : 'Dark'
     themeBtn.title = dark ? 'switch to light theme' : 'switch to dark theme'
   }
   themeBtn.onclick = () => {
@@ -661,27 +840,29 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     applyAccent()
   }
   paintTheme()
-  const refresh = el('button', 'hbtn', '⟳ Refresh')
+  const refresh = el('button', 'hbtn header-refresh')
+  refresh.append(el('span', '', '↻'), el('span', 'long-label', ' Refresh'))
   refresh.title = 'refresh now'
   refresh.setAttribute('aria-label', 'Refresh')
   const close = el('button', 'hbtn ghost', '×')
   close.title = 'collapse'
   close.setAttribute('aria-label', 'Collapse panel')
   close.onclick = () => { panel.style.display = 'none' }
-  const commandsBtn = el('button', 'hbtn', '⌘ Commands')
+  const commandsBtn = el('button', 'hbtn header-command')
+  commandsBtn.append(el('span', '', '⌘K'), el('span', 'long-label', ' Commands'))
   commandsBtn.title = 'browse /research commands (Ctrl/Cmd+K)'
   commandsBtn.setAttribute('aria-keyshortcuts', 'Control+K Meta+K')
   commandsBtn.onclick = () => { openCommandsModal(root) }
-  const shortcutsBtn = el('button', 'hbtn', '⌨ Shortcuts')
+  const shortcutsBtn = el('button', 'hbtn header-secondary', '?  Shortcuts')
   shortcutsBtn.title = 'keyboard shortcuts'
   shortcutsBtn.onclick = () => { openShortcutsModal(root) }
-  const bellBtn = el('button', 'hbtn', '🔔')
+  const bellBtn = el('button', 'hbtn header-notifications')
+  bellBtn.append(el('span', '', '○'), el('span', 'long-label', ' Activity'))
   bellBtn.title = 'notifications'
   bellBtn.onclick = () => { openNotificationsModal(root) }
-  const modeBadge = el('span', 'hbtn')
-  modeBadge.textContent = '🧭 gate-only'
+  const modeBadge = el('span', 'mode-badge')
+  modeBadge.textContent = 'Human gates'
   modeBadge.title = 'research mode: every gate requires a human decision'
-  modeBadge.style.cssText = 'cursor:default;opacity:.9'
   // dsh-web "Collapse sidebar": toggles the workspace sidebar width
   // (persisted, dsh-web layout memory).
   const SIDEBAR_KEY = 'dsh-scholar-ui-sidebar'
@@ -690,7 +871,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const sidebarPersist = (): void => {
     try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? 'collapsed' : 'expanded') } catch { /* private mode */ }
   }
-  const sidebarToggle = el('button', 'hbtn', '◧')
+  const sidebarToggle = el('button', 'hbtn icon-btn sidebar-toggle', '‹')
   sidebarToggle.title = 'collapse / expand sidebar'
   sidebarToggle.setAttribute('aria-expanded', 'true')
   sidebarToggle.setAttribute('aria-label', 'Toggle sidebar')
@@ -699,15 +880,14 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     sidebarPersist()
     if (sidebar !== null) sidebar.classList.toggle('collapsed', sidebarCollapsed)
     if (main !== null) main.classList.toggle('expanded', sidebarCollapsed)
-    sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
+    sidebarToggle.textContent = sidebarCollapsed ? '›' : '‹'
     sidebarToggle.setAttribute('aria-expanded', String(!sidebarCollapsed))
     void render()
   }
   // dsh-web density selector (the model dropdown's visual slot): Compact /
   // Normal controls the panel font scale.
   densityLoad()
-  const densitySelect = el('select', 'picker')
-  densitySelect.style.cssText = 'width:auto;margin:0;padding:3px 6px;font-size:10.5px;border-radius:7px'
+  const densitySelect = el('select', 'picker density-select')
   const dOptCompact = el('option', '', 'Compact')
   dOptCompact.value = 'compact'
   const dOptNormal = el('option', '', 'Normal')
@@ -719,58 +899,95 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     densityApply(panel)
   }
   densityApply(panel)
+  const headerActions = el('div', 'header-actions')
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
-    header.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, themeBtn, refresh)
+    headerActions.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, themeBtn, refresh)
   } else {
-    header.append(themeBtn, refresh, close)
+    headerActions.append(themeBtn, refresh, close)
   }
+  header.appendChild(headerActions)
   main.appendChild(header)
 
   // ── tabs ──
   const tabs = el('div', 'tabs')
   tabs.setAttribute('role', 'tablist')
-  tabs.setAttribute('aria-label', 'panel sections')
-  const TAB_DEFS = [
-    ['chat', '💬 Chat'], ['phase', 'Phase'], ['gates', 'Gates'], ['runs', 'Runs'],
-    ['artifacts', 'Artifacts'], ['evidence', 'Evidence'], ['budget', 'Budget'],
+  tabs.setAttribute('aria-label', 'Research workspace sections')
+  const TAB_GROUPS = [
+    {
+      label: 'Research',
+      tabs: [
+        ['chat', 'Chat', 'Plan and drive the project through research commands.'],
+        ['phase', 'Overview', 'See the current phase, next actions, ideas, contracts, and audit trail.'],
+      ],
+    },
+    {
+      label: 'Execution',
+      tabs: [
+        ['gates', 'Approvals', 'Make human gate decisions and record their rationale.'],
+        ['runs', 'Runs', 'Track durable jobs, execution state, retries, and cancellation.'],
+      ],
+    },
+    {
+      label: 'Review',
+      tabs: [
+        ['artifacts', 'Artifacts', 'Inspect snapshots, manifests, bundles, and generated outputs.'],
+        ['evidence', 'Evidence', 'Review claims, verified results, confidence, and provenance.'],
+      ],
+    },
+    {
+      label: 'Operations',
+      tabs: [
+        ['budget', 'Budget', 'Monitor usage limits, execution policy, and integrity constraints.'],
+      ],
+    },
   ] as const
+  const TAB_DEFS = TAB_GROUPS.flatMap(group => group.tabs)
   const tabButtons = new Map<string, HTMLElement>()
-  for (const [key, label] of TAB_DEFS) {
-    const button = el('button', 'tab', label)
-    button.dataset.tab = key
-    button.id = `tab-${key}`
-    button.setAttribute('aria-controls', 'panel-body')
-    button.setAttribute('aria-keyshortcuts', `Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`)
-    button.setAttribute('role', 'tab')
-    button.setAttribute('role', 'tab')
-    button.setAttribute('aria-selected', key === activeTab ? 'true' : 'false')
-    // dsh-web "pin view": ★ marks a favourite tab (persisted).
-    const pinned = tabPinned(key)
-    if (pinned) {
-      button.classList.add('pinned')
-      const pin = el('span', '', '★ ')
-      pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
-      button.prepend(pin)
-    }
-    button.title = pinned ? `${label} (pinned · click ☆ to unpin)` : `${label} · Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`
-    button.onclick = (event) => {
-      // A click on the pin glyph toggles the favourite instead of switching.
-      const target = event.target as HTMLElement
-      if (target.textContent === '★ ' || target.textContent === '☆ ') {
-        tabTogglePin(key)
-        return
+  for (const group of TAB_GROUPS) {
+    const groupEl = el('div', 'tab-group')
+    groupEl.setAttribute('role', 'presentation')
+    groupEl.appendChild(el('span', 'tab-group-label', group.label))
+    const groupTabs = el('div', 'tab-group-tabs')
+    groupTabs.setAttribute('role', 'presentation')
+    for (const [key, label] of group.tabs) {
+      const button = el('button', 'tab', label)
+      button.dataset.tab = key
+      button.dataset.group = group.label
+      button.id = `tab-${key}`
+      button.setAttribute('aria-controls', 'panel-body')
+      button.setAttribute('aria-keyshortcuts', `Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`)
+      button.setAttribute('role', 'tab')
+      button.setAttribute('aria-selected', key === activeTab ? 'true' : 'false')
+      // dsh-web "pin view": ★ marks a favourite tab (persisted).
+      const pinned = tabPinned(key)
+      if (pinned) {
+        button.classList.add('pinned')
+        const pin = el('span', 'tab-pin', '★ ')
+        pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
+        button.prepend(pin)
       }
-      activeTab = key
-      tabSave()
-      void render()
+      button.title = pinned ? `${label} (pinned · click ☆ to unpin)` : `${label} · ${group.label} · Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`
+      button.onclick = (event) => {
+        // A click on the pin glyph toggles the favourite instead of switching.
+        const target = event.target as HTMLElement
+        if (target.classList.contains('tab-pin')) {
+          tabTogglePin(key)
+          return
+        }
+        activeTab = key
+        tabSave()
+        void render()
+      }
+      button.oncontextmenu = (event) => {
+        event.preventDefault()
+        tabTogglePin(key)
+      }
+      tabButtons.set(key, button)
+      groupTabs.appendChild(button)
     }
-    button.oncontextmenu = (event) => {
-      event.preventDefault()
-      tabTogglePin(key)
-    }
-    tabButtons.set(key, button)
-    tabs.appendChild(button)
+    groupEl.appendChild(groupTabs)
+    tabs.appendChild(groupEl)
   }
   main.appendChild(tabs)
 
@@ -780,30 +997,39 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   body.setAttribute('role', 'tabpanel')
   body.setAttribute('aria-label', 'active panel content')
   main.appendChild(body)
+  // Chat owns a main-level footer, outside the scrollable panel body. Keeping
+  // one persistent dock prevents textarea content from changing its anchor.
+  const chatDock = el('div', 'chat-dock')
+  chatDock.hidden = true
+  main.appendChild(chatDock)
   const picker = el('select', 'picker')
   picker.style.cssText = 'margin:10px 12px 0;width:calc(100% - 24px)'
   picker.onchange = () => { projectId = picker.value || undefined; void render() }
   if (!fullscreen) main.insertBefore(picker, body)
 
   const styleTabs = (): void => {
+    body.classList.toggle('chat-active', activeTab === 'chat')
     for (const [key, button] of tabButtons) {
-      button.classList.toggle('active', key === activeTab)
-      if (key === activeTab) button.setAttribute('aria-current', 'page')
+      const selected = key === activeTab
+      button.classList.toggle('active', selected)
+      button.setAttribute('aria-selected', String(selected))
+      if (selected) button.setAttribute('aria-current', 'page')
       else button.removeAttribute('aria-current')
       // dsh-web pinned tabs: keep the ★ marker in sync (buttons are built
       // once, so the pin class must be refreshed on every render).
       const pinned = tabPinned(key)
       button.classList.toggle('pinned', pinned)
       button.setAttribute('aria-pressed', pinned ? 'true' : 'false')
-      const hasStar = button.querySelector('span') !== null
+      const hasStar = button.querySelector('.tab-pin') !== null
       if (pinned && !hasStar) {
-        const pin = el('span', '', '★ ')
+        const pin = el('span', 'tab-pin', '★ ')
         pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
         button.prepend(pin)
       } else if (!pinned && hasStar) {
-        button.querySelector('span')?.remove()
+        button.querySelector('.tab-pin')?.remove()
       }
     }
+    body.setAttribute('aria-labelledby', `tab-${activeTab}`)
   }
 
   // dsh-web document title: reflect the active tab + project in the tab
@@ -818,13 +1044,19 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   const render = async (): Promise<void> => {
     styleTabs()
+    // Keep the live chat dock mounted during chat refreshes. Hiding it before
+    // the async project requests complete makes the body gain its height for a
+    // frame, which visibly shifts the whole conversation while typing.
+    if (activeTab !== 'chat') {
+      chatDock.hidden = true
+      chatDock.replaceChildren()
+    }
     // dsh-web skeleton: placeholders while the first paint loads.
     if (booting) {
-      const skel = el('div')
-      skel.style.cssText = 'display:flex;flex-direction:column;gap:10px;padding:14px'
+      const skel = el('div', 'skeleton')
       for (let i = 0; i < 4; i++) {
-        const bar = el('div')
-        bar.style.cssText = `height:14px;border-radius:6px;background:var(--bg-3);animation:pulse 1.6s ease-in-out infinite;width:${92 - i * 12}%`
+        const bar = el('div', 'skeleton-bar')
+        bar.style.width = `${92 - i * 12}%`
         skel.appendChild(bar)
       }
       body.replaceChildren(skel)
@@ -844,8 +1076,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     // dsh-web session ordering: most recently active first (by updated_at).
     projects.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
     if (!kernelOnline) {
-      const banner = el('div')
-      banner.style.cssText = 'position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:center;gap:8px;padding:6px 12px;background:var(--tone-red-bg);border-bottom:1px solid var(--tone-red);color:var(--tone-red);font:600 11px/1.4 system-ui,sans-serif'
+      const banner = el('div', 'connection-banner')
+      banner.style.cssText = 'position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:center;gap:8px;padding:8px 12px;background:var(--tone-red-bg);color:var(--tone-red);font:650 11px/1.4 system-ui,sans-serif'
       banner.appendChild(el('span', '', '⚠'))
       const text = el('span', '', 'Research kernel unreachable — reconnecting…')
       banner.appendChild(text)
@@ -869,7 +1101,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     syncTitle(projection?.project?.name)
     if (fullscreen && sidebar !== null) {
       // dsh-web sidebar stats: counts of the active project under its row.
-      renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() }, projection?.counts)
+      renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() })
     } else {
       // Rebuild when empty, when there is no active project, or when the
       // active project id is not among the options (chat /research new
@@ -891,24 +1123,24 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     if (target === undefined) {
       syncTitle(undefined)
       // dsh-web hero: a guided empty state instead of a bare message.
-      const hero = el('div')
-      hero.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:14px;padding:60px 20px;text-align:center'
-      hero.appendChild(el('div', '', '🧪'))
-      hero.appendChild(el('div', '', 'Welcome to **Research OS**'))
-      hero.appendChild(el('div', 'muted', 'A fully standalone DSH Scholar web plugin: plan, run and review research with human-gated decisions. Start by creating your first project.'))
-      const steps = el('div')
-      steps.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:4px;font-size:11.5px;color:var(--text-2)'
+      const hero = el('div', 'welcome')
+      hero.appendChild(el('div', 'welcome-mark', '⌁'))
+      hero.appendChild(el('h1', '', 'Let’s start researching'))
+      hero.appendChild(el('div', 'welcome-eyebrow', 'Choose a workspace or create a new research project'))
+      hero.appendChild(el('div', 'welcome-copy', 'Plan, run, and review rigorous research with human-gated decisions and traceable evidence.'))
+      const steps = el('div', 'welcome-steps')
+      let stepIndex = 0
       const addStep = (t: string): void => {
-        const row = el('div', 'row')
-        row.style.cssText = 'justify-content:center'
-        row.appendChild(el('span', '', '·'))
+        stepIndex += 1
+        const row = el('div', 'welcome-step')
+        row.appendChild(el('span', 'welcome-step-num', String(stepIndex).padStart(2, '0')))
         row.appendChild(el('span', '', t))
         steps.appendChild(row)
       }
-      addStep('＋ New Project in the sidebar, or /research new demo1 in Chat')
-      addStep('Approve the Scope Gate in the Gates tab (human only)')
-      addStep('Survey literature, pre-register a contract, run container experiments')
-      addStep('Build the manuscript, review it, export the Release Bundle')
+      addStep('Define the problem and create a scoped research project.')
+      addStep('Review the Scope Gate before any work moves forward.')
+      addStep('Survey, pre-register, and run reproducible experiments.')
+      addStep('Connect evidence to claims, then prepare the release bundle.')
       hero.appendChild(steps)
       // dsh-web overview: how many projects live on this kernel.
       if (projects.length > 0) {
@@ -920,7 +1152,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         chipRow.style.cssText = 'gap:6px;flex-wrap:wrap;justify-content:center;margin-top:6px'
         for (const rp of projects.slice(0, 4)) {
           if (rp.project_id === undefined) continue
-          const chip = el('button', 'hbtn', `📁 ${rp.name ?? rp.project_id}`)
+          const chip = el('button', 'hbtn', rp.name ?? rp.project_id)
           chip.style.cssText = 'padding:4px 12px;font-size:10.5px'
           chip.onclick = () => {
             projectId = rp.project_id!
@@ -930,14 +1162,18 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         }
         hero.appendChild(chipRow)
       }
-      const go = el('button', 'btn approve', '＋ Create your first project')
+      const go = el('button', 'btn primary', 'Create a research project')
       go.style.cssText = 'padding:9px 20px;margin-top:6px'
       go.onclick = () => { openNewProjectModal(root) }
       hero.appendChild(go)
+      chatDock.hidden = true
+      chatDock.replaceChildren()
       body.replaceChildren(hero)
       return
     }
     if (projection === null) {
+      chatDock.hidden = true
+      chatDock.replaceChildren()
       body.replaceChildren(el('div', 'error-banner', `Research kernel unreachable (project ${target}).`))
       return
     }
@@ -950,17 +1186,29 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
     const title = el('div', 'project-title')
     const pname = el('span', 'pname', projection.project.name ?? projectId)
+    const projectHeading = el('div', 'project-heading')
+    projectHeading.append(el('span', 'project-kicker', 'Research'), pname)
     // dsh-web affordance: click the project id to copy it.
     const pid = el('span', 'pid', `${projectId} · rev ${projection.project.revision ?? 0}`)
     pid.style.cssText += ';cursor:pointer;border-radius:6px;padding:1px 4px'
     pid.title = 'click to copy project ID'
     pid.onclick = () => { if (projectId !== undefined) copyText(projectId) }
     const statusPill = pill(projection.project.status)
-    title.append(pname, statusPill, pid)
+    title.append(projectHeading, statusPill, pid)
     body.appendChild(title)
 
+    const activeDef = TAB_DEFS.find(def => def[0] === activeTab)
+    const activeGroup = TAB_GROUPS.find(group => group.tabs.some(def => def[0] === activeTab))
+    if (activeDef !== undefined && activeGroup !== undefined) {
+      const intro = el('div', 'view-intro')
+      const copy = el('div', 'view-copy')
+      copy.append(el('h2', 'view-title', activeDef[1]), el('div', 'view-description', activeDef[2]))
+      intro.append(copy, el('span', 'view-group', activeGroup.label))
+      body.appendChild(intro)
+    }
+
     switch (activeTab) {
-      case 'chat': await renderChat(body, target); break
+      case 'chat': await renderChat(body, chatDock, target); break
       case 'phase': await renderPhase(body, projection, target); break
       case 'gates': await renderGates(body, target); break
       case 'runs': renderRuns(body, projection); break
@@ -976,7 +1224,10 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   refresh.onclick = () => { void render() }
   // dsh-web notification dot: unread count on the bell (99+ capped).
   const paintBell = (): void => {
-    bellBtn.textContent = notifUnread > 0 ? `🔔 ${notifUnread > 99 ? '99+' : notifUnread}` : '🔔'
+    bellBtn.replaceChildren(
+      el('span', '', notifUnread > 0 ? String(notifUnread > 99 ? '99+' : notifUnread) : '○'),
+      el('span', 'long-label', notifUnread > 0 ? ' New' : ' Activity'),
+    )
     bellBtn.title = notifUnread > 0 ? `${notifUnread} unread notifications` : 'notifications'
   }
   paintBell()
@@ -1080,6 +1331,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     if (event.key === '/' && !typing && fullscreen) {
       event.preventDefault()
       activeTab = 'chat'
+      tabSave()
       chatDraft = '/'
       rerender()
       // Focus the composer once the chat tab has rendered.
@@ -1131,13 +1383,13 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       sidebarCollapsed = true
       sidebar.classList.add('collapsed')
       if (main !== null) main.classList.add('expanded')
-      sidebarToggle.textContent = '◨'
+      sidebarToggle.textContent = '›'
     }
   }
   if (sidebarCollapsed && sidebar !== null) {
     sidebar.classList.add('collapsed')
     if (main !== null) main.classList.add('expanded')
-    sidebarToggle.textContent = '◨'
+    sidebarToggle.textContent = '›'
   }
   onResize()
   window.addEventListener('resize', onResize)
@@ -1225,11 +1477,12 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     }
     quick.appendChild(b)
   }
-  jump('⛩️ Gates', 'gates')
-  jump('⚙️ Runs', 'runs')
-  jump('📦 Artifacts', 'artifacts')
-  jump('📊 Evidence', 'evidence')
-  jump('💰 Budget', 'budget')
+  jump('Chat', 'chat')
+  jump('Approvals', 'gates')
+  jump('Runs', 'runs')
+  jump('Artifacts', 'artifacts')
+  jump('Evidence', 'evidence')
+  jump('Budget', 'budget')
   body.appendChild(quick)
   // dsh-web data panel: budget usage of this project.
   const budget = p.budget
@@ -2888,7 +3141,7 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   }
   if (pending.length > 0) {
     // dsh-web depth: jump from the drawer to the Gates tab.
-    const goGates = el('button', 'hbtn', '→ open Gates tab')
+    const goGates = el('button', 'hbtn', '→ open Approvals')
     goGates.style.cssText = 'margin-top:8px'
     goGates.onclick = () => {
       overlay.remove()
@@ -3262,13 +3515,14 @@ function favCommandToggle(name: string): void {
 function runChatLine(line: string): void {
   chatDraft = line
   activeTab = 'chat'
+  tabSave()
   rerender()
 }
 
 /* ─────────────────────────── shortcuts modal ─────────────────────────── */
 
 const SHORTCUTS: Array<[string, string]> = [
-  ['Alt+1..7', 'switch tab (Chat, Phase, Gates, Runs, Artifacts, Evidence, Budget)'],
+  ['Alt+1..7', 'switch view (Chat, Overview, Approvals, Runs, Artifacts, Evidence, Budget)'],
   ['Ctrl/Cmd+K', 'open the command palette'],
   ['Ctrl/Cmd+P', 'quick project switcher'],
   ['Ctrl/Cmd+Shift+F (chat)', 'search across all sessions'],
@@ -3417,6 +3671,7 @@ function openCommandsModal(root: ShadowRoot): void {
         overlay.remove()
         chatDraft = line
         activeTab = 'chat'
+        tabSave()
         rerender()
       }
       list.appendChild(row)
@@ -3803,7 +4058,7 @@ function openAboutModal(root: ShadowRoot): void {
   }
   modal.appendChild(el('div', 'section-label', 'Version'))
   row('Plugin', 'v0.2 (hardening branch)')
-  row('Surface', 'Chat · Phase · Gates · Runs · Artifacts · Evidence · Budget')
+  row('Surface', 'Research · Execution · Review · Operations')
   row('Kernel', 'Research Kernel (SQLite + CAS)')
   row('Runner', 'docker isolation (baseline/pilot/formal/reproduce)')
 
@@ -3813,7 +4068,7 @@ function openAboutModal(root: ShadowRoot): void {
   modal.appendChild(arch)
 
   modal.appendChild(el('div', 'section-label', 'Safety model'))
-  const safety = el('div', 'muted', 'gate-only mode: scope / idea / contract / release gates always require a human decision (Approve/Reject in the Gates tab or the sidebar). Budget overruns park the project as BLOCKED_GATE until a human Budget Gate approves.')
+  const safety = el('div', 'muted', 'gate-only mode: scope / idea / contract / release gates always require a human decision (Approve/Reject in Execution → Approvals or the sidebar). Budget overruns park the project as BLOCKED_GATE until a human Budget Gate approves.')
   safety.style.cssText = 'font-size:11.5px;line-height:1.6'
   modal.appendChild(safety)
 
@@ -4172,6 +4427,7 @@ function openCommandHistoryModal(root: ShadowRoot): void {
             overlay.remove()
             chatDraft = line
             activeTab = 'chat'
+            tabSave()
             rerender()
           },
         },
@@ -4181,6 +4437,7 @@ function openCommandHistoryModal(root: ShadowRoot): void {
       overlay.remove()
       chatDraft = line
       activeTab = 'chat'
+      tabSave()
       rerender()
     }
     list.appendChild(row)
@@ -4498,8 +4755,22 @@ function openSessionSearchModal(root: ShadowRoot): void {
       const roleTag = el('span', 'artifact-kind', h.role === 'user' ? 'YOU' : h.role === 'error' ? 'ERR' : 'OS')
       roleTag.style.cssText += ';color:var(--text-3)'
       row.appendChild(roleTag)
-      const snippet = el('span', 'grow', h.text.length > 90 ? `${h.text.slice(0, 90)}…` : h.text)
+      const snippet = el('span', 'grow')
       snippet.style.cssText = 'font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      // dsh-web highlight: mark the matched term inside the snippet.
+      const snippetText = h.text.length > 90 ? `${h.text.slice(0, 90)}…` : h.text
+      const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const parts = snippetText.split(new RegExp(`(${esc})`, 'gi'))
+      for (const part of parts) {
+        if (part !== '' && part.toLowerCase() === q) {
+          const mark = el('span')
+          mark.style.cssText = 'background:var(--tone-amber-bg);color:var(--tone-amber);border-radius:3px'
+          mark.textContent = part
+          snippet.appendChild(mark)
+        } else if (part !== '') {
+          snippet.appendChild(document.createTextNode(part))
+        }
+      }
       row.appendChild(snippet)
       row.onmouseenter = () => { selIdx = rowEls.indexOf(row); paint() }
       row.onclick = () => {
@@ -5107,7 +5378,7 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
       })
       projectId = project.project_id
       void rerender()
-      return `Project **${project.project_id}** (${name}) created — DRAFT.\nScope Gate opened: approve it in the Gates tab (human only).`
+      return `Project **${project.project_id}** (${name}) created — DRAFT.\nScope Gate opened: approve it in Execution → Approvals (human only).`
     }
     case 'list': {
       const projects = (await api<Array<{ project_id?: string; name?: string; status?: string }>>('/v1/projects')) ?? []
@@ -5184,7 +5455,7 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
         }),
       })
       if (c === null || c.contract_id === undefined) return 'contract registration failed'
-      return `Contract **${c.contract_id}** registered — approve it in the Gates tab (human).`
+      return `Contract **${c.contract_id}** registered — approve it in Execution → Approvals (human).`
     }
     case 'run': {
       if (activeProjectId === undefined) return 'No project selected'
@@ -5291,27 +5562,31 @@ function isProjectActive(status: string | undefined): boolean {
 
 /**
  * dsh-web-style workspace sidebar: search box + group filter, one row per
- * project (name + status dot/label), the active one highlighted; a ＋
- * button creates a project.
+ * project (name + status dot/label), the active one highlighted; the
+ * workspace header owns project creation.
  */
 function renderSidebar(
   sidebar: HTMLElement,
   projects: ProjectRow[],
   activeId: string | undefined,
   onPick: (projectId: string) => void,
-  activeCounts?: { ideas?: number; contracts?: number; claims?: number; evidence?: number; artifacts?: number; corpus_snapshots?: number },
 ): void {
   sidebar.replaceChildren()
+
+  const brandRow = el('div', 'sidebar-brand-row')
+  brandRow.append(el('span', 'sidebar-wordmark', 'dsh'), el('span', 'sidebar-product', 'research'))
+  sidebar.appendChild(brandRow)
+
   const head = el('div', 'sidebar-head')
-  head.appendChild(el('span', 'sidebar-title', 'Projects'))
+  head.appendChild(el('span', 'sidebar-title', 'Workspaces'))
   // dsh-web sort toggle: recent activity vs alphabetical.
-  const sortBtn = el('button', 'sidebar-new', sidebarSort === 'name' ? '⇅ A–Z' : '⇅ recent')
+  const sortBtn = el('button', 'sidebar-new', sidebarSort === 'name' ? 'A–Z' : 'Recent')
   sortBtn.title = sidebarSort === 'name' ? 'sort by name (click for recent)' : 'sort by recent activity (click for A–Z)'
   sortBtn.style.cssText = 'padding:1px 8px;font-size:10px'
   sortBtn.onclick = () => {
     sidebarSort = sidebarSort === 'recent' ? 'name' : 'recent'
     sidebarSortPersist()
-    renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+    renderSidebar(sidebar, projects, activeId, onPick)
   }
   head.appendChild(sortBtn)
   const newBtn = el('button', 'sidebar-new', '＋')
@@ -5327,12 +5602,10 @@ function renderSidebar(
   // Search box: filters the project rows in place (keeps input focus,
   // dsh-web "Search sessions" feel).
   const search = document.createElement('input')
+  search.className = 'sidebar-search'
   search.type = 'text'
-  search.placeholder = '🔍 Search projects…'
+  search.placeholder = 'Search workspaces…'
   search.value = sidebarQuery
-  search.style.cssText = 'margin:8px 10px 2px;padding:6px 10px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;font:11px/1.4 system-ui,sans-serif;outline:none'
-  search.onfocus = () => { search.style.borderColor = 'var(--accent)' }
-  search.onblur = () => { search.style.borderColor = 'var(--border)' }
   // dsh-web search box: Escape clears the filter in place.
   search.onkeydown = (event) => {
     if (event.key === 'Escape' && search.value !== '') {
@@ -5345,24 +5618,22 @@ function renderSidebar(
   sidebar.appendChild(search)
 
   // Group by (dsh-web "Group by"): all / active / done.
-  const groupRow = el('div')
-  groupRow.style.cssText = 'display:flex;gap:4px;padding:4px 10px 6px'
+  const groupRow = el('div', 'sidebar-groups')
   const GROUP_DEFS: Array<['all' | 'active' | 'done' | 'archived', string]> = [
     ['all', 'All'], ['active', 'Active'], ['done', 'Done'], ['archived', 'Archived'],
   ]
   for (const [key, label] of GROUP_DEFS) {
-    const chip = el('button', 'sidebar-new')
+    const chip = el('button', 'sidebar-filter')
     chip.textContent = label
-    chip.style.cssText = 'flex:1;padding:3px 4px;font-size:10px;text-align:center'
-    if (sidebarGroup === key) {
-      chip.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
-    }
+    chip.classList.toggle('active', sidebarGroup === key)
     chip.onclick = () => { sidebarGroup = key; renderSidebar(sidebar, projects, activeId, onPick) }
     groupRow.appendChild(chip)
   }
   sidebar.appendChild(groupRow)
 
   const list = el('div', 'sidebar-list')
+  list.setAttribute('role', 'tree')
+  list.setAttribute('aria-label', 'Research workspaces')
   // dsh-web counts: the footer shows the filtered/total project counts.
   const footLabel = el('span', '', `${projects.length} projects`)
   const renderRows = (): void => {
@@ -5391,7 +5662,7 @@ function renderSidebar(
     }
     for (const p of filtered) {
       const item = el('button', 'ws-item')
-      item.setAttribute('role', 'listitem')
+      item.setAttribute('role', 'treeitem')
       item.setAttribute('aria-label', `project ${p.name ?? p.project_id ?? ''}`)
       // dsh-web starred projects: ★ toggles the favourite (sorted first).
       const isFav = p.project_id !== undefined && favProjects.has(p.project_id)
@@ -5402,7 +5673,7 @@ function renderSidebar(
         event.stopPropagation()
         if (p.project_id === undefined) return
         favProjectToggle(p.project_id)
-        renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+        renderSidebar(sidebar, projects, activeId, onPick)
       }
       item.appendChild(favStar)
       if (p.project_id === activeId) {
@@ -5418,7 +5689,7 @@ function renderSidebar(
           if (p.project_id === undefined) return
           if (sidebarSelected.has(p.project_id)) sidebarSelected.delete(p.project_id)
           else sidebarSelected.add(p.project_id)
-          renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+          renderSidebar(sidebar, projects, activeId, onPick)
         }
         item.prepend(box)
       }
@@ -5430,10 +5701,15 @@ function renderSidebar(
       const dot = el('span', 'ws-dot')
       dot.style.background = `var(--tone-${tone})`
       item.appendChild(dot)
-      item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
+      const itemText = el('span', 'ws-text')
+      itemText.append(
+        el('span', 'ws-name', p.name ?? p.project_id ?? ''),
+        el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''),
+      )
+      item.appendChild(itemText)
       if (blocked) {
-        const badge = el('span', 'ws-status', '⏳')
-        badge.title = 'blocked on a human gate decision — click to open Gates'
+        const badge = el('span', 'ws-status', '!')
+        badge.title = 'blocked on a human gate decision — click to open Approvals'
         badge.style.cssText = 'color:var(--tone-amber);font-weight:700;cursor:pointer'
         badge.onclick = (event) => {
           event.stopPropagation()
@@ -5444,7 +5720,6 @@ function renderSidebar(
         }
         item.appendChild(badge)
       }
-      item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
       // dsh-web tooltip: full identity of the project on hover.
       item.title = `${p.name ?? ''} · ${p.status ?? ''} · ${p.project_id ?? ''}`
@@ -5487,21 +5762,6 @@ function renderSidebar(
         if (p.project_id === undefined) return
         const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
         if (root !== null) void openProjectDetailModal(root, p.project_id)
-      }
-      // dsh-web sidebar stats: counts of the active project under its row.
-      if (p.project_id === activeId && activeCounts !== undefined) {
-        const stats = el('div')
-        stats.style.cssText = 'display:flex;gap:8px;padding:2px 10px 6px 26px;font-size:9px;color:var(--text-3)'
-        const parts: string[] = []
-        if ((activeCounts.corpus_snapshots ?? 0) > 0) parts.push(`📚${activeCounts.corpus_snapshots}`)
-        if ((activeCounts.ideas ?? 0) > 0) parts.push(`💡${activeCounts.ideas}`)
-        if ((activeCounts.contracts ?? 0) > 0) parts.push(`📋${activeCounts.contracts}`)
-        if ((activeCounts.claims ?? 0) > 0) parts.push(`🧾${activeCounts.claims}`)
-        if ((activeCounts.evidence ?? 0) > 0) parts.push(`📊${activeCounts.evidence}`)
-        if ((activeCounts.artifacts ?? 0) > 0) parts.push(`📦${activeCounts.artifacts}`)
-        if (parts.length === 0) parts.push('empty project')
-        stats.textContent = parts.join(' · ')
-        list.appendChild(stats)
       }
       // dsh-web "session actions": rename + archive/restore (hover only).
       const actionsWrap = el('span')
@@ -5560,7 +5820,7 @@ function renderSidebar(
     selectBtn.onclick = () => {
       sidebarSelecting = true
       sidebarSelected.clear()
-      renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+      renderSidebar(sidebar, projects, activeId, onPick)
     }
     foot.append(footLabel, footStats, selectBtn, settingsBtn)
   } else {
@@ -5568,7 +5828,7 @@ function renderSidebar(
     doneBtn.onclick = () => {
       sidebarSelecting = false
       sidebarSelected.clear()
-      renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+      renderSidebar(sidebar, projects, activeId, onPick)
     }
     const countLabel = el('span', '', `${sidebarSelected.size} selected`)
     const archiveSel = el('button', 'hbtn', '🗄 Archive')
@@ -5619,17 +5879,18 @@ let gsKind: 'all' | 'claim' | 'evidence' | 'artifact' = 'all'
 let sidebarSelecting = false
 let sidebarSelected = new Set<string>()
 
-async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
-  const shell = el('div')
-  shell.style.cssText = 'display:flex;flex-direction:row;height:100%;min-height:420px'
+async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: string): Promise<void> {
+  // Rebuild the persistent footer synchronously. Its old geometry stays in
+  // place throughout async refresh work, and this swap cannot paint halfway.
+  dock.replaceChildren()
+  const shell = el('div', 'chat-shell')
 
-  const column = el('div')
-  column.style.cssText = 'flex:1;display:flex;flex-direction:column;min-width:0'
+  const column = el('div', 'chat-column')
+  shell.appendChild(column)
 
   // dsh-web session tabs: switch / create / close chat sessions (the row
   // scrolls horizontally instead of wrapping with many sessions).
-  const sessionTabs = el('div')
-  sessionTabs.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;align-items:center;overflow-x:auto;flex-wrap:nowrap;max-width:100%;padding-bottom:2px;scrollbar-width:thin'
+  const sessionTabs = el('div', 'chat-session-tabs')
   for (const s of chatSessions) {
     const tab = el('button', 'hbtn')
     tab.textContent = s.name
@@ -5760,6 +6021,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
           onPick: () => {
             chatSessionSelect(s.id)
             activeTab = 'chat'
+            tabSave()
             rerender()
             setTimeout(() => {
               const rootEl = rootHost()
@@ -5896,8 +6158,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
 
   // Transcript search box (dsh-web "Search sessions" on the chat itself):
   // filters which messages are shown; matches are highlighted.
-  const searchRow = el('div')
-  searchRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:8px'
+  const searchRow = el('div', 'chat-search-row')
   const searchInput = document.createElement('input')
   searchInput.type = 'text'
   searchInput.placeholder = '🔍 Search conversation…'
@@ -6009,6 +6270,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     chip.onclick = () => {
       chatDraft = line
       activeTab = 'chat'
+      tabSave()
       rerender()
       setTimeout(() => {
         const rootEl = rootHost()
@@ -6022,10 +6284,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
 
   // dsh-web scroll affordance: wrap the transcript so a "jump to bottom"
   // button can float over it while the user scrolls up.
-  const streamWrap = el('div')
-  streamWrap.style.cssText = 'flex:1;display:flex;flex-direction:column;position:relative;min-height:0'
-  const stream = el('div')
-  stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
+  const streamWrap = el('div', 'chat-stream-wrap')
+  const stream = el('div', 'chat-stream')
   // dsh-web a11y: announce assistant replies as they land.
   stream.setAttribute('aria-live', 'polite')
   stream.setAttribute('aria-label', 'conversation')
@@ -6123,14 +6383,9 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       }
       stream.appendChild(quoteBox)
     }
-    const bubble = el('div')
-    bubble.style.cssText = msg.role === 'user'
-      ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;word-break:break-word;font-size:12px;cursor:pointer'
-      : msg.role === 'error'
-        ? 'align-self:flex-start;background:var(--tone-red-bg);color:var(--tone-red);border:1px solid var(--tone-red);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px;cursor:pointer'
-        : 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px;cursor:pointer'
+    const bubble = el('div', `chat-message ${msg.role}`)
     if (chatDetailIndex === i) {
-      bubble.style.outline = '2px solid var(--accent)'
+      bubble.classList.add('selected')
     }
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
     // /research status answers render as a field-card grid (dsh-web
@@ -6171,7 +6426,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       }
       // dsh-web depth: pending gates get a one-click jump to the Gates tab.
       if (pending !== 'none') {
-        const goGates = el('button', 'hbtn', '⛩️ open Gates tab')
+        const goGates = el('button', 'hbtn', 'Open Approvals')
         goGates.style.cssText = 'grid-column:1 / -1;align-self:flex-start'
         goGates.onclick = () => {
           activeTab = 'gates'
@@ -6261,7 +6516,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('pending'))
       card.appendChild(head)
-      const go = el('button', 'hbtn', '→ open Gates tab')
+      const go = el('button', 'hbtn', '→ open Approvals')
       go.style.cssText = 'align-self:flex-start'
       go.onclick = () => {
         activeTab = 'gates'
@@ -6282,7 +6537,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('pending'))
       card.appendChild(head)
-      const goGates = el('button', 'hbtn', '→ approve in Gates tab')
+      const goGates = el('button', 'hbtn', '→ open Approvals')
       goGates.style.cssText = 'align-self:flex-start'
       goGates.onclick = () => {
         activeTab = 'gates'
@@ -6322,7 +6577,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('built'))
       card.appendChild(head)
-      const goPhase = el('button', 'hbtn', '→ open Phase tab')
+      const goPhase = el('button', 'hbtn', '→ open Overview')
       goPhase.style.cssText = 'align-self:flex-start'
       goPhase.onclick = () => {
         activeTab = 'phase'
@@ -6364,7 +6619,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('exported'))
       card.appendChild(head)
-      const goPhase = el('button', 'hbtn', '→ open Phase tab')
+      const goPhase = el('button', 'hbtn', '→ open Overview')
       goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
       goPhase.onclick = () => {
         activeTab = 'phase'
@@ -6387,7 +6642,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       for (const l of ideaLines.slice(0, 4)) {
         card.appendChild(el('div', 'muted', l.trim()))
       }
-      const goPhase = el('button', 'hbtn', '→ open Phase tab')
+      const goPhase = el('button', 'hbtn', '→ open Overview')
       goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
       goPhase.onclick = () => {
         activeTab = 'phase'
@@ -6483,7 +6738,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         card.appendChild(row)
       }
       if (rows.length > 5) card.appendChild(el('div', 'muted', `… and ${rows.length - 5} more`))
-      const goGates = el('button', 'hbtn', '→ open Gates tab')
+      const goGates = el('button', 'hbtn', '→ open Approvals')
       goGates.style.cssText = 'align-self:flex-start;margin-top:4px'
       goGates.onclick = () => {
         activeTab = 'gates'
@@ -6613,6 +6868,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       quote.onclick = () => {
         chatDraft = ''
         activeTab = 'chat'
+        tabSave()
         chatQuoteTarget = { index: i, text: msg.text }
         rerender()
         setTimeout(() => {
@@ -6706,6 +6962,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       rerun.onclick = () => {
         chatDraft = detailMsg.text
         activeTab = 'chat'
+        tabSave()
         rerender()
         setTimeout(() => {
           const hostEl = document.querySelector('#dsh-scholar-ui')
@@ -6750,14 +7007,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     panel.appendChild(copyRow)
     shell.appendChild(panel)
   }
-  shell.appendChild(column)
-
-  // Composer (persists across refreshes via chatDraft) + session actions.
-  const composerRow = el('div')
-  composerRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:10px'
+  // The composer is rendered into the main-level dock, outside both the
+  // transcript shell and the scrollable panel body.
+  const composerRow = el('div', 'chat-composer-row')
   // dsh-web quote-reply: pending quote banner above the composer.
   if (chatQuoteTarget !== null) {
-    const quoteBanner = el('div')
+    const quoteBanner = el('div', 'chat-quote')
     quoteBanner.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:5px 10px;font-size:10.5px;color:var(--text)'
     const qText = el('span', 'grow', `Replying to: ${chatQuoteTarget.text.slice(0, 70)}${chatQuoteTarget.text.length > 70 ? '…' : ''}`)
     quoteBanner.appendChild(qText)
@@ -6768,28 +7023,25 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       rerender()
     }
     quoteBanner.appendChild(cancelQuote)
-    column.appendChild(quoteBanner)
+    dock.appendChild(quoteBanner)
   }
-  const composer = el('div')
-  composer.style.cssText = 'flex:1;display:flex;gap:8px'
-  // dsh-web composer: a multi-line textarea that auto-grows.
+  const composer = el('div', 'chat-composer')
+  // dsh-web composer: fixed-height input; longer drafts scroll internally so
+  // the dock never moves when its content changes.
   const input = document.createElement('textarea')
-  input.rows = 1
+  input.rows = 2
+  input.className = 'chat-composer-input'
   // dsh-web context: the placeholder shows the active project.
   input.placeholder = `/research status — ${projectId !== '' && projectId !== undefined ? `active: ${projectId.slice(0, 16)}` : 'no project selected'} (Enter sends, Shift+Enter newline)`
   input.setAttribute('aria-label', 'Research command composer')
   input.value = chatDraft
-  input.style.cssText = 'flex:1;resize:none;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.5 ui-monospace,Menlo,monospace;outline:none;min-height:34px;max-height:120px;overflow-y:auto'
   const autosize = (): void => {
-    input.style.height = 'auto'
-    input.style.height = `${Math.min(input.scrollHeight, 120)}px`
+    input.style.height = '48px'
   }
   input.onfocus = () => {
-    input.style.borderColor = 'var(--accent)'
     if (input.value.trim().startsWith('/')) renderCompletions(true)
   }
   input.onblur = () => {
-    input.style.borderColor = 'var(--border)'
     completionBox.style.display = 'none'
     completionOpen = false
   }
@@ -6800,7 +7052,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   // dsh-web "/" command completion: typing "/" (or focusing with "/")
   // opens the command palette under the composer; typing filters it.
-  const completionBox = el('div')
+  const completionBox = el('div', 'chat-completions')
   completionBox.style.cssText = 'display:none;flex-direction:column;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);overflow:hidden;max-height:40vh;overflow-y:auto'
   let completionOpen = false
   const renderCompletions = (force = false): void => {
@@ -6841,8 +7093,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     }
     completionBox.style.display = 'flex'
   }
-  const send = el('button', 'btn approve', 'Send')
-  send.style.cssText = 'padding:7px 16px;border-radius:9px'
+  const send = el('button', 'chat-send', '↑')
   send.setAttribute('aria-label', 'Send command')
   const run = async (): Promise<void> => {
     const line = input.value.trim()
@@ -6858,9 +7109,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     // even if the user switched sessions while it ran).
     const originSessionId = chatActiveId
     chatPush('user', line, quote ?? undefined)
+    input.disabled = true
+    send.disabled = true
     // dsh-web streaming feel: a "running…" bubble while the command works.
-    const runningBubble = el('div')
-    runningBubble.style.cssText = 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;font-size:12px;display:flex;align-items:center;gap:8px'
+    const runningBubble = el('div', 'chat-running')
     const spinner = el('span')
     spinner.textContent = '⏳'
     const runningText = el('span', '', 'running…')
@@ -6870,11 +7122,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     streamEl.scrollTop = streamEl.scrollHeight
     try {
       const answer = await executeChatCommand(line, projectId)
+      input.disabled = false
+      send.disabled = false
       runningBubble.remove()
       // dsh-web streaming feel: reveal the answer progressively in chunks
       // (line-by-line for multi-line answers, word-wise for single lines).
-      const answerBubble = el('div')
-      answerBubble.style.cssText = 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px;cursor:pointer'
+      const answerBubble = el('div', 'chat-message assistant')
       const lines = answer.split('\n')
       const chunkMs = lines.length > 4 ? 14 : 10
       const reveal = (): void => {
@@ -6909,6 +7162,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       streamEl.appendChild(answerBubble)
       reveal()
     } catch (error) {
+      input.disabled = false
+      send.disabled = false
       runningBubble.remove()
       chatPush('error', `command failed: ${(error as Error).message}`)
       rerender()
@@ -6979,20 +7234,17 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       }
     }
   }
-  composer.append(input, send)
+  composer.appendChild(input)
   // dsh-web "session actions": clear this conversation.
-  const clear = el('button', 'hbtn', '🗑')
+  const clear = el('button', 'hbtn', '×')
   clear.title = 'clear conversation'
   clear.setAttribute('aria-label', 'Clear conversation')
   clear.onclick = () => {
     chatClear()
     rerender()
   }
-  composerRow.append(composer, clear)
-  column.appendChild(composerRow)
   // dsh-web composer toolbar: markdown quick-inserts at the cursor.
-  const toolbar = el('div')
-  toolbar.style.cssText = 'display:flex;align-items:center;gap:4px;margin-top:6px'
+  const toolbar = el('div', 'chat-composer-tools')
   const mkBtn = (label: string, title: string): HTMLButtonElement => {
     const b = el('button', 'hbtn', label)
     b.title = title
@@ -7017,9 +7269,13 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   linkBtn.onclick = () => insertMarkdown('[', '](https://)', 'text')
   const listBtn = mkBtn('•', 'bullet list item')
   listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
-  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn)
-  column.appendChild(toolbar)
-  column.appendChild(completionBox)
+  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, clear)
+  const composerActions = el('div', 'chat-composer-actions')
+  composerActions.append(toolbar, send)
+  composer.appendChild(composerActions)
+  composerRow.appendChild(composer)
+  dock.append(completionBox, composerRow)
+  dock.hidden = false
 
   body.appendChild(shell)
 }
@@ -7170,7 +7426,9 @@ function formatChatText(text: string, highlight?: string): HTMLElement[] {
       nodes.push(el('div', '', '\u00a0'))
       continue
     }
-    nodes.push(el('div', '', ...inlineChatText(line, highlight)))
+    const paragraph = el('div')
+    paragraph.append(...inlineChatText(line, highlight))
+    nodes.push(paragraph)
   }
   flushFence()
   return nodes

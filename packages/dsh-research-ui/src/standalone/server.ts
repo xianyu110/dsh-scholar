@@ -111,41 +111,48 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Research OS — DSH Scholar</title>
 <style>
-  :root { color-scheme: light; }
+  :root { color-scheme: light; --bg:#ffffff; --surface:#ffffff; --border:rgba(0,0,0,.10); --text:#0f1115; --muted:#61666b; --faint:#81858c; --accent:#4176e6; --accent-soft:#edf3fe; }
   :root[data-theme="dark"] { color-scheme: dark; }
-  body { margin:0; background:#f7f9fc; color:#1a2333; font:14px/1.5 system-ui,sans-serif; }
-  :root[data-theme="dark"] body { background:#0a0e18; color:#dbe2ee; }
-  #boot-screen { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:9998; }
-  .card { background:#ffffff; border:1px solid #d9e1ee; border-radius:14px; padding:28px 34px; width:min(420px, 90vw); box-shadow:0 18px 60px rgba(30,45,80,.18); }
-  :root[data-theme="dark"] .card { background:#111726; border-color:#263049; box-shadow:0 18px 60px rgba(0,0,0,.5); }
-  .card h1 { margin:0 0 6px; font-size:18px; color:#1a2333; }
-  :root[data-theme="dark"] .card h1 { color:#eef2fa; }
-  .card p { margin:0 0 16px; color:#4a5a78; font-size:12.5px; }
-  :root[data-theme="dark"] .card p { color:#8b97b0; }
-  .card input { width:100%; box-sizing:border-box; background:#ffffff; color:#1a2333; border:1px solid #d9e1ee; border-radius:8px; padding:9px 12px; font:13px/1.4 ui-monospace,Menlo,monospace; outline:none; margin-bottom:12px; }
-  :root[data-theme="dark"] .card input { background:#151b2c; color:#dbe2ee; border-color:#2b3652; }
-  .card input:focus { border-color:#2563eb; }
-  :root[data-theme="dark"] .card input:focus { border-color:#4d9fff; }
-  .card button { width:100%; background:linear-gradient(180deg,#2f9e44,#238636); color:#fff; border:0; border-radius:8px; padding:10px 14px; font:700 13px/1 system-ui,sans-serif; cursor:pointer; }
-  .card button:hover { filter:brightness(1.12); }
-  .err { color:#dc2626; font-size:12px; margin-top:10px; min-height:16px; }
+  :root[data-theme="dark"] { --bg:#151517; --surface:#232324; --border:rgba(255,255,255,.12); --text:#f9fafb; --muted:#cfd3d6; --faint:#adb2b8; --accent:#679efe; --accent-soft:#34415b; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; overflow:hidden; background:var(--bg); color:var(--text); font:14px/22px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Helvetica Neue",Helvetica,Arial,sans-serif; }
+  #boot-screen { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; padding:24px; z-index:9998; }
+  .card { position:relative; width:min(380px,100%); overflow:hidden; padding:24px; background:var(--surface); border:1px solid var(--border); border-radius:24px; box-shadow:0 0 1px rgba(0,0,0,.2),0 0 4px rgba(0,0,0,.02),0 12px 32px rgba(0,0,0,.08); }
+  .brand { display:flex; align-items:baseline; gap:8px; margin-bottom:28px; }
+  .brand-mark { color:var(--text); font:700 19px/22px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; letter-spacing:-.06em; }
+  .brand-name { color:var(--text); font:500 14px/20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .brand-meta { margin-top:0; color:var(--faint); font:400 12px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .eyebrow { margin-bottom:8px; color:var(--accent); font:500 13px/20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .card h1 { margin:0 0 8px; color:var(--text); font:500 26px/32px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; letter-spacing:0; }
+  .card p { margin:0 0 24px; color:var(--muted); font-size:14px; line-height:22px; }
+  .field-label { display:block; margin:0 0 7px; color:var(--text); font:500 13px/20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .card input { width:100%; height:44px; background:transparent; color:var(--text); border:1px solid var(--border); border-radius:22px; padding:7px 14px; font:400 14px/22px 'SF Mono','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,Courier,sans-serif; outline:none; margin-bottom:10px; box-shadow:none; }
+  .card input:focus { border-color:var(--border); box-shadow:none; }
+  .card button { width:100%; min-height:40px; background:var(--accent); color:#fff; border:0; border-radius:20px; padding:9px 14px; font:500 14px/22px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; cursor:pointer; box-shadow:none; transition:background-color .1s cubic-bezier(.4,0,.2,1),opacity .1s cubic-bezier(.4,0,.2,1); }
+  .card button:hover { filter:brightness(1.08); transform:none; }
+  .card button:active { transform:none; }
+  .err { color:#dc2626; font-size:11px; margin-top:10px; min-height:16px; }
   :root[data-theme="dark"] .err { color:#f87171; }
-  .hint { margin-top:14px; color:#6b7a99; font-size:11px; }
-  :root[data-theme="dark"] .hint { color:#55627e; }
-  .theme-toggle { position:fixed; top:14px; right:16px; z-index:9999; background:#ffffff; color:#1a2333; border:1px solid #d9e1ee; border-radius:8px; padding:5px 12px; cursor:pointer; font:600 12px/1.6 system-ui,sans-serif; }
-  :root[data-theme="dark"] .theme-toggle { background:#151b2c; color:#dbe2ee; border-color:#2b3652; }
+  .hint { display:flex; align-items:flex-start; gap:8px; margin-top:16px; padding-top:16px; border-top:1px solid var(--border); color:var(--faint); font-size:10.5px; }
+  .hint-dot { width:7px; height:7px; flex:0 0 auto; margin-top:5px; border-radius:50%; background:#22c55e; box-shadow:none; }
+  .theme-toggle { position:fixed; top:18px; right:20px; z-index:9999; min-height:32px; background:transparent; color:var(--muted); border:0; border-radius:8px; padding:5px 10px; cursor:pointer; font:500 12px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .theme-toggle:hover { color:var(--text); }
+  @media (max-width:520px) { .card { padding:28px 22px; border-radius:20px; } .card h1 { font-size:26px; } .theme-toggle { top:10px; right:10px; } }
 </style>
 </head>
 <body>
-<button id="theme-toggle" class="theme-toggle">🌙 Dark</button>
+<button id="theme-toggle" class="theme-toggle">Dark</button>
 <div id="boot-screen">
   <div class="card">
-    <h1>🧪 Research OS</h1>
-    <p>Standalone DSH Scholar web plugin — gate decisions here are recorded with your operator identity.</p>
+    <div class="brand"><span class="brand-mark">dsh</span><span class="brand-name">Research</span><span class="brand-meta">Workspace</span></div>
+    <div class="eyebrow">Operator access</div>
+    <h1>Welcome back.</h1>
+    <p>Open your evidence workspace. Human gate decisions are recorded with your operator identity.</p>
+    <label class="field-label" for="token-input">Access token</label>
     <input id="token-input" type="password" placeholder="Access token" autocomplete="off">
-    <button id="token-submit">Unlock</button>
+    <button id="token-submit">Open workspace</button>
     <div class="err" id="token-err"></div>
-    <div class="hint">Token: generated on server start, printed to its log / saved under the data dir.</div>
+    <div class="hint"><span class="hint-dot"></span><span>Your token is generated when the local server starts and remains on this machine.</span></div>
   </div>
 </div>
 <script>
@@ -171,7 +178,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
     function paintTheme() {
       var dark = readTheme() === 'dark';
       root.setAttribute('data-theme', dark ? 'dark' : 'light');
-      toggle.textContent = dark ? '☀️ Light' : '🌙 Dark';
+      toggle.textContent = dark ? 'Light' : 'Dark';
     }
     toggle.addEventListener('click', function () {
       var next = readTheme() === 'dark' ? 'light' : 'dark';
