@@ -231,6 +231,19 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
 /* ─────────────────────────── panel state ─────────────────────────── */
 
 let activeTab = 'phase'
+const TAB_KEY = 'dsh-scholar-ui-tab'
+
+/** Restore the last active tab (dsh-web session restore feel). */
+function tabLoad(): void {
+  try {
+    const saved = localStorage.getItem(TAB_KEY)
+    if (saved !== null) activeTab = saved
+  } catch { /* private mode */ }
+}
+
+function tabSave(): void {
+  try { localStorage.setItem(TAB_KEY, activeTab) } catch { /* private mode */ }
+}
 let projectId: string | undefined
 let lastError: string | undefined
 
@@ -515,7 +528,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   for (const [key, label] of TAB_DEFS) {
     const button = el('button', 'tab', label)
     button.dataset.tab = key
-    button.onclick = () => { activeTab = key; void render() }
+    button.onclick = () => { activeTab = key; tabSave(); void render() }
     tabButtons.set(key, button)
     tabs.appendChild(button)
   }
@@ -539,8 +552,16 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
     // dsh-web session ordering: most recently active first (by updated_at).
     projects.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+    const target = projectId ?? projects[0]?.project_id
+    let projection: Projection | null = null
+    if (target !== undefined) {
+      projection = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
+      if (projection === null || projection.project === undefined) projection = null
+      else projectId = projection.project.project_id
+    }
     if (fullscreen && sidebar !== null) {
-      renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() })
+      // dsh-web sidebar stats: counts of the active project under its row.
+      renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() }, projection?.counts)
     } else {
       // Rebuild when empty, when there is no active project, or when the
       // active project id is not among the options (chat /research new
@@ -559,17 +580,14 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         picker.value = projectId ?? ''
       }
     }
-    const target = projectId ?? projects[0]?.project_id
     if (target === undefined) {
       body.replaceChildren(el('div', 'empty', 'No research projects yet — create one with the ＋ New Project button.'))
       return
     }
-    const projection = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
-    if (projection === null || projection.project === undefined) {
+    if (projection === null) {
       body.replaceChildren(el('div', 'error-banner', `Research kernel unreachable (project ${target}).`))
       return
     }
-    projectId = projection.project.project_id
     if (!fullscreen) {
       // Keep the picker in sync with the active project (the chat /research
       // new command switches it outside the picker's own onchange).
@@ -601,6 +619,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   rerender = () => { void render() }
   chatLoad()
   historyLoad()
+  tabLoad()
   void render()
   const timer = window.setInterval(() => { void render() }, 8000)
   // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
@@ -633,6 +652,20 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         const ta = root.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
         ta?.focus()
       }, 120)
+    }
+    // dsh-web behavior: Escape closes any open modal/overlay, the message
+    // details panel and any pending quote.
+    if (event.key === 'Escape' && !typing) {
+      const overlays = root.querySelectorAll('.overlay')
+      if (overlays.length > 0) {
+        overlays[overlays.length - 1]?.remove()
+      } else if (chatDetailIndex >= 0) {
+        chatDetailIndex = -1
+        rerender()
+      } else if (chatQuoteTarget !== null) {
+        chatQuoteTarget = null
+        rerender()
+      }
     }
   }
   window.addEventListener('keydown', onKey)
@@ -1713,6 +1746,7 @@ function renderSidebar(
   projects: ProjectRow[],
   activeId: string | undefined,
   onPick: (projectId: string) => void,
+  activeCounts?: { ideas?: number; contracts?: number; claims?: number; evidence?: number; artifacts?: number; corpus_snapshots?: number },
 ): void {
   sidebar.replaceChildren()
   const head = el('div', 'sidebar-head')
@@ -1778,6 +1812,20 @@ function renderSidebar(
       item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+      // dsh-web sidebar stats: counts of the active project under its row.
+      if (p.project_id === activeId && activeCounts !== undefined) {
+        const stats = el('div')
+        stats.style.cssText = 'display:flex;gap:8px;padding:2px 10px 6px 26px;font-size:9px;color:var(--text-3)'
+        const parts: string[] = []
+        if ((activeCounts.corpus_snapshots ?? 0) > 0) parts.push(`📚${activeCounts.corpus_snapshots}`)
+        if ((activeCounts.ideas ?? 0) > 0) parts.push(`💡${activeCounts.ideas}`)
+        if ((activeCounts.contracts ?? 0) > 0) parts.push(`📋${activeCounts.contracts}`)
+        if ((activeCounts.claims ?? 0) > 0) parts.push(`🧾${activeCounts.claims}`)
+        if ((activeCounts.artifacts ?? 0) > 0) parts.push(`📦${activeCounts.artifacts}`)
+        if (parts.length === 0) parts.push('empty project')
+        stats.textContent = parts.join(' · ')
+        list.appendChild(stats)
+      }
       // dsh-web "session actions": rename + archive/restore (hover only).
       const actionsWrap = el('span')
       actionsWrap.style.cssText = 'display:none;align-items:center;gap:2px;flex-shrink:0'
