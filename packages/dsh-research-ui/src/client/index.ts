@@ -437,9 +437,16 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const close = el('button', 'hbtn ghost', '×')
   close.title = 'collapse'
   close.onclick = () => { panel.style.display = 'none' }
+  const commandsBtn = el('button', 'hbtn', '⌘ Commands')
+  commandsBtn.title = 'browse /research commands'
+  commandsBtn.onclick = () => { openCommandsModal(root) }
+  const modeBadge = el('span', 'hbtn')
+  modeBadge.textContent = '🧭 gate-only'
+  modeBadge.title = 'research mode: every gate requires a human decision'
+  modeBadge.style.cssText = 'cursor:default;opacity:.9'
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
-    header.append(themeBtn, refresh)
+    header.append(modeBadge, commandsBtn, themeBtn, refresh)
   } else {
     header.append(themeBtn, refresh, close)
   }
@@ -537,6 +544,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   refresh.onclick = () => { void render() }
   rerender = () => { void render() }
+  chatLoad()
   void render()
   const timer = window.setInterval(() => { void render() }, 8000)
   window.addEventListener('beforeunload', () => window.clearInterval(timer), { once: true })
@@ -1004,6 +1012,198 @@ function openNewProjectModal(root: ShadowRoot): void {
   nameInput.focus()
 }
 
+/* ─────────────────────────── commands modal ─────────────────────────── */
+
+const CHAT_COMMANDS: Array<[string, string]> = [
+  ['new', '/research new demo1', 'create a project + Scope Gate'],
+  ['list', '/research list', 'list all projects'],
+  ['status', '/research status', 'phase, gates, jobs, budget of the active project'],
+  ['survey', '/research survey temporal action localization', 'multi-source literature search + frozen snapshot'],
+  ['ideas', '/research ideas', 'list IdeaCards of the active project'],
+  ['gates', '/research gates', 'gate list + decisions of the active project'],
+  ['jobs', '/research jobs', 'job list of the active project'],
+  ['contract', '/research contract {"idea_id":"...","dataset_id":"fixture","baseline":"b","treatment":"a","primary_metric":"macro_f1","seeds":[11,23,47]}', 'pre-register an ExperimentContract'],
+  ['run', '/research run {"kind":"echo","command":["echo","hi"]}', 'submit a durable runner job'],
+  ['evidence', '/research evidence {"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"acc","value":0.9,"baseline_value":0.8,"effect_size":0.1,"ci_low":0.05,"ci_high":0.15,"n_seeds":3}}', 'ingest an EvidenceItem'],
+  ['claims', '/research claims', 'claims + verification status'],
+  ['write', '/research write', 'build the manuscript from the Evidence Ledger'],
+  ['review', '/research review', 'deterministic reviewer checks'],
+  ['export', '/research export', 'generate a private Release Bundle'],
+  ['release', '/research release', 'create the human Release Gate'],
+]
+
+/**
+ * dsh-web "Commands" palette: every /research command with a one-line
+ * description. Clicking one switches to the Chat tab, fills the composer
+ * and runs it.
+ */
+function openCommandsModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:560px;max-width:92vw'
+  const header = el('div', 'modal-header', '⌘ Research Commands')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const hint = el('div', 'muted', 'Click a command to run it in the Chat tab (or type it there directly).')
+  hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
+  modal.appendChild(hint)
+
+  const list = el('div')
+  list.style.cssText = 'max-height:46vh;overflow-y:auto'
+  for (const [name, line, desc] of CHAT_COMMANDS) {
+    const row = el('button')
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer'
+    row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+    row.onmouseleave = () => { row.style.background = 'none' }
+    const nameEl = el('span', 'artifact-kind', name.toUpperCase())
+    const bodyEl = el('span', 'grow')
+    bodyEl.style.cssText = 'min-width:0'
+    const lineEl = el('div', 'mono', line)
+    lineEl.style.cssText = 'font-size:10.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+    const descEl = el('div', 'muted', desc)
+    descEl.style.cssText = 'font-size:10.5px'
+    bodyEl.append(lineEl, descEl)
+    row.append(nameEl, bodyEl)
+    row.onclick = () => {
+      overlay.remove()
+      chatDraft = line
+      activeTab = 'chat'
+      rerender()
+    }
+    list.appendChild(row)
+  }
+  modal.appendChild(list)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+}
+
+/* ─────────────────────────── settings modal ─────────────────────────── */
+
+/**
+ * dsh-web "Settings" counterpart: connection status (kernel health +
+ * endpoint), access token state, theme and conversation controls. Reads
+ * live kernel health through the bridge.
+ */
+async function openSettingsModal(root: ShadowRoot): Promise<void> {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+  const header = el('div', 'modal-header', '⚙ Settings')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const section = (title: string): HTMLElement => {
+    const label = el('div', 'section-label', title)
+    label.style.cssText = 'margin-top:14px'
+    return label
+  }
+  const row = (label: string, value: string, valueClass = 'mono'): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', valueClass, value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-all'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+
+  // Connection: live kernel health through the bridge.
+  modal.appendChild(section('Connection'))
+  const healthRow = el('div', 'row')
+  healthRow.style.cssText = 'padding:4px 0'
+  const healthLabel = el('span', '', 'Kernel')
+  healthLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const healthValue = el('span', 'mono', 'checking…')
+  healthValue.style.cssText = 'font-size:11px'
+  healthRow.append(healthLabel, healthValue)
+  modal.appendChild(healthRow)
+  const health = await api<{ ok?: boolean; instance?: string }>('/v1/health')
+  if (health === null || health.ok !== true) {
+    healthValue.textContent = 'unreachable'
+    healthValue.style.color = 'var(--tone-red)'
+  } else {
+    healthValue.textContent = `connected · ${health.instance ?? ''}`
+    healthValue.style.color = 'var(--tone-green)'
+  }
+  row('Bridge', 'same-origin /v1 proxy')
+  row('Auth', tokenProvider !== undefined ? 'bearer token (session)' : 'DSH boot token')
+
+  // Access token (standalone only).
+  if (tokenProvider !== undefined) {
+    modal.appendChild(section('Access'))
+    const tokRow = el('div', 'row')
+    tokRow.style.cssText = 'padding:4px 0'
+    const tokLabel = el('span', '', 'Token')
+    tokLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const tokValue = el('span', 'mono', '••••••••')
+    tokValue.style.cssText = 'font-size:11px'
+    const reveal = el('button', 'hbtn', 'Show')
+    reveal.style.cssText = 'padding:1px 8px'
+    reveal.onclick = async () => {
+      const t = await tokenProvider()
+      tokValue.textContent = t ?? '(none)'
+      reveal.remove()
+    }
+    tokRow.append(tokLabel, tokValue, reveal)
+    modal.appendChild(tokRow)
+  }
+
+  // Appearance.
+  modal.appendChild(section('Appearance'))
+  const themeRow = el('div', 'row')
+  themeRow.style.cssText = 'padding:4px 0'
+  const themeLabel = el('span', '', 'Theme')
+  themeLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const themeValue = el('span', 'mono', readTheme() === 'dark' ? 'dark' : 'light')
+  themeValue.style.cssText = 'font-size:11px'
+  const themeToggle = el('button', 'hbtn', 'Toggle')
+  themeToggle.style.cssText = 'padding:1px 8px'
+  themeToggle.onclick = () => {
+    const next = readTheme() === 'dark' ? 'light' : 'dark'
+    writeTheme(next)
+    const hostEl = root.host as HTMLElement
+    hostEl.dataset.theme = next
+    themeValue.textContent = next
+    // Refresh the header button label too.
+    document.dispatchEvent(new Event('dsh-scholar-theme-changed'))
+  }
+  themeRow.append(themeLabel, themeValue, themeToggle)
+  modal.appendChild(themeRow)
+
+  // Conversation.
+  modal.appendChild(section('Conversation'))
+  const convRow = el('div', 'row')
+  convRow.style.cssText = 'padding:4px 0'
+  const convLabel = el('span', '', 'Transcript')
+  convLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const convValue = el('span', 'mono', `${chatMessages.length} messages`)
+  convValue.style.cssText = 'font-size:11px'
+  const clearBtn = el('button', 'hbtn', 'Clear')
+  clearBtn.style.cssText = 'padding:1px 8px'
+  clearBtn.onclick = () => {
+    chatClear()
+    convValue.textContent = '0 messages'
+    rerender()
+  }
+  convRow.append(convLabel, convValue, clearBtn)
+  modal.appendChild(convRow)
+
+  const about = el('div', 'muted', 'DSH Scholar · Research OS standalone web plugin · v0.2 hardening')
+  about.style.cssText = 'margin-top:16px;font-size:10.5px'
+  modal.appendChild(about)
+
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+}
+
 /* ─────────────────────────── Chat (dialogue) tab ─────────────────────────── */
 
 /**
@@ -1020,9 +1220,40 @@ interface ChatMessage {
 
 let chatMessages: ChatMessage[] = []
 let chatDraft = ''
+const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
+const CHAT_MAX = 200
+
+/** Restore the transcript persisted in localStorage (dsh-web session feel). */
+function chatLoad(): void {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY)
+    if (raw === null) return
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed)) {
+      chatMessages = parsed
+        .filter((m): m is ChatMessage => typeof m === 'object' && m !== null
+          && typeof (m as ChatMessage).role === 'string'
+          && (m as ChatMessage).role in { user: 1, assistant: 1, error: 1 }
+          && typeof (m as ChatMessage).text === 'string')
+        .slice(-CHAT_MAX)
+    }
+  } catch { /* corrupt or private mode */ }
+}
+
+function chatPersist(): void {
+  try {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatMessages.slice(-CHAT_MAX)))
+  } catch { /* private mode */ }
+}
+
+function chatClear(): void {
+  chatMessages = []
+  chatPersist()
+}
 
 function chatPush(role: ChatMessage['role'], text: string): void {
   chatMessages.push({ role, text, time: new Date().toLocaleTimeString() })
+  chatPersist()
 }
 
 function fmtProjectRow(p: { project_id?: string; name?: string; status?: string }): string {
@@ -1256,9 +1487,13 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
   }
 }
 
+/** Sidebar search filter (dsh-web "Search sessions" feel). */
+let sidebarQuery = ''
+
 /**
- * dsh-web-style workspace sidebar: one row per project (name + status
- * dot/label), the active one highlighted; a ＋ button creates a project.
+ * dsh-web-style workspace sidebar: search box, one row per project (name +
+ * status dot/label), the active one highlighted; a ＋ button creates a
+ * project.
  */
 function renderSidebar(
   sidebar: HTMLElement,
@@ -1278,27 +1513,55 @@ function renderSidebar(
   head.appendChild(newBtn)
   sidebar.appendChild(head)
 
+  // Search box: filters the project rows in place (keeps input focus,
+  // dsh-web "Search sessions" feel).
+  const search = document.createElement('input')
+  search.type = 'text'
+  search.placeholder = '🔍 Search projects…'
+  search.value = sidebarQuery
+  search.style.cssText = 'margin:8px 10px 2px;padding:6px 10px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;font:11px/1.4 system-ui,sans-serif;outline:none'
+  search.onfocus = () => { search.style.borderColor = 'var(--accent)' }
+  search.onblur = () => { search.style.borderColor = 'var(--border)' }
+  sidebar.appendChild(search)
+
   const list = el('div', 'sidebar-list')
-  if (projects.length === 0) {
-    const empty = el('div', 'empty', 'No projects yet.')
-    empty.style.cssText = 'padding:10px 12px'
-    list.appendChild(empty)
+  const renderRows = (): void => {
+    list.replaceChildren()
+    const q = sidebarQuery.trim().toLowerCase()
+    const filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q))
+    if (filtered.length === 0) {
+      const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet.' : 'No matches.')
+      empty.style.cssText = 'padding:10px 12px'
+      list.appendChild(empty)
+      return
+    }
+    for (const p of filtered) {
+      const item = el('button', 'ws-item')
+      if (p.project_id === activeId) item.classList.add('active')
+      const tone = STATUS_META[p.status ?? '']?.tone ?? 'slate'
+      const dot = el('span', 'ws-dot')
+      dot.style.background = `var(--tone-${tone})`
+      item.appendChild(dot)
+      item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
+      item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
+      item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+      list.appendChild(item)
+    }
   }
-  for (const p of projects) {
-    const item = el('button', 'ws-item')
-    if (p.project_id === activeId) item.classList.add('active')
-    const tone = STATUS_META[p.status ?? '']?.tone ?? 'slate'
-    const dot = el('span', 'ws-dot')
-    dot.style.background = `var(--tone-${tone})`
-    item.appendChild(dot)
-    item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
-    item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
-    item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
-    list.appendChild(item)
-  }
+  search.oninput = () => { sidebarQuery = search.value; renderRows() }
+  renderRows()
   sidebar.appendChild(list)
 
-  const foot = el('div', 'sidebar-foot', 'DSH Scholar · standalone Research OS')
+  const foot = el('div', 'sidebar-foot')
+  foot.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between'
+  const footLabel = el('span', '', `${projects.length} projects`)
+  const settingsBtn = el('button', 'hbtn', '⚙ Settings')
+  settingsBtn.title = 'connection, token and appearance settings'
+  settingsBtn.onclick = () => {
+    const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+    if (root !== null) openSettingsModal(root)
+  }
+  foot.append(footLabel, settingsBtn)
   sidebar.appendChild(foot)
 }
 
@@ -1340,9 +1603,11 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   shell.appendChild(stream)
 
-  // Composer (persists across refreshes via chatDraft).
+  // Composer (persists across refreshes via chatDraft) + session actions.
+  const composerRow = el('div')
+  composerRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:10px'
   const composer = el('div')
-  composer.style.cssText = 'display:flex;gap:8px;margin-top:10px'
+  composer.style.cssText = 'flex:1;display:flex;gap:8px'
   const input = document.createElement('input')
   input.type = 'text'
   input.placeholder = '/research status — type a command'
@@ -1370,7 +1635,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   send.onclick = () => { void run() }
   input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); void run() } }
   composer.append(input, send)
-  shell.appendChild(composer)
+  // dsh-web "session actions": clear this conversation.
+  const clear = el('button', 'hbtn', '🗑')
+  clear.title = 'clear conversation'
+  clear.onclick = () => {
+    chatClear()
+    rerender()
+  }
+  composerRow.append(composer, clear)
+  shell.appendChild(composerRow)
 
   body.appendChild(shell)
 }
