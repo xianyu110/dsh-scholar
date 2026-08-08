@@ -1439,13 +1439,33 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     actions.style.cssText = 'margin-top:10px;display:flex;gap:8px'
     const approve = el('button', 'btn approve', '✓ Approve')
     const reject = el('button', 'btn reject', '✕ Reject')
+    // dsh-web decision reason: optional free-text recorded in the ledger.
+    const reasonRow = el('div')
+    reasonRow.style.cssText = 'display:none;margin-top:8px;gap:6px;align-items:center'
+    const reasonInput = document.createElement('input')
+    reasonInput.type = 'text'
+    reasonInput.placeholder = 'Optional decision reason (recorded in the ledger)…'
+    reasonInput.maxLength = 200
+    reasonInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none'
+    reasonInput.onfocus = () => { reasonInput.style.borderColor = 'var(--accent)' }
+    reasonInput.onblur = () => { reasonInput.style.borderColor = 'var(--border)' }
+    reasonRow.appendChild(reasonInput)
+    const reasonToggle = el('button', 'hbtn', '✎ reason')
+    reasonToggle.title = 'add a decision reason'
+    reasonToggle.style.cssText = 'padding:0 8px;font-size:10px'
+    reasonToggle.onclick = () => {
+      const open = reasonRow.style.display === 'none'
+      reasonRow.style.display = open ? 'flex' : 'none'
+      if (open) reasonInput.focus()
+    }
     const act = async (decision: 'approved' | 'rejected', label: string): Promise<void> => {
+      const reason = reasonInput.value.trim()
       const ok = await api(`/v1/gates/${encodeURIComponent(gate.gate_id ?? '')}/decisions`, {
         method: 'POST',
         body: JSON.stringify({
           actor: 'web-user',
           decision,
-          reason: `${label} from Research OS panel`,
+          reason: reason !== '' ? reason : `${label} from Research OS panel`,
           // dsh-web resume: approving a budget gate on a BLOCKED_GATE project
           // must pin the resume target (kernel §6.6 default: EXPERIMENTING),
           // otherwise the project stays parked after approval.
@@ -1464,8 +1484,9 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     approve.onclick = () => { void act('approved', 'approved') }
     reject.onclick = () => { void act('rejected', 'rejected') }
     if (!gatesSelecting) {
-      actions.append(approve, reject)
+      actions.append(approve, reject, reasonToggle)
       card.appendChild(actions)
+      card.appendChild(reasonRow)
     }
     listEl.appendChild(card)
   }
@@ -3534,7 +3555,9 @@ function showToast(root: ShadowRoot | null, text: string): void {
   const toast = el('div', 'toast', text)
   toast.setAttribute('role', 'status')
   toast.setAttribute('aria-live', 'polite')
-  toast.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:10001;background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:99px;padding:6px 16px;font:600 11.5px/1.4 system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3);pointer-events:none;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+  // dsh-web toast: click to dismiss it early.
+  toast.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:10001;background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:99px;padding:6px 16px;font:600 11.5px/1.4 system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3);cursor:pointer;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+  toast.onclick = () => toast.remove()
   root.appendChild(toast)
   setTimeout(() => toast.remove(), 2400)
 }
@@ -4548,7 +4571,7 @@ function renderSidebar(
   const renderRows = (): void => {
     list.replaceChildren()
     const q = sidebarQuery.trim().toLowerCase()
-    let filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q))
+    let filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q) || (p.status ?? '').toLowerCase().includes(q))
     if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
     if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
     if (filtered.length === 0) {
