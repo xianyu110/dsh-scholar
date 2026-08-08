@@ -351,6 +351,24 @@ function densityApply(panel: HTMLElement): void {
   try { localStorage.setItem(DENSITY_KEY, density) } catch { /* private mode */ }
 }
 
+/** Project favourites (dsh-web starred projects), persisted. */
+const FAV_PROJECTS_KEY = 'dsh-scholar-ui-fav-projects'
+let favProjects = new Set<string>()
+function favProjectsLoad(): void {
+  try {
+    const raw = localStorage.getItem(FAV_PROJECTS_KEY)
+    if (raw !== null) favProjects = new Set(JSON.parse(raw) as string[])
+  } catch { /* private mode */ }
+}
+function favProjectsPersist(): void {
+  try { localStorage.setItem(FAV_PROJECTS_KEY, JSON.stringify([...favProjects])) } catch { /* private mode */ }
+}
+function favProjectToggle(id: string): void {
+  if (favProjects.has(id)) favProjects.delete(id)
+  else favProjects.add(id)
+  favProjectsPersist()
+}
+
 /** Artifact list filter (dsh-web search-as-you-type), persisted per render. */
 let artifactsQuery = ''
 
@@ -949,6 +967,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   historyLoad()
   tabLoad()
   notifLoad()
+  favProjectsLoad()
   void render()
   const startTimer = (): number | null => {
     if (!autoRefreshEnabled()) return null
@@ -4872,6 +4891,10 @@ function renderSidebar(
     if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
     if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
     if (sidebarGroup === 'archived') filtered = filtered.filter(p => p.status === 'ARCHIVED')
+    // dsh-web starred projects: favourites sort to the top.
+    if (favProjects.size > 0) {
+      filtered = [...filtered].sort((a, b) => (favProjects.has(b.project_id ?? '') ? 1 : 0) - (favProjects.has(a.project_id ?? '') ? 1 : 0))
+    }
     // dsh-web counts: reflect the active filter in the footer.
     footLabel.textContent = q === '' && sidebarGroup === 'all'
       ? `${projects.length} projects`
@@ -4886,6 +4909,18 @@ function renderSidebar(
       const item = el('button', 'ws-item')
       item.setAttribute('role', 'listitem')
       item.setAttribute('aria-label', `project ${p.name ?? p.project_id ?? ''}`)
+      // dsh-web starred projects: ★ toggles the favourite (sorted first).
+      const isFav = p.project_id !== undefined && favProjects.has(p.project_id)
+      const favStar = el('span', '', isFav ? '★' : '☆')
+      favStar.style.cssText = `cursor:pointer;color:${isFav ? 'var(--tone-amber)' : 'var(--text-3)'};font-size:10px;flex-shrink:0`
+      favStar.title = isFav ? 'unfavourite project' : 'favourite project (pinned first)'
+      favStar.onclick = (event) => {
+        event.stopPropagation()
+        if (p.project_id === undefined) return
+        favProjectToggle(p.project_id)
+        renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+      }
+      item.appendChild(favStar)
       if (p.project_id === activeId) {
         item.classList.add('active')
         item.setAttribute('aria-current', 'page')
