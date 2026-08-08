@@ -83,7 +83,9 @@ interface Projection {
   project?: {
     project_id?: string; name?: string; status?: string; revision?: number
     brief?: { problem?: string; primary_metrics?: string[] }
-    constraints?: { max_model_cost_usd?: number; max_gpu_hours?: number; max_parallel_jobs?: number }
+    constraints?: { max_model_cost_usd?: number; max_gpu_hours?: number; max_parallel_jobs?: number; datasets?: string; external_model_upload?: string }
+    execution?: { runner_profile?: string; network_policy?: string; artifact_store?: string }
+    integrity?: { require_baseline_reproduction?: boolean; require_experiment_contract?: boolean; require_claim_evidence_links?: boolean; require_clean_room_rerun?: boolean; allow_automatic_public_release?: boolean }
     history?: string[]
   }
   pending_gates?: Array<{ gate_id?: string; type?: string; title?: string; summary?: string; status?: string }>
@@ -719,6 +721,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const styleTabs = (): void => {
     for (const [key, button] of tabButtons) {
       button.classList.toggle('active', key === activeTab)
+      if (key === activeTab) button.setAttribute('aria-current', 'page')
+      else button.removeAttribute('aria-current')
       // dsh-web pinned tabs: keep the ★ marker in sync (buttons are built
       // once, so the pin class must be refreshed on every render).
       const pinned = tabPinned(key)
@@ -1539,10 +1543,68 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       row.appendChild(chip)
     }
     row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
-    row.title = 'click to preview'
+    row.title = 'click to preview · double-click for details'
     row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
+    row.ondblclick = (event) => {
+      event.stopPropagation()
+      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+      if (root !== null) openArtifactDetailModal(root, artifact)
+    }
     body.appendChild(row)
   }
+}
+
+/** dsh-web artifact drawer: metadata of one CAS artifact. */
+function openArtifactDetailModal(root: ShadowRoot, artifact: ArtifactRow): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:540px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Artifact details')
+  const header = el('div', 'modal-header', '📦 Artifact details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:110px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-all'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const titleRow = el('div', 'row')
+  titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
+  titleRow.appendChild(el('span', 'artifact-kind', (artifact.kind ?? '?').toUpperCase()))
+  titleRow.appendChild(el('span', 'pname', fmtId(artifact.artifact_id ?? '', 30)))
+  modal.appendChild(titleRow)
+
+  modal.appendChild(el('div', 'section-label', 'Artifact'))
+  row('Artifact', String(artifact.artifact_id ?? '—'))
+  row('Kind', String(artifact.kind ?? '—'))
+  row('Size', fmtBytes(artifact.size_bytes))
+  const meta = artifact.metadata
+  if (meta !== undefined && Object.keys(meta).length > 0) {
+    modal.appendChild(el('div', 'section-label', 'Metadata'))
+    for (const [k, v] of Object.entries(meta)) {
+      row(k, typeof v === 'object' ? JSON.stringify(v) : String(v))
+    }
+  }
+  const previewBtn = el('button', 'hbtn', '⧉ preview')
+  previewBtn.style.cssText = 'margin-top:12px'
+  previewBtn.onclick = () => {
+    overlay.remove()
+    void previewArtifact(artifact.artifact_id ?? '')
+  }
+  modal.appendChild(previewBtn)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  trapFocus(overlay, null)
 }
 
 /** Download link backed by a blob URL (used for non-previewable types). */
@@ -1756,6 +1818,61 @@ function openEvidenceDetailModal(root: ShadowRoot, item: EvidenceRow): void {
   trapFocus(overlay, null)
 }
 
+/** dsh-web budget drawer: constraints/execution/integrity of a project. */
+function openBudgetDetailModal(root: ShadowRoot, p: Projection): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:540px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Budget details')
+  const header = el('div', 'modal-header', '💰 Budget & policy details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const c = p.project?.constraints
+  const b = p.budget
+  const exec = p.project?.execution as Record<string, unknown> | undefined
+  const integ = p.project?.integrity as Record<string, unknown> | undefined
+  modal.appendChild(el('div', 'section-label', 'Usage'))
+  row('Model cost', `$${b?.model_cost_usd ?? 0}${c?.max_model_cost_usd !== undefined ? ` / $${c.max_model_cost_usd}` : ''}`)
+  row('GPU hours', `${b?.gpu_hours ?? 0}${c?.max_gpu_hours !== undefined ? ` / ${c.max_gpu_hours}` : ''}`)
+  row('API requests', String(b?.api_requests ?? 0))
+  modal.appendChild(el('div', 'section-label', 'Constraints'))
+  row('Datasets', String(c?.datasets ?? '—'))
+  row('Model upload', String(c?.external_model_upload ?? '—'))
+  row('Parallel jobs', String(c?.max_parallel_jobs ?? '—'))
+  modal.appendChild(el('div', 'section-label', 'Execution'))
+  if (exec !== undefined) {
+    row('Runner', String(exec.runner_profile ?? '—'))
+    row('Network', String(exec.network_policy ?? '—'))
+    row('Artifacts', String(exec.artifact_store ?? '—'))
+  }
+  modal.appendChild(el('div', 'section-label', 'Integrity'))
+  if (integ !== undefined) {
+    row('Baseline repro', String(integ.require_baseline_reproduction ?? '—'))
+    row('Contract', String(integ.require_experiment_contract ?? '—'))
+    row('Claim links', String(integ.require_claim_evidence_links ?? '—'))
+    row('Clean-room', String(integ.require_clean_room_rerun ?? '—'))
+    row('Auto release', String(integ.allow_automatic_public_release ?? '—'))
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  trapFocus(overlay, null)
+}
+
 function renderBudget(body: HTMLElement, p: Projection): void {
   const c = p.project?.constraints
   const b = p.budget
@@ -1763,7 +1880,17 @@ function renderBudget(body: HTMLElement, p: Projection): void {
   const gpu = b?.gpu_hours ?? 0
   const modelMax = c?.max_model_cost_usd
   const gpuMax = c?.max_gpu_hours
-  body.appendChild(el('div', 'section-label', 'Budget'))
+  const labelRow = el('div', 'row')
+  labelRow.style.cssText = 'justify-content:space-between;align-items:center'
+  labelRow.appendChild(el('div', 'section-label', 'Budget'))
+  const detailBtn = el('button', 'hbtn', 'ℹ details')
+  detailBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
+  detailBtn.onclick = () => {
+    const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+    if (root !== null) openBudgetDetailModal(root, p)
+  }
+  labelRow.appendChild(detailBtn)
+  body.appendChild(labelRow)
   const row1 = budgetRow('Model cost', model, modelMax, '$', 2)
   const row2 = budgetRow('GPU hours', gpu, gpuMax, '', 2)
   const row3 = el('div', 'budget-row')
@@ -3655,7 +3782,10 @@ function renderSidebar(
       const item = el('button', 'ws-item')
       item.setAttribute('role', 'listitem')
       item.setAttribute('aria-label', `project ${p.name ?? p.project_id ?? ''}`)
-      if (p.project_id === activeId) item.classList.add('active')
+      if (p.project_id === activeId) {
+        item.classList.add('active')
+        item.setAttribute('aria-current', 'page')
+      }
       if (sidebarSelecting && p.project_id !== undefined) {
         if (sidebarSelected.has(p.project_id)) item.classList.add('selected')
         const box = el('span', 'ws-check', sidebarSelected.has(p.project_id) ? '☑' : '☐')
