@@ -2853,6 +2853,28 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
     setTimeout(() => { exportBtn.textContent = '⬇ Export JSON' }, 2000)
   }
   exportRow.appendChild(exportBtn)
+  // dsh-web share: copy a compact markdown summary of this project.
+  const summaryBtn = el('button', 'hbtn', '⧉ copy summary')
+  summaryBtn.title = 'copy a markdown summary of this project'
+  summaryBtn.onclick = () => {
+    const counts = p.counts ?? {}
+    const lines = [
+      `# ${proj.name ?? projectId}`,
+      '',
+      `- Project: \`${projectId}\``,
+      `- Phase: \`${proj.status}\` (rev ${proj.revision ?? 0})`,
+      `- Problem: ${proj.brief?.problem ?? '—'}`,
+      `- Budget: $${p.budget?.model_cost_usd ?? 0} / ${proj.constraints?.max_model_cost_usd ?? '∞'} max`,
+      `- Contents: ${counts.ideas ?? 0} ideas · ${counts.contracts ?? 0} contracts · ${counts.claims ?? 0} claims · ${counts.evidence ?? 0} evidence · ${counts.artifacts ?? 0} artifacts`,
+    ]
+    const md = lines.join('\n')
+    void navigator.clipboard.writeText(md).then(
+      () => { summaryBtn.textContent = '✓ copied' },
+      () => { summaryBtn.textContent = 'copy failed' },
+    )
+    setTimeout(() => { summaryBtn.textContent = '⧉ copy summary' }, 1600)
+  }
+  exportRow.appendChild(summaryBtn)
   modal.appendChild(exportRow)
 }
 
