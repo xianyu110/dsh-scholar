@@ -986,6 +986,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   tabLoad()
   notifLoad()
   favProjectsLoad()
+  sidebarSortLoad()
   void render()
   const startTimer = (): number | null => {
     if (!autoRefreshEnabled()) return null
@@ -5102,6 +5103,18 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
 let sidebarQuery = ''
 /** Sidebar grouping (dsh-web "Group by" feel): all | active | done. */
 let sidebarGroup: 'all' | 'active' | 'done' | 'archived' = 'all'
+/** Sidebar sort order (dsh-web sort toggle), persisted. */
+let sidebarSort: 'recent' | 'name' = 'recent'
+const SIDEBAR_SORT_KEY = 'dsh-scholar-ui-sidebar-sort'
+function sidebarSortLoad(): void {
+  try {
+    const v = localStorage.getItem(SIDEBAR_SORT_KEY)
+    if (v === 'name' || v === 'recent') sidebarSort = v
+  } catch { /* private mode */ }
+}
+function sidebarSortPersist(): void {
+  try { localStorage.setItem(SIDEBAR_SORT_KEY, sidebarSort) } catch { /* private mode */ }
+}
 
 /** Projects considered "active" (still in the research pipeline). */
 function isProjectActive(status: string | undefined): boolean {
@@ -5123,6 +5136,16 @@ function renderSidebar(
   sidebar.replaceChildren()
   const head = el('div', 'sidebar-head')
   head.appendChild(el('span', 'sidebar-title', 'Projects'))
+  // dsh-web sort toggle: recent activity vs alphabetical.
+  const sortBtn = el('button', 'sidebar-new', sidebarSort === 'name' ? '⇅ A–Z' : '⇅ recent')
+  sortBtn.title = sidebarSort === 'name' ? 'sort by name (click for recent)' : 'sort by recent activity (click for A–Z)'
+  sortBtn.style.cssText = 'padding:1px 8px;font-size:10px'
+  sortBtn.onclick = () => {
+    sidebarSort = sidebarSort === 'recent' ? 'name' : 'recent'
+    sidebarSortPersist()
+    renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+  }
+  head.appendChild(sortBtn)
   const newBtn = el('button', 'sidebar-new', '＋')
   newBtn.title = 'new project'
   newBtn.setAttribute('aria-label', 'New project')
@@ -5177,7 +5200,10 @@ function renderSidebar(
   const renderRows = (): void => {
     list.replaceChildren()
     const q = sidebarQuery.trim().toLowerCase()
-    let filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q) || (p.status ?? '').toLowerCase().includes(q))
+    const base = sidebarSort === 'name'
+      ? [...projects].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
+      : projects
+    let filtered = q === '' ? base : base.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q) || (p.status ?? '').toLowerCase().includes(q))
     if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
     if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
     if (sidebarGroup === 'archived') filtered = filtered.filter(p => p.status === 'ARCHIVED')
