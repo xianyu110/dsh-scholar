@@ -277,10 +277,23 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
       return
     }
   }
-  const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+  let url: URL
+  try {
+    url = new URL(req.url ?? '/', 'http://127.0.0.1')
+  } catch {
+    send(res, 400, { error: { code: 'invalid_url', message: 'malformed request url' } })
+    return
+  }
   // pathname is percent-encoded; decode segments so ids like sha256:<hex>
-  // survive (encodeURIComponent on the client side).
-  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent) // e.g. ['v1','projects','rsp_x']
+  // survive (encodeURIComponent on the client side). A malformed escape
+  // (e.g. %zz) must answer JSON 400 — never crash the server (§19.2).
+  let parts: string[]
+  try {
+    parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent) // e.g. ['v1','projects','rsp_x']
+  } catch {
+    send(res, 400, { error: { code: 'invalid_encoding', message: 'malformed percent-encoding in path' } })
+    return
+  }
 
   const method = req.method ?? 'GET'
   const [version, resource, id, sub, subId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]

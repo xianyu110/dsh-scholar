@@ -670,6 +670,41 @@ export class ResearchKernel {
     })
   }
 
+  // ── CAS integrity & GC (acceptance-tests.md §3) ─────────────────────────
+
+  /**
+   * Remove blobs that are not referenced by ANY artifact record (orphan GC,
+   * storage-migrations.md §6). A grace period protects blobs written but not
+   * yet committed to a transaction (stage/finalize pattern). Returns the
+   * number of removed blobs.
+   */
+  collectOrphanBlobs(graceMs = 0): number {
+    const referenced = new Set(
+      (this.db.prepare('SELECT sha256 FROM artifacts').all() as Array<{ sha256: string }>).map(r => r.sha256),
+    )
+    const now = Date.now()
+    let removed = 0
+    for (const sha of this.cas.list()) {
+      if (referenced.has(sha)) continue
+      const mtime = this.cas.mtimeMs(sha)
+      if (mtime === null || now - mtime < graceMs) continue
+      if (this.cas.remove(sha)) removed++
+    }
+    return removed
+  }
+
+  /**
+   * Integrity scan: artifacts whose blob is missing from the CAS (or empty).
+   * Returns per-project counts + the offending artifact ids. Used by the
+   * recovery flow after restore (storage-migrations.md §10).
+   */
+  scanMissingBlobs(): { project_id: string; artifact_id: string; sha256: string }[] {
+    const rows = this.db.prepare('SELECT artifact_id, project_id, sha256 FROM artifacts').all() as unknown as Array<{
+      artifact_id: string; project_id: string; sha256: string
+    }>
+    return rows.filter(r => !this.cas.has(r.sha256))
+  }
+
   // ── artifacts (CAS) ──────────────────────────────────────────────────────
 
   registerArtifact(input: {

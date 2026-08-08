@@ -6,7 +6,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, statSync, readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
 export class ArtifactCas {
@@ -57,6 +57,39 @@ export class ArtifactCas {
       return statSync(this.pathFor(sha256)).size > 0
     } catch {
       return false
+    }
+  }
+
+  /** Every stored blob sha256 (acceptance-tests.md §3 blob scan). */
+  list(): string[] {
+    let entries: string[]
+    try {
+      entries = readdirSync(this.root)
+    } catch {
+      return []
+    }
+    return entries
+      .filter(entry => /^[0-9a-f]{64}$/.test(entry) && !entry.endsWith('.tmp-'))
+      .sort()
+  }
+
+  /** Delete one blob; missing blobs are a no-op (orphan GC, §6 CAS). */
+  remove(sha256: string): boolean {
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return false
+    try {
+      unlinkSync(this.pathFor(sha256))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** mtime of a blob (grace-period GC); null when absent. */
+  mtimeMs(sha256: string): number | null {
+    try {
+      return statSync(this.pathFor(sha256)).mtimeMs
+    } catch {
+      return null
     }
   }
 }

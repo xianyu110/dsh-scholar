@@ -23,6 +23,7 @@ SCRIPTS=(
   run-gate-tests.sh
   run-unicode-tests.sh
   run-lower-is-better-tests.sh
+  run-malformed-path-tests.sh
 )
 
 echo "=== §19.2 v0.2 blocking tests ==="
