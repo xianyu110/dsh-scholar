@@ -12,6 +12,9 @@ import { zh as terminalZh, en as terminalEn } from './locales/terminal'
 import { zh as manuscriptZh, en as manuscriptEn } from './locales/manuscript'
 import { zh as overviewZh, en as overviewEn } from './locales/overview'
 import { zh as runsZh, en as runsEn } from './locales/runs'
+import { zh as artifactsZh, en as artifactsEn } from './locales/artifacts'
+import { zh as evidenceZh, en as evidenceEn } from './locales/evidence'
+import { zh as budgetZh, en as budgetEn } from './locales/budget'
 
 export type Locale = 'zh' | 'en'
 
@@ -27,6 +30,9 @@ const DICTS: AllDicts = {
     manuscript: manuscriptZh as unknown as Record<string, string>,
     overview: overviewZh as unknown as Record<string, string>,
     runs: runsZh as unknown as Record<string, string>,
+    artifacts: artifactsZh as unknown as Record<string, string>,
+    evidence: evidenceZh as unknown as Record<string, string>,
+    budget: budgetZh as unknown as Record<string, string>,
   },
   en: {
     common: commonEn as unknown as Record<string, string>,
@@ -36,6 +42,9 @@ const DICTS: AllDicts = {
     manuscript: manuscriptEn as unknown as Record<string, string>,
     overview: overviewEn as unknown as Record<string, string>,
     runs: runsEn as unknown as Record<string, string>,
+    artifacts: artifactsEn as unknown as Record<string, string>,
+    evidence: evidenceEn as unknown as Record<string, string>,
+    budget: budgetEn as unknown as Record<string, string>,
   },
 }
 

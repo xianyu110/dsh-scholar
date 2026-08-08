@@ -1668,7 +1668,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       gatesSelected.clear()
       rerender()
     }
-    const doneSel = el('button', 'hbtn', 'Done')
+    const doneSel = el('button', 'hbtn', t('artifacts', 'artifacts.done'))
     doneSel.onclick = () => {
       gatesSelecting = false
       gatesSelected.clear()
@@ -1906,7 +1906,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       runsSelected.clear()
       rerender()
     }
-    const doneSel = el('button', 'hbtn', 'Done')
+    const doneSel = el('button', 'hbtn', t('artifacts', 'artifacts.done'))
     doneSel.setAttribute('aria-label', 'Exit runs multi-select')
     doneSel.onclick = () => {
       runsSelecting = false
@@ -2067,10 +2067,10 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
   const artifacts = (await api<ArtifactRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/artifacts`)) ?? []
   const labelRow = el('div', 'row')
   labelRow.style.cssText = 'justify-content:space-between;align-items:center'
-  labelRow.appendChild(el('div', 'section-label', `Artifacts (${artifacts.length}, click to preview)`))
+  labelRow.appendChild(el('div', 'section-label', t('artifacts', 'artifacts.section', { count: String(artifacts.length) })))
   if (artifacts.length > 0) {
-    const selBtn = el('button', 'hbtn', artifactsSelecting ? '☑ Selecting…' : '☑ Select')
-    selBtn.title = artifactsSelecting ? 'exit multi-select' : 'multi-select artifacts (bulk download)'
+    const selBtn = el('button', 'hbtn', artifactsSelecting ? t('artifacts', 'artifacts.selecting') : t('artifacts', 'artifacts.select'))
+    selBtn.title = artifactsSelecting ? t('artifacts', 'artifacts.selecting.title') : t('artifacts', 'artifacts.select.title')
     selBtn.setAttribute('aria-pressed', artifactsSelecting ? 'true' : 'false')
     selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
     selBtn.onclick = () => {
@@ -2082,14 +2082,14 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
   }
   body.appendChild(labelRow)
   if (artifacts.length === 0) {
-    body.appendChild(el('div', 'empty', 'No artifacts yet — runs and analysis produce them.'))
+    body.appendChild(el('div', 'empty', t('artifacts', 'artifacts.empty')))
     return
   }
   // dsh-web search-as-you-type: filter the artifact list in place. Only
   // the list below is rebuilt, so the input keeps focus while typing.
   const searchInput = document.createElement('input')
   searchInput.type = 'text'
-  searchInput.placeholder = '🔍 Filter artifacts…'
+  searchInput.placeholder = t('artifacts', 'artifacts.filterPlaceholder')
   searchInput.value = artifactsQuery
   searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none;margin:2px 0 4px'
   searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
@@ -2137,7 +2137,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       bar.style.cssText = 'padding:8px 10px;margin:4px 0;display:flex;align-items:center;gap:10px;border-color:var(--accent)'
       const count = el('span', 'mono', `${artifactsSelected.size} selected`)
       count.style.cssText = 'font-size:11px;color:var(--text)'
-      const downloadSel = el('button', 'btn approve', '⬇ Download selected')
+      const downloadSel = el('button', 'btn approve', t('artifacts', 'artifacts.downloadSelected'))
       downloadSel.disabled = artifactsSelected.size === 0
       downloadSel.onclick = async () => {
         let downloaded = 0
@@ -2169,14 +2169,14 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
         artifactsSelected.clear()
         rerender()
       }
-      const doneSel = el('button', 'hbtn', 'Done')
+      const doneSel = el('button', 'hbtn', t('artifacts', 'artifacts.done'))
       doneSel.onclick = () => {
         artifactsSelecting = false
         artifactsSelected.clear()
         rerender()
       }
-      const allBtn = el('button', 'hbtn', '☑ all')
-      allBtn.title = 'select all artifacts'
+      const allBtn = el('button', 'hbtn', t('artifacts', 'artifacts.all'))
+      allBtn.title = t('artifacts', 'artifacts.all.title')
       allBtn.onclick = () => {
         for (const a of artifacts) if (a.artifact_id !== undefined) artifactsSelected.add(a.artifact_id)
         renderList()
@@ -2187,7 +2187,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
     // dsh-web virtualized feel: window artifacts to the newest 15.
     const shownArtifacts = artifacts.slice(-15).reverse()
     if (artifacts.length > 15) {
-      const notice = el('div', 'muted', `Showing the newest 15 of ${artifacts.length} artifacts — use the global search or export for the rest.`)
+      const notice = el('div', 'muted', t('artifacts', 'artifacts.showingNewest', { count: String(artifacts.length) }))
       notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
       listEl.appendChild(notice)
     }
@@ -2200,7 +2200,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       String(a.metadata?.name ?? '').toLowerCase().includes(q),
     )
     if (filtered.length === 0) {
-      listEl.appendChild(el('div', 'empty', `No artifacts match "${artifactsQuery.trim()}"${artifactsKind !== 'all' ? ` (kind: ${artifactsKind})` : ''}.`))
+      listEl.appendChild(el('div', 'empty', t('artifacts', 'artifacts.noMatch', { query: artifactsQuery.trim(), kind: artifactsKind !== 'all' ? ` (kind: ${artifactsKind})` : '' })))
       return
     }
     for (const artifact of filtered) {
@@ -2235,7 +2235,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
         row.appendChild(chip)
       }
       row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
-      row.title = 'click to preview · double-click for details'
+      row.title = t('artifacts', 'artifacts.rowTitle')
       row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
       // dsh-web context menu: preview / details / copy id.
       row.oncontextmenu = (event) => {
@@ -2292,18 +2292,18 @@ function openArtifactDetailModal(root: ShadowRoot, artifact: ArtifactRow): void 
   titleRow.appendChild(el('span', 'pname', fmtId(artifact.artifact_id ?? '', 30)))
   modal.appendChild(titleRow)
 
-  modal.appendChild(el('div', 'section-label', 'Artifact'))
+  modal.appendChild(el('div', 'section-label', t('artifacts', 'artifacts.detail.title')))
   row('Artifact', String(artifact.artifact_id ?? '—'))
   row('Kind', String(artifact.kind ?? '—'))
   row('Size', fmtBytes(artifact.size_bytes))
   const meta = artifact.metadata
   if (meta !== undefined && Object.keys(meta).length > 0) {
-    modal.appendChild(el('div', 'section-label', 'Metadata'))
+    modal.appendChild(el('div', 'section-label', t('artifacts', 'artifacts.detail.metadata')))
     for (const [k, v] of Object.entries(meta)) {
       row(k, typeof v === 'object' ? JSON.stringify(v) : String(v))
     }
   }
-  const previewBtn = el('button', 'hbtn', '⧉ preview')
+  const previewBtn = el('button', 'hbtn', t('artifacts', 'artifacts.detail.preview'))
   previewBtn.style.cssText = 'margin-top:12px'
   previewBtn.onclick = () => {
     overlay.remove()
@@ -2399,8 +2399,8 @@ async function previewArtifact(artifactId: string): Promise<void> {
     }
     // dsh-web depth: open blob-backed previews in their own browser tab.
     if (blobUrls.length > 0) {
-      const openTab = el('button', 'hbtn', '⧉ open in tab')
-      openTab.title = 'open the artifact in a new browser tab'
+      const openTab = el('button', 'hbtn', t('artifacts', 'artifacts.detail.openTab'))
+      openTab.title = t('artifacts', 'artifacts.detail.openTab.title')
       openTab.style.cssText = 'margin-top:10px'
       openTab.onclick = () => {
         const url = blobUrls[blobUrls.length - 1]!
@@ -2420,7 +2420,7 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
   // list container is rebuilt so the input keeps focus.
   const searchInput = document.createElement('input')
   searchInput.type = 'text'
-  searchInput.placeholder = '🔍 Filter claims & evidence…'
+  searchInput.placeholder = t('evidence', 'evidence.filterPlaceholder')
   searchInput.value = evidenceQuery
   searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none;margin:2px 0 6px'
   searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
@@ -2444,9 +2444,9 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       (e.analysis_method ?? '').toLowerCase().includes(q) ||
       (Array.isArray(e.run_ids) ? e.run_ids.join(' ') : '').toLowerCase().includes(q),
     )
-    listEl.appendChild(el('div', 'section-label', `Claims (${cq.length})`))
+    listEl.appendChild(el('div', 'section-label', t('evidence', 'evidence.claims', { count: String(cq.length) })))
     if (cq.length === 0) {
-      listEl.appendChild(el('div', 'empty', q === '' ? 'No claims yet.' : `No claims match "${evidenceQuery.trim()}".`))
+      listEl.appendChild(el('div', 'empty', q === '' ? t('evidence', 'evidence.claims.empty') : t('evidence', 'evidence.claims.noMatch', { query: evidenceQuery.trim() })))
     }
     if (cq.length > 8) {
       const notice = el('div', 'muted', `Showing the newest 8 of ${cq.length} claims — use 🌐 global search for the rest.`)
@@ -2462,7 +2462,7 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       top.appendChild(el('span', 'grow'))
       // dsh-web drawer: one-click claim details (double-click too).
       const claimBtn = el('button', 'hbtn', '⧉')
-      claimBtn.title = 'claim details'
+      claimBtn.title = t('evidence', 'evidence.claimDetails')
       claimBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
       claimBtn.onclick = (event) => {
         event.stopPropagation()
@@ -2497,9 +2497,9 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       card.appendChild(id)
       listEl.appendChild(card)
     }
-    listEl.appendChild(el('div', 'section-label', `Evidence (${eq.length})`))
+    listEl.appendChild(el('div', 'section-label', t('evidence', 'evidence.evidence', { count: String(eq.length) })))
     if (eq.length === 0) {
-      listEl.appendChild(el('div', 'empty', q === '' ? 'No verified evidence yet — only the Analysis Worker can create it.' : `No evidence matches "${evidenceQuery.trim()}".`))
+      listEl.appendChild(el('div', 'empty', q === '' ? t('evidence', 'evidence.evidence.empty') : t('evidence', 'evidence.evidence.noMatch', { query: evidenceQuery.trim() })))
     }
     if (eq.length > 8) {
       const notice = el('div', 'muted', `Showing the newest 8 of ${eq.length} evidence items — use 🌐 global search for the rest.`)
@@ -2523,7 +2523,7 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       row.appendChild(pill('verified'))
       // dsh-web drawer: one-click evidence details (double-click still works).
       const detailsBtn = el('button', 'hbtn', '⧉')
-      detailsBtn.title = 'evidence details'
+      detailsBtn.title = t('evidence', 'evidence.evidenceDetails')
       detailsBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
       detailsBtn.onclick = (event) => {
         event.stopPropagation()
@@ -2621,7 +2621,7 @@ function openClaimDetailModal(root: ShadowRoot, claim: ClaimRow): void {
   stmt.style.cssText = 'font-size:12px;color:var(--text);line-height:1.55;margin-bottom:8px'
   modal.appendChild(stmt)
 
-  modal.appendChild(el('div', 'section-label', 'Claim'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.claim.title')))
   row('Claim', String(claim.claim_id ?? '—'))
   row('Status', String(claim.status ?? '—'))
   row('Confidence', String(claim.confidence ?? '—'))
@@ -2632,18 +2632,18 @@ function openClaimDetailModal(root: ShadowRoot, claim: ClaimRow): void {
   }
   const ev = claim.evidence
   if (ev !== undefined && (ev.evidence_ids ?? []).length > 0) {
-    modal.appendChild(el('div', 'section-label', 'Supporting evidence'))
+    modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.claim.supporting')))
     for (const id of ev.evidence_ids ?? []) row('Evidence', fmtId(id, 40))
     if (typeof ev.analysis_artifact === 'string' && ev.analysis_artifact !== '') row('Analysis artifact', fmtId(ev.analysis_artifact, 40))
   }
   const limitations = claim.limitations ?? []
   if (limitations.length > 0) {
-    modal.appendChild(el('div', 'section-label', 'Limitations'))
+    modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.claim.limitations')))
     for (const l of limitations) modal.appendChild(el('div', 'muted', `· ${l}`))
   }
   const history = claim.history ?? []
   if (history.length > 0) {
-    modal.appendChild(el('div', 'section-label', 'Verification history'))
+    modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.claim.history')))
     for (const h of history) {
       const hrow = el('div', 'row')
       hrow.style.cssText = 'padding:2px 0;align-items:flex-start'
@@ -2684,13 +2684,13 @@ function openEvidenceDetailModal(root: ShadowRoot, item: EvidenceRow): void {
     modal.appendChild(r)
   }
   const r = item.result
-  modal.appendChild(el('div', 'section-label', 'Result'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.detail.result')))
   row('Metric', r?.primary_metric ?? '—')
   row('Value', String(r?.value ?? '—'))
   row('Effect', r?.effect_size !== undefined ? `Δ${r.effect_size >= 0 ? '+' : ''}${r.effect_size}` : '—')
   row('CI', `[${r?.ci_low ?? '—'}, ${r?.ci_high ?? '—'}]`)
   row('n seeds', String(r?.n_seeds ?? '—'))
-  modal.appendChild(el('div', 'section-label', 'Provenance'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.detail.provenance')))
   row('Evidence', String(item.evidence_id ?? '—'))
   row('Method', item.analysis_method ?? '—')
   row('Runs', Array.isArray(item.run_ids) ? item.run_ids.join(', ') : '—')
@@ -2728,21 +2728,21 @@ function openBudgetDetailModal(root: ShadowRoot, p: Projection): void {
   const b = p.budget
   const exec = p.project?.execution as Record<string, unknown> | undefined
   const integ = p.project?.integrity as Record<string, unknown> | undefined
-  modal.appendChild(el('div', 'section-label', 'Usage'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.usage')))
   row('Model cost', `$${b?.model_cost_usd ?? 0}${c?.max_model_cost_usd !== undefined ? ` / $${c.max_model_cost_usd}` : ''}`)
   row('GPU hours', `${b?.gpu_hours ?? 0}${c?.max_gpu_hours !== undefined ? ` / ${c.max_gpu_hours}` : ''}`)
   row('API requests', String(b?.api_requests ?? 0))
-  modal.appendChild(el('div', 'section-label', 'Constraints'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.constraints')))
   row('Datasets', String(c?.datasets ?? '—'))
   row('Model upload', String(c?.external_model_upload ?? '—'))
   row('Parallel jobs', String(c?.max_parallel_jobs ?? '—'))
-  modal.appendChild(el('div', 'section-label', 'Execution'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.execution')))
   if (exec !== undefined) {
     row('Runner', String(exec.runner_profile ?? '—'))
     row('Network', String(exec.network_policy ?? '—'))
     row('Artifacts', String(exec.artifact_store ?? '—'))
   }
-  modal.appendChild(el('div', 'section-label', 'Integrity'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.integrity')))
   if (integ !== undefined) {
     row('Baseline repro', String(integ.require_baseline_reproduction ?? '—'))
     row('Contract', String(integ.require_experiment_contract ?? '—'))
@@ -2764,8 +2764,8 @@ function renderBudget(body: HTMLElement, p: Projection): void {
   const gpuMax = c?.max_gpu_hours
   const labelRow = el('div', 'row')
   labelRow.style.cssText = 'justify-content:space-between;align-items:center'
-  labelRow.appendChild(el('div', 'section-label', 'Budget'))
-  const detailBtn = el('button', 'hbtn', 'ℹ details')
+  labelRow.appendChild(el('div', 'section-label', t('budget', 'budget.section')))
+  const detailBtn = el('button', 'hbtn', t('budget', 'budget.details'))
   detailBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
   detailBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
@@ -2782,7 +2782,7 @@ function renderBudget(body: HTMLElement, p: Projection): void {
 
   const counts = p.counts
   if (counts !== undefined) {
-    body.appendChild(el('div', 'section-label', 'Project contents'))
+    body.appendChild(el('div', 'section-label', t('budget', 'budget.projectContents')))
     const chips = el('div', 'count-chips')
     const entries: Array<[string, number]> = [
       ['📚 snapshots', counts.corpus_snapshots ?? 0],
@@ -2866,9 +2866,9 @@ function openNewProjectModal(root: ShadowRoot | null | undefined): void {
 
   const actions = el('div', 'row')
   actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
-  const cancel = el('button', 'hbtn', 'Cancel')
+  const cancel = el('button', 'hbtn', t('budget', 'budget.modal.cancel'))
   cancel.onclick = () => overlay.remove()
-  const create = el('button', 'btn approve', 'Create Project')
+  const create = el('button', 'btn approve', t('budget', 'budget.modal.create'))
   create.style.cssText = 'padding:7px 18px'
   create.onclick = async () => {
     const name = nameInput.value.trim()
@@ -2962,7 +2962,7 @@ function openRenameModal(root: ShadowRoot, projectId: string, currentName: strin
 
   const actions = el('div', 'row')
   actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
-  const cancel = el('button', 'hbtn', 'Cancel')
+  const cancel = el('button', 'hbtn', t('budget', 'budget.modal.cancel'))
   cancel.onclick = () => overlay.remove()
   const save = el('button', 'btn approve', 'Rename')
   save.style.cssText = 'padding:7px 18px'
@@ -3059,7 +3059,7 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   row('Workspace', proj.workspace ?? '—')
 
   const c = proj.constraints
-  modal.appendChild(el('div', 'section-label', 'Constraints'))
+  modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.constraints')))
   row('Budget', `$${c?.max_model_cost_usd ?? '∞'} max`)
   row('GPU hours', `${c?.max_gpu_hours ?? '∞'} max`)
   row('Parallel jobs', String(c?.max_parallel_jobs ?? '—'))
@@ -5549,7 +5549,7 @@ function chatSessionRename(id: string): void {
   modal.appendChild(err)
   const actions = el('div', 'row')
   actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
-  const cancel = el('button', 'hbtn', 'Cancel')
+  const cancel = el('button', 'hbtn', t('budget', 'budget.modal.cancel'))
   cancel.onclick = () => overlay.remove()
   const save = el('button', 'btn approve', 'Save')
   save.style.cssText = 'padding:7px 18px'
