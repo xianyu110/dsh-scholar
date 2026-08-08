@@ -96,7 +96,7 @@ interface ClaimRow { claim_id?: string; statement?: string; status?: string; con
 interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number } }
 interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number }
 interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
-interface ProjectRow { project_id?: string; name?: string; status?: string }
+interface ProjectRow { project_id?: string; name?: string; status?: string; updated_at?: string }
 
 /* ─────────────────────────── design system ─────────────────────────── */
 
@@ -537,6 +537,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     styleTabs()
     // Project list: drives the sidebar (fullscreen) or the picker (float).
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
+    // dsh-web session ordering: most recently active first (by updated_at).
+    projects.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
     if (fullscreen && sidebar !== null) {
       renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() })
     } else {
@@ -1930,6 +1932,9 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const roleRow = el('div', 'row')
     roleRow.appendChild(el('span', 'muted', 'Role'))
     roleRow.appendChild(pill(detailMsg.role))
+    const idxRow = el('div', 'row')
+    idxRow.appendChild(el('span', 'muted', 'Message'))
+    idxRow.appendChild(el('span', 'mono', `#${chatDetailIndex + 1} / ${chatMessages.length}`))
     const timeRow = el('div', 'row')
     timeRow.appendChild(el('span', 'muted', 'Time'))
     timeRow.appendChild(el('span', 'mono', detailMsg.time))
@@ -1939,8 +1944,25 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const charsRow = el('div', 'row')
     charsRow.appendChild(el('span', 'muted', 'Chars'))
     charsRow.appendChild(el('span', 'mono', String(detailMsg.text.length)))
-    meta.append(roleRow, timeRow, linesRow, charsRow)
+    meta.append(roleRow, idxRow, timeRow, linesRow, charsRow)
     panel.appendChild(meta)
+    // dsh-web "copy command": quick re-run for user messages.
+    if (detailMsg.role === 'user') {
+      const rerun = el('button', 'hbtn', '↻ re-run command')
+      rerun.style.cssText = 'align-self:flex-start'
+      rerun.onclick = () => {
+        chatDraft = detailMsg.text
+        activeTab = 'chat'
+        rerender()
+        setTimeout(() => {
+          const hostEl = document.querySelector('#dsh-scholar-ui')
+          const rootEl = hostEl !== null ? hostEl.shadowRoot : null
+          const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+          ta?.focus()
+        }, 120)
+      }
+      panel.appendChild(rerun)
+    }
     const rawLabel = el('div', 'section-label', 'Raw text')
     panel.appendChild(rawLabel)
     const pre = el('pre', '')
