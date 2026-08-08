@@ -1397,16 +1397,24 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
 /** Runs multi-select (dsh-web bulk cancel). */
 let runsSelecting = false
 let runsSelected = new Set<string>()
+/** Runs status filter (dsh-web filter chips). */
+let runsFilter = 'all'
+const RUNS_FILTERS: Array<[string, string]> = [
+  ['all', 'All'], ['queued', 'Queued'], ['running', 'Running'],
+  ['succeeded', 'Succeeded'], ['failed', 'Failed'], ['cancelled', 'Cancelled'],
+]
 
 function renderRuns(body: HTMLElement, p: Projection): void {
-  const jobs = (p.jobs ?? []).slice(-12).reverse()
+  const allJobs = p.jobs ?? []
+  const jobs = (runsFilter === 'all' ? allJobs : allJobs.filter(j => j.status === runsFilter)).slice(-12).reverse()
   const cancellable = new Set(['queued', 'running', 'retryable'])
   const labelRow = el('div', 'row')
   labelRow.style.cssText = 'justify-content:space-between;align-items:center'
-  labelRow.appendChild(el('div', 'section-label', `Runs (${(p.jobs ?? []).length})`))
+  labelRow.appendChild(el('div', 'section-label', `Runs (${allJobs.length})`))
   if (jobs.length > 0) {
     const selBtn = el('button', 'hbtn', runsSelecting ? '☑ Selecting…' : '☑ Select')
     selBtn.title = runsSelecting ? 'exit multi-select' : 'multi-select runs (bulk cancel)'
+    selBtn.setAttribute('aria-pressed', runsSelecting ? 'true' : 'false')
     selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
     selBtn.onclick = () => {
       runsSelecting = !runsSelecting
@@ -1416,12 +1424,25 @@ function renderRuns(body: HTMLElement, p: Projection): void {
     labelRow.appendChild(selBtn)
   }
   body.appendChild(labelRow)
+  // dsh-web filter chips: one-click status filter with live counts.
+  const chipsRow = el('div')
+  chipsRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 6px;flex-wrap:wrap'
+  for (const [key, label] of RUNS_FILTERS) {
+    const count = key === 'all' ? allJobs.length : allJobs.filter(j => j.status === key).length
+    const chip = el('button', 'hbtn', `${label} (${count})`)
+    chip.style.cssText = 'padding:2px 8px;font-size:10px'
+    if (runsFilter === key) chip.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
+    chip.setAttribute('aria-pressed', runsFilter === key ? 'true' : 'false')
+    chip.onclick = () => { runsFilter = key; rerender() }
+    chipsRow.appendChild(chip)
+  }
+  body.appendChild(chipsRow)
   if (jobs.length === 0) {
-    body.appendChild(el('div', 'empty', 'No experiment runs yet.'))
+    body.appendChild(el('div', 'empty', allJobs.length === 0 ? 'No experiment runs yet.' : `No runs with status "${runsFilter}".`))
     return
   }
-  if ((p.jobs ?? []).length > 12) {
-    const notice = el('div', 'muted', `Showing the newest 12 of ${(p.jobs ?? []).length} runs.`)
+  if (allJobs.length > 12) {
+    const notice = el('div', 'muted', `Showing the newest 12 of ${allJobs.length} runs.`)
     notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
     body.appendChild(notice)
   }
@@ -2695,6 +2716,10 @@ const CHAT_COMMANDS: Array<[string, string]> = [
  * description. Clicking one switches to the Chat tab, fills the composer
  * and runs it.
  */
+/** Command palette filter (dsh-web search-as-you-type), persisted across
+ * reopenings of the palette. */
+let paletteQuery = ''
+
 function openCommandsModal(root: ShadowRoot): void {
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
@@ -2712,42 +2737,67 @@ function openCommandsModal(root: ShadowRoot): void {
   hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
   modal.appendChild(hint)
 
+  // dsh-web command palette: filter-as-you-type over name/line/description.
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.placeholder = '🔍 Filter commands…'
+  input.value = paletteQuery
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none;margin-bottom:10px'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  modal.appendChild(input)
+
   const list = el('div')
   list.style.cssText = 'max-height:46vh;overflow-y:auto'
-  for (const [name, line, desc] of CHAT_COMMANDS) {
-    const row = el('button')
-    row.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer'
-    row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
-    row.onmouseleave = () => { row.style.background = 'none' }
-    const nameEl = el('span', 'artifact-kind', name.toUpperCase())
-    const bodyEl = el('span', 'grow')
-    bodyEl.style.cssText = 'min-width:0'
-    const lineEl = el('div', 'mono', line)
-    lineEl.style.cssText = 'font-size:10.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-    const descEl = el('div', 'muted', desc)
-    descEl.style.cssText = 'font-size:10.5px'
-    bodyEl.append(lineEl, descEl)
-    const favBtn = el('span', 'artifact-kind', favCommands().has(name) ? '★' : '☆')
-    favBtn.title = favCommands().has(name) ? 'unfavourite command' : 'favourite command (quick run)'
-    favBtn.style.cssText += ';cursor:pointer;color:' + (favCommands().has(name) ? 'var(--tone-amber)' : 'var(--text-3)')
-    favBtn.onclick = (event) => {
-      event.stopPropagation()
-      favCommandToggle(name)
-      overlay.remove()
-      openCommandsModal(root)
-    }
-    row.append(nameEl, bodyEl, favBtn)
-    row.onclick = () => {
-      overlay.remove()
-      chatDraft = line
-      activeTab = 'chat'
-      rerender()
-    }
-    list.appendChild(row)
-  }
   modal.appendChild(list)
+
+  const renderList = (): void => {
+    list.replaceChildren()
+    const q = paletteQuery.trim().toLowerCase()
+    const matches = q === '' ? CHAT_COMMANDS : CHAT_COMMANDS.filter(([name, line, desc]) =>
+      name.toLowerCase().includes(q) || line.toLowerCase().includes(q) || desc.toLowerCase().includes(q),
+    )
+    if (matches.length === 0) {
+      list.appendChild(el('div', 'empty', `No commands match "${paletteQuery.trim()}".`))
+      return
+    }
+    for (const [name, line, desc] of matches) {
+      const row = el('button')
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer'
+      row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+      row.onmouseleave = () => { row.style.background = 'none' }
+      const nameEl = el('span', 'artifact-kind', name.toUpperCase())
+      const bodyEl = el('span', 'grow')
+      bodyEl.style.cssText = 'min-width:0'
+      const lineEl = el('div', 'mono', line)
+      lineEl.style.cssText = 'font-size:10.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      const descEl = el('div', 'muted', desc)
+      descEl.style.cssText = 'font-size:10.5px'
+      bodyEl.append(lineEl, descEl)
+      const favBtn = el('span', 'artifact-kind', favCommands().has(name) ? '★' : '☆')
+      favBtn.title = favCommands().has(name) ? 'unfavourite command' : 'favourite command (quick run)'
+      favBtn.style.cssText += ';cursor:pointer;color:' + (favCommands().has(name) ? 'var(--tone-amber)' : 'var(--text-3)')
+      favBtn.onclick = (event) => {
+        event.stopPropagation()
+        favCommandToggle(name)
+        overlay.remove()
+        openCommandsModal(root)
+      }
+      row.append(nameEl, bodyEl, favBtn)
+      row.onclick = () => {
+        overlay.remove()
+        chatDraft = line
+        activeTab = 'chat'
+        rerender()
+      }
+      list.appendChild(row)
+    }
+  }
+  input.oninput = () => { paletteQuery = input.value; renderList() }
+  renderList()
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  input.focus()
   trapFocus(overlay, null)
 }
 
@@ -3431,10 +3481,9 @@ function openGlobalSearchModal(root: ShadowRoot): void {
     }
   }
   input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); void runSearch() } }
-  input.focus()
-
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  input.focus()
 }
 
 /* ─────────────────────────── compare modal ─────────────────────────── */
@@ -4768,7 +4817,23 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       rerender()
     }
     stream.appendChild(bubble)
-    // dsh-web message actions: copy the raw text + quote-reply (hover).
+    // dsh-web message actions: user messages get a copy button too (the
+    // assistant/error actions below add copy + quote-reply).
+    if (msg.role === 'user') {
+      const actionsRow = el('div')
+      actionsRow.style.cssText = 'align-self:flex-end;display:flex;gap:6px;margin-top:2px'
+      const copy = el('button', 'hbtn', '⧉ copy')
+      copy.style.cssText = 'padding:0 6px;font-size:9px'
+      copy.onclick = () => {
+        void navigator.clipboard.writeText(msg.text).then(
+          () => { copy.textContent = '✓ copied' },
+          () => { copy.textContent = 'copy failed' },
+        )
+        setTimeout(() => { copy.textContent = '⧉ copy' }, 1600)
+      }
+      actionsRow.appendChild(copy)
+      stream.appendChild(actionsRow)
+    }
     if (msg.role === 'assistant' || msg.role === 'error') {
       const actionsRow = el('div')
       actionsRow.style.cssText = 'align-self:flex-start;display:flex;gap:6px;margin-top:2px'
