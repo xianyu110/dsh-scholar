@@ -6284,7 +6284,7 @@ async function msLoadTree(): Promise<void> {
 async function msOpenFile(path: string): Promise<void> {
   if (msDocId === null) return
   if (msDirty && msOpenPath !== null && msOpenPath !== path) {
-    const keep = window.confirm(`Discard unsaved changes to ${msOpenPath}?`)
+    const keep = window.confirm(t('manuscript', 'manuscript.editor.discard', { path: msOpenPath }))
     if (!keep) return
   }
   const file = await api<{ path: string; version: number; content: string }>(`/v1/documents/${encodeURIComponent(msDocId)}/file?path=${encodeURIComponent(path)}`)
@@ -6303,7 +6303,7 @@ async function msSaveFile(): Promise<void> {
   })
   if (result === null) {
     // 409 conflict (or transport error): surface the conflict banner.
-    msConflict = `Save conflict on ${msOpenPath} — the file changed on the server. Reload to see the current version, then merge.`
+    msConflict = t('manuscript', 'manuscript.conflict.text', { path: msOpenPath })
     rerender()
     return
   }
@@ -6380,7 +6380,7 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
   host?.setAttribute('data-project', projectId)
   const doc = await msLoadDocument(projectId)
   if (doc.document_id === '') {
-    body.appendChild(el('div', 'error-banner', 'Manuscript workspace unavailable.'))
+    body.appendChild(el('div', 'error-banner', t('manuscript', 'manuscript.workspaceUnavailable')))
     return
   }
   const firstLoad = msDocId !== doc.document_id
@@ -6395,19 +6395,19 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
   // Header: document, revision, save state, actions.
   const header = el('div', 'row')
   header.style.cssText = 'justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px'
-  const title = el('span', 'pname', `📄 ${docId.slice(0, 16)} · rev ${msRevision}${msDirty ? ' · unsaved' : ''}`)
+  const title = el('span', 'pname', t('manuscript', 'manuscript.header.doc', { id: docId.slice(0, 16), rev: String(msRevision) }) + (msDirty ? t('manuscript', 'manuscript.header.unsaved') : ''))
   title.style.cssText = 'font-size:12px'
   header.appendChild(title)
   const actions = el('div', 'row')
   actions.style.cssText = 'gap:6px'
-  const saveBtn = el('button', 'hbtn', '💾 Save')
+  const saveBtn = el('button', 'hbtn', t('manuscript', 'manuscript.action.save'))
   saveBtn.disabled = !msDirty
   saveBtn.onclick = () => { void msSaveFile() }
-  const compileBtn = el('button', 'btn approve', '▶ Compile')
+  const compileBtn = el('button', 'btn approve', t('manuscript', 'manuscript.action.compile'))
   compileBtn.style.cssText = 'padding:4px 14px'
   compileBtn.onclick = () => { void msCompile() }
   const refreshBtn = el('button', 'hbtn', '⟳')
-  refreshBtn.title = 'refresh workspace'
+  refreshBtn.title = t('manuscript', 'manuscript.action.refresh')
   refreshBtn.onclick = () => { void msLoadTree().then(() => rerender()) }
   actions.append(saveBtn, compileBtn, refreshBtn)
   header.appendChild(actions)
@@ -6417,7 +6417,7 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
     const banner = el('div', 'card border-red')
     banner.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:8px'
     banner.appendChild(el('span', 'grow', `⚠ ${msConflict}`))
-    const reloadBtn = el('button', 'hbtn', '⟳ Reload')
+    const reloadBtn = el('button', 'hbtn', t('manuscript', 'manuscript.action.reload'))
     reloadBtn.onclick = () => { void msReloadFile() }
     banner.appendChild(reloadBtn)
     body.appendChild(banner)
@@ -6429,7 +6429,7 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
   // File tree (220px).
   const treeCol = el('div')
   treeCol.style.cssText = 'width:220px;flex-shrink:0;border:1px solid var(--border);border-radius:10px;padding:8px;overflow-y:auto;max-height:640px'
-  treeCol.appendChild(el('div', 'section-label', 'Files'))
+  treeCol.appendChild(el('div', 'section-label', t('manuscript', 'manuscript.files')))
   for (const f of msFiles) {
     const row = el('button')
     row.style.cssText = 'display:flex;align-items:center;gap:6px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:4px 6px;border-radius:6px;cursor:pointer;font:11px/1.4 ui-monospace,Menlo,monospace'
@@ -6442,10 +6442,10 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
     row.onclick = () => { void msOpenFile(f.path).then(() => rerender()) }
     treeCol.appendChild(row)
   }
-  const newFileBtn = el('button', 'hbtn', '＋ new')
+  const newFileBtn = el('button', 'hbtn', t('manuscript', 'manuscript.action.newFile'))
   newFileBtn.style.cssText = 'margin-top:8px;width:100%'
   newFileBtn.onclick = () => {
-    const name = window.prompt('New file path (e.g. sections/intro.tex):', 'section.tex')
+    const name = window.prompt(t('manuscript', 'manuscript.newFilePrompt'), 'section.tex')
     if (name === null || name.trim() === '') return
     void api(`/v1/documents/${encodeURIComponent(docId)}/file`, {
       method: 'PUT',
@@ -6460,9 +6460,9 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
   editorCol.style.cssText = 'flex:1;display:flex;flex-direction:column;min-width:0'
   const editorHead = el('div', 'row')
   editorHead.style.cssText = 'justify-content:space-between;align-items:center;margin-bottom:4px'
-  editorHead.appendChild(el('span', 'muted', msOpenPath !== null ? `${msOpenPath} · v${msSavedVersion}` : 'no file open'))
+  editorHead.appendChild(el('span', 'muted', msOpenPath !== null ? `${msOpenPath} · v${msSavedVersion}` : t('manuscript', 'manuscript.editor.noFile')))
   const closeEdit = el('button', 'hbtn ghost', '×')
-  closeEdit.title = 'close editor'
+  closeEdit.title = t('manuscript', 'manuscript.editor.close')
   closeEdit.onclick = () => { msOpenPath = null; msContent = ''; rerender() }
   editorHead.appendChild(closeEdit)
   editorCol.appendChild(editorHead)
@@ -6474,7 +6474,7 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
     ta.oninput = () => {
       msContent = ta.value
       msDirty = ta.value !== (msFiles.find(f => f.path === msOpenPath)?.content ?? '')
-      const save = [...(editorCol.querySelectorAll('button') ?? [])].find(b => b.textContent === '💾 Save')
+      const save = [...(editorCol.querySelectorAll('button') ?? [])].find(b => b.textContent === t('manuscript', 'manuscript.action.save'))
       if (save !== undefined) save.disabled = !msDirty
     }
     ta.onkeydown = (event) => {
@@ -6485,16 +6485,16 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
     }
     editorCol.appendChild(ta)
   } else {
-    editorCol.appendChild(el('div', 'empty', 'Select a file from the tree to edit.'))
+    editorCol.appendChild(el('div', 'empty', t('manuscript', 'manuscript.editor.empty')))
   }
   body.appendChild(editorCol)
 
   // Diagnostics + PDF preview.
   const rightCol = el('div')
   rightCol.style.cssText = 'width:360px;flex-shrink:0;border:1px solid var(--border);border-radius:10px;padding:8px;overflow-y:auto;max-height:640px'
-  rightCol.appendChild(el('div', 'section-label', 'Builds'))
+  rightCol.appendChild(el('div', 'section-label', t('manuscript', 'manuscript.builds')))
   if (msBuilds.length === 0) {
-    rightCol.appendChild(el('div', 'muted', 'No builds yet — Compile freezes the workspace and submits a latex-compile job.'))
+    rightCol.appendChild(el('div', 'muted', t('manuscript', 'manuscript.builds.none')))
   }
   for (const b of msBuilds.slice(0, 6)) {
     const card = el('div', 'card')
@@ -6514,18 +6514,18 @@ async function renderManuscript(body: HTMLElement, _p: Projection, projectId: st
         row.textContent = `${d.level}: ${d.message}`
         card.appendChild(row)
       }
-      if (diagnostics.length > 8) card.appendChild(el('div', 'muted', `… and ${diagnostics.length - 8} more`))
+      if (diagnostics.length > 8) card.appendChild(el('div', 'muted', t('manuscript', 'manuscript.builds.more', { count: String(diagnostics.length - 8) })))
     }
     rightCol.appendChild(card)
   }
   if (msPdfUrl !== null) {
-    rightCol.appendChild(el('div', 'section-label', 'PDF preview'))
+    rightCol.appendChild(el('div', 'section-label', t('manuscript', 'manuscript.pdf.title')))
     const embed = document.createElement('embed')
     embed.src = msPdfUrl
     embed.type = 'application/pdf'
     embed.style.cssText = 'width:100%;height:420px;border:1px solid var(--border);border-radius:8px'
     rightCol.appendChild(embed)
-    const dl = el('button', 'hbtn', '⬇ Download PDF')
+    const dl = el('button', 'hbtn', t('manuscript', 'manuscript.pdf.download'))
     dl.style.cssText = 'margin-top:6px'
     dl.onclick = () => {
       const a = el('a', 'dl', 'download')
