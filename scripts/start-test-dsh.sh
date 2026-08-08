@@ -21,6 +21,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 TEST_HOME="${DSH_SCHOLAR_TEST_HOME:-$HOME/.dsh-scholar-test}"
 WEB_PORT="${DSH_SCHOLAR_TEST_PORT:-3081}"
 KERNEL_PORT="${DSH_SCHOLAR_TEST_KERNEL_PORT:-17412}"
+EXTRA_PATCH="${DSH_SCHOLAR_EXTRA_PATCH:-}"
 PROFILE=web
 BIN=/home/dev/Desktop/test-lzszq/apps/cli/lib/bin.js
 DEV_CLI="$REPO/scripts/dsh-dev"
@@ -64,15 +65,20 @@ EOF
 # 3. Install the plugin into the test profile (idempotent via pnpm).
 if ! grep -q '"@dsh-scholar/research-plugin"' "$TEST_HOME/profiles/$PROFILE/package.json" 2>/dev/null; then
   echo "installing @dsh-scholar/research-plugin into $PROFILE ..."
-  DSH_HOME="$TEST_HOME" "$DEV_CLI" plugin --profile "$PROFILE" add "$REPO" || true
+  DSH_HOME="$TEST_HOME" "$DEV_CLI" plugin --profile "$PROFILE" add "$REPO"
 fi
+grep -q '"@dsh-scholar/research-plugin"' "$TEST_HOME/profiles/$PROFILE/package.json"
 
 # 4. Boot the isolated instance. The SOURCE CLI (tsx) is used instead of the
 #    prebuilt lib/bin.js: the built artifact predates profile patch-layer
 #    id-targeted config overrides, so kernel.port overrides silently fail
 #    with it (the plugin then spawns on the default 7412).
 echo "starting isolated test DSH: http://127.0.0.1:$WEB_PORT (DSH_HOME=$TEST_HOME, kernel :$KERNEL_PORT)"
-DSH_HOME="$TEST_HOME" setsid nohup "$DEV_CLI" web --host 127.0.0.1 --port "$WEB_PORT" \
+EXTRA_ARGS=()
+if [ -n "$EXTRA_PATCH" ]; then
+  EXTRA_ARGS=(--patch "$EXTRA_PATCH")
+fi
+DSH_HOME="$TEST_HOME" setsid nohup "$DEV_CLI" web "${EXTRA_ARGS[@]}" --host 127.0.0.1 --port "$WEB_PORT" \
   >> "$TEST_HOME/test-web.log" 2>&1 < /dev/null &
 echo "pid $! — log: $TEST_HOME/test-web.log"
 
@@ -82,22 +88,17 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-# 6. Wait for BOTH kernels (main plugin sidecar + research-ui sidecar).
-#    Both may open the same SQLite DB; a cold start can race on the
-#    migration write-lock, leaving the main kernel dead while the web
-#    process itself looks healthy — /research then hangs with no response.
-#    Detect that here instead of letting it surface as "no reaction".
+# 6. Wait for the root research-plugin kernel. The separate research-ui bundle
+#    is not installed by this script and must never be inferred from :7412.
 for _ in $(seq 1 30); do
   K1=$(curl -sf -m 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" > /dev/null 2>&1 && echo ok || echo down)
-  K2=$(curl -sf -m 1 "http://127.0.0.1:7412/v1/health" > /dev/null 2>&1 && echo ok || echo down)
-  [ "$K1" = ok ] && [ "$K2" = ok ] && break
+  [ "$K1" = ok ] && break
   sleep 1
 done
-if [ "$K1" != ok ] || [ "$K2" != ok ]; then
+if [ "$K1" != ok ]; then
   echo ""
   echo "WARNING: kernel(s) not healthy after startup:"
-  echo "  main plugin kernel  :$KERNEL_PORT -> $K1"
-  echo "  research-ui kernel  :7412         -> $K2"
+  echo "  research-plugin kernel :$KERNEL_PORT -> $K1"
   echo "  web log tail:"
   tail -20 "$TEST_HOME/test-web.log" 2>/dev/null || true
   echo ""

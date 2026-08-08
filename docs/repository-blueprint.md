@@ -1,0 +1,205 @@
+# 仓库蓝图与生成顺序
+
+> 规范性文档。生成器应按这里创建文件边界，再按其他规范填充实现。
+
+## 1. 技术基线
+
+- Node.js 24、TypeScript 5.9、pnpm 11、ESM；
+- workspace：packages/*、workers/*、apps/*；
+- Zod 3、Vitest、node:sqlite、原生 fetch/http；
+- 浏览器 UI 可以使用 React + DSH slots，或保持轻量 DOM，但必须满足同一接口、i18n 和测试；
+- browser bundle 使用 tsdown 输出 DSH ClientModuleLoader classic handoff；
+- 所有包 strict TypeScript，不使用 skipLibCheck 掩盖本项目错误。
+
+## 2. 目标文件树
+
+~~~text
+dsh-scholar/
+  apps/
+    research-bff/
+    research-standalone/
+  packages/
+    research-schemas/
+    research-kernel/
+    research-client/
+    research-authz/
+    research-cas/
+    scholar-connectors/
+    dsh-research-plugin/
+    dsh-research-ui/
+    evidence-engine/
+    manuscript-builder/
+    release-bundle/
+  workers/
+    runner-gateway/
+    analysis-worker/
+    research-orchestrator/
+    clean-room-verifier/
+  skills/
+    research-core/
+    domain-machine-learning/
+    domain-data-science/
+    venue-templates/
+  plugins/research-core/.dsh-plugin/
+  configs/
+    research-web.cordis.yml
+    research-headless.cordis.yml
+    research-dev-selfmod.cordis.yml
+    runner-profiles/
+  migrations/
+  tests/
+    unit/
+    contract/
+    integration/
+    security/
+    recovery/
+    ui/
+    golden-path-v2/
+  evals/
+  scripts/
+  docs/
+  package.json
+  pnpm-workspace.yaml
+  tsconfig.base.json
+  vitest.config.ts
+~~~
+
+现有仓库可以逐步迁移，不要求一次物理移动所有包；模块接口和依赖方向必须先收敛。
+
+## 3. 包责任与依赖方向
+
+| 包 | 负责 | 允许依赖 |
+|---|---|---|
+| research-schemas | Zod、类型、状态机常量、错误 code | zod |
+| research-cas | Blob put/read/has/GC | Node fs/crypto |
+| research-kernel | 业务事务与 projection | schemas、cas |
+| research-client | HTTP/Binary/SSE adapter | schemas |
+| research-authz | Principal、membership、policy | schemas |
+| scholar-connectors | 外部论文 adapter | schemas |
+| evidence-engine | Metric/RunSet/Analysis/Claim verify | schemas |
+| manuscript-builder | Ledger→TeX workspace、review、diagnostics parser | schemas |
+| release-bundle | 自包含 bundle layout/verify | schemas |
+| dsh-research-plugin | DSH 工具/命令/Skill/BFF mount | client、connectors、authz |
+| dsh-research-ui | 客户端、i18n、Terminal、TeX UI | browser-safe schemas/client types |
+| runner-gateway | snapshot materialize、Docker、terminal、sign | client、schemas |
+| analysis-worker | evidence-engine CLI/internal adapter | evidence-engine、client |
+| orchestrator | durable actions/state planning | client、connectors |
+| clean-room | bundle verify and rerun | client、release-bundle |
+| apps/research-bff | 组装 Kernel client、AuthZ、HTTP routes、UI host | plugin host adapters、client、authz、UI static assets |
+| apps/research-standalone | loopback server、local Principal、sidecar、共享 UI | research-bff、UI、kernel executable |
+
+Kernel 不依赖 DSH、UI、Runner 或 Connector。UI 不导入 Node-only 模块。Worker 不导入 Kernel Store。dsh-research-plugin 不导入 browser implementation，只声明/托管 dsh-research-ui 的构建产物；两个 app 负责运行时组装，不拥有业务逻辑。
+
+## 4. 关键实现文件
+
+### research-schemas
+
+- project.ts：Brief、Project、Status、Transition；
+- governance.ts：Gate、Decision、Principal；
+- corpus.ts、idea.ts、experiment.ts、evidence.ts；
+- artifact.ts、job.ts、terminal.ts、tex.ts、events.ts；
+- ids.ts、errors.ts、index.ts。
+
+### research-kernel
+
+- kernel.ts：深模块外部接口；
+- store/schema.ts、store/migrations.ts、store/queries/*；
+- transactions/*：Gate、complete、budget、TeX save/build；
+- server/router.ts、server/json.ts、server/artifact.ts、server/sse.ts；
+- projections/*；
+- bin/kernel.ts。
+
+### dsh-research-ui
+
+- client/app.tsx 或 app.ts：共享应用入口；
+- client/pages/{chat,overview,approvals,runs,terminal,artifacts,evidence,manuscript,budget}；
+- client/components/{TerminalBlock,TexEditor,PdfPreview,Diagnostics,Modal,Toast}；
+- client/i18n/{service,format,locales/*}；
+- client/state/{api,preferences,streams}；
+- host/bff.ts、host/sidecar.ts；
+- standalone/server.ts、standalone/bootstrap.ts；
+- client.tsdown.config.ts。
+
+不得再次形成单个 7,000+ 行 client 文件；页面模块只通过共享 state/interface 交互。
+
+## 5. 根脚本
+
+~~~json
+{
+  "build": "build all packages, workers, browser bundles and copied skills",
+  "typecheck": "tsc -b or equivalent strict check",
+  "test": "vitest unit and contract",
+  "test:ui": "browser/jsdom + accessibility + i18n",
+  "test:security": "blocking security suites",
+  "test:docker": "real container eval",
+  "test:golden": "deterministic golden path",
+  "test:all": "all blocking suites including TeX and clean-room",
+  "verify:bundles": "client handoff and no innerHTML",
+  "verify:skills": "prepared skill assets and installed package",
+  "verify:docs": "links, fences, contract snapshots and docs-change policy"
+}
+~~~
+
+build 先 schemas/cas，再 kernel/client/connectors/evidence/manuscript，后 workers/plugin/UI，最后 bundle/skill verification。禁止依赖未跟踪 lib 产物运行测试。
+
+## 6. 生成顺序
+
+1. 建立 schemas 与错误 code；
+2. 建立临时 SQLite/CAS 并实现 Kernel 深接口；
+3. 建立 v2 HTTP、ResearchClient 和 contract tests；
+4. 实现 Gate、Artifact、Job/lease/Manifest 事务；
+5. 实现 Runner snapshot/Docker/Terminal；
+6. 实现 Analysis/Evidence/Claim；
+7. 实现 TeX document/build；
+8. 实现 Orchestrator、Connectors 和 Release；
+9. 实现 DSH adapter、Skills 和 BFF；
+10. 实现共享 UI、i18n、Terminal 和 Manuscript Workbench；
+11. 实现 standalone adapter；
+12. 跑 security、recovery、Docker、TeX、Golden、clean-room。
+
+每步先写对应接口验收，再实现。旧浅模块的测试在新深接口测试覆盖后删除，避免同时维护两套行为。
+
+## 7. 开发协作与 subagent
+
+开发默认尽可能并行使用 subagent：
+
+- 跨目录检索、外围资料、测试日志、独立核验和无重叠文件实现应并发；
+- 每个委派任务写清范围、问题、输出和 file:line 证据；
+- 代码任务明确文件所有权，并声明不得回滚他人修改；
+- 多个独立任务同一批派发，主代理等待结果后再合并判断；
+- 基础架构文档和即将修改的具体代码由主代理完整阅读；
+- 方案取舍、冲突解决、最终修改和全量验收归主代理；
+- 子代理结论只做压缩线索，重要结论按提供的 file:line 抽查，不重复通读其全部范围。
+
+一次 agent 任务应有界，异常长时间无结果要中止并拆小。并行不能成为减少测试或绕过代码所有权的理由。
+
+## 8. 文档同步工作流
+
+每个需求或修复分支必须包含：规范差异、实现、测试、hardening status。PR 模板检查：
+
+- 哪个规范章节改变；
+- Domain/HTTP/DB/UI/i18n 是否同步；
+- 新增 acceptance 场景；
+- 迁移和向后兼容；
+- 安全影响；
+- 当前差距是否关闭。
+
+只改代码的变更不能合并。
+
+## 9. Self-mod 开发配置
+
+configs/research-dev-selfmod.cordis.yml 只插入 @deepseek-ai/dsh-tool-cordis，绝不并入根 cordis.patch。开发启动脚本要求显式环境确认，例如 DSH_SCHOLAR_ENABLE_SELFMOD=1，并打印高风险提示、profile、DSH_HOME 和 workspace。
+
+实际包名必须是 @deepseek-ai/dsh-tool-cordis；cordis:tool-cordis 只在专门注册该 builtin 的 DSH 测试 scaffold 有效。源码仓库保留 dev overlay，但生产 npm files/发布 tarball 排除 configs/research-dev-selfmod.cordis.yml；开发者从源码使用 scripts/start-selfmod-dev.sh。
+
+调试完成后把动态代码转换为普通插件源码、测试和文档；dyn-N 不是可交付产物。CI 对生产 dump-config 做否定断言，对开发 overlay 做 inspect/mount/unmount 冒烟。
+
+## 10. 完成检查
+
+- pnpm lockfile、构建和类型检查可从 clean checkout 运行；
+- npm pack 或本地 package tarball 包含全部运行资产；
+- 全新 DSH_HOME 安装成功，不依赖开发 symlink；
+- production composition 无 tool-cordis；开发 overlay 可用且隔离；
+- zh/en 资源完整，无 UI 硬编码；
+- Terminal、TeX、PDF、binary proxy 和 SSE 在 DSH 与 standalone 两种模式一致；
+- docs/README.md 的所有文档链接和规范条目可达。

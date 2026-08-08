@@ -1,195 +1,139 @@
-# DSH Scholar 完整使用教程
+# DSH Scholar 使用指南
 
-> 适用版本:`hardening/v0.2`(Security Alpha)。核心原则:**Gate 由人类决定、
-> 实验真实执行、Evidence 可信**——Agent 只能请求,不能批准。
+> 目标版本 2.1。当前仓库尚未实现实时 Terminal、完整 TeX Workbench 和 i18n；实际差距见 hardening-v0.2-status.md。
 
----
+## 1. 启动
 
-## 1. 环境一览
+独立 UI：
 
-| 实例 | 地址 | 插件 | 用途 |
-|---|---|---|---|
-| **生产 GUI** | http://127.0.0.1:3080 | 无(已移除) | 日常 DSH 使用 |
-| **测试实例(专属科研 GUI)** | **http://127.0.0.1:3081** | research-plugin + **research-ui(专属面板)** | 科研流程演示/开发 |
+~~~bash
+bash scripts/start-standalone-ui.sh
+~~~
 
-## 2. 启动专属科研 GUI
+DSH 嵌入测试实例：
 
-### 2a. 完全独立的 Web 插件(推荐,不依赖 dsh web)
+~~~bash
+bash scripts/start-test-dsh.sh
+~~~
 
-**不启动任何 `dsh web` 进程**——research-ui 包自带 HTTP server、kernel
-sidecar 和全屏界面,从零到可用只跑一个命令:
+打开页面后可以在 Settings → Language 选择中文或 English。没有手动选择时，系统先读 dsh.locale，再匹配浏览器语言，最后使用中文。切换语言不会翻译项目名、论文、命令输出和 TeX 原始错误。
 
-```bash
-cd /home/dev/Desktop/dsh-scholar
-bash scripts/start-standalone-ui.sh    # http://127.0.0.1:18610
-```
+## 2. 创建项目与 Scope Gate
 
-- 首次启动会生成访问 token,打印在终端并保存到
-  `~/.dsh-scholar-standalone/research-ui-standalone/standalone-token`;
-- 浏览器打开 **http://127.0.0.1:18610**,粘贴 token 解锁(存 localStorage);
-- 界面包含 **＋ New Project**(创建项目 + Scope Gate)、Phase 流水线、
-  Gates(人类 Approve/Reject)、Runs、Artifacts、Evidence、Budget;
-- 数据保存在 `~/.dsh-scholar-standalone/`,与生产/测试实例完全隔离;
-- 端口可用环境变量覆盖:`DSH_SCHOLAR_STANDALONE_PORT`(默认 18610)、
-  `DSH_SCHOLAR_STANDALONE_KERNEL_PORT`(默认 17413)、
-  `DSH_SCHOLAR_STANDALONE_DATA`(默认 `~/.dsh-scholar-standalone`)。
+在 Chat 使用：
 
-> 认证与安全:所有 `/v1/*` 请求要求 `Authorization: Bearer <token>`;
-> 非 GET 请求做同源 CSRF 校验;body 上限 16 MiB——与 DSH 桥接同款姿态
-> (design §15.2/§15.3)。`--no-token` 可关闭(仅回环,不推荐)。
+~~~text
+/research new shift-localization {"problem":"Does uncertainty weighting improve temporal localization?","scope":"public datasets only","primary_metrics":["mAP@0.5"]}
+~~~
 
-### 2b. 测试实例(嵌入 dsh web 的面板版)
+或点击 New Project。系统创建 DRAFT 项目和 Scope Gate。到 Approvals 检查 target、范围和预算后批准或拒绝。Human UI 不要求填写 actor，身份来自当前登录会话。
 
-```bash
-cd /home/dev/Desktop/dsh-scholar
-bash scripts/start-test-dsh.sh        # 幂等:初始化 profile + 安装插件 + 启动
-```
+## 3. 调研与 Idea
 
-启动后浏览器打开 **http://127.0.0.1:3081**。页面右下角会出现 **🧪 Research OS**
-浮动面板(GUI 专属面板,自动加载):
-
-- **Phase**:项目当前阶段 + 下一步动作 + 历史
-- **Gates**:待审批的 Gate,**Approve/Reject 按钮(人类专属)**——这是 v2 唯一的人类决策入口
-- **Runs**:实验作业状态(可取消)
-- **Artifacts**:代码/日志/指标/图表(点击预览,SVG 内联渲染)
-- **Evidence**:Claims + 可信 Evidence(仅 Analysis Worker 生成)
-- **Budget**:预算用量 vs 硬限额
-
-## 3. 完整科研流程(从 0 到复现包)
-
-> 全程约 10 个步骤;Gate 步骤需要你在面板上点按钮。
-
-### 3.1 创建项目
-在 Web 会话输入框执行:
-
-```
-/research new shift-localization '{"problem":"Does uncertainty weighting improve temporal localization under domain shift?","scope":"THUMOS14, supervised, no new data","primary_metrics":["mAP@0.5"],"resources":"1 GPU, <=20 GPU-hours","baseline_repo":"https://github.com/example/baseline"}'
-```
-
-系统创建项目(DRAFT)+ **Scope Gate Request**。查看状态:
-
-```
-/research status
-```
-
-### 3.2 批准 Scope Gate(人类)
-在右侧面板 **Gates** 标签,点击 Scope Gate 的 **✓ Approve**。
-→ 项目进入 `SCOPED`(此状态只能经人类 Gate 到达,通用迁移被禁止)。
-
-### 3.3 文献调研
-```
-/research survey "temporal action localization"
-```
-多源检索(OpenAlex/Crossref/arXiv)→ 去重 → 冻结 **CorpusSnapshot**(含引用图与段落)。
-
-### 3.4 Idea 生成与新颖性审计
-```
+~~~text
+/research survey "temporal action localization under domain shift"
 /research ideas
-```
-让模型用 `idea_create` 生成候选 + `novelty_audit` 反查重(每个 Idea 需
-falsification 条件、MVE、最近邻)。也可用并行面板:
+~~~
 
-```
-research_panel kind=idea-panel perspectives=[{"label":"skeptic"},{"label":"innovator"}] task="生成 3 个可证伪 IdeaCard"
-```
+Overview 展示 Corpus、候选 Idea、最近邻、exact delta、falsification 和 MVE。调研来源失败会明确显示，不能把部分失败伪装为完整覆盖。选择 Idea 后在 Approvals 决定 Idea Gate。
 
-### 3.5 批准 Idea Gate(人类)
-面板 Gates → Idea Gate → **Approve** → `IDEA_APPROVED`。
+## 4. Baseline 与 Contract
 
-### 3.6 Baseline 真实复现(容器强制)
-代码快照归档(真实内容,非清单):
+先登记代码和数据快照，再提交 Baseline。正式 Job 必须来自 CAS 内容、固定镜像和容器；空命令或 message-only 不能成功。
 
-```
-research_project action=create ...   # 或复用已有项目
-```
+~~~text
+/research reproduce {"repo":"...","commit":"...","expected_metrics":{"mAP@0.5":58.4}}
+/research contract {"idea_id":"...","dataset_id":"...","baseline":"...","treatment":"...","primary_metric":"mAP@0.5","seeds":[11,23,47,89,101]}
+~~~
 
-用工具链(模型或手动):
+PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预算和 AnalysisPlan。批准后合同版本冻结。
 
-```
-workspace_snapshot  path=<你的代码目录>
-baseline_prepare    repo=<baseline repo> expected_metrics='{"mAP@0.5":58.4}' tolerance=0.05
-baseline_verify     expected_metrics='{"mAP@0.5":58.4}' tolerance=0.05
-```
+## 5. 运行实验与查看终端
 
-> ⚠️ **v2 强制**:baseline/pilot/formal/reproduce 只能在容器执行;空命令或
-> message-only 假实验会被拒绝。正式作业必须带 `code_snapshot_id`(真实代码归档)。
+> 目标 v2 行为；当前仓库只能在 Run 完成后从日志 Artifact 查看输出。
 
-### 3.7 实验合同 + Contract Gate(人类)
-```
-/research contract '{"idea_id":"...","dataset_id":"thumos14","baseline":"baseline_b","treatment":"method_a","primary_metric":"mAP@0.5","seeds":[11,23,47,89,101]}'
-```
-面板 Gates → Contract Gate → **Approve** → Contract 冻结(`CONTRACT_APPROVED`),
-之后任何口径变更需新版本重新审批。
+~~~text
+/research run formal {"contract_id":"...","code_snapshot_id":"..."}
+~~~
 
-### 3.8 正式实验(多 seed,容器真实执行)
-```
-/research run formal
-```
-或由模型按合同提交作业(每个 seed 一个,idempotency key
-`formal:{contract}:{code}:{data}:{metric}:{seed}`)。长任务有 Heartbeat,
-取消会终止真实容器;Manifest 带 Ed25519 签名 + fencing token。
+Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选择一个 Run，点击 Open Terminal 或进入 Terminal Tab：
 
-### 3.9 统计与 Evidence(仅 Analysis Worker 可信)
-```
-/research evidence '{"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"mAP@0.5","value":61.2,"baseline_value":58.4,"effect_size":2.8,"ci_low":1.1,"ci_high":4.5,"n_seeds":5}}'
-```
+- All 保持 stdout/stderr 的实际交错顺序；
+- stdout/stderr 可单独筛选；
+- live 表示正在接收 Runner 输出；
+- reconnecting 会自动从最后 seq 续传；
+- gap/truncated 表示部分热日志已淘汰，完整或截断日志仍可下载；
+- exit code、signal、timeout 和 cancelled 是不同终态；
+- Cancel 只有在实际容器停止确认后才显示完成。
 
-> 注意:普通 Agent 只能写 `evidence_note_create`(**draft_unverified**);
-> 只有确定性 Analysis Worker 能写 **verified** Evidence 支持 Claim。
-> Claim 缺 effect/CI/n → **inconclusive**,不可能被误标 supported。
+终端内容是原始执行数据，不随页面语言翻译。
 
-### 3.10 论文、评审、复现包
-```
-/research write     # 从只读 Evidence Ledger 生成 Markdown/LaTeX + BibTeX + 图表
-/research review    # 确定性评审:数字一致性、引用解析、复现要求
-/research export    # 自包含 Release Bundle(私有导出,非发布)
-/research release   # 创建 Release Gate(人类,默认保持未批准)
-```
+## 6. Evidence 与 Claim
 
-## 4. Gate 决策入口(人类专属)
+普通用户或 Agent 可以创建 draft note，但不能创建 accepted Evidence。Analysis Worker 根据合同、匹配 Seed 和 metrics file 生成 Evidence；Evidence 页面显示 provenance、effect、CI、n 和方向。
 
-| Gate | 触发时机 | 批准入口 |
-|---|---|---|
-| Scope | 项目创建后 | GUI 面板 Gates → Approve |
-| Idea | Idea 候选完成 | GUI 面板 Gates → Approve |
-| Contract | Baseline 复现后 | GUI 面板 Gates → Approve(冻结合同) |
-| Budget | 预算超限 → BLOCKED_GATE | GUI 面板 Gates → Approve(resume) |
-| Release | 复现包完成 | GUI 面板 Gates → Approve(显式发布决策) |
+缺字段、样本不足、CI 跨无效区间或只使用 draft/legacy Evidence 时 Claim 是 inconclusive。contradicted 和 negative result 会保留在稿件限制与结果中。
 
-Agent 工具只有 `research_gate_request`(创建/列出);`research_phase` 不能
-进入 Gate 控制状态(SCOPED/IDEA_APPROVED/CONTRACT_APPROVED/RELEASED)。
+## 7. TeX Manuscript Workbench
 
-## 5. 无头/CI 模式
+> 目标 v2 行为；当前仓库只生成一次性 LaTeX 字符串/Artifact，没有文件树、编辑器和产品化编译面板。
 
-```bash
-./scripts/dsh-dev --profile research-headless "/research status"
-```
-无人值守不会阻塞:遇到 Gate 时项目进入 BLOCKED_GATE,等待人类在 GUI 处理。
+### 7.1 生成稿件
 
-**一键 10 步完整演示**(连接测试实例 kernel `:17412` + 独立 docker runner,
-自动跑完:项目/Scope Gate→人类审批→文献快照→Idea/反查重→Idea Gate→
-baseline 代码归档+容器复现→Contract 冻结→3 seeds 正式执行→分析/Evidence/
-Claim→论文/评审/复现包/Release Gate,14 项断言全绿):
+~~~text
+/research write
+~~~
 
-```bash
-timeout 400 bash evals/demo-full-flow.sh
-```
+系统从 Brief、Corpus、approved Contract、accepted Evidence、Claim、图表和 Venue Template 创建 TexDocument，而不是只返回一个字符串。
 
-## 6. 常见问题
+### 7.2 编辑
 
-| 问题 | 处理 |
+进入 Manuscript：
+
+1. 文件树选择 paper.tex、references.bib 或 figures；
+2. 编辑器显示行号和脏状态；
+3. Ctrl/Cmd+S 保存；
+4. 如果其他页面已修改同一文件，会出现 version conflict，选择 Reload、Copy local 或 Merge，系统不会静默覆盖；
+5. History 可查看过去 revision。
+
+### 7.3 编译
+
+点击 Compile。系统先保存脏文件，冻结当前 manifest，然后创建 latex-compile Job。右侧 Build Terminal 实时显示 pdflatex/bibtex 多遍输出。
+
+Diagnostics 将错误整理为 file:line；点击可跳到编辑器。TeX 原始消息保持原文，按钮与诊断类别按页面 locale 翻译。成功后 Preview 显示 PDF。继续编辑源文件时旧 PDF 标记 Stale，直到下一次成功编译。
+
+可以下载 PDF、完整 compile log、sources 和 aux Artifact。HTML 不作为稿件预览。
+
+## 8. Review 与 Release
+
+> Review/Bundle 当前已有基础；与版本化 TeX Workbench、实时编译和 PDF freshness 的联动属于目标 v2。
+
+~~~text
+/research review
+/research export
+/research release
+~~~
+
+Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译、负结果、许可和 AI usage。Export 生成私有自包含 Bundle；clean-room 重跑实验、分析和 PDF。release 只创建 Human Release Gate，不自动上传外部平台。
+
+## 9. Budget 与 Block
+
+Budget 页面显示模型、API、GPU、存储和并发。超过硬上限时项目进入 BLOCKED_GATE，正在运行的策略按 Job contract 安全停止或完成；只有 Human Budget Gate 可恢复到 payload 允许的状态。
+
+## 10. 常见问题
+
+| 现象 | 说明 |
 |---|---|
-| 正式作业失败 "container execution required" | Runner 必须 `--mode docker`(subprocess 仅 smoke/echo) |
-| 作业失败 "code_snapshot_required" | 先用 `workspace_snapshot` 归档代码,提交时带 `code_snapshot_id` |
-| Gate 无法用工具批准 | 正确——决策仅人类 GUI;用面板按钮 |
-| Claim 一直是 inconclusive | Evidence 未 verified 或缺 effect/CI/n_seeds;跑真实 Analysis |
-| 预算超限项目卡住 | 面板 Budget/Gates → 批准 Budget Gate 恢复 |
-| 想重置测试实例 | `rm -rf ~/.dsh-scholar-test && bash scripts/start-test-dsh.sh` |
+| container_execution_required | 正式 Job 不能使用 subprocess |
+| code_snapshot_required | 先创建真实内容快照 |
+| revision_conflict | 项目已被其他动作修改，刷新后重试 |
+| document_version_conflict | TeX 文件有并发版本，显式合并 |
+| Terminal gap/truncated | 热日志有保留上限；下载最终 log 查看可用内容 |
+| Claim inconclusive | Evidence 未 accepted 或缺统计字段 |
+| PDF stale | 源文件 revision 晚于 build input，重新 Compile |
+| Kernel unreachable | 检查 instance health、dataDir、port 和 sidecar ownership |
+| 页面部分未翻译 | 缺失 key 会显示 key；这是缺陷，应按 docs 规则补资源和测试 |
 
-## 7. 生产实例启用插件(可选)
+## 11. 开发者临时 self-mod
 
-```bash
-./scripts/dsh-dev plugin --profile web add /home/dev/Desktop/dsh-scholar
-./scripts/dsh-dev plugin --profile web add /home/dev/Desktop/dsh-scholar/packages/dsh-research-ui
-# 重启生产 GUI 生效;kernel 端口错开(见 docs/test-instance-plan.md)
-```
+仅调试 DSH/Cordis 运行时行为时，按 test-instance-plan.md 创建隔离 DSH_HOME，并显式加载 research-dev-selfmod overlay。可使用 cordis_inspect、cordis_mount、cordis_unmount；动态插件不持久，不能用于 Gate、正式 Run、Evidence 或发布。需要保留的行为必须转成源码、测试和 Markdown。
