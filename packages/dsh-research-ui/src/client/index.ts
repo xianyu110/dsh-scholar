@@ -1955,6 +1955,27 @@ function renderRuns(body: HTMLElement, p: Projection): void {
         if (root !== null) void openJobDetailModal(root, job.job_id!)
       }
       row.appendChild(detailsBtn)
+      // dsh-web "open terminal": jump to the Terminal tab for this run.
+      const termBtn = el('button', 'hbtn', '🖥')
+      termBtn.title = 'open terminal for this run'
+      termBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      termBtn.onclick = (event) => {
+        event.stopPropagation()
+        terminalRunId = job.job_id!
+        terminalLines = []
+        terminalLastSeq = 0
+        terminalTotalBytes = 0
+        terminalDroppedBytes = 0
+        terminalTruncated = false
+        terminalExitCode = null
+        terminalExitSignal = null
+        terminalStatus = 'idle'
+        terminalLoadSeq()
+        activeTab = 'terminal'
+        tabSave()
+        rerender()
+      }
+      row.appendChild(termBtn)
     }
     card.appendChild(row)
     // dsh-web job drawer: double-click opens the full detail modal.
@@ -3427,7 +3448,7 @@ function runChatLine(line: string): void {
 /* ─────────────────────────── shortcuts modal ─────────────────────────── */
 
 const SHORTCUTS: Array<[string, string]> = [
-  ['Alt+1..7', 'switch view (Chat, Overview, Approvals, Runs, Artifacts, Evidence, Budget)'],
+  ['Alt+1..9', 'switch view (Chat, Overview, Approvals, Runs, Terminal, Artifacts, Evidence, Budget, Manuscript)'],
   ['Ctrl/Cmd+K', 'open the command palette'],
   ['Ctrl/Cmd+P', 'quick project switcher'],
   ['Ctrl/Cmd+Shift+F (chat)', 'search across all sessions'],
