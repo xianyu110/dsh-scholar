@@ -269,6 +269,17 @@ function accentSet(name: string): void {
   try { localStorage.setItem(ACCENT_KEY, name in ACCENTS ? name : 'blue') } catch { /* private mode */ }
 }
 
+const RADIUS_KEY = 'dsh-scholar-ui-radius'
+const RADII: Record<string, string> = { small: '6px', normal: '12px', large: '18px' }
+
+/** Panel corner radius (dsh-web appearance preference), persisted. */
+function radiusValue(): string {
+  try { return RADII[localStorage.getItem(RADIUS_KEY) ?? 'normal'] ?? RADII.normal! } catch { return RADII.normal! }
+}
+function radiusSet(name: string): void {
+  try { localStorage.setItem(RADIUS_KEY, name in RADII ? name : 'normal') } catch { /* private mode */ }
+}
+
 const FAV_KEY = 'dsh-scholar-ui-favs'
 
 function tabFavs(): Set<string> {
@@ -337,6 +348,7 @@ export function apply(options: ApplyOptions = {}): void {
   const root = host.attachShadow({ mode: 'open' })
   // Theme: LIGHT is the default; persisted per browser. Accent: custom.
   host.dataset.theme = readTheme()
+  host.style.setProperty('--panel-radius', radiusValue())
   // Custom accent (dsh-web theming): override the CSS variable directly.
   // Dark-theme accent variants (dsh-web theming): brighter in dark mode.
   const ACCENT_DARK: Record<string, string> = {
@@ -387,7 +399,7 @@ export function apply(options: ApplyOptions = {}): void {
 }
 
 * { box-sizing: border-box; margin: 0; }
-.panel { display:flex; flex-direction:column; height:100%; max-height:inherit; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:${fullscreen ? 0 : 14}px; overflow:hidden; box-shadow:${fullscreen ? 'none' : 'var(--shadow)'}; font:12px/1.5 system-ui,sans-serif; }
+.panel { display:flex; flex-direction:column; height:100%; max-height:inherit; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:${fullscreen ? 0 : 'var(--panel-radius)'}; overflow:hidden; box-shadow:${fullscreen ? 'none' : 'var(--shadow)'}; font:12px/1.5 system-ui,sans-serif; }
 ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .header { display:flex; align-items:center; gap:8px; padding:${fullscreen ? '14px 20px' : '11px 14px'}; background:var(--header-grad); border-bottom:1px solid var(--border); }
 .header .logo { font-size:${fullscreen ? 18 : 14}px; filter:drop-shadow(0 0 6px var(--accent)); }
@@ -888,6 +900,12 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         chatDetailIndex = next
         rerender()
       }
+      return
+    }
+    // dsh-web help: '?' opens the shortcut reference.
+    if (event.key === '?' && !typing) {
+      event.preventDefault()
+      openShortcutsModal(root)
       return
     }
     // dsh-web behavior: typing "/" anywhere (not already typing) jumps to
@@ -2290,6 +2308,29 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   accentRow.append(accentLabel, accentSelect)
   modal.appendChild(accentRow)
 
+  // Corner radius (dsh-web appearance).
+  const radiusRow = el('div', 'row')
+  radiusRow.style.cssText = 'padding:4px 0'
+  const radiusLabel = el('span', '', 'Corners')
+  radiusLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const radiusSelect = el('select', 'picker')
+  radiusSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+  const currentRadius = Object.entries(RADII).find(([, v]) => v === radiusValue())?.[0] ?? 'normal'
+  for (const [name, val] of Object.entries(RADII)) {
+    const opt = el('option', '', `${name} (${val})`)
+    opt.value = name
+    radiusSelect.appendChild(opt)
+  }
+  radiusSelect.value = currentRadius
+  radiusSelect.onchange = () => {
+    radiusSet(radiusSelect.value)
+    const hostEl = document.querySelector('#dsh-scholar-ui')
+    hostEl?.style.setProperty('--panel-radius', radiusValue())
+    rerender()
+  }
+  radiusRow.append(radiusLabel, radiusSelect)
+  modal.appendChild(radiusRow)
+
   // Conversation.
   modal.appendChild(section('Conversation'))
   const convRow = el('div', 'row')
@@ -3510,6 +3551,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isReview = msg.role === 'assistant' && msg.text.startsWith('Reviewer:')
     const isExport = msg.role === 'assistant' && /Release bundle \*\*[^*]+\*\* generated/.test(msg.text)
     const isIdeas = msg.role === 'assistant' && /^IdeaCards:/m.test(msg.text)
+    const isList = msg.role === 'assistant' && /^Projects \(\d+\):/m.test(msg.text)
     const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
@@ -3746,6 +3788,23 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         rerender()
       }
       card.appendChild(goPhase)
+      structured = card
+    } else if (isList && searchQ === '') {
+      // dsh-web projects card: count + first rows.
+      const countMatch = /^Projects \((\d+)\):/m.exec(msg.text)
+      const rows = msg.text.split('\n').filter(l => /^- /.test(l.trim()))
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '📁'))
+      head.appendChild(el('span', 'pname', `${countMatch?.[1] ?? rows.length} project(s)`))
+      head.appendChild(el('span', 'grow'))
+      card.appendChild(head)
+      for (const r of rows.slice(0, 6)) {
+        card.appendChild(el('div', 'muted', r.trim().replace(/^- /, '· ')))
+      }
+      if (rows.length > 6) card.appendChild(el('div', 'muted', `… and ${rows.length - 6} more`))
       structured = card
     }
     const lineCount = msg.text.split('\n').length
