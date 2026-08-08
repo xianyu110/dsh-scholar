@@ -55,6 +55,42 @@ describe('governance: durable human principal (GOV-01)', () => {
   })
 })
 
+describe('governance: gate target freeze (GOV-02)', () => {
+  it('contract gate approval freezes the target contract atomically', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: gate.gate_id, actor: 'web-user', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+    // Walk to IDEA_APPROVED (contract gate's from-state) via the public
+    // transition table + an idea gate.
+    kernel.transition(project.project_id, 'SURVEYING', kernel.getProject(project.project_id).revision)
+    kernel.transition(project.project_id, 'IDEATING', kernel.getProject(project.project_id).revision)
+    const ideaGate = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'Idea Gate', payload: { idea_id: 'idea_x' } })
+    kernel.decideGate({ gate_id: ideaGate.gate_id, actor: 'web-user', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('IDEA_APPROVED')
+    // IDEA_APPROVED -> BASELINE_REPRO (the contract gate's from-state).
+    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
+    // A contract + its gate; approval must freeze the contract in the SAME
+    // transaction as the decision.
+    const contract = kernel.registerContract({
+      project_id: project.project_id,
+      idea_id: 'idea_x', data: { dataset_id: 'd', version: 'v1' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'macro_f1', secondary: [] }, seeds: [1, 2], analysis: {},
+      ablations: [], stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 1, stop_on_data_leakage: true },
+    })
+    const cGate = kernel.createGate({ project_id: project.project_id, type: 'contract', title: 'Contract Gate', payload: { contract_id: contract.contract_id } })
+    const decided = kernel.decideGate({ gate_id: cGate.gate_id, actor: 'web-user', principal: { principal_id: 'u1' }, decision: 'approved', diff: 'v1' })
+    const frozen = kernel.getContract(contract.contract_id)
+    expect(frozen.status).toBe('approved')
+    expect(frozen.approval?.gate_decision_id).toBe(decided.decision.decision_id)
+    expect(frozen.approval?.approved_by).toBe('web-user')
+    // The project moved to the contract-approved state in the same txn.
+    expect(kernel.getProject(project.project_id).status).toBe('CONTRACT_APPROVED')
+    kernel.close()
+  })
+})
+
 describe('governance: evidence provenance (EVID-01)', () => {
   it('claim verification ignores draft/legacy evidence and needs worker-verified rows', () => {
     const kernel = freshKernel()

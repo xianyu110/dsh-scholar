@@ -475,6 +475,19 @@ export class ResearchKernel {
           if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
             project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
           }
+        } else if (gate.type === 'contract') {
+          // GOV-02: freeze the target contract ATOMICALLY with the decision
+          // (design §6.6: contracts become immutable on Contract Gate
+          // approval) — inside the same transaction as the decision row.
+          const contractId = typeof gate.payload.contract_id === 'string' ? gate.payload.contract_id : undefined
+          if (contractId !== undefined) {
+            this.approveContract(contractId, decision.decision_id, input.actor)
+          }
+          if (project.status === mapping.from) {
+            project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
+          } else if (project.status !== mapping.to) {
+            throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
+          }
         } else if (project.status === mapping.from) {
           project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
         } else if (project.status === mapping.to) {
