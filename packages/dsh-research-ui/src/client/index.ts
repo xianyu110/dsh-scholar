@@ -5378,6 +5378,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isExport = msg.role === 'assistant' && /Release bundle \*\*[^*]+\*\* generated/.test(msg.text)
     const isIdeas = msg.role === 'assistant' && /^IdeaCards:/m.test(msg.text)
     const isList = msg.role === 'assistant' && /^Projects \(\d+\):/m.test(msg.text)
+    const isJobs = msg.role === 'assistant' && /^Jobs:/m.test(msg.text)
     const isGatesList = msg.role === 'assistant' && /^Gates:/m.test(msg.text)
     const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
@@ -5648,6 +5649,41 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         card.appendChild(row)
       }
       if (rows.length > 6) card.appendChild(el('div', 'muted', `… and ${rows.length - 6} more`))
+      structured = card
+    } else if (isJobs && searchQ === '') {
+      // dsh-web runs card: job rows with status pills + jump to Runs.
+      const jobLines = msg.text.split('\n').filter(l => /^- /.test(l.trim()))
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '⚙️'))
+      head.appendChild(el('span', 'pname', `${jobLines.length} run(s)`))
+      head.appendChild(el('span', 'grow'))
+      card.appendChild(head)
+      for (const l of jobLines.slice(0, 8)) {
+        const m = /`([^`]+)` \[([^\]]+)\] (\S+)/.exec(l)
+        const row = el('div', 'row')
+        if (m !== null) {
+          row.appendChild(el('span', 'artifact-kind', String(m[2]).toUpperCase()))
+          const text = el('span', 'grow mono', fmtId(m[1] ?? '', 26))
+          text.style.cssText = 'font-size:10px'
+          row.appendChild(text)
+          row.appendChild(pill(m[3] ?? ''))
+        } else {
+          row.appendChild(el('span', 'muted', l.trim().replace(/^- /, '· ')))
+        }
+        card.appendChild(row)
+      }
+      if (jobLines.length > 8) card.appendChild(el('div', 'muted', `… and ${jobLines.length - 8} more`))
+      const goRuns = el('button', 'hbtn', '→ open Runs tab')
+      goRuns.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goRuns.onclick = () => {
+        activeTab = 'runs'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goRuns)
       structured = card
     } else if (isGatesList && searchQ === '') {
       // dsh-web gates card: pending/decided counts.
