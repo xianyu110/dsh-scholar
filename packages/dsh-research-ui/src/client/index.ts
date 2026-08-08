@@ -3892,6 +3892,8 @@ interface ContextMenuItem {
   label: string
   hint?: string
   danger?: boolean
+  /** dsh-web menu grouping: a divider is drawn before this item. */
+  divider?: boolean
   onPick: () => void
 }
 function openContextMenu(root: ShadowRoot, x: number, y: number, items: ContextMenuItem[]): void {
@@ -3903,6 +3905,11 @@ function openContextMenu(root: ShadowRoot, x: number, y: number, items: ContextM
   menu.style.cssText = 'position:fixed;min-width:200px;background:var(--bg-2);border:1px solid var(--border-strong);border-radius:10px;padding:4px;box-shadow:0 12px 40px rgba(0,0,0,.35);z-index:10002;font:12px/1.4 system-ui,sans-serif;color:var(--text)'
   const menuButtons: HTMLButtonElement[] = []
   for (const it of items) {
+    if (it.divider === true) {
+      const sep = el('div')
+      sep.style.cssText = 'height:1px;background:var(--border-2);margin:4px 6px'
+      menu.appendChild(sep)
+    }
     const btn = el('button')
     btn.setAttribute('role', 'menuitem')
     btn.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:6px 10px;border-radius:7px;cursor:pointer;font:inherit'
@@ -5320,12 +5327,14 @@ function renderSidebar(
         if (isArchived) {
           ctxItems.push({
             label: '↩ Restore',
+            divider: true,
             onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/unarchive`, { method: 'POST' }).then(() => rerender()) },
           })
         } else {
           ctxItems.push({
             label: '🗄 Archive',
             hint: 'data kept',
+            divider: true,
             onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/archive`, { method: 'POST' }).then(() => rerender()) },
           })
         }
@@ -5611,6 +5620,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         { label: 'Copy session ID', hint: s.id, onPick: () => copyText(s.id) },
         {
           label: '⬇ Export JSON',
+          divider: true,
           onPick: () => {
             const payload = JSON.stringify({
               name: s.name,
@@ -5656,7 +5666,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
             showToast(rootHost(), `⬇ Exported ${s.name} as markdown`)
           },
         },
-        { label: '× Close', danger: true, onPick: () => chatSessionClose(s.id) },
+        { label: '× Close', danger: true, divider: true, onPick: () => chatSessionClose(s.id) },
       ]
       openContextMenu(root, event.clientX, event.clientY, ctxItems)
     }
@@ -6370,6 +6380,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         { label: '⧉ Copy md', onPick: () => copyText(textToMarkdown(msg.text)) },
         {
           label: '↩ Reply',
+          divider: true,
           onPick: () => {
             chatDraft = ''
             chatQuoteTarget = { index: i, text: msg.text }
