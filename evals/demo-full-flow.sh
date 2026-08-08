@@ -41,6 +41,18 @@ EOF
 cat > "$WORK/repo/data.json" <<'EOF'
 {"baseline":[0.60,0.62,0.58]}
 EOF
+cat > "$WORK/repo/baseline.js" <<'EOF'
+// Deterministic BASELINE script: same seed trend as train.js but -0.05,
+// so paired per-seed differences are +0.05 (matched-seed design, §13.6).
+const fs = require('fs')
+const args = process.argv.slice(2)
+const seed = Number(args[args.indexOf('--seed') + 1] || 0)
+const dataPath = args[args.indexOf('--data') + 1] || '/work/data.json'
+const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'))
+const base = data.baseline.reduce((a, b) => a + b, 0) / data.baseline.length
+const value = Math.round((base + seed * 0.01 - 0.05) * 10000) / 10000
+console.log(JSON.stringify({ metric: 'macro_f1', value, seed }))
+EOF
 ok "fixture 代码就绪(train.js + data.json)"
 
 # ── 1. 创建项目 + Scope Gate Request ─────────────────────────────────────
@@ -82,6 +94,11 @@ say "6. Baseline 复现(代码快照归档 + 容器执行)"
 CODE=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/repo\",\"description\":\"fixture train.js\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
 api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
 B_JOB=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo\",\"kind\":\"baseline\",\"code_snapshot_id\":\"$CODE\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"0\",\"--data\",\"/work/data.json\"],\"payload\":{}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+# §13.6 paired design: baseline runs at the SAME seeds as the formals so the
+# analysis engine can pair baseline/treatment per seed.
+for BSEED in 11 23 47; do
+  api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo-$BSEED\",\"kind\":\"baseline\",\"code_snapshot_id\":\"$CODE\",\"command\":[\"node\",\"/work/baseline.js\",\"--seed\",\"$BSEED\",\"--data\",\"/work/data.json\"],\"payload\":{}}" > /dev/null
+done
 for _ in $(seq 1 60); do BS=$(api "http://127.0.0.1:$KPORT/v1/jobs/$B_JOB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))"); [[ "$BS" == "succeeded" ]] && break; sleep 0.5; done
 BVAL=$(api "http://127.0.0.1:$KPORT/v1/jobs/$B_JOB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const m=(JSON.parse(d).run_manifest||{}).metrics_artifact;console.log(m||'')})")
 BACT=$(curl -s "http://127.0.0.1:$KPORT/v1/artifacts/$BVAL?project_id=$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const m=JSON.parse(d).metrics.find(x=>x.metric==='macro_f1');console.log(m?m.value:'')})")
