@@ -902,6 +902,13 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       }
       return
     }
+    // dsh-web transcript nav: Home/End select the first/last message.
+    if ((event.key === 'Home' || event.key === 'End') && !typing && activeTab === 'chat' && chatMessages.length > 0) {
+      event.preventDefault()
+      chatDetailIndex = event.key === 'Home' ? 0 : chatMessages.length - 1
+      rerender()
+      return
+    }
     // dsh-web help: '?' opens the shortcut reference.
     if (event.key === '?' && !typing) {
       event.preventDefault()
@@ -1016,6 +1023,26 @@ function renderPhase(body: HTMLElement, p: Projection): void {
 
   // history (audit ledger: transitions, gate decisions, renames, archives)
   const history = (p.project?.history ?? []).slice(-10)
+  // dsh-web quick-nav: jump to the relevant panel from the pipeline view.
+  body.appendChild(el('div', 'section-label', 'Quick view'))
+  const quick = el('div', 'row')
+  quick.style.cssText = 'gap:6px;flex-wrap:wrap'
+  const jump = (label: string, tab: string): void => {
+    const b = el('button', 'hbtn', label)
+    b.style.cssText = 'padding:2px 10px;font-size:10.5px'
+    b.onclick = () => {
+      activeTab = tab
+      tabSave()
+      rerender()
+    }
+    quick.appendChild(b)
+  }
+  jump('⛩️ Gates', 'gates')
+  jump('⚙️ Runs', 'runs')
+  jump('📦 Artifacts', 'artifacts')
+  jump('📊 Evidence', 'evidence')
+  jump('💰 Budget', 'budget')
+  body.appendChild(quick)
   if (history.length > 0) {
     body.appendChild(el('div', 'section-label', 'Audit history'))
     for (const h of history) {
@@ -2030,6 +2057,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ['Ctrl/Cmd+K', 'open the command palette'],
   ['Ctrl/Cmd+Shift+T', 'toggle light/dark theme'],
   ['Ctrl+↑ / Ctrl+↓', 'walk chat messages (details panel)'],
+  ['Home / End', 'jump to the first / last message'],
   ['/ (not typing)', 'focus the chat composer with a leading slash'],
   ['↑ / ↓ (composer)', 'walk command history'],
   ['Tab (composer)', 'complete the command name'],
@@ -3552,6 +3580,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isExport = msg.role === 'assistant' && /Release bundle \*\*[^*]+\*\* generated/.test(msg.text)
     const isIdeas = msg.role === 'assistant' && /^IdeaCards:/m.test(msg.text)
     const isList = msg.role === 'assistant' && /^Projects \(\d+\):/m.test(msg.text)
+    const isGatesList = msg.role === 'assistant' && /^Gates:/m.test(msg.text)
     const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
@@ -3805,6 +3834,34 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         card.appendChild(el('div', 'muted', r.trim().replace(/^- /, '· ')))
       }
       if (rows.length > 6) card.appendChild(el('div', 'muted', `… and ${rows.length - 6} more`))
+      structured = card
+    } else if (isGatesList && searchQ === '') {
+      // dsh-web gates card: pending/decided counts.
+      const rows = msg.text.split('\n').filter(l => /^- /.test(l.trim()))
+      const pendingCount = rows.filter(r => /\[pending\]/.test(r)).length
+      const decidedCount = rows.length - pendingCount
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '⛩️'))
+      head.appendChild(el('span', 'pname', `${rows.length} gate(s) · ${pendingCount} pending · ${decidedCount} decided`))
+      head.appendChild(el('span', 'grow'))
+      card.appendChild(head)
+      for (const r of rows.slice(0, 5)) {
+        const isPending = /\[pending\]/.test(r)
+        const row = el('div', 'muted', r.trim().replace(/^- /, isPending ? '⏳ ' : '✅ '))
+        card.appendChild(row)
+      }
+      if (rows.length > 5) card.appendChild(el('div', 'muted', `… and ${rows.length - 5} more`))
+      const goGates = el('button', 'hbtn', '→ open Gates tab')
+      goGates.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goGates.onclick = () => {
+        activeTab = 'gates'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goGates)
       structured = card
     }
     const lineCount = msg.text.split('\n').length
