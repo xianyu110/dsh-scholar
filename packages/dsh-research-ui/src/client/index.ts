@@ -338,8 +338,13 @@ export function apply(options: ApplyOptions = {}): void {
   // Theme: LIGHT is the default; persisted per browser. Accent: custom.
   host.dataset.theme = readTheme()
   // Custom accent (dsh-web theming): override the CSS variable directly.
+  // Dark-theme accent variants (dsh-web theming): brighter in dark mode.
+  const ACCENT_DARK: Record<string, string> = {
+    blue: '#4d9fff', violet: '#a78bfa', green: '#34d399', amber: '#fbbf24',
+  }
   const applyAccent = (): void => {
-    const c = accentColor()
+    const name = (Object.entries(ACCENTS).find(([, v]) => v === accentColor())?.[0] ?? 'blue')
+    const c = host.dataset.theme === 'dark' ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
     // Custom properties live on the host element (ShadowRoot has no .style).
     host.style.setProperty('--accent', c)
     host.style.setProperty('--accent-soft', `${c}1f`)
@@ -555,6 +560,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
     writeTheme(host.dataset.theme)
     paintTheme()
+    applyAccent()
   }
   paintTheme()
   const refresh = el('button', 'hbtn', '⟳ Refresh')
@@ -795,9 +801,16 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     }
     const stamp = el('div', 'stamp', `updated ${new Date().toLocaleTimeString()}${lastError !== undefined ? ` · ⚠ ${lastError}` : ''}`)
     body.appendChild(stamp)
+    paintBell()
   }
 
   refresh.onclick = () => { void render() }
+  // dsh-web notification dot: unread count on the bell.
+  const paintBell = (): void => {
+    bellBtn.textContent = notifUnread > 0 ? `🔔 ${notifUnread}` : '🔔'
+    bellBtn.title = notifUnread > 0 ? `${notifUnread} unread notifications` : 'notifications'
+  }
+  paintBell()
   rerender = () => { void render() }
   chatLoad()
   historyLoad()
@@ -824,6 +837,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
         writeTheme(host.dataset.theme)
         paintTheme()
+        applyAccent()
       } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !typing && activeTab === 'chat' && chatMessages.length > 0) {
         // dsh-web keyboard navigation: Ctrl+ArrowUp/Down walks messages
         // and selects them into the details panel.
@@ -1958,7 +1972,9 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   accentSelect.onchange = () => {
     accentSet(accentSelect.value)
     const hostEl = document.querySelector('#dsh-scholar-ui')
-    const c = accentColor()
+    const dark = hostEl?.dataset.theme === 'dark'
+    const name = accentSelect.value
+    const c = dark ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
     hostEl?.style.setProperty('--accent', c)
     hostEl?.style.setProperty('--accent-soft', `${c}1f`)
     hostEl?.style.setProperty('--accent-text', c)
@@ -2092,7 +2108,10 @@ function rootHost(): ShadowRoot | null {
 
 /** dsh-web notification centre: toast history (persisted, 30 max). */
 const NOTIF_KEY = 'dsh-scholar-ui-notifs'
+const NOTIF_READ_KEY = 'dsh-scholar-ui-notifs-read'
 let notifHistory: Array<{ text: string; time: string }> = []
+/** Unread badge count (dsh-web notification dot). */
+let notifUnread = 0
 function notifLoad(): void {
   try {
     const raw = localStorage.getItem(NOTIF_KEY)
@@ -2101,6 +2120,8 @@ function notifLoad(): void {
     if (Array.isArray(parsed)) {
       notifHistory = parsed.filter((n): n is { text: string; time: string } => typeof n === 'object' && n !== null && typeof (n as { text?: unknown }).text === 'string').slice(-30)
     }
+    const readRaw = localStorage.getItem(NOTIF_READ_KEY)
+    notifUnread = readRaw === null ? 0 : Math.max(0, notifHistory.length - Number(readRaw))
   } catch { /* private mode */ }
 }
 function notifPersist(): void {
@@ -2108,13 +2129,20 @@ function notifPersist(): void {
 }
 function notifClear(): void {
   notifHistory = []
+  notifUnread = 0
   notifPersist()
+  try { localStorage.setItem(NOTIF_READ_KEY, '0') } catch { /* private mode */ }
+}
+function notifMarkRead(): void {
+  notifUnread = 0
+  try { localStorage.setItem(NOTIF_READ_KEY, String(notifHistory.length)) } catch { /* private mode */ }
 }
 
 /** dsh-web toast: a transient status pill bottom-center (2.4s), recorded. */
 function showToast(root: ShadowRoot | null, text: string): void {
   notifHistory.push({ text, time: new Date().toLocaleTimeString() })
   notifPersist()
+  notifUnread += 1
   if (root === null) return
   const existing = root.querySelector('.toast')
   existing?.remove()
@@ -2126,6 +2154,8 @@ function showToast(root: ShadowRoot | null, text: string): void {
 
 /** dsh-web notification centre modal. */
 function openNotificationsModal(root: ShadowRoot): void {
+  notifMarkRead()
+  rerender()
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -3139,6 +3169,14 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         grid.appendChild(chatFieldCell('Evidence', evMatch[1] ?? ''))
         grid.appendChild(chatFieldCell('Status', evMatch[2] ?? ''))
       }
+      const goEv = el('button', 'hbtn', '→ open Evidence tab')
+      goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goEv.onclick = () => {
+        activeTab = 'evidence'
+        tabSave()
+        rerender()
+      }
+      grid.appendChild(goEv)
       structured = grid
     } else if (isGate && searchQ === '') {
       // dsh-web gate card: gate id + a jump-to-Gates action.
