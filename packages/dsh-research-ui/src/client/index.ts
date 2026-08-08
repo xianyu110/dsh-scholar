@@ -371,6 +371,8 @@ function favProjectToggle(id: string): void {
 
 /** Artifact list filter (dsh-web search-as-you-type), persisted per render. */
 let artifactsQuery = ''
+/** Artifact kind filter (dsh-web filter chips). */
+let artifactsKind = 'all'
 
 /** Claims & evidence filter on the Evidence tab (dsh-web search-as-you-type). */
 let evidenceQuery = ''
@@ -1822,6 +1824,36 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
   searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
   body.appendChild(searchInput)
 
+  // dsh-web filter chips: restrict by artifact kind (kinds present here).
+  const kindCounts = new Map<string, number>()
+  for (const a of artifacts) {
+    const k = a.kind ?? '?'
+    kindCounts.set(k, (kindCounts.get(k) ?? 0) + 1)
+  }
+  const kindChips = el('div')
+  kindChips.style.cssText = 'display:flex;gap:4px;margin:2px 0 6px;flex-wrap:wrap'
+  const kindDefs: Array<[string, string]> = [['all', `All (${artifacts.length})`], ...[...kindCounts.entries()].slice(0, 8).map(([k, n]) => [k, `${k} (${n})`] as [string, string])]
+  const paintKindChips = (): void => {
+    for (let i = 0; i < kindDefs.length; i++) {
+      const b = kindChips.children[i] as HTMLElement | undefined
+      if (b === undefined) continue
+      const active = artifactsKind === kindDefs[i]![0]
+      b.setAttribute('aria-pressed', active ? 'true' : 'false')
+      b.style.cssText = `padding:2px 8px;font-size:10px${active ? ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)' : ''}`
+    }
+  }
+  for (const [key, label] of kindDefs) {
+    const chip = el('button', 'hbtn', label)
+    chip.onclick = () => {
+      artifactsKind = key
+      paintKindChips()
+      renderList()
+    }
+    kindChips.appendChild(chip)
+  }
+  paintKindChips()
+  body.appendChild(kindChips)
+
   const listEl = el('div')
   body.appendChild(listEl)
 
@@ -1880,15 +1912,16 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
       listEl.appendChild(notice)
     }
+    const kindFiltered = artifactsKind === 'all' ? shownArtifacts : shownArtifacts.filter(a => (a.kind ?? '?') === artifactsKind)
     const q = artifactsQuery.trim().toLowerCase()
-    const filtered = q === '' ? shownArtifacts : shownArtifacts.filter(a =>
+    const filtered = q === '' ? kindFiltered : kindFiltered.filter(a =>
       (a.kind ?? '').toLowerCase().includes(q) ||
       (a.artifact_id ?? '').toLowerCase().includes(q) ||
       String(a.metadata?.kind ?? '').toLowerCase().includes(q) ||
       String(a.metadata?.name ?? '').toLowerCase().includes(q),
     )
     if (filtered.length === 0) {
-      listEl.appendChild(el('div', 'empty', `No artifacts match "${artifactsQuery.trim()}".`))
+      listEl.appendChild(el('div', 'empty', `No artifacts match "${artifactsQuery.trim()}"${artifactsKind !== 'all' ? ` (kind: ${artifactsKind})` : ''}.`))
       return
     }
     for (const artifact of filtered) {
