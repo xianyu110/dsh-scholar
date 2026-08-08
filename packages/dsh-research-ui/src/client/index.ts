@@ -1344,6 +1344,11 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
   if (claims.length === 0) {
     body.appendChild(el('div', 'empty', 'No claims yet.'))
   }
+  if (claims.length > 8) {
+    const notice = el('div', 'muted', `Showing the newest 8 of ${claims.length} claims — use 🌐 global search for the rest.`)
+    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+    body.appendChild(notice)
+  }
   for (const claim of claims.slice(-8).reverse()) {
     const card = el('div', 'evidence-card')
     const top = el('div', 'row')
@@ -2605,6 +2610,62 @@ let chatMessages: ChatMessage[] = []
 let chatDraft = ''
 const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 const CHAT_MAX = 200
+/** Multi-session chats (dsh-web session tabs), persisted. */
+const SESSIONS_KEY = 'dsh-scholar-ui-sessions'
+interface ChatSession { id: string; name: string; messages: ChatMessage[] }
+let chatSessions: ChatSession[] = []
+let chatActiveId: string | null = null
+
+/** Current session's messages (chatMessages mirrors the active session). */
+function chatSyncActive(): void {
+  const active = chatSessions.find(s => s.id === chatActiveId)
+  chatMessages = active !== undefined ? active.messages : []
+}
+function chatSessionsPersist(): void {
+  try {
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(chatSessions.map(s => ({ ...s, messages: s.messages.slice(-CHAT_MAX) }))))
+  } catch { /* private mode */ }
+}
+function chatSessionEnsure(): void {
+  if (chatSessions.length === 0) {
+    chatSessions = [{ id: 'default', name: 'Chat 1', messages: [] }]
+    chatActiveId = 'default'
+  }
+  if (chatActiveId === null || !chatSessions.some(s => s.id === chatActiveId)) {
+    chatActiveId = chatSessions[0]!.id
+  }
+  chatSyncActive()
+}
+function chatSessionNew(): void {
+  const id = `s${Date.now()}`
+  chatSessions.push({ id, name: `Chat ${chatSessions.length + 1}`, messages: [] })
+  chatActiveId = id
+  chatDraft = ''
+  chatSyncActive()
+  chatSessionsPersist()
+  rerender()
+}
+function chatSessionClose(id: string): void {
+  const idx = chatSessions.findIndex(s => s.id === id)
+  if (idx < 0) return
+  chatSessions.splice(idx, 1)
+  if (chatSessions.length === 0) chatSessionEnsure()
+  if (chatActiveId === id) {
+    chatActiveId = chatSessions[Math.min(idx, chatSessions.length - 1)]!.id
+    chatDraft = ''
+  }
+  chatSyncActive()
+  chatSessionsPersist()
+  rerender()
+}
+function chatSessionSelect(id: string): void {
+  if (chatSessions.some(s => s.id === id)) {
+    chatActiveId = id
+    chatDraft = ''
+    chatSyncActive()
+    rerender()
+  }
+}
 /** Command history for ↑/↓ navigation (dsh-web shell feel), persisted. */
 const HISTORY_KEY = 'dsh-scholar-ui-history'
 let chatHistory: string[] = []
@@ -2630,8 +2691,25 @@ function historyPush(line: string): void {
   historyIndex = -1
 }
 
-/** Restore the transcript persisted in localStorage (dsh-web session feel). */
+/** Restore transcripts persisted in localStorage (dsh-web session tabs). */
 function chatLoad(): void {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY)
+    const parsed = raw !== null ? JSON.parse(raw) as unknown : null
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      chatSessions = parsed
+        .filter((s): s is ChatSession => typeof s === 'object' && s !== null
+          && typeof (s as ChatSession).id === 'string'
+          && typeof (s as ChatSession).name === 'string'
+          && Array.isArray((s as ChatSession).messages))
+        .map(s => ({ ...s, messages: s.messages.filter((m): m is ChatMessage => typeof m === 'object' && m !== null && typeof (m as ChatMessage).role === 'string' && (m as ChatMessage).role in { user: 1, assistant: 1, error: 1 } && typeof (m as ChatMessage).text === 'string').slice(-CHAT_MAX) }))
+      chatActiveId = chatSessions[0]?.id ?? null
+      chatSyncActive()
+      return
+    }
+  } catch { /* corrupt or private mode */ }
+  // Legacy single-transcript key.
+  chatSessionEnsure()
   try {
     const raw = localStorage.getItem(CHAT_STORAGE_KEY)
     if (raw === null) return
@@ -2643,6 +2721,7 @@ function chatLoad(): void {
           && (m as ChatMessage).role in { user: 1, assistant: 1, error: 1 }
           && typeof (m as ChatMessage).text === 'string')
         .slice(-CHAT_MAX)
+      chatSyncActive()
     }
   } catch { /* corrupt or private mode */ }
 }
@@ -2651,10 +2730,12 @@ function chatPersist(): void {
   try {
     localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatMessages.slice(-CHAT_MAX)))
   } catch { /* private mode */ }
+  chatSessionsPersist()
 }
 
 function chatClear(): void {
   chatMessages = []
+  chatSyncActive()
   chatPersist()
 }
 
@@ -3141,6 +3222,39 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const column = el('div')
   column.style.cssText = 'flex:1;display:flex;flex-direction:column;min-width:0'
 
+  // dsh-web session tabs: switch / create / close chat sessions.
+  const sessionTabs = el('div')
+  sessionTabs.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap;align-items:center'
+  for (const s of chatSessions) {
+    const tab = el('button', 'hbtn')
+    tab.textContent = s.name
+    tab.style.cssText = 'padding:3px 10px;font-size:10.5px'
+    if (s.id === chatActiveId) {
+      tab.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
+    }
+    tab.onclick = () => { chatSessionSelect(s.id) }
+    sessionTabs.appendChild(tab)
+    const close = el('button', 'hbtn ghost', '×')
+    close.style.cssText = 'padding:0 4px;font-size:10px'
+    close.title = `close ${s.name}`
+    close.onclick = (event) => {
+      event.stopPropagation()
+      chatSessionClose(s.id)
+    }
+    const wrap = el('span')
+    wrap.style.cssText = 'display:inline-flex;align-items:center;gap:2px;border:1px solid var(--border);border-radius:8px;padding:1px 4px'
+    if (s.id === chatActiveId) wrap.style.cssText += ';border-color:var(--accent);background:var(--accent-soft)'
+    wrap.appendChild(tab)
+    wrap.appendChild(close)
+    sessionTabs.appendChild(wrap)
+  }
+  const newSession = el('button', 'hbtn', '＋')
+  newSession.title = 'new chat session'
+  newSession.style.cssText = 'padding:3px 9px;font-size:11px'
+  newSession.onclick = () => { chatSessionNew() }
+  sessionTabs.appendChild(newSession)
+  column.appendChild(sessionTabs)
+
   // Transcript search box (dsh-web "Search sessions" on the chat itself):
   // filters which messages are shown; matches are highlighted.
   const searchRow = el('div')
@@ -3287,6 +3401,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isContract = msg.role === 'assistant' && /Contract \*\*[^*]+\*\* registered/.test(msg.text)
     const isWrite = msg.role === 'assistant' && /Manuscript \*\*[^*]+\*\* built/.test(msg.text)
     const isReview = msg.role === 'assistant' && msg.text.startsWith('Reviewer:')
+    const isExport = msg.role === 'assistant' && /Release bundle \*\*[^*]+\*\* generated/.test(msg.text)
     const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
@@ -3479,6 +3594,27 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         rerender()
       }
       card.appendChild(goEv)
+      structured = card
+    } else if (isExport && searchQ === '') {
+      // dsh-web export card: bundle id + jump to Phase (release gate).
+      const bMatch = /Release bundle \*\*([^*]+)\*\* generated/.exec(msg.text)
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '📦'))
+      head.appendChild(el('span', 'pname', bMatch?.[1] ?? 'release bundle'))
+      head.appendChild(el('span', 'grow'))
+      head.appendChild(pill('exported'))
+      card.appendChild(head)
+      const goPhase = el('button', 'hbtn', '→ open Phase tab')
+      goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goPhase.onclick = () => {
+        activeTab = 'phase'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goPhase)
       structured = card
     }
     const lineCount = msg.text.split('\n').length
