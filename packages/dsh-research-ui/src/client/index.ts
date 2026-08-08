@@ -602,25 +602,55 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   void render()
   const timer = window.setInterval(() => { void render() }, 8000)
   // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
-  // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme.
+  // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme;
+  // a bare "/" (not typing) focuses the chat composer.
   const onKey = (event: KeyboardEvent): void => {
-    if (!(event.metaKey || event.ctrlKey)) return
     const target = event.target as HTMLElement | null
     const typing = target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
-    if (event.key.toLowerCase() === 'k' && !typing) {
+    if (event.metaKey || event.ctrlKey) {
+      if (event.key.toLowerCase() === 'k' && !typing) {
+        event.preventDefault()
+        openCommandsModal(root)
+      } else if (event.key.toLowerCase() === 't' && event.shiftKey && !typing) {
+        event.preventDefault()
+        host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
+        writeTheme(host.dataset.theme)
+        paintTheme()
+      }
+      return
+    }
+    // dsh-web behavior: typing "/" anywhere (not already typing) jumps to
+    // the chat composer with a leading slash.
+    if (event.key === '/' && !typing && fullscreen) {
       event.preventDefault()
-      openCommandsModal(root)
-    } else if (event.key.toLowerCase() === 't' && event.shiftKey && !typing) {
-      event.preventDefault()
-      host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
-      writeTheme(host.dataset.theme)
-      paintTheme()
+      activeTab = 'chat'
+      chatDraft = '/'
+      rerender()
+      // Focus the composer once the chat tab has rendered.
+      setTimeout(() => {
+        const ta = root.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+        ta?.focus()
+      }, 120)
     }
   }
   window.addEventListener('keydown', onKey)
+  // Responsive: narrow viewports auto-collapse the sidebar (dsh-web shell).
+  const onResize = (): void => {
+    if (!fullscreen || sidebar === null) return
+    const narrow = window.innerWidth < 920
+    if (narrow !== sidebarCollapsed) {
+      sidebarCollapsed = narrow
+      sidebar.classList.toggle('collapsed', sidebarCollapsed)
+      if (main !== null) main.classList.toggle('expanded', sidebarCollapsed)
+      sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
+    }
+  }
+  onResize()
+  window.addEventListener('resize', onResize)
   window.addEventListener('beforeunload', () => {
     window.clearInterval(timer)
     window.removeEventListener('keydown', onKey)
+    window.removeEventListener('resize', onResize)
   }, { once: true })
   document.body.appendChild(host)
 }
@@ -2026,12 +2056,35 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     try {
       const answer = await executeChatCommand(line, projectId)
       runningBubble.remove()
-      chatPush('assistant', answer)
+      // dsh-web streaming feel: reveal the answer progressively in chunks
+      // (line-by-line for multi-line answers, word-wise for single lines).
+      const answerBubble = el('div')
+      answerBubble.style.cssText = 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px;cursor:pointer'
+      const lines = answer.split('\n')
+      const chunkMs = lines.length > 4 ? 14 : 10
+      const reveal = (): void => {
+        const done = answerBubble.getAttribute('data-lines') !== null
+          ? Number(answerBubble.getAttribute('data-lines')) : 0
+        const next = done + 1
+        if (next >= lines.length) {
+          answerBubble.replaceChildren(...formatChatText(answer))
+          chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
+          chatPersist()
+          rerender()
+          return
+        }
+        answerBubble.replaceChildren(...formatChatText(lines.slice(0, next).join('\n') + '\n'))
+        answerBubble.setAttribute('data-lines', String(next))
+        streamEl.scrollTop = streamEl.scrollHeight
+        setTimeout(reveal, chunkMs)
+      }
+      streamEl.appendChild(answerBubble)
+      reveal()
     } catch (error) {
       runningBubble.remove()
       chatPush('error', `command failed: ${(error as Error).message}`)
+      rerender()
     }
-    rerender()
   }
   send.onclick = () => { void run() }
   input.onkeydown = (event) => {
