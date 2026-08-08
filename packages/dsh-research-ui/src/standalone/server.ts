@@ -282,6 +282,12 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         res.end(BOOTSTRAP_HTML)
         return
       }
+      // Favicon: 204 so the browser does not log a 404 per request.
+      if (method === 'GET' && (url.pathname === '/favicon.ico' || url.pathname === '/favicon.svg')) {
+        res.writeHead(204, { 'cache-control': 'no-store' })
+        res.end()
+        return
+      }
       // Client bundle (the same build the DSH host uses; standalone config
       // is applied by the bootstrap script before apply()).
       if (method === 'GET' && url.pathname === '/client.js') {
