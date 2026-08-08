@@ -37,6 +37,7 @@ export type ProjectMode = z.infer<typeof ProjectMode>
 export const KernelEventKind = z.enum([
   'project.created',
   'project.transitioned',
+  'project.renamed',
   'gate.created',
   'gate.decided',
   'artifact.registered',

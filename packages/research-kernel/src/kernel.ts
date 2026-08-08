@@ -288,6 +288,20 @@ export class ResearchKernel {
     return updated
   }
 
+  /** Rename a project (dsh-web session actions); audited in history. */
+  renameProject(projectId: string, name: string): ResearchProject {
+    const clean = name.trim()
+    if (clean === '') throw new KernelError(422, 'invalid_name', 'project name must not be empty')
+    if (clean.length > 120) throw new KernelError(422, 'invalid_name', 'project name too long (max 120 chars)')
+    const project = this.getProject(projectId)
+    const now = nowIso()
+    this.db.prepare('UPDATE projects SET name = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
+      .run(clean, now, JSON.stringify([...project.history, `renamed to "${clean}"`]), projectId)
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.renamed', { from: project.name, to: clean, revision: updated.revision })
+    return updated
+  }
+
   /** Link a DSH session to a project (design RSP-006). */
   linkSession(sessionId: string, projectId: string): SessionLink {
     this.getProject(projectId)

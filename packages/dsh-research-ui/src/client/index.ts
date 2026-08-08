@@ -395,6 +395,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .ws-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; background:var(--tone-slate); }
 .ws-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:600 12px/1.3 system-ui,sans-serif; }
 .ws-status { font:600 8.5px/1 ui-monospace,Menlo,monospace; color:var(--text-3); letter-spacing:.3px; flex-shrink:0; }
+.ws-rename { display:none; color:var(--text-3); font-size:12px; padding:0 4px; cursor:pointer; flex-shrink:0; }
+.ws-rename:hover { color:var(--accent); }
+.ws-item:hover .ws-rename { display:inline; }
 .sidebar-foot { padding:10px 12px; border-top:1px solid var(--border); color:var(--text-3); font-size:10px; }
 .sidebar.collapsed { width:44px; }
 .sidebar.collapsed .sidebar-head { justify-content:center; padding:12px 6px; }
@@ -565,7 +568,27 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   chatLoad()
   void render()
   const timer = window.setInterval(() => { void render() }, 8000)
-  window.addEventListener('beforeunload', () => window.clearInterval(timer), { once: true })
+  // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
+  // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme.
+  const onKey = (event: KeyboardEvent): void => {
+    if (!(event.metaKey || event.ctrlKey)) return
+    const target = event.target as HTMLElement | null
+    const typing = target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    if (event.key.toLowerCase() === 'k' && !typing) {
+      event.preventDefault()
+      openCommandsModal(root)
+    } else if (event.key.toLowerCase() === 't' && event.shiftKey && !typing) {
+      event.preventDefault()
+      host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
+      writeTheme(host.dataset.theme)
+      paintTheme()
+    }
+  }
+  window.addEventListener('keydown', onKey)
+  window.addEventListener('beforeunload', () => {
+    window.clearInterval(timer)
+    window.removeEventListener('keydown', onKey)
+  }, { once: true })
   document.body.appendChild(host)
 }
 
@@ -1028,6 +1051,78 @@ function openNewProjectModal(root: ShadowRoot): void {
   overlay.appendChild(modal)
   root.appendChild(overlay)
   nameInput.focus()
+}
+
+/* ─────────────────────────── rename modal ─────────────────────────── */
+
+/**
+ * dsh-web "session actions" rename: PATCH /v1/projects/:id {name}, audited
+ * in the kernel history ledger.
+ */
+function openRenameModal(root: ShadowRoot, projectId: string, currentName: string, onDone: () => void): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:440px;max-width:92vw'
+  const header = el('div', 'modal-header', '✎ Rename Project')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const hint = el('div', 'muted', `Current name: ${currentName} · rename is audited in the project history.`)
+  hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
+  modal.appendChild(hint)
+
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.value = currentName
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  modal.appendChild(input)
+
+  const err = el('div', 'error-banner')
+  err.style.cssText = 'display:none;margin-top:10px'
+  modal.appendChild(err)
+
+  const actions = el('div', 'row')
+  actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
+  const cancel = el('button', 'hbtn', 'Cancel')
+  cancel.onclick = () => overlay.remove()
+  const save = el('button', 'btn approve', 'Rename')
+  save.style.cssText = 'padding:7px 18px'
+  save.onclick = async () => {
+    const name = input.value.trim()
+    if (name === '') {
+      err.textContent = 'Name must not be empty.'
+      err.style.display = 'block'
+      return
+    }
+    err.style.display = 'none'
+    save.disabled = true
+    save.textContent = 'Saving…'
+    const result = await api<{ project_id?: string; name?: string }>(`/v1/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    })
+    if (result === null || result.project_id === undefined) {
+      err.textContent = 'Rename failed — is the kernel reachable?'
+      err.style.display = 'block'
+      save.disabled = false
+      save.textContent = 'Rename'
+      return
+    }
+    overlay.remove()
+    onDone()
+  }
+  actions.append(cancel, save)
+  modal.appendChild(actions)
+
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  input.focus()
+  input.select()
 }
 
 /* ─────────────────────────── commands modal ─────────────────────────── */
@@ -1590,6 +1685,16 @@ function renderSidebar(
       item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+      // dsh-web "session actions": rename (appears on hover via CSS).
+      const renameBtn = el('span', 'ws-rename', '✎')
+      renameBtn.title = 'rename project'
+      renameBtn.onclick = (event) => {
+        event.stopPropagation()
+        if (p.project_id === undefined) return
+        const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+        if (root !== null) openRenameModal(root, p.project_id, p.name ?? '', () => rerender())
+      }
+      item.appendChild(renameBtn)
       list.appendChild(item)
     }
   }
@@ -1703,10 +1808,22 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     chatDraft = ''
     completionBox.style.display = 'none'
     chatPush('user', line)
+    // dsh-web streaming feel: a "running…" bubble while the command works.
+    const runningBubble = el('div')
+    runningBubble.style.cssText = 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;font-size:12px;display:flex;align-items:center;gap:8px'
+    const spinner = el('span')
+    spinner.textContent = '⏳'
+    const runningText = el('span', '', 'running…')
+    runningBubble.append(spinner, runningText)
+    const streamEl = stream
+    streamEl.appendChild(runningBubble)
+    streamEl.scrollTop = streamEl.scrollHeight
     try {
       const answer = await executeChatCommand(line, projectId)
+      runningBubble.remove()
       chatPush('assistant', answer)
     } catch (error) {
+      runningBubble.remove()
       chatPush('error', `command failed: ${(error as Error).message}`)
     }
     rerender()

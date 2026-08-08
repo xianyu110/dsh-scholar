@@ -112,6 +112,18 @@ describe('project state machine', () => {
     kernel.close()
   })
 
+  it('renames a project with audit history and revision bump', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'old-name', workspace: '/w', brief: makeBrief() })
+    const renamed = kernel.renameProject(project.project_id, 'new-name')
+    expect(renamed.name).toBe('new-name')
+    expect(renamed.revision).toBe(1)
+    expect(renamed.history.at(-1)).toBe('renamed to "new-name"')
+    expect(kernel.listProjects()[0]!.name).toBe('new-name')
+    expect(() => kernel.renameProject(project.project_id, '   ')).toThrow(KernelError)
+    kernel.close()
+  })
+
   it('v2 §6.2: generic transition cannot enter gate-controlled states', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })

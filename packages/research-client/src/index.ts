@@ -104,6 +104,10 @@ export class ResearchClient {
     return this.request('GET', `/v1/projects/${projectId}`)
   }
 
+  renameProject(projectId: string, name: string): Promise<ResearchProject> {
+    return this.request('PATCH', `/v1/projects/${projectId}`, { name })
+  }
+
   projectProjection(projectId: string): Promise<{
     project: ResearchProject
     pending_gates: Gate[]

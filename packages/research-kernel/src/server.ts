@@ -268,6 +268,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.getProject(id))
               return
             }
+            if (method === 'PATCH' && sub === undefined) {
+              const input = z.object({ name: z.string().min(1) }).parse(body)
+              ok(res, kernel.renameProject(id, input.name))
+              return
+            }
             if (method === 'GET' && sub === 'projection') {
               ok(res, kernel.projectProjection(id))
               return
