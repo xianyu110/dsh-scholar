@@ -548,10 +548,17 @@ async function runDocker(
 ): Promise<RunOutcome> {
   const startedAt = new Date().toISOString()
   const container = `dsh-scholar-${randomUUID().slice(0, 8)}`
+  // §3.2/§12.3 (RUN-02): full container baseline — read-only rootfs,
+  // capability drop, no-new-privileges, pids cap. /tmp is a tmpfs and
+  // /outputs is the only rw mount, so job payloads must write there.
   const args = [
     'run', '--rm', '--name', container,
     '--network', 'none',
     '--user', '65534:65534',
+    '--read-only',
+    '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+    '--pids-limit', '256',
     '--memory', '1g', '--cpus', '1',
     '--workdir', '/work',
     '-v', `${cwd}:/work:ro`,
