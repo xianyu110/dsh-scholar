@@ -4530,7 +4530,7 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
 /** Sidebar search filter (dsh-web "Search sessions" feel). */
 let sidebarQuery = ''
 /** Sidebar grouping (dsh-web "Group by" feel): all | active | done. */
-let sidebarGroup: 'all' | 'active' | 'done' = 'all'
+let sidebarGroup: 'all' | 'active' | 'done' | 'archived' = 'all'
 
 /** Projects considered "active" (still in the research pipeline). */
 function isProjectActive(status: string | undefined): boolean {
@@ -4576,8 +4576,8 @@ function renderSidebar(
   // Group by (dsh-web "Group by"): all / active / done.
   const groupRow = el('div')
   groupRow.style.cssText = 'display:flex;gap:4px;padding:4px 10px 6px'
-  const GROUP_DEFS: Array<['all' | 'active' | 'done', string]> = [
-    ['all', 'All'], ['active', 'Active'], ['done', 'Done'],
+  const GROUP_DEFS: Array<['all' | 'active' | 'done' | 'archived', string]> = [
+    ['all', 'All'], ['active', 'Active'], ['done', 'Done'], ['archived', 'Archived'],
   ]
   for (const [key, label] of GROUP_DEFS) {
     const chip = el('button', 'sidebar-new')
@@ -4598,6 +4598,7 @@ function renderSidebar(
     let filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q) || (p.status ?? '').toLowerCase().includes(q))
     if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
     if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
+    if (sidebarGroup === 'archived') filtered = filtered.filter(p => p.status === 'ARCHIVED')
     if (filtered.length === 0) {
       const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet — create one with ＋ above or /research new in Chat.' : 'No matches for the current filter.')
       empty.style.cssText = 'padding:10px 12px'
@@ -4820,6 +4821,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const tab = el('button', 'hbtn')
     tab.textContent = s.name
     tab.style.cssText = 'padding:3px 10px;font-size:10.5px'
+    // dsh-web session depth: message count on the chip.
+    if ((s.messages ?? []).length > 0) {
+      const cnt = el('span', 'muted', ` ${s.messages.length}`)
+      cnt.style.cssText = 'font-size:9px;opacity:.75'
+      tab.appendChild(cnt)
+    }
     if (s.id !== chatActiveId && (s.unread ?? 0) > 0) {
       const badge = el('span', 'artifact-kind', `${s.unread}`)
       badge.style.cssText += ';margin-left:4px;color:var(--tone-amber);font-weight:700'
