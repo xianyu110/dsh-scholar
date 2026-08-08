@@ -3731,17 +3731,20 @@ function openGlobalSearchModal(root: ShadowRoot): void {
 
   const input = document.createElement('input')
   input.type = 'text'
-  input.placeholder = 'Search claims & evidence across all projects…'
+  input.placeholder = 'Search claims, evidence & artifacts across all projects…'
   input.value = globalSearchQuery
   input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none;margin-bottom:10px'
   input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
   input.onblur = () => { input.style.borderColor = 'var(--border)' }
   modal.appendChild(input)
 
-  // dsh-web filter chips: restrict hits by kind (All / Claims / Evidence).
+  // dsh-web filter chips: restrict hits by kind (All / Claims / Evidence /
+  // Artifacts).
   const chipsRow = el('div')
   chipsRow.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap'
-  const GS_KINDS: Array<['all' | 'claim' | 'evidence', string]> = [['all', 'All'], ['claim', 'Claims'], ['evidence', 'Evidence']]
+  const GS_KINDS: Array<['all' | 'claim' | 'evidence' | 'artifact', string]> = [
+    ['all', 'All'], ['claim', 'Claims'], ['evidence', 'Evidence'], ['artifact', 'Artifacts'],
+  ]
   for (const [key, label] of GS_KINDS) {
     const chip = el('button', 'hbtn', label)
     chip.style.cssText = 'padding:2px 10px;font-size:10px'
@@ -3806,6 +3809,13 @@ function openGlobalSearchModal(root: ShadowRoot): void {
           hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'evidence', text: label })
         }
       }
+      const artifacts = (await api<ArtifactRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/artifacts`)) ?? []
+      for (const a of artifacts) {
+        const label = `${a.kind ?? 'artifact'} ${a.artifact_id ?? ''}${typeof a.metadata?.name === 'string' && a.metadata.name !== '' ? ` · ${a.metadata.name}` : ''}`
+        if (label.toLowerCase().includes(q)) {
+          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'artifact', text: label })
+        }
+      }
     }
     const kindHits = gsKind === 'all' ? hits : hits.filter(h => h.kind === gsKind)
     globalSearchResults = kindHits
@@ -3840,7 +3850,9 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       row.onclick = () => {
         overlay.remove()
         projectId = h.projectId
-        activeTab = 'evidence'
+        // dsh-web jump: artifacts open the Artifacts tab, everything else
+        // the Evidence tab.
+        activeTab = h.kind === 'artifact' ? 'artifacts' : 'evidence'
         tabSave()
         rerender()
       }
@@ -4203,6 +4215,10 @@ function chatSessionArchive(id: string): void {
   const session = chatSessions.find(s => s.id === id)
   if (session === undefined) return
   session.archived = !session.archived
+  if (!session.archived) {
+    // dsh-web restore: a restored session is no longer unread.
+    session.unread = 0
+  }
   if (session.archived && chatActiveId === id) {
     const next = chatSessions.find(s => s.id !== id && !s.archived) ?? chatSessions.find(s => s.id !== id)
     if (next !== undefined) {
@@ -4802,7 +4818,7 @@ let globalSearchOpen = false
 let globalSearchQuery = ''
 let globalSearchResults: Array<{ project: string; kind: string; text: string }> = []
 /** Global search kind filter (dsh-web filter chips). */
-let gsKind: 'all' | 'claim' | 'evidence' = 'all'
+let gsKind: 'all' | 'claim' | 'evidence' | 'artifact' = 'all'
 /** Multi-select mode for the sidebar (dsh-web bulk session actions). */
 let sidebarSelecting = false
 let sidebarSelected = new Set<string>()
