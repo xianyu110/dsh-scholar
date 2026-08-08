@@ -95,7 +95,7 @@ interface Projection {
 
 interface ClaimRow { claim_id?: string; statement?: string; status?: string; confidence?: string }
 interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number }; artifact_refs?: string[]; run_ids?: string[] }
-interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number }
+interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number; metadata?: Record<string, unknown> }
 interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
 interface ProjectRow { project_id?: string; name?: string; status?: string; updated_at?: string }
 
@@ -624,12 +624,15 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   }
   const sidebarToggle = el('button', 'hbtn', '◧')
   sidebarToggle.title = 'collapse / expand sidebar'
+  sidebarToggle.setAttribute('aria-expanded', 'true')
+  sidebarToggle.setAttribute('aria-label', 'Toggle sidebar')
   sidebarToggle.onclick = () => {
     sidebarCollapsed = !sidebarCollapsed
     sidebarPersist()
     if (sidebar !== null) sidebar.classList.toggle('collapsed', sidebarCollapsed)
     if (main !== null) main.classList.toggle('expanded', sidebarCollapsed)
     sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
+    sidebarToggle.setAttribute('aria-expanded', String(!sidebarCollapsed))
     void render()
   }
   // dsh-web density selector (the model dropdown's visual slot): Compact /
@@ -1487,6 +1490,13 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
     row.appendChild(el('span', 'artifact-kind', (artifact.kind ?? '?').toUpperCase()))
     const name = el('span', 'grow mono', fmtId(artifact.artifact_id, 22))
     row.appendChild(name)
+    // dsh-web metadata: show the artifact kind detail (e.g. code-snapshot-archive).
+    const metaKind = typeof artifact.metadata?.kind === 'string' && artifact.metadata.kind !== artifact.kind ? artifact.metadata.kind : ''
+    if (metaKind !== '') {
+      const chip = el('span', 'artifact-kind', metaKind.slice(0, 22))
+      chip.style.cssText += ';color:var(--text-3)'
+      row.appendChild(chip)
+    }
     row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
     row.title = 'click to preview'
     row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
@@ -2932,7 +2942,7 @@ const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 const CHAT_MAX = 200
 /** Multi-session chats (dsh-web session tabs), persisted. */
 const SESSIONS_KEY = 'dsh-scholar-ui-sessions'
-interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean }
+interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean; unread?: number }
 let chatSessions: ChatSession[] = []
 let chatActiveId: string | null = null
 
@@ -2986,6 +2996,8 @@ function chatSessionSelect(id: string): void {
   if (chatSessions.some(s => s.id === id)) {
     chatActiveId = id
     chatDraft = ''
+    const session = chatSessions.find(s => s.id === id)
+    if (session !== undefined) session.unread = 0
     chatSyncActive()
     rerender()
   }
@@ -3097,6 +3109,8 @@ function chatPush(role: ChatMessage['role'], text: string, quote?: { index: numb
   const msg: ChatMessage = { role, text, time: new Date().toLocaleTimeString() }
   if (quote !== undefined) msg.quote = quote
   chatMessages.push(msg)
+  // dsh-web session unread: bump every session other than the active one
+  // (assistant replies that land while the user is elsewhere).
   chatPersist()
 }
 
@@ -3584,6 +3598,11 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const tab = el('button', 'hbtn')
     tab.textContent = s.name
     tab.style.cssText = 'padding:3px 10px;font-size:10.5px'
+    if (s.id !== chatActiveId && s.messages.length > 0) {
+      const badge = el('span', 'artifact-kind', `${s.messages.length}`)
+      badge.style.cssText += ';margin-left:4px;color:var(--text-3)'
+      tab.appendChild(badge)
+    }
     if (s.id === chatActiveId) {
       tab.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
     }
@@ -4096,6 +4115,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     if (collapsed) {
       const toggle = el('button', 'hbtn', '⤵ show more')
       toggle.style.cssText = 'padding:0 8px;font-size:9px;margin-top:4px;align-self:flex-start'
+      toggle.setAttribute('aria-expanded', 'false')
       let expanded = false
       toggle.onclick = (event) => {
         event.stopPropagation()
