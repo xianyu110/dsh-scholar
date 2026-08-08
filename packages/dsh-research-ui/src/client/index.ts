@@ -732,6 +732,16 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
         writeTheme(host.dataset.theme)
         paintTheme()
+      } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !typing && activeTab === 'chat' && chatMessages.length > 0) {
+        // dsh-web keyboard navigation: Ctrl+ArrowUp/Down walks messages
+        // and selects them into the details panel.
+        event.preventDefault()
+        const dir = event.key === 'ArrowUp' ? -1 : 1
+        const next = chatDetailIndex < 0
+          ? (dir < 0 ? chatMessages.length - 1 : 0)
+          : Math.min(chatMessages.length - 1, Math.max(0, chatDetailIndex + dir))
+        chatDetailIndex = next
+        rerender()
       }
       return
     }
@@ -1449,6 +1459,39 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   for (const h of history) {
     modal.appendChild(el('div', 'muted', `· ${h}`))
   }
+
+  // dsh-web export: full project JSON (projection + gates + jobs + ideas
+  // + contracts + evidence + artifacts) as a downloadable file.
+  const exportRow = el('div', 'row')
+  exportRow.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:16px'
+  const exportBtn = el('button', 'btn approve', '⬇ Export JSON')
+  exportBtn.style.cssText = 'padding:7px 16px'
+  exportBtn.onclick = async () => {
+    exportBtn.textContent = 'Exporting…'
+    const data: Record<string, unknown> = {
+      project: p,
+      gates: (await api(`/v1/projects/${encodeURIComponent(projectId)}/gates`)) ?? [],
+      jobs: (await api(`/v1/projects/${encodeURIComponent(projectId)}/jobs`)) ?? [],
+      ideas: (await api(`/v1/projects/${encodeURIComponent(projectId)}/ideas`)) ?? [],
+      contracts: (await api(`/v1/projects/${encodeURIComponent(projectId)}/contracts`)) ?? [],
+      evidence: (await api(`/v1/projects/${encodeURIComponent(projectId)}/evidence`)) ?? [],
+      claims: (await api(`/v1/projects/${encodeURIComponent(projectId)}/claims`)) ?? [],
+      artifacts: (await api(`/v1/projects/${encodeURIComponent(projectId)}/artifacts`)) ?? [],
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = el('a', 'dl', 'download')
+    a.href = url
+    a.download = `${proj.name ?? projectId}.research.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+    exportBtn.textContent = '✓ exported'
+    setTimeout(() => { exportBtn.textContent = '⬇ Export JSON' }, 2000)
+  }
+  exportRow.appendChild(exportBtn)
+  modal.appendChild(exportRow)
 }
 
 /* ─────────────────────────── commands modal ─────────────────────────── */
@@ -2616,12 +2659,49 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       bubble.style.outline = '2px solid var(--accent)'
     }
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
-    // Long assistant replies collapse to a preview with a toggle (dsh-web
-    // long-message handling); the search view never collapses.
+    // /research status answers render as a field-card grid (dsh-web
+    // structured results) instead of raw text.
+    const isStatus = msg.role === 'assistant' && /^\*\*.*\*\* \(`rsp_/.test(msg.text) && msg.text.includes('Next actions:')
+    let statusCards: HTMLElement | null = null
+    if (isStatus && searchQ === '') {
+      const phaseMatch = /phase `([^`]+)` rev (\d+)/.exec(msg.text)
+      const pendingMatch = msg.text.match(/Pending gates:\n([\s\S]*?)\n\n/)
+      const jobsMatch = msg.text.match(/Recent jobs:\n([\s\S]*?)\n\n/)
+      const budgetMatch = /Budget: \$([\d.]+) \/ ([\d.]+|\S+) max, ([\d.]+) \/ ([\d.]+|\S+) GPU-h/.exec(msg.text)
+      const grid = el('div')
+      grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
+      const cell = (label: string, value: string): HTMLElement => {
+        const c = el('div')
+        c.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:6px 9px'
+        const l = el('div', 'muted', label)
+        l.style.cssText = 'font-size:9px;text-transform:uppercase;letter-spacing:.5px'
+        const v = el('div', 'mono', value)
+        v.style.cssText = 'font-size:11px;color:var(--text);margin-top:2px;word-break:break-word'
+        c.append(l, v)
+        return c
+      }
+      if (phaseMatch !== null) {
+        grid.appendChild(cell('Phase', `${phaseMatch[1]} · rev ${phaseMatch[2]}`))
+      }
+      const next = msg.text.split('Next actions:')[1]?.split('\n\n')[0]?.split('\n').filter(l => l.trim().startsWith('- ')).map(l => l.trim().slice(2)).slice(0, 3).join('; ') ?? '—'
+      grid.appendChild(cell('Next', next || '—'))
+      const pending = pendingMatch !== null ? pendingMatch[1].split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
+      grid.appendChild(cell('Pending gates', pending || 'none'))
+      const jobs = jobsMatch !== null ? jobsMatch[1].split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
+      grid.appendChild(cell('Jobs', jobs || 'none'))
+      if (budgetMatch !== null) {
+        grid.appendChild(cell('Budget', `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
+      }
+      statusCards = grid
+    }
     const lineCount = msg.text.split('\n').length
-    const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === ''
+    const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === '' && statusCards === null
     const renderBubble = (): void => {
-      bubble.replaceChildren(...formatChatText(collapsed ? msg.text.split('\n').slice(0, 6).join('\n') + '\n…' : msg.text, searchQ === '' ? undefined : searchQ))
+      if (statusCards !== null) {
+        bubble.replaceChildren(statusCards)
+      } else {
+        bubble.replaceChildren(...formatChatText(collapsed ? msg.text.split('\n').slice(0, 6).join('\n') + '\n…' : msg.text, searchQ === '' ? undefined : searchQ))
+      }
     }
     renderBubble()
     if (collapsed) {
