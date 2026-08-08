@@ -893,7 +893,11 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
     const title = el('div', 'project-title')
     const pname = el('span', 'pname', projection.project.name ?? projectId)
+    // dsh-web affordance: click the project id to copy it.
     const pid = el('span', 'pid', `${projectId} · rev ${projection.project.revision ?? 0}`)
+    pid.style.cssText += ';cursor:pointer;border-radius:6px;padding:1px 4px'
+    pid.title = 'click to copy project ID'
+    pid.onclick = () => { if (projectId !== undefined) copyText(projectId) }
     const statusPill = pill(projection.project.status)
     title.append(pname, statusPill, pid)
     body.appendChild(title)
@@ -1262,29 +1266,59 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
 let gatesSelecting = false
 let gatesSelected = new Set<string>()
 
+/** Gates filter (dsh-web search-as-you-type), persisted per render. */
+let gatesQuery = ''
+
 async function renderGates(body: HTMLElement, projectId: string): Promise<void> {
   const gates = (await api<GateRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/gates`)) ?? []
   const pending = gates.filter(g => g.status === 'pending')
   const decided = gates.filter(g => g.status !== 'pending')
-  const labelRow = el('div', 'row')
-  labelRow.style.cssText = 'justify-content:space-between;align-items:center'
-  labelRow.appendChild(el('div', 'section-label', `Awaiting your decision (${pending.length})`))
-  if (pending.length > 0) {
-    const selBtn = el('button', 'hbtn', gatesSelecting ? '☑ Selecting…' : '☑ Select')
-    selBtn.title = gatesSelecting ? 'exit multi-select' : 'multi-select gates (bulk decide)'
-    selBtn.setAttribute('aria-pressed', gatesSelecting ? 'true' : 'false')
-    selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
-    selBtn.onclick = () => {
-      gatesSelecting = !gatesSelecting
-      gatesSelected.clear()
-      rerender()
+  // dsh-web search-as-you-type: filters both sections; only the list
+  // container is rebuilt so the input keeps focus.
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.placeholder = '🔍 Filter gates…'
+  searchInput.value = gatesQuery
+  searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none;margin:2px 0 6px'
+  searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
+  searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
+  body.appendChild(searchInput)
+  const listEl = el('div')
+  body.appendChild(listEl)
+
+  const renderList = (): void => {
+    listEl.replaceChildren()
+    const q = gatesQuery.trim().toLowerCase()
+    const matches = (g: GateRow): boolean =>
+      q === '' ||
+      (g.type ?? '').toLowerCase().includes(q) ||
+      (g.title ?? '').toLowerCase().includes(q) ||
+      (g.status ?? '').toLowerCase().includes(q) ||
+      (g.summary ?? '').toLowerCase().includes(q) ||
+      (g.gate_id ?? '').toLowerCase().includes(q)
+    const pFiltered = pending.filter(matches)
+    const dFiltered = decided.filter(matches)
+    const labelRow = el('div', 'row')
+    labelRow.style.cssText = 'justify-content:space-between;align-items:center'
+    labelRow.appendChild(el('div', 'section-label', `Awaiting your decision (${pFiltered.length})`))
+    if (pFiltered.length > 0) {
+      const selBtn = el('button', 'hbtn', gatesSelecting ? '☑ Selecting…' : '☑ Select')
+      selBtn.title = gatesSelecting ? 'exit multi-select' : 'multi-select gates (bulk decide)'
+      selBtn.setAttribute('aria-pressed', gatesSelecting ? 'true' : 'false')
+      selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
+      selBtn.onclick = () => {
+        gatesSelecting = !gatesSelecting
+        gatesSelected.clear()
+        rerender()
+      }
+      labelRow.appendChild(selBtn)
     }
-    labelRow.appendChild(selBtn)
-  }
-  body.appendChild(labelRow)
-  if (pending.length === 0) {
-    body.appendChild(el('div', 'empty', 'No pending gates. All decisions are made — or nothing was requested yet.'))
-  }
+    listEl.appendChild(labelRow)
+    if (pFiltered.length === 0) {
+      listEl.appendChild(el('div', 'empty', q === ''
+        ? 'No pending gates. All decisions are made — or nothing was requested yet.'
+        : `No pending gates match "${gatesQuery.trim()}".`))
+    }
   // Bulk decide bar.
   if (gatesSelecting && pending.length > 0) {
     const bar = el('div', 'card border-amber')
@@ -1295,11 +1329,18 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     approveSel.disabled = gatesSelected.size === 0
     approveSel.onclick = async () => {
       for (const id of gatesSelected) {
+        const g = gates.find(x => x.gate_id === id)
         await api(`/v1/gates/${encodeURIComponent(id)}/decisions`, {
           method: 'POST',
-          body: JSON.stringify({ actor: 'web-user', decision: 'approved', reason: 'bulk approved from Research OS panel' }),
+          body: JSON.stringify({
+            actor: 'web-user',
+            decision: 'approved',
+            reason: 'bulk approved from Research OS panel',
+            ...(g?.type === 'budget' ? { resume_to: 'EXPERIMENTING' } : {}),
+          }),
         })
       }
+      showToast(rootHost(), `✓ ${gatesSelected.size} gate(s) approved`)
       gatesSelecting = false
       gatesSelected.clear()
       rerender()
@@ -1313,6 +1354,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
           body: JSON.stringify({ actor: 'web-user', decision: 'rejected', reason: 'bulk rejected from Research OS panel' }),
         })
       }
+      showToast(rootHost(), `✕ ${gatesSelected.size} gate(s) rejected`)
       gatesSelecting = false
       gatesSelected.clear()
       rerender()
@@ -1324,9 +1366,9 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       rerender()
     }
     bar.append(count, approveSel, rejectSel, doneSel)
-    body.appendChild(bar)
+    listEl.appendChild(bar)
   }
-  for (const gate of pending) {
+  for (const gate of pFiltered) {
     const card = el('div', 'card border-amber')
     const top = el('div', 'row')
     // Multi-select checkbox (pending gates only).
@@ -1363,9 +1405,23 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     const act = async (decision: 'approved' | 'rejected', label: string): Promise<void> => {
       const ok = await api(`/v1/gates/${encodeURIComponent(gate.gate_id ?? '')}/decisions`, {
         method: 'POST',
-        body: JSON.stringify({ actor: 'web-user', decision, reason: `${label} from Research OS panel` }),
+        body: JSON.stringify({
+          actor: 'web-user',
+          decision,
+          reason: `${label} from Research OS panel`,
+          // dsh-web resume: approving a budget gate on a BLOCKED_GATE project
+          // must pin the resume target (kernel §6.6 default: EXPERIMENTING),
+          // otherwise the project stays parked after approval.
+          ...(gate.type === 'budget' ? { resume_to: 'EXPERIMENTING' } : {}),
+        }),
       })
-      lastError = ok === null ? `gate ${label.toLowerCase()} failed (bridge error)` : undefined
+      if (ok === null) {
+        lastError = `gate ${label.toLowerCase()} failed (bridge error)`
+      } else {
+        lastError = undefined
+        // dsh-web confirmation: toast the decision outcome.
+        showToast(rootHost(), `${decision === 'approved' ? '✓' : '✕'} ${shortType(gate.type)} gate ${decision}`)
+      }
       rerender()
     }
     approve.onclick = () => { void act('approved', 'approved') }
@@ -1374,12 +1430,12 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       actions.append(approve, reject)
       card.appendChild(actions)
     }
-    body.appendChild(card)
+    listEl.appendChild(card)
   }
-  if (decided.length > 0) {
-    body.appendChild(el('div', 'section-label', `Decided (${decided.length})`))
+  if (dFiltered.length > 0) {
+    listEl.appendChild(el('div', 'section-label', `Decided (${dFiltered.length})`))
     const card = el('div', 'card')
-    for (const gate of decided) {
+    for (const gate of dFiltered) {
       const row = el('div', 'gate-row')
       const info = el('div', 'grow')
       const name = el('div', 'pname', `${shortType(gate.type)} Gate`)
@@ -1390,8 +1446,11 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       row.appendChild(pill(gate.status))
       card.appendChild(row)
     }
-    body.appendChild(card)
+    listEl.appendChild(card)
   }
+  }
+  searchInput.oninput = () => { gatesQuery = searchInput.value; renderList() }
+  renderList()
 }
 
 /** Runs multi-select (dsh-web bulk cancel). */
@@ -1461,6 +1520,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
           body: JSON.stringify({ actor: 'web-user', reason: 'bulk cancelled from Research OS panel' }),
         })
       }
+      showToast(rootHost(), `✕ Cancelled ${runsSelected.size} run(s)`)
       runsSelecting = false
       runsSelected.clear()
       rerender()
@@ -1519,7 +1579,12 @@ function renderRuns(body: HTMLElement, p: Projection): void {
           method: 'POST',
           body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from Research OS panel' }),
         })
-        lastError = ok === null ? 'cancel failed (bridge error)' : undefined
+        if (ok === null) {
+          lastError = 'cancel failed (bridge error)'
+        } else {
+          lastError = undefined
+          showToast(rootHost(), `✕ Cancelled run ${fmtId(job.job_id, 18)}`)
+        }
         rerender()
       }
       const wrap = el('div', 'row')
@@ -1582,11 +1647,13 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       const downloadSel = el('button', 'btn approve', '⬇ Download selected')
       downloadSel.disabled = artifactsSelected.size === 0
       downloadSel.onclick = async () => {
+        let downloaded = 0
         for (const id of artifactsSelected) {
           const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
             headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
           })
           if (!response.ok) continue
+          downloaded += 1
           const blob = await response.blob()
           const url = URL.createObjectURL(blob)
           const a = el('a', 'dl', 'download')
@@ -1597,6 +1664,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
           a.remove()
           setTimeout(() => URL.revokeObjectURL(url), 4000)
         }
+        showToast(rootHost(), `⬇ Downloaded ${downloaded} artifact(s)`)
         artifactsSelecting = false
         artifactsSelected.clear()
         rerender()
@@ -4160,9 +4228,11 @@ function renderSidebar(
         if (!archived) {
           const ok = await api(`/v1/projects/${encodeURIComponent(p.project_id)}/archive`, { method: 'POST' })
           if (ok === null) { lastError = 'archive failed (bridge error)'; return }
+          showToast(rootHost(), `🗄 Archived ${p.name ?? p.project_id}`)
         } else {
           const ok = await api(`/v1/projects/${encodeURIComponent(p.project_id)}/unarchive`, { method: 'POST' })
           if (ok === null) { lastError = 'restore failed (bridge error)'; return }
+          showToast(rootHost(), `↩ Restored ${p.name ?? p.project_id}`)
         }
         rerender()
       }
@@ -4208,6 +4278,7 @@ function renderSidebar(
       for (const id of sidebarSelected) {
         await api(`/v1/projects/${encodeURIComponent(id)}/archive`, { method: 'POST' })
       }
+      showToast(rootHost(), `🗄 Archived ${sidebarSelected.size} project(s)`)
       sidebarSelecting = false
       sidebarSelected.clear()
       rerender()
