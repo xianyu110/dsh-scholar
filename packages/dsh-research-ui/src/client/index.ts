@@ -2610,6 +2610,13 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
   titleRow.appendChild(el('span', 'pname', proj.name ?? projectId))
   titleRow.appendChild(pill(proj.status ?? ''))
+  titleRow.appendChild(el('span', 'grow'))
+  // dsh-web affordance: copy the project id straight from the drawer.
+  const copyId = el('button', 'hbtn', '⧉')
+  copyId.title = 'copy project ID'
+  copyId.style.cssText = 'padding:1px 8px'
+  copyId.onclick = () => copyText(projectId)
+  titleRow.appendChild(copyId)
   modal.appendChild(titleRow)
 
   modal.appendChild(el('div', 'section-label', 'Overview'))
@@ -4187,7 +4194,7 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
     const url = URL.createObjectURL(blob)
     const a = el('a', 'dl', 'download')
     a.href = url
-    a.download = `compare-${new Date().toISOString().slice(0, 10)}.csv`
+    a.download = `compare-${labels.join('-').replaceAll(' ', '-').slice(0, 60)}-${new Date().toISOString().slice(0, 10)}.csv`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -5274,6 +5281,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       ['📋 list projects', '/research list'],
       ['📌 status', '/research status'],
       ['🧾 claims', '/research claims'],
+      ['✍️ write manuscript', '/research write'],
+      ['📦 export bundle', '/research export'],
     ]
     for (const [label, line] of starterDefs) {
       const chip = el('button', 'hbtn', label)
