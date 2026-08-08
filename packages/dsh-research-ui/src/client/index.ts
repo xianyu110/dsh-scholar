@@ -4418,6 +4418,119 @@ function openGlobalSearchModal(root: ShadowRoot): void {
   input.focus()
 }
 
+/* ─────────────────────────── session search modal ─────────────────────────── */
+
+/** Cross-session transcript search (dsh-web "search all sessions"). */
+let sessionSearchQuery = ''
+
+function openSessionSearchModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:560px;max-width:92vw'
+  const header = el('div', 'modal-header', '🔎 Search Sessions')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.placeholder = 'Search every session transcript…'
+  input.value = sessionSearchQuery
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none;margin-bottom:10px'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  modal.appendChild(input)
+
+  const results = el('div')
+  results.style.cssText = 'max-height:46vh;overflow-y:auto'
+  results.setAttribute('role', 'listbox')
+  results.setAttribute('aria-label', 'session hits')
+  modal.appendChild(results)
+
+  let selIdx = -1
+  const rowEls: HTMLElement[] = []
+  const paint = (): void => {
+    for (let i = 0; i < rowEls.length; i++) {
+      rowEls[i]!.style.background = i === selIdx ? 'var(--bg-hover)' : 'none'
+      rowEls[i]!.setAttribute('aria-selected', i === selIdx ? 'true' : 'false')
+    }
+    rowEls[selIdx]?.scrollIntoView({ block: 'nearest' })
+  }
+
+  const runSearch = (): void => {
+    const q = sessionSearchQuery.trim().toLowerCase()
+    results.replaceChildren()
+    rowEls.length = 0
+    selIdx = -1
+    if (q === '') {
+      results.appendChild(el('div', 'muted', 'Type to search across all sessions.'))
+      return
+    }
+    const hits: Array<{ sessionId: string; sessionName: string; index: number; role: string; text: string }> = []
+    for (const s of chatSessions) {
+      for (let i = 0; i < s.messages.length; i++) {
+        const m = s.messages[i]!
+        if (m.text.toLowerCase().includes(q)) {
+          hits.push({ sessionId: s.id, sessionName: s.name, index: i, role: m.role, text: m.text })
+        }
+      }
+    }
+    if (hits.length === 0) {
+      results.appendChild(el('div', 'empty', `No matches for "${sessionSearchQuery.trim()}" across ${chatSessions.length} session(s).`))
+      return
+    }
+    const count = el('div', 'muted', `${hits.length} hit(s) across ${chatSessions.length} session(s) — ↑/↓ + Enter to jump.`)
+    count.style.cssText = 'margin-bottom:8px;font-size:11px'
+    results.appendChild(count)
+    for (const h of hits.slice(0, 100)) {
+      const row = el('div')
+      row.setAttribute('role', 'option')
+      row.setAttribute('aria-selected', 'false')
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;border-bottom:1px dashed var(--border-2)'
+      row.appendChild(el('span', 'artifact-kind', h.sessionName.slice(0, 14)))
+      const roleTag = el('span', 'artifact-kind', h.role === 'user' ? 'YOU' : h.role === 'error' ? 'ERR' : 'OS')
+      roleTag.style.cssText += ';color:var(--text-3)'
+      row.appendChild(roleTag)
+      const snippet = el('span', 'grow', h.text.length > 90 ? `${h.text.slice(0, 90)}…` : h.text)
+      snippet.style.cssText = 'font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      row.appendChild(snippet)
+      row.onmouseenter = () => { selIdx = rowEls.indexOf(row); paint() }
+      row.onclick = () => {
+        overlay.remove()
+        chatSessionSelect(h.sessionId)
+        chatDetailIndex = h.index
+        rerender()
+      }
+      rowEls.push(row)
+      results.appendChild(row)
+    }
+    if (hits.length > 100) results.appendChild(el('div', 'muted', `… and ${hits.length - 100} more hits`))
+  }
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (selIdx >= 0 && rowEls[selIdx] !== undefined) rowEls[selIdx]!.click()
+      else runSearch()
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (rowEls.length === 0) return
+      event.preventDefault()
+      selIdx = (selIdx + (event.key === 'ArrowDown' ? 1 : -1) + rowEls.length) % rowEls.length
+      paint()
+    }
+  }
+  let debounceTimer: number | undefined
+  input.oninput = () => {
+    sessionSearchQuery = input.value
+    if (debounceTimer !== undefined) window.clearTimeout(debounceTimer)
+    debounceTimer = window.setTimeout(() => { runSearch() }, 300)
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  input.focus()
+}
+
 /* ─────────────────────────── project switcher modal ─────────────────────────── */
 
 /** Quick project switcher (dsh-web Ctrl/Cmd+P): filter + ↑/↓ + Enter. */
@@ -5791,7 +5904,16 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
     if (root !== null) openGlobalSearchModal(root)
   }
+  // dsh-web cross-session search: every chat session's transcript.
+  const allBtn = el('button', 'hbtn', '🔎 all')
+  allBtn.title = 'search across all sessions'
+  allBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
+  allBtn.onclick = () => {
+    const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+    if (root !== null) openSessionSearchModal(root)
+  }
   searchRow.appendChild(globalBtn)
+  searchRow.appendChild(allBtn)
   // dsh-web "commands only" filter: a compact list of just the commands.
   const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? '⌘ commands on' : '⌘ commands')
   commandsOnlyBtn.title = 'show only command messages'
