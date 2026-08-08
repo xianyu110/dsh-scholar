@@ -813,7 +813,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       kernelOnline = health !== null && health.ok === true
       // dsh-web status dot: reflect bridge health immediately.
       kernelDot.style.background = kernelOnline ? 'var(--tone-green)' : 'var(--tone-red)'
-      kernelDot.title = kernelOnline ? 'kernel connected' : 'kernel unreachable'
+      kernelDot.title = kernelOnline ? `kernel connected · ${health.instance ?? ''}` : 'kernel unreachable'
     }
     // Project list: drives the sidebar (fullscreen) or the picker (float).
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
@@ -1445,10 +1445,15 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       s.style.cssText = 'margin-top:3px'
       card.appendChild(s)
     }
-    // dsh-web traceability: the gate id (support / ledger lookups).
+    // dsh-web traceability: the gate id (support / ledger lookups), copyable.
     if (gate.gate_id !== undefined && gate.gate_id !== '') {
       const gid = el('div', 'muted mono', fmtId(gate.gate_id, 26))
-      gid.style.cssText = 'margin-top:3px;font-size:9px'
+      gid.style.cssText = 'margin-top:3px;font-size:9px;cursor:pointer'
+      gid.title = 'click to copy gate ID'
+      gid.onclick = (event) => {
+        event.stopPropagation()
+        if (gate.gate_id !== undefined) copyText(gate.gate_id)
+      }
       card.appendChild(gid)
     }
     const actions = el('div', 'gate-actions')
@@ -3086,6 +3091,19 @@ function openCommandsModal(root: ShadowRoot): void {
   }
   input.oninput = () => { paletteQuery = input.value; renderList() }
   renderList()
+  // dsh-web palette navigation: ↑/↓ move through the command rows (the
+  // rows are buttons, so Enter on a focused row runs it natively).
+  modal.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const rows = [...list.querySelectorAll('button')] as HTMLElement[]
+    if (rows.length === 0) return
+    event.preventDefault()
+    const cur = rows.indexOf(root.activeElement as HTMLElement)
+    const next = cur < 0
+      ? (event.key === 'ArrowDown' ? 0 : rows.length - 1)
+      : (cur + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
+    rows[next]?.focus()
+  })
   overlay.appendChild(modal)
   root.appendChild(overlay)
   input.focus()
