@@ -5,6 +5,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { ResearchKernel, KernelError } from './kernel.js'
 import { TexError } from './tex-workspace.js'
@@ -296,8 +297,22 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
 
   const method = req.method ?? 'GET'
   const [version, resource, id, sub, subId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
-  if (version !== 'v1') {
+  if (version !== 'v1' && version !== 'v2') {
     send(res, 404, { error: { code: 'not_found', message: 'unknown api version' } })
+    return
+  }
+  if (version === 'v2') {
+    void readJson(req).then(async (body) => {
+      try {
+        await handleV2({ req, res, method, url, id, sub, subId, body, kernel })
+      } catch (error) {
+        if (error instanceof KernelError) send(res, error.status, { error: { code: error.code, message: error.message } })
+        else {
+          console.error(`[kernel] v2 handler error: ${(error as Error).message}`)
+          send(res, 500, { error: { code: 'internal_error', message: 'internal error' } })
+        }
+      }
+    })
     return
   }
 
@@ -957,6 +972,119 @@ function handleTerminalSse(
 }
 
 /** Start the kernel API server; returns the listening server. */
+/**
+ * v2 adapter (api-contracts.md §4): the /v2 surface the BFF exposes to the
+ * UI. Idempotency-Key-scoped project creation, membership-filtered paginated
+ * listing, projection with capabilities, gate-requests (decision fields are
+ * rejected — agents cannot attach a decision) and transitions (gate states
+ * stay 422). x-principal-id is the BFF-resolved operator identity; when
+ * present, project-scoped routes enforce membership (404 on non-member).
+ */
+async function handleV2(ctx: {
+  req: IncomingMessage
+  res: ServerResponse
+  method: string
+  url: URL
+  id?: string
+  sub?: string
+  subId?: string
+  body: unknown
+  kernel: ResearchKernel
+}): Promise<void> {
+  const { req, res, method, url, id, sub, subId, body, kernel } = ctx
+  const principal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
+  const memberOr404 = (projectId: string): void => {
+    if (principal === undefined) return
+    const members = kernel.listProjectMembers(projectId)
+    if (!members.some(m => m.principal_id === principal)) {
+      throw new KernelError(404, 'project_not_found', 'project not found or access denied')
+    }
+  }
+  if (id === undefined && method === 'POST') {
+    // POST /v2/projects — Idempotency-Key REQUIRED (api-contracts §4).
+    const idem = typeof req.headers['idempotency-key'] === 'string' && req.headers['idempotency-key'] !== ''
+      ? req.headers['idempotency-key']
+      : undefined
+    if (idem === undefined) {
+      send(res, 422, { error: { code: 'idempotency_key_required', message: 'POST /v2/projects requires an Idempotency-Key header' } })
+      return
+    }
+    const input = createProjectSchema.parse(body)
+    const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
+    const out = kernel.createProjectWithInitialGate({ ...input as Parameters<ResearchKernel['createProject']>[0], idempotency_key: idem, request_hash: requestHash })
+    send(res, 201, { project: out.project, gate: out.gate, budget: out.budget, membership: out.membership })
+    return
+  }
+  if (id === undefined && method === 'GET') {
+    // GET /v2/projects — membership-filtered paginated list.
+    const limit = Number(url.searchParams.get('limit') ?? '50')
+    const cursor = url.searchParams.get('cursor') ?? undefined
+    const page = kernel.listProjectsPage(Number.isFinite(limit) ? limit : 50, cursor)
+    const items = principal === undefined
+      ? page.items
+      : page.items.filter(p => kernel.listProjectMembers(p.project_id).some(m => m.principal_id === principal))
+    send(res, 200, { items, next_cursor: page.next_cursor })
+    return
+  }
+  if (id !== undefined && sub === undefined && method === 'GET') {
+    memberOr404(id)
+    ok(res, kernel.getProject(id))
+    return
+  }
+  if (id !== undefined && sub === 'projection' && method === 'GET') {
+    memberOr404(id)
+    const projection = kernel.projectProjection(id)
+    const members = kernel.listProjectMembers(id)
+    const project = kernel.getProject(id)
+    const capabilities = {
+      editor: true,
+      runner_profile: project.execution.runner_profile,
+      gates: ['scope', 'idea', 'contract', 'release'],
+      roles: members.map(m => m.role),
+      membership: principal === undefined ? null : members.find(m => m.principal_id === principal)?.role ?? null,
+    }
+    send(res, 200, { ...projection, capabilities })
+    return
+  }
+  if (id !== undefined && sub === 'gate-requests' && subId === undefined && method === 'POST') {
+    memberOr404(id)
+    const input = z.object({
+      type: z.enum(['scope', 'idea', 'contract', 'release']),
+      title: z.string().min(1),
+      summary: z.string().optional(),
+      payload: z.record(z.unknown()).optional(),
+    }).parse(body)
+    // Gate requests must NOT carry a decision (agents cannot attach one).
+    const bodyObj = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
+    for (const forbidden of ['decision', 'actor', 'principal', 'resume_to']) {
+      if (forbidden in bodyObj) {
+        throw new KernelError(422, 'decision_not_allowed', `gate-requests must not carry '${forbidden}'`)
+      }
+    }
+    const gate = kernel.createGate({
+      project_id: id,
+      type: input.type,
+      title: input.title,
+      summary: input.summary,
+      payload: input.payload,
+    })
+    send(res, 201, { gate })
+    return
+  }
+  if (id !== undefined && sub === 'transitions' && method === 'POST') {
+    memberOr404(id)
+    const input = z.object({
+      to: z.string().min(1),
+      expected_revision: z.number().int().nonnegative(),
+      reason: z.string().optional(),
+    }).parse(body)
+    const project = kernel.transition(id, input.to as never, input.expected_revision, input.reason)
+    ok(res, project)
+    return
+  }
+  send(res, 404, { error: { code: 'not_found', message: 'unknown v2 route' } })
+}
+
 export function startKernelServer(options: KernelServerOptions): Promise<{ server: Server; url: string; port: number }> {  const { kernel, host = '127.0.0.1', port = 7412, token } = options
   // §12.7 server-level startup parameter (see also KernelOptions.requireSignedManifest).
   if (options.requireSignedManifest !== undefined) kernel.requireSignedManifest = options.requireSignedManifest

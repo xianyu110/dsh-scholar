@@ -381,7 +381,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   }
   function projectIdFromPath(pathname: string): string | null {
     const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
-    if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'projects') return parts[2] ?? null
+    if (parts.length >= 3 && (parts[0] === 'v1' || parts[0] === 'v2') && parts[1] === 'projects') return parts[2] ?? null
     if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'gates') return parts[2] ?? null
     return null
   }
@@ -498,8 +498,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
-      // Kernel proxy: everything under /v1/*.
-      if (url.pathname.startsWith('/v1/')) {
+      // Kernel proxy: everything under /v1/* and /v2/* (v2 = BFF surface).
+      if (url.pathname.startsWith('/v1/') || url.pathname.startsWith('/v2/')) {
         // Auth: bearer token required when token mode is on.
         if (options.token !== null) {
           const auth = req.headers.authorization
@@ -550,9 +550,17 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           }
           body = read.body
         }
+        // api-contracts.md §1: mutation/creation headers pass through
+        // (Idempotency-Key, X-Request-Id); the BFF identity is never
+        // forwarded — the standalone enforces membership itself.
+        const proxyHeaders: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' }
+        for (const name of ['idempotency-key', 'x-request-id']) {
+          const value = req.headers[name]
+          if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
+        }
         const upstream = await fetch(`${endpoint}${url.pathname}${url.search}`, {
           method,
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          headers: proxyHeaders,
           body,
         })
         if (upstream.status >= 400) {

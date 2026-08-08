@@ -174,6 +174,18 @@ else
   fail "SEC: kernel pid not found for argv check"
 fi
 
+# ── API-01/v2: Idempotency-Key + X-Request-Id pass through the proxy ──────
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -H 'idempotency-key: v2-proxy-idem-1' -H 'x-request-id: req_proxy_1' \
+  "http://127.0.0.1:$WEB_PORT/v2/projects" \
+  -d '{"name":"v2-rt","workspace":"/w/v2rt","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}')
+[ "$R" = "201" ] && ok "API-01: v2 create via proxy (idem-key forwarded) -> 201" || fail "API-01: v2 create via proxy -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -H 'idempotency-key: v2-proxy-idem-1' \
+  "http://127.0.0.1:$WEB_PORT/v2/projects" \
+  -d '{"name":"v2-rt","workspace":"/w/v2rt","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}')
+[ "$R" = "201" ] && ok "API-01: v2 idempotent replay via proxy -> 201" || fail "API-01: v2 replay -> $R"
+
 # ── OPS-01: clean shutdown frees both ports ────────────────────────────────
 kill "$SPID" 2>/dev/null || true
 for _ in $(seq 1 20); do

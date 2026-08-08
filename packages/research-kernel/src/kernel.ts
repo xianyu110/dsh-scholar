@@ -275,6 +275,78 @@ export class ResearchKernel {
     return project
   }
 
+  /**
+   * v2 (api-contracts.md §4): atomic create-project with the initial Scope
+   * Gate + creator membership + budget, plus the BFF-scoped Idempotency-Key.
+   * Replaying the same key + request hash returns the SAME project/gate/
+   * budget/membership; the same key with a different request hash is a 409.
+   */
+  createProjectWithInitialGate(input: Parameters<ResearchKernel['createProject']>[0] & {
+    idempotency_key?: string
+    request_hash?: string
+  }): { project: ResearchProject; gate: Gate; budget: BudgetRecord; membership: Array<Record<string, unknown>> } {
+    if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+      const existing = this.db.prepare('SELECT project_id, request_hash FROM projects WHERE idempotency_key = ?')
+        .get(input.idempotency_key) as { project_id: string; request_hash: string | null } | undefined
+      if (existing !== undefined) {
+        if (existing.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict', `idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        return {
+          project: this.getProject(existing.project_id),
+          gate: this.listGates(existing.project_id, 'pending').find(g => g.type === 'scope') ?? this.listGates(existing.project_id)[0]!,
+          budget: this.getBudget(existing.project_id),
+          membership: this.listProjectMembers(existing.project_id),
+        }
+      }
+    }
+    return withTransaction(this.db, () => {
+      const project = this.createProject(input)
+      // Initial Scope Gate (v2 contract: the project ships with it).
+      const gate = this.createGate({
+        project_id: project.project_id,
+        type: 'scope',
+        title: 'Scope Gate',
+        summary: 'Initial scope approval required before any research work.',
+      })
+      const budget = this.getBudget(project.project_id)
+      if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+        this.db.prepare('UPDATE projects SET idempotency_key = ?, request_hash = ? WHERE project_id = ?')
+          .run(input.idempotency_key, input.request_hash ?? '', project.project_id)
+      }
+      return { project, gate, budget, membership: this.listProjectMembers(project.project_id) }
+    })
+  }
+
+  /**
+   * v2 keyset pagination (api-contracts.md §1): items ordered by
+   * (updated_at DESC, project_id DESC); cursor encodes the last row.
+   */
+  listProjectsPage(limit = 50, cursor?: string): { items: ProjectRow[]; next_cursor: string | null } {
+    const cap = Math.min(Math.max(limit, 1), 200)
+    let after: { updated_at: string; project_id: string } | null = null
+    if (cursor !== undefined && cursor !== '') {
+      try {
+        const raw = Buffer.from(cursor, 'base64url').toString('utf8')
+        const [updatedAt, projectId] = raw.split('|')
+        if (updatedAt !== undefined && projectId !== undefined && updatedAt !== '' && projectId !== '') {
+          after = { updated_at: updatedAt, project_id: projectId }
+        }
+      } catch { /* malformed cursor -> start from the top */ }
+    }
+    const rows = after === null
+      ? this.db.prepare('SELECT * FROM projects ORDER BY updated_at DESC, project_id DESC LIMIT ?').all(cap + 1) as unknown as ProjectRow[]
+      : this.db.prepare('SELECT * FROM projects WHERE (updated_at < ? OR (updated_at = ? AND project_id < ?)) ORDER BY updated_at DESC, project_id DESC LIMIT ?')
+        .all(after.updated_at, after.updated_at, after.project_id, cap + 1) as unknown as ProjectRow[]
+    const hasMore = rows.length > cap
+    const page = hasMore ? rows.slice(0, cap) : rows
+    const last = page[page.length - 1]
+    return {
+      items: page,
+      next_cursor: hasMore && last !== undefined ? Buffer.from(`${last.updated_at}|${last.project_id}`).toString('base64url') : null,
+    }
+  }
+
   // ── project membership (API-01 foundation, reconstruction-contracts §7) ──
 
   listProjectMembers(projectId: string): Array<{

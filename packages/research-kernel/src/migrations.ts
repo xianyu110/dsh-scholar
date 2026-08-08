@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -463,6 +463,20 @@ const terminalTexCapabilities = (db: DatabaseSync, report: MigrationReport): voi
 }
 
 /**
+ * 0007 — project idempotency keys (api-contracts.md §4 /v2): the BFF-scoped
+ * Idempotency-Key + request hash are persisted so POST /v2/projects replays
+ * return the same project/gate/budget/membership while a different request
+ * hash under the same key is a 409.
+ */
+const projectIdempotencyKeys = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'projects', 'idempotency_key', 'TEXT')
+  ensureColumn(db, 'projects', 'request_hash', 'TEXT')
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_idempotency ON projects(idempotency_key) WHERE idempotency_key IS NOT NULL`)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.projects = (db.prepare('SELECT COUNT(*) AS n FROM projects WHERE idempotency_key IS NOT NULL').get() as { n: number }).n
+}
+
+/**
  * 0006 — project membership (API-01 foundation): creator is seeded as the
  * first PI; roles follow reconstruction-contracts.md (last PI cannot be
  * removed or demoted). BFF route-level enforcement lands with the v2
@@ -563,6 +577,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'Project membership model (API-01 foundation)',
     body: projectMembers.toString(),
     up: projectMembers,
+  },
+  {
+    id: '0007_project_idempotency_keys',
+    description: 'Project Idempotency-Key + request hash columns (v2)',
+    body: projectIdempotencyKeys.toString(),
+    up: projectIdempotencyKeys,
   },
 ]
 
