@@ -613,6 +613,13 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const header = el('div', 'header')
   header.appendChild(el('span', 'logo', '🧪'))
   header.appendChild(el('span', 'title', 'Research OS'))
+  // dsh-web kernel status: live dot (green when the kernel answers, red
+  // when the bridge is down; amber while checking).
+  const kernelDot = el('span')
+  kernelDot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:var(--tone-amber);display:inline-block;flex-shrink:0'
+  kernelDot.title = 'kernel status: checking…'
+  kernelDot.setAttribute('aria-label', 'kernel status')
+  header.appendChild(kernelDot)
   const spacer = el('span', 'spacer')
   header.appendChild(spacer)
   const themeBtn = el('button', 'hbtn')
@@ -804,6 +811,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       lastKernelCheck = now
       const health = await api<{ ok?: boolean }>('/v1/health')
       kernelOnline = health !== null && health.ok === true
+      // dsh-web status dot: reflect bridge health immediately.
+      kernelDot.style.background = kernelOnline ? 'var(--tone-green)' : 'var(--tone-red)'
+      kernelDot.title = kernelOnline ? 'kernel connected' : 'kernel unreachable'
     }
     // Project list: drives the sidebar (fullscreen) or the picker (float).
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
@@ -3112,6 +3122,20 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   }
   row('Bridge', 'same-origin /v1 proxy')
   row('Auth', tokenProvider !== undefined ? 'bearer token (session)' : 'DSH boot token')
+  // dsh-web connection details: the exact bridge endpoint, copyable.
+  const bridgeEnd = `${location.origin}${base()}/v1`
+  const bridgeRow = el('div', 'row')
+  bridgeRow.style.cssText = 'padding:4px 0'
+  const bridgeLabel = el('span', '', 'Endpoint')
+  bridgeLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const bridgeValue = el('span', 'mono', bridgeEnd)
+  bridgeValue.style.cssText = 'font-size:11px;color:var(--text);word-break:break-all;flex:1'
+  const bridgeCopy = el('button', 'hbtn', '⧉')
+  bridgeCopy.title = 'copy endpoint'
+  bridgeCopy.style.cssText = 'padding:1px 8px'
+  bridgeCopy.onclick = () => copyText(bridgeEnd)
+  bridgeRow.append(bridgeLabel, bridgeValue, bridgeCopy)
+  modal.appendChild(bridgeRow)
 
   // Access token (standalone only).
   if (tokenProvider !== undefined) {
@@ -4862,6 +4886,28 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   newSession.style.cssText = 'padding:3px 9px;font-size:11px'
   newSession.onclick = () => { chatSessionNew() }
   sessionTabs.appendChild(newSession)
+  // dsh-web backup: export every session (transcripts included) as JSON.
+  const backupBtn = el('button', 'hbtn', '💾')
+  backupBtn.title = 'backup all sessions (JSON)'
+  backupBtn.setAttribute('aria-label', 'Backup all sessions as JSON')
+  backupBtn.style.cssText = 'padding:3px 9px;font-size:11px'
+  backupBtn.onclick = () => {
+    const payload = JSON.stringify({
+      exported_at: new Date().toISOString(),
+      sessions: chatSessions.map(s => ({ ...s, messages: s.messages.slice(-CHAT_MAX) })),
+    }, null, 2)
+    const blob = new Blob([payload], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = el('a', 'dl', 'download')
+    a.href = url
+    a.download = `research-sessions-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+    showToast(rootHost(), `💾 Backed up ${chatSessions.length} session(s)`)
+  }
+  sessionTabs.appendChild(backupBtn)
   column.appendChild(sessionTabs)
 
   // Transcript search box (dsh-web "Search sessions" on the chat itself):
