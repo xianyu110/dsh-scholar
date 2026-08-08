@@ -1318,6 +1318,98 @@ function openRenameModal(root: ShadowRoot, projectId: string, currentName: strin
   input.select()
 }
 
+/* ─────────────────────────── project detail modal ─────────────────────────── */
+
+/**
+ * dsh-web project drawer: full detail of one project (brief, constraints,
+ * counts, pending gates, recent jobs, audit history).
+ */
+async function openProjectDetailModal(root: ShadowRoot, projectId: string): Promise<void> {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:600px;max-width:94vw'
+  const header = el('div', 'modal-header', '📁 Project details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const loading = el('div', 'muted', 'Loading…')
+  modal.appendChild(loading)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+
+  const p = await api<Projection>(`/v1/projects/${encodeURIComponent(projectId)}/projection`)
+  if (p === null || p.project === undefined) {
+    loading.textContent = 'Project unavailable.'
+    return
+  }
+  modal.removeChild(loading)
+  const proj = p.project
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:120px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', '', value)
+    v.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+
+  const titleRow = el('div', 'row')
+  titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
+  titleRow.appendChild(el('span', 'pname', proj.name ?? projectId))
+  titleRow.appendChild(pill(proj.status ?? ''))
+  modal.appendChild(titleRow)
+
+  modal.appendChild(el('div', 'section-label', 'Overview'))
+  row('Project', `\`${projectId}\` · rev ${proj.revision ?? 0}`)
+  row('Problem', proj.brief?.problem ?? '—')
+  row('Metrics', (proj.brief?.primary_metrics ?? []).join(', ') || '—')
+  row('Workspace', proj.workspace ?? '—')
+
+  const c = proj.constraints
+  modal.appendChild(el('div', 'section-label', 'Constraints'))
+  row('Budget', `$${c?.max_model_cost_usd ?? '∞'} max`)
+  row('GPU hours', `${c?.max_gpu_hours ?? '∞'} max`)
+  row('Parallel jobs', String(c?.max_parallel_jobs ?? '—'))
+
+  const counts = p.counts
+  if (counts !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Contents'))
+    row('Corpus snapshots', String(counts.corpus_snapshots ?? 0))
+    row('Ideas / Contracts', `${counts.ideas ?? 0} / ${counts.contracts ?? 0}`)
+    row('Claims / Evidence', `${counts.claims ?? 0} / ${counts.evidence ?? 0}`)
+    row('Artifacts', String(counts.artifacts ?? 0))
+  }
+
+  const pending = p.pending_gates ?? []
+  modal.appendChild(el('div', 'section-label', 'Pending gates'))
+  if (pending.length === 0) {
+    modal.appendChild(el('div', 'empty', 'none'))
+  }
+  for (const g of pending) {
+    modal.appendChild(el('div', '', `- ${g.type} gate \`${g.gate_id}\`: ${g.title} (${g.status})`))
+  }
+
+  const jobs = (p.jobs ?? []).slice(-5)
+  modal.appendChild(el('div', 'section-label', 'Recent jobs'))
+  if (jobs.length === 0) {
+    modal.appendChild(el('div', 'empty', 'none'))
+  }
+  for (const j of jobs) {
+    modal.appendChild(el('div', '', `- \`${j.job_id}\` [${j.kind}] ${j.status}`))
+  }
+
+  const history = (proj.history ?? []).slice(-6)
+  modal.appendChild(el('div', 'section-label', 'Audit history'))
+  for (const h of history) {
+    modal.appendChild(el('div', 'muted', `· ${h}`))
+  }
+}
+
 /* ─────────────────────────── commands modal ─────────────────────────── */
 
 const CHAT_COMMANDS: Array<[string, string]> = [
@@ -1597,6 +1689,25 @@ function openAboutModal(root: ShadowRoot): void {
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+}
+
+/* ─────────────────────────── toast notifications ─────────────────────────── */
+
+/** Resolve the panel's shadow root from anywhere. */
+function rootHost(): ShadowRoot | null {
+  const hostEl = document.querySelector('#dsh-scholar-ui')
+  return hostEl !== null ? hostEl.shadowRoot : null
+}
+
+/** dsh-web toast: a transient status pill bottom-center (2.4s). */
+function showToast(root: ShadowRoot | null, text: string): void {
+  if (root === null) return
+  const existing = root.querySelector('.toast')
+  existing?.remove()
+  const toast = el('div', 'toast', text)
+  toast.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:10001;background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:99px;padding:6px 16px;font:600 11.5px/1.4 system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3);pointer-events:none;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+  root.appendChild(toast)
+  setTimeout(() => toast.remove(), 2400)
 }
 
 /* ─────────────────────────── command history modal ─────────────────────────── */
@@ -2068,6 +2179,13 @@ function renderSidebar(
       }
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+      // dsh-web project drawer: double-click opens the full detail modal.
+      item.ondblclick = (event) => {
+        event.stopPropagation()
+        if (p.project_id === undefined) return
+        const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+        if (root !== null) void openProjectDetailModal(root, p.project_id)
+      }
       // dsh-web sidebar stats: counts of the active project under its row.
       if (p.project_id === activeId && activeCounts !== undefined) {
         const stats = el('div')
@@ -2510,6 +2628,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
           chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
           chatPersist()
           rerender()
+          showToast(rootHost(), `✓ ${line.slice(0, 40)}${line.length > 40 ? '…' : ''}`)
           return
         }
         answerBubble.replaceChildren(...formatChatText(lines.slice(0, next).join('\n') + '\n'))
@@ -2523,6 +2642,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       runningBubble.remove()
       chatPush('error', `command failed: ${(error as Error).message}`)
       rerender()
+      showToast(rootHost(), `✗ command failed`)
     }
   }
   send.onclick = () => { void run() }
@@ -2672,6 +2792,33 @@ function formatChatText(text: string, highlight?: string): HTMLElement[] {
       nodes.push(row)
       continue
     }
+    // dsh-web markdown tables: consecutive lines starting with '|'.
+    if (/^\|/.test(line)) {
+      const table = nodes.find(n => n.classList.contains('chat-table')) as HTMLElement | undefined
+      const cells = line.split('|').map(c => c.trim()).filter((c, i, arr) => !(i === 0 && c === '') && !(i === arr.length - 1 && c === ''))
+      // Skip the |---| separator row.
+      if (cells.every(c => /^:?-{2,}:?$/.test(c))) continue
+      let tbody: HTMLElement
+      if (table === undefined) {
+        const tbl = el('table', 'chat-table')
+        tbl.style.cssText = 'border-collapse:collapse;margin:4px 0;font-size:10.5px;width:100%'
+        tbody = el('tbody')
+        tbl.appendChild(tbody)
+        nodes.push(tbl)
+      } else {
+        tbody = table.querySelector('tbody') as HTMLElement
+      }
+      const tr = el('tr')
+      tr.style.cssText = 'border-bottom:1px solid var(--border-2)'
+      for (const cell of cells) {
+        const td = el('td', '', '')
+        td.style.cssText = 'padding:2px 8px;border-left:1px solid var(--border-2);vertical-align:top'
+        td.append(...inlineChatText(cell, highlight))
+        tr.appendChild(td)
+      }
+      tbody.appendChild(tr)
+      continue
+    }
     if (/^\d+\.\s+/.test(line)) {
       const row = el('div')
       row.style.cssText = 'display:flex;gap:7px;padding:1px 0'
@@ -2695,9 +2842,26 @@ function formatChatText(text: string, highlight?: string): HTMLElement[] {
 /** Inline **bold** + `code` spans (shared by every line kind). */
 function inlineChatText(text: string, highlight?: string): HTMLElement[] {
   const nodes: HTMLElement[] = []
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g)
   for (const part of parts) {
     if (part === '') continue
+    const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part)
+    if (link !== null) {
+      // dsh-web markdown links: [label](url) -> safe anchor (target=_blank,
+      // rel noopener; scheme allowlist http/https).
+      const url = link[2] ?? ''
+      if (/^https?:\/\//i.test(url)) {
+        const a = el('a', '', link[1] ?? url)
+        a.href = url
+        a.target = '_blank'
+        a.rel = 'noopener noreferrer'
+        a.style.cssText = 'color:var(--accent);text-decoration:underline'
+        nodes.push(a)
+      } else {
+        nodes.push(el('span', '', `${link[1] ?? ''} (${url})`))
+      }
+      continue
+    }
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       nodes.push(el('strong', '', part.slice(2, -2)))
     } else if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
