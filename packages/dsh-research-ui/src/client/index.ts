@@ -582,6 +582,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   header.appendChild(spacer)
   const themeBtn = el('button', 'hbtn')
   themeBtn.setAttribute('aria-label', 'Toggle theme')
+  themeBtn.setAttribute('aria-keyshortcuts', 'Control+Shift+T Meta+Shift+T')
   const paintTheme = (): void => {
     const dark = host.dataset.theme === 'dark'
     themeBtn.textContent = dark ? '☀️ Light' : '🌙 Dark'
@@ -603,6 +604,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   close.onclick = () => { panel.style.display = 'none' }
   const commandsBtn = el('button', 'hbtn', '⌘ Commands')
   commandsBtn.title = 'browse /research commands'
+  commandsBtn.setAttribute('aria-keyshortcuts', 'Control+K Meta+K')
   commandsBtn.onclick = () => { openCommandsModal(root) }
   const shortcutsBtn = el('button', 'hbtn', '⌨ Shortcuts')
   shortcutsBtn.title = 'keyboard shortcuts'
@@ -671,6 +673,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     button.dataset.tab = key
     button.id = `tab-${key}`
     button.setAttribute('aria-controls', 'panel-body')
+    button.setAttribute('aria-keyshortcuts', `Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`)
     button.setAttribute('role', 'tab')
     button.setAttribute('aria-selected', key === activeTab ? 'true' : 'false')
     // dsh-web "pin view": ★ marks a favourite tab (persisted).
@@ -1036,6 +1039,20 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   pipeline.appendChild(pctRow)
   body.appendChild(pipeline)
 
+  // dsh-web summary row: problem + primary metrics.
+  const brief = p.project?.brief
+  if (brief !== undefined) {
+    const sum = el('div', 'muted')
+    sum.style.cssText = 'font-size:11px;margin-top:8px;line-height:1.5'
+    const problem = typeof brief.problem === 'string' && brief.problem !== '' ? brief.problem : null
+    const metrics = Array.isArray(brief.primary_metrics) && brief.primary_metrics.length > 0 ? brief.primary_metrics.join(', ') : null
+    const parts: string[] = []
+    if (problem !== null) parts.push(problem)
+    if (metrics !== null) parts.push(`📊 ${metrics}`)
+    if (parts.length > 0) sum.textContent = parts.join(' · ')
+    body.appendChild(sum)
+  }
+
   // next actions
   const next = (p.next_actions ?? []).filter(Boolean)
   if (next.length > 0) {
@@ -1140,6 +1157,12 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       id.style.cssText = 'font-size:9px'
       bodyEl.append(title, id)
       row.appendChild(bodyEl)
+      row.title = 'double-click for contract details'
+      row.ondblclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openContractDetailModal(root, c)
+      }
       card.appendChild(row)
     }
     if (contracts.length > 5) card.appendChild(el('div', 'muted', `… and ${contracts.length - 5} more`))
@@ -2131,6 +2154,78 @@ async function openJobDetailModal(root: ShadowRoot, jobId: string): Promise<void
     cancelRow.appendChild(cancel)
     modal.appendChild(cancelRow)
   }
+}
+
+/* ─────────────────────────── contract detail modal ─────────────────────────── */
+
+/** dsh-web contract drawer: full record of an ExperimentContract. */
+function openContractDetailModal(root: ShadowRoot, contract: Record<string, unknown>): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Contract details')
+  const header = el('div', 'modal-header', '📋 Contract details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:110px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const titleRow = el('div', 'row')
+  titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
+  titleRow.appendChild(el('span', 'pname', fmtId(String(contract.contract_id ?? ''), 28)))
+  titleRow.appendChild(el('span', 'grow'))
+  titleRow.appendChild(pill(String(contract.status ?? '')))
+  modal.appendChild(titleRow)
+
+  const data = contract.data as Record<string, unknown> | undefined
+  const methods = contract.methods as Record<string, unknown> | undefined
+  const metrics = contract.metrics as Record<string, unknown> | undefined
+  const analysis = contract.analysis as Record<string, unknown> | undefined
+  modal.appendChild(el('div', 'section-label', 'Contract'))
+  row('Contract', String(contract.contract_id ?? '—'))
+  row('Status', String(contract.status ?? '—'))
+  if (typeof contract.version === 'string') row('Version', contract.version)
+  if (typeof contract.idea_id === 'string') row('Idea', contract.idea_id)
+  if (data !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Data'))
+    if (typeof data.dataset_id === 'string') row('Dataset', data.dataset_id)
+    if (typeof data.split === 'string') row('Split', data.split)
+    if (typeof data.version === 'string') row('Version', data.version)
+  }
+  if (methods !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Methods'))
+    row('Baseline', String(methods.baseline ?? '—'))
+    row('Treatment', String(methods.treatment ?? '—'))
+  }
+  if (metrics !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Metrics'))
+    row('Primary', String(metrics.primary ?? '—'))
+    const secondary = Array.isArray(metrics.secondary) ? (metrics.secondary as string[]).join(', ') : '—'
+    row('Secondary', secondary)
+  }
+  const seeds = Array.isArray(contract.seeds) ? (contract.seeds as number[]).join(', ') : '—'
+  modal.appendChild(el('div', 'section-label', 'Analysis'))
+  row('Seeds', seeds)
+  if (analysis !== undefined) {
+    row('Effect', String(analysis.effect_size ?? '—'))
+    row('Interval', String(analysis.interval ?? '—'))
+    row('Correction', String(analysis.multiple_testing ?? '—'))
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  trapFocus(overlay, null)
 }
 
 /* ─────────────────────────── commands modal ─────────────────────────── */
