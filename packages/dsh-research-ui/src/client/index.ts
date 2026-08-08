@@ -1979,6 +1979,17 @@ async function previewArtifact(artifactId: string): Promise<void> {
       modal.appendChild(pre)
       modal.appendChild(downloadLink(blob, artifactId))
     }
+    // dsh-web depth: open blob-backed previews in their own browser tab.
+    if (blobUrls.length > 0) {
+      const openTab = el('button', 'hbtn', '⧉ open in tab')
+      openTab.title = 'open the artifact in a new browser tab'
+      openTab.style.cssText = 'margin-top:10px'
+      openTab.onclick = () => {
+        const url = blobUrls[blobUrls.length - 1]!
+        window.open(url, '_blank', 'noopener')
+      }
+      modal.appendChild(openTab)
+    }
     overlay.appendChild(modal)
     root.appendChild(overlay)
   } catch { /* bridge unreachable */ }
@@ -4114,10 +4125,11 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
     for (const v of r.values) table.appendChild(cell(v))
   }
   modal.appendChild(table)
-  // dsh-web export: download the comparison as CSV.
+  // dsh-web export: download the comparison as CSV, or copy as markdown.
+  const exportRow = el('div', 'row')
+  exportRow.style.cssText = 'margin-top:10px;gap:8px'
   const exportCsv = el('button', 'hbtn', '⬇ Export CSV')
   exportCsv.title = 'download the comparison table as CSV'
-  exportCsv.style.cssText = 'margin-top:10px'
   exportCsv.onclick = () => {
     const lines = [
       ['Label', ...labels],
@@ -4134,7 +4146,22 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
     a.remove()
     setTimeout(() => URL.revokeObjectURL(url), 4000)
   }
-  modal.appendChild(exportCsv)
+  const copyMd = el('button', 'hbtn', '⧉ copy md')
+  copyMd.title = 'copy the comparison as a markdown table'
+  copyMd.onclick = () => {
+    const lines = [
+      ['Label', ...labels],
+      ...rows.map(r => [r.label, ...r.values]),
+    ]
+    const md = lines.map(line => `| ${line.join(' | ')} |`).join('\n')
+    void navigator.clipboard.writeText(md).then(
+      () => { copyMd.textContent = '✓ copied' },
+      () => { copyMd.textContent = 'copy failed' },
+    )
+    setTimeout(() => { copyMd.textContent = '⧉ copy md' }, 1600)
+  }
+  exportRow.append(exportCsv, copyMd)
+  modal.appendChild(exportRow)
 }
 
 /* ─────────────────────────── Chat (dialogue) tab ─────────────────────────── */
@@ -5024,6 +5051,40 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     showToast(rootHost(), `💾 Backed up ${chatSessions.length} session(s)`)
   }
   sessionTabs.appendChild(backupBtn)
+  // dsh-web restore: import sessions back from a backup JSON file.
+  const restoreBtn = el('button', 'hbtn', '⬆')
+  restoreBtn.title = 'restore sessions from a backup JSON'
+  restoreBtn.setAttribute('aria-label', 'Restore sessions from backup')
+  restoreBtn.style.cssText = 'padding:3px 9px;font-size:11px'
+  const fileInput = document.createElement('input')
+  fileInput.type = 'file'
+  fileInput.accept = 'application/json,.json'
+  fileInput.style.display = 'none'
+  fileInput.onchange = () => {
+    const file = fileInput.files?.[0]
+    if (file === undefined) return
+    void file.text().then((raw) => {
+      try {
+        const parsed = JSON.parse(raw) as { sessions?: unknown }
+        const list = Array.isArray(parsed.sessions) ? parsed.sessions : null
+        if (list === null || list.length === 0) throw new Error('no sessions')
+        const cleaned = list.filter((s): s is ChatSession => typeof s === 'object' && s !== null
+          && typeof (s as ChatSession).id === 'string' && Array.isArray((s as ChatSession).messages))
+        if (cleaned.length === 0) throw new Error('invalid shape')
+        chatSessions = cleaned
+        chatSessionEnsure()
+        chatSessionsPersist()
+        rerender()
+        showToast(rootHost(), `⬆ Restored ${cleaned.length} session(s)`)
+      } catch {
+        showToast(rootHost(), '⬆ Restore failed: invalid backup file')
+      }
+    })
+    fileInput.value = ''
+  }
+  restoreBtn.onclick = () => fileInput.click()
+  document.body.appendChild(fileInput)
+  sessionTabs.appendChild(restoreBtn)
   column.appendChild(sessionTabs)
 
   // Transcript search box (dsh-web "Search sessions" on the chat itself):
