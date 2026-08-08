@@ -94,7 +94,7 @@ interface Projection {
 }
 
 interface ClaimRow { claim_id?: string; statement?: string; status?: string; confidence?: string }
-interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number } }
+interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number }; artifact_refs?: string[]; run_ids?: string[] }
 interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number }
 interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
 interface ProjectRow { project_id?: string; name?: string; status?: string; updated_at?: string }
@@ -541,6 +541,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 /* dsh-web background texture preferences. */
 :host([data-texture="grid"]) .panel { background-image: linear-gradient(var(--border-2) 1px, transparent 1px), linear-gradient(90deg, var(--border-2) 1px, transparent 1px); background-size: 22px 22px; }
 :host([data-texture="dots"]) .panel { background-image: radial-gradient(var(--border-2) 1px, transparent 1px); background-size: 18px 18px; }
+/* dsh-web a11y: visible keyboard focus everywhere. */
+:host(:focus-visible), .panel :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
 /* dsh-web mobile: full-viewport panel, scrollable tabs, compact chrome. */
 @media (max-width: 640px) {
   :host { position: fixed; inset: 0; }
@@ -1622,7 +1624,9 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
     row.appendChild(el('span', 'grow'))
     row.appendChild(pill('verified'))
     card.appendChild(row)
-    const meta = el('div', 'muted', `CI [${r?.ci_low ?? '?'}, ${r?.ci_high ?? '?'}] · n=${r?.n_seeds ?? '?'} · ${item.analysis_method ?? '?'}`)
+    const refsCount = Array.isArray(item.artifact_refs) ? item.artifact_refs.length : 0
+    const runsCount = Array.isArray(item.run_ids) ? item.run_ids.length : 0
+    const meta = el('div', 'muted', `CI [${r?.ci_low ?? '?'}, ${r?.ci_high ?? '?'}] · n=${r?.n_seeds ?? '?'} · ${item.analysis_method ?? '?'} · ${runsCount} run(s) · ${refsCount} artifact ref(s)`)
     meta.style.cssText = 'margin-top:4px'
     card.appendChild(meta)
     // dsh-web analysis depth: an effect-size bar (0-centred) per evidence.
@@ -2928,7 +2932,7 @@ const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 const CHAT_MAX = 200
 /** Multi-session chats (dsh-web session tabs), persisted. */
 const SESSIONS_KEY = 'dsh-scholar-ui-sessions'
-interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number }
+interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean }
 let chatSessions: ChatSession[] = []
 let chatActiveId: string | null = null
 
@@ -2996,6 +3000,23 @@ function chatSessionRename(id: string): void {
   const clean = name.trim()
   if (clean === '') return
   session.name = clean.slice(0, 40)
+  chatSessionsPersist()
+  rerender()
+}
+
+/** Archive a chat session (dsh-web session actions); messages are kept. */
+function chatSessionArchive(id: string): void {
+  const session = chatSessions.find(s => s.id === id)
+  if (session === undefined) return
+  session.archived = !session.archived
+  if (session.archived && chatActiveId === id) {
+    const next = chatSessions.find(s => s.id !== id && !s.archived) ?? chatSessions.find(s => s.id !== id)
+    if (next !== undefined) {
+      chatActiveId = next.id
+      chatDraft = ''
+    }
+  }
+  chatSyncActive()
   chatSessionsPersist()
   rerender()
 }
@@ -3573,6 +3594,14 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     }
     tab.title = `${s.name} · double-click to rename`
     sessionTabs.appendChild(tab)
+    // dsh-web session actions: archive/restore.
+    const arch = el('button', 'hbtn ghost', s.archived === true ? '↩' : '🗄')
+    arch.title = s.archived === true ? 'restore session' : 'archive session'
+    arch.style.cssText = 'padding:0 4px;font-size:10px'
+    arch.onclick = (event) => {
+      event.stopPropagation()
+      chatSessionArchive(s.id)
+    }
     const close = el('button', 'hbtn ghost', '×')
     close.style.cssText = 'padding:0 4px;font-size:10px'
     close.title = `close ${s.name}`
@@ -3583,7 +3612,9 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const wrap = el('span')
     wrap.style.cssText = 'display:inline-flex;align-items:center;gap:2px;border:1px solid var(--border);border-radius:8px;padding:1px 4px'
     if (s.id === chatActiveId) wrap.style.cssText += ';border-color:var(--accent);background:var(--accent-soft)'
+    if (s.archived === true) wrap.style.cssText += ';opacity:.45'
     wrap.appendChild(tab)
+    wrap.appendChild(arch)
     wrap.appendChild(close)
     sessionTabs.appendChild(wrap)
   }
