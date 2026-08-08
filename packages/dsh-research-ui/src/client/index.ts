@@ -380,11 +380,39 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .artifact-row:hover { background:var(--bg-hover); }
 .artifact-row:last-child { border-bottom:0; }
 .artifact-kind { font:600 9.5px/1.6 ui-monospace,Menlo,monospace; color:var(--text-2); background:var(--bg-3); border:1px solid var(--border); border-radius:5px; padding:1px 6px; flex-shrink:0; }
+/* dsh-web-style layout: left workspace sidebar + main column */
+.panel.row { flex-direction: row; }
+.main { flex:1; display:flex; flex-direction:column; min-width:0; }
+.sidebar { width:230px; flex-shrink:0; display:flex; flex-direction:column; background:var(--bg-3); border-right:1px solid var(--border); overflow:hidden; }
+.sidebar-head { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border); }
+.sidebar-title { font:700 11px/1 system-ui,sans-serif; color:var(--text-2); letter-spacing:.8px; text-transform:uppercase; }
+.sidebar-new { border:1px solid var(--border); background:var(--bg-2); color:var(--text); border-radius:8px; padding:3px 10px; cursor:pointer; font:600 11px/1.6 system-ui,sans-serif; }
+.sidebar-new:hover { background:var(--bg-hover); border-color:var(--border-strong); }
+.sidebar-list { flex:1; overflow-y:auto; padding:6px; scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
+.ws-item { display:flex; align-items:center; gap:8px; width:100%; border:0; background:none; color:var(--text); text-align:left; padding:8px 10px; border-radius:8px; cursor:pointer; margin-bottom:2px; }
+.ws-item:hover { background:var(--bg-hover); }
+.ws-item.active { background:var(--accent-soft); box-shadow:inset 2px 0 0 var(--accent); }
+.ws-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; background:var(--tone-slate); }
+.ws-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:600 12px/1.3 system-ui,sans-serif; }
+.ws-status { font:600 8.5px/1 ui-monospace,Menlo,monospace; color:var(--text-3); letter-spacing:.3px; flex-shrink:0; }
+.sidebar-foot { padding:10px 12px; border-top:1px solid var(--border); color:var(--text-3); font-size:10px; }
 `
   root.appendChild(style)
 
   const panel = el('div', 'panel')
   root.appendChild(panel)
+
+  // Fullscreen (standalone) mode uses a dsh-web-style layout: a left
+  // workspace sidebar (project list) + a main column (header, top tabs,
+  // body). The floating mode keeps the compact picker + tabs column.
+  const main = fullscreen ? el('div', 'main') : panel
+  let sidebar: HTMLElement | null = null
+  if (fullscreen) {
+    panel.classList.add('row')
+    sidebar = el('div', 'sidebar')
+    panel.appendChild(sidebar)
+    panel.appendChild(main)
+  }
 
   // ── header ──
   const header = el('div', 'header')
@@ -410,15 +438,12 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   close.title = 'collapse'
   close.onclick = () => { panel.style.display = 'none' }
   if (fullscreen) {
-    // Standalone mode: an in-panel project creator (the DSH host provides
-    // /research new; the standalone web plugin must be self-sufficient).
-    const newBtn = el('button', 'hbtn', '＋ New Project')
-    newBtn.onclick = () => { openNewProjectModal(root) }
-    header.append(newBtn, themeBtn, refresh)
+    // Standalone mode: project creation lives in the sidebar.
+    header.append(themeBtn, refresh)
   } else {
     header.append(themeBtn, refresh, close)
   }
-  panel.appendChild(header)
+  main.appendChild(header)
 
   // ── tabs ──
   const tabs = el('div', 'tabs')
@@ -434,15 +459,15 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     tabButtons.set(key, button)
     tabs.appendChild(button)
   }
-  panel.appendChild(tabs)
+  main.appendChild(tabs)
 
   // ── body + picker ──
   const body = el('div', 'body')
-  panel.appendChild(body)
+  main.appendChild(body)
   const picker = el('select', 'picker')
   picker.style.cssText = 'margin:10px 12px 0;width:calc(100% - 24px)'
   picker.onchange = () => { projectId = picker.value || undefined; void render() }
-  panel.insertBefore(picker, body)
+  if (!fullscreen) main.insertBefore(picker, body)
 
   const styleTabs = (): void => {
     for (const [key, button] of tabButtons) button.classList.toggle('active', key === activeTab)
@@ -450,23 +475,27 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   const render = async (): Promise<void> => {
     styleTabs()
-    // Project picker: session-linked first, then all projects.
+    // Project list: drives the sidebar (fullscreen) or the picker (float).
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
-    // Rebuild when empty, when there is no active project, or when the
-    // active project id is not among the options (chat /research new
-    // creates projects outside the picker's own onchange).
-    const hasActive = projectId !== undefined && [...picker.options].some(o => o.value === projectId)
-    if (picker.options.length === 0 || projectId === undefined || !hasActive) {
-      picker.replaceChildren()
-      const placeholder = el('option', '', projectId === undefined ? '— select project —' : '— session-linked —')
-      placeholder.value = ''
-      picker.appendChild(placeholder)
-      for (const p of projects) {
-        const option = el('option', '', `${p.name ?? p.project_id} · ${p.status ?? ''}`)
-        option.value = p.project_id ?? ''
-        picker.appendChild(option)
+    if (fullscreen && sidebar !== null) {
+      renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() })
+    } else {
+      // Rebuild when empty, when there is no active project, or when the
+      // active project id is not among the options (chat /research new
+      // creates projects outside the picker's own onchange).
+      const hasActive = projectId !== undefined && [...picker.options].some(o => o.value === projectId)
+      if (picker.options.length === 0 || projectId === undefined || !hasActive) {
+        picker.replaceChildren()
+        const placeholder = el('option', '', projectId === undefined ? '— select project —' : '— session-linked —')
+        placeholder.value = ''
+        picker.appendChild(placeholder)
+        for (const p of projects) {
+          const option = el('option', '', `${p.name ?? p.project_id} · ${p.status ?? ''}`)
+          option.value = p.project_id ?? ''
+          picker.appendChild(option)
+        }
+        picker.value = projectId ?? ''
       }
-      picker.value = projectId ?? ''
     }
     const target = projectId ?? projects[0]?.project_id
     if (target === undefined) {
@@ -479,9 +508,11 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       return
     }
     projectId = projection.project.project_id
-    // Keep the picker in sync with the active project (the chat /research
-    // new command switches it outside the picker's own onchange).
-    picker.value = projectId ?? ''
+    if (!fullscreen) {
+      // Keep the picker in sync with the active project (the chat /research
+      // new command switches it outside the picker's own onchange).
+      picker.value = projectId ?? ''
+    }
     body.replaceChildren()
 
     const title = el('div', 'project-title')
@@ -1223,6 +1254,52 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
     default:
       return `Unknown command: /research ${sub}. Try /research help`
   }
+}
+
+/**
+ * dsh-web-style workspace sidebar: one row per project (name + status
+ * dot/label), the active one highlighted; a ＋ button creates a project.
+ */
+function renderSidebar(
+  sidebar: HTMLElement,
+  projects: ProjectRow[],
+  activeId: string | undefined,
+  onPick: (projectId: string) => void,
+): void {
+  sidebar.replaceChildren()
+  const head = el('div', 'sidebar-head')
+  head.appendChild(el('span', 'sidebar-title', 'Projects'))
+  const newBtn = el('button', 'sidebar-new', '＋')
+  newBtn.title = 'new project'
+  newBtn.onclick = () => {
+    const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+    if (root !== null) openNewProjectModal(root)
+  }
+  head.appendChild(newBtn)
+  sidebar.appendChild(head)
+
+  const list = el('div', 'sidebar-list')
+  if (projects.length === 0) {
+    const empty = el('div', 'empty', 'No projects yet.')
+    empty.style.cssText = 'padding:10px 12px'
+    list.appendChild(empty)
+  }
+  for (const p of projects) {
+    const item = el('button', 'ws-item')
+    if (p.project_id === activeId) item.classList.add('active')
+    const tone = STATUS_META[p.status ?? '']?.tone ?? 'slate'
+    const dot = el('span', 'ws-dot')
+    dot.style.background = `var(--tone-${tone})`
+    item.appendChild(dot)
+    item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
+    item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
+    item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+    list.appendChild(item)
+  }
+  sidebar.appendChild(list)
+
+  const foot = el('div', 'sidebar-foot', 'DSH Scholar · standalone Research OS')
+  sidebar.appendChild(foot)
 }
 
 /**
