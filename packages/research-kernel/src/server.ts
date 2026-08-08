@@ -64,12 +64,28 @@ const gateSchema = z.object({
 
 const decisionSchema = z.object({
   actor: z.string().min(1),
+  // hardening GOV-01: the authenticated human principal (BFF injects it from
+  // the login identity; the UI no longer sends a bare actor).
+  principal: z.object({
+    principal_id: z.string().min(1),
+    tenant_id: z.string().optional(),
+    auth_method: z.string().optional(),
+    session_id: z.string().nullable().optional(),
+  }).optional(),
   decision: z.enum(['approved', 'rejected', 'revised']),
-  reason: z.string().optional(),
+  // gui-plugin-plan §6: reject/revise must carry the operator's rationale.
+  reason: z.string().optional().superRefine((value, ctx) => {
+    // refined below against the decision (schema-level cross-field check).
+    void value; void ctx
+  }),
   diff: z.string().optional(),
   session_id: z.string().nullable().optional(),
   event_id: z.string().nullable().optional(),
   resume_to: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if ((value.decision === 'rejected' || value.decision === 'revised') && (value.reason === undefined || value.reason.trim() === '')) {
+    ctx.addIssue({ code: 'custom', message: 'reason is required for rejected/revised decisions', path: ['reason'] })
+  }
 })
 
 const artifactSchema = z.object({
@@ -166,8 +182,9 @@ const evidenceSchema = z.object({
   result: z.record(z.unknown()),
   uncertainty: z.string().optional(),
   // v2 §13.1: agent-facing write defaults to draft_unverified; 'verified' is
-  // the Analysis-Worker internal path (ingestVerifiedEvidence).
-  provenance_status: z.enum(['draft_unverified', 'legacy_unverified', 'verified']).optional(),
+  // the Analysis-Worker internal path (ingestVerifiedEvidence) and is REJECTED
+  // on the public route (hardening EVID-01).
+  provenance_status: z.enum(['draft_unverified', 'legacy_unverified']).optional(),
 })
 
 const claimVerifySchema = z.object({
@@ -422,9 +439,17 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.listCorpusSnapshots(id))
               return
             }
-            if (method === 'POST' && sub === 'evidence') {
+            if (method === 'POST' && sub === 'evidence' && subId === undefined) {
               const input = evidenceSchema.parse(body)
               const item = kernel.ingestEvidence({ ...input, project_id: id } as never)
+              send(res, 201, item)
+              return
+            }
+            // Analysis-Worker internal path (v2 §13.1): verified provenance is
+            // only reachable here; the public route rejects it (EVID-01).
+            if (method === 'POST' && sub === 'evidence' && subId === 'verified') {
+              const input = evidenceSchema.parse(body)
+              const item = kernel.ingestVerifiedEvidence({ ...input, project_id: id } as never)
               send(res, 201, item)
               return
             }

@@ -227,7 +227,9 @@ export class ResearchKernel {
     session_id?: string | null
     dsh_workspace_id?: string | null
   }): ResearchProject {
-    ResearchBrief.parse(input.brief)
+    // hardening: store the PARSED brief (defaults applied), never the raw
+    // caller object — projection and ledger stay consistent.
+    const brief = ResearchBrief.parse(input.brief)
     const project: ResearchProject = {
       project_id: buildProjectId(),
       name: input.name,
@@ -235,7 +237,7 @@ export class ResearchKernel {
       mode: input.mode ?? 'gate-only',
       status: 'DRAFT',
       revision: 0,
-      brief: input.brief,
+      brief,
       constraints: BudgetConstraints.parse(input.constraints ?? {}),
       execution: ExecutionConfig.parse(input.execution ?? {}),
       integrity: IntegrityConfig.parse(input.integrity ?? {}),
@@ -444,8 +446,15 @@ export class ResearchKernel {
         decided_at: nowIso(),
       }
       this.db.prepare(
-        'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      ).run(decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor, decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at)
+        'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at, principal_id, principal_tenant_id, principal_auth_method, principal_session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor,
+        decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at,
+        decision.principal?.principal_id ?? null,
+        decision.principal?.tenant_id ?? null,
+        decision.principal?.auth_method ?? null,
+        decision.principal?.session_id ?? null,
+      )
       const gateUpdate = this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
         .run(input.decision, decision.decided_at, gate.gate_id, 'pending')
       if (Number(gateUpdate.changes) !== 1) {
@@ -479,19 +488,33 @@ export class ResearchKernel {
 
   listDecisions(projectId: string): Decision[] {
     const rows = this.db.prepare('SELECT * FROM decisions WHERE project_id = ? ORDER BY decided_at').all(projectId) as unknown as Array<Record<string, unknown>>
-    return rows.map(row => ({
-      decision_id: row.decision_id as string,
-      gate_id: row.gate_id as string,
-      project_id: row.project_id as string,
-      gate_type: row.gate_type as GateType,
-      actor: row.actor as string,
-      decision: row.decision as Decision['decision'],
-      reason: row.reason as string,
-      diff: row.diff as string,
-      session_id: row.session_id as string | null,
-      event_id: row.event_id as string | null,
-      decided_at: row.decided_at as string,
-    }))
+    return rows.map(row => {
+      const principalId = row.principal_id as string | null
+      const decision: Decision = {
+        decision_id: row.decision_id as string,
+        gate_id: row.gate_id as string,
+        project_id: row.project_id as string,
+        gate_type: row.gate_type as GateType,
+        actor: row.actor as string,
+        // hardening GOV-01: the durable principal is reconstructed from the
+        // stored columns; legacy rows (NULL) surface as legacy_unverified.
+        principal: principalId !== null && principalId !== ''
+          ? {
+              principal_id: principalId,
+              tenant_id: (row.principal_tenant_id as string | null) ?? '',
+              auth_method: (row.principal_auth_method as string | null) ?? 'unverified',
+              session_id: (row.principal_session_id as string | null) ?? null,
+            }
+          : undefined,
+        decision: row.decision as Decision['decision'],
+        reason: row.reason as string,
+        diff: row.diff as string,
+        session_id: row.session_id as string | null,
+        event_id: row.event_id as string | null,
+        decided_at: row.decided_at as string,
+      }
+      return decision
+    })
   }
 
   /** Gate-transaction transition: the ONLY path into gate-controlled states
@@ -1440,6 +1463,9 @@ export class ResearchKernel {
     provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified'
   }): import('@dsh-scholar/research-schemas').EvidenceItem {
     this.getProject(input.project_id)
+    // Note: the PUBLIC HTTP route rejects 'verified' (evidenceSchema);
+    // ingestVerifiedEvidence is the internal Analysis-Worker path that sets
+    // it here. Kernel-level callers are trusted internal surfaces.
     const item = {
       evidence_id: `evidence_${randomUUID().slice(0, 12)}`,
       project_id: input.project_id,
@@ -1454,9 +1480,12 @@ export class ResearchKernel {
       created_at: nowIso(),
     }
     const provenance = input.provenance_status ?? 'legacy_unverified'
+    // The provenance travels INSIDE the stored body too (listEvidence
+    // reparses it; verifyClaim filters on it — hardening EVID-01).
+    const stored = { ...item, provenance_status: provenance }
     this.db.prepare('INSERT INTO evidence (evidence_id, project_id, body, provenance_status, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(item.evidence_id, item.project_id, JSON.stringify(item), provenance, item.created_at)
-    return { ...item, provenance_status: provenance } as import('@dsh-scholar/research-schemas').EvidenceItem & { provenance_status: string }
+      .run(item.evidence_id, item.project_id, JSON.stringify(stored), provenance, item.created_at)
+    return stored as import('@dsh-scholar/research-schemas').EvidenceItem & { provenance_status: string }
   }
 
   /** v2 §13.1 / §17.3: Analysis-Worker-only verified evidence path. */
@@ -1485,11 +1514,27 @@ export class ResearchKernel {
     reason?: string
   }): Claim {
     const current = this.getClaim(input.claim_id)
-    const evidence = input.evidence_ids
+    // hardening EVID-01: only WORKER-verified evidence may support a claim;
+    // draft notes and legacy rows are excluded from the verdict.
+    const resolved = input.evidence_ids
       .map(id => this.listEvidence(current.project_id).find(e => e.evidence_id === id))
       .filter((e): e is NonNullable<typeof e> => e !== undefined)
-    if (evidence.length === 0) {
+    if (resolved.length === 0) {
       throw new KernelError(422, 'no_evidence', `claim ${input.claim_id} has no resolvable evidence`)
+    }
+    const evidence = resolved.filter(e => (e as { provenance_status?: string }).provenance_status === 'verified')
+    if (evidence.length === 0) {
+      // Resolvable but not worker-verified: the verdict is inconclusive with
+      // an explicit reason (no 422 — the ids exist, provenance is lacking).
+      const update = this.db.prepare('UPDATE claims SET body = ?, updated_at = ? WHERE claim_id = ?')
+      const currentBody = JSON.parse(JSON.stringify(current)) as Claim
+      const inconclusive: Claim = {
+        ...currentBody,
+        status: 'inconclusive',
+        history: [...(currentBody.history ?? []), { status: 'inconclusive' as Claim['status'], at: nowIso(), reason: 'requires worker-verified evidence' }],
+      }
+      update.run(JSON.stringify(inconclusive), nowIso(), input.claim_id)
+      return inconclusive
     }
     // v2 §13.5: deterministic strict rules. Default is inconclusive.
     // supported requires: verified evidence, effect size present, CI present,

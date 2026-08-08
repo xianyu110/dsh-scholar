@@ -57,7 +57,13 @@ CREATE TABLE IF NOT EXISTS decisions (
   diff TEXT NOT NULL DEFAULT '',
   session_id TEXT,
   event_id TEXT,
-  decided_at TEXT NOT NULL
+  decided_at TEXT NOT NULL,
+  -- v2 §6.4 authenticated principal (hardening GOV-01): durable identity of
+  -- the human operator behind the decision; NULL for legacy rows.
+  principal_id TEXT,
+  principal_tenant_id TEXT,
+  principal_auth_method TEXT,
+  principal_session_id TEXT
 );
 CREATE TABLE IF NOT EXISTS ideas (
   idea_id TEXT PRIMARY KEY,
@@ -220,6 +226,11 @@ export function openDatabase(path: string): DatabaseSync {
   }
   // v2 forward migrations on pre-existing databases.
   ensureColumn(db, 'evidence', 'provenance_status', "TEXT NOT NULL DEFAULT 'legacy_unverified'")
+  // hardening GOV-01: decisions carry the durable human principal.
+  ensureColumn(db, 'decisions', 'principal_id', 'TEXT')
+  ensureColumn(db, 'decisions', 'principal_tenant_id', 'TEXT')
+  ensureColumn(db, 'decisions', 'principal_auth_method', 'TEXT')
+  ensureColumn(db, 'decisions', 'principal_session_id', 'TEXT')
   // §12.6 lease fencing: generation counter, bumped on every claim.
   ensureColumn(db, 'jobs', 'lease_generation', 'INTEGER')
   migrateJobsProjectIdempotency(db)
