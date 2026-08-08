@@ -423,7 +423,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   // ── tabs ──
   const tabs = el('div', 'tabs')
   const TAB_DEFS = [
-    ['phase', 'Phase'], ['gates', 'Gates'], ['runs', 'Runs'],
+    ['chat', '💬 Chat'], ['phase', 'Phase'], ['gates', 'Gates'], ['runs', 'Runs'],
     ['artifacts', 'Artifacts'], ['evidence', 'Evidence'], ['budget', 'Budget'],
   ] as const
   const tabButtons = new Map<string, HTMLElement>()
@@ -452,8 +452,11 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     styleTabs()
     // Project picker: session-linked first, then all projects.
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
-    const current = picker.options.length === 0
-    if (current || projectId === undefined) {
+    // Rebuild when empty, when there is no active project, or when the
+    // active project id is not among the options (chat /research new
+    // creates projects outside the picker's own onchange).
+    const hasActive = projectId !== undefined && [...picker.options].some(o => o.value === projectId)
+    if (picker.options.length === 0 || projectId === undefined || !hasActive) {
       picker.replaceChildren()
       const placeholder = el('option', '', projectId === undefined ? '— select project —' : '— session-linked —')
       placeholder.value = ''
@@ -476,7 +479,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       return
     }
     projectId = projection.project.project_id
-    if (current) picker.value = projectId
+    // Keep the picker in sync with the active project (the chat /research
+    // new command switches it outside the picker's own onchange).
+    picker.value = projectId ?? ''
     body.replaceChildren()
 
     const title = el('div', 'project-title')
@@ -487,6 +492,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     body.appendChild(title)
 
     switch (activeTab) {
+      case 'chat': await renderChat(body, target); break
       case 'phase': renderPhase(body, projection); break
       case 'gates': await renderGates(body, target); break
       case 'runs': renderRuns(body, projection); break
@@ -965,4 +971,349 @@ function openNewProjectModal(root: ShadowRoot): void {
   overlay.appendChild(modal)
   root.appendChild(overlay)
   nameInput.focus()
+}
+
+/* ─────────────────────────── Chat (dialogue) tab ─────────────────────────── */
+
+/**
+ * Chat transcript + built-in /research command executor. Mirrors the dsh web
+ * dialogue feel (message bubbles + composer) while talking straight to the
+ * Kernel API through the same bridge the panels use — no agent loop needed.
+ * The composer persists across 8s panel refreshes via chatDraft.
+ */
+interface ChatMessage {
+  role: 'user' | 'assistant' | 'error'
+  text: string
+  time: string
+}
+
+let chatMessages: ChatMessage[] = []
+let chatDraft = ''
+
+function chatPush(role: ChatMessage['role'], text: string): void {
+  chatMessages.push({ role, text, time: new Date().toLocaleTimeString() })
+}
+
+function fmtProjectRow(p: { project_id?: string; name?: string; status?: string }): string {
+  return `- **${p.name ?? '?'}** (\`${p.project_id ?? '?'}\`) — ${p.status ?? '?'}`
+}
+
+/** Parse `key=value` pairs from a JSON-ish argument string. */
+function chatJsonArg(rest: string): Record<string, unknown> | null {
+  const start = rest.indexOf('{')
+  if (start < 0) return null
+  try {
+    const parsed = JSON.parse(rest.slice(start)) as unknown
+    return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Execute one chat line: either a /research subcommand or a bare word that
+ * maps to one. Returns the assistant answer text.
+ */
+async function executeChatCommand(line: string, activeProjectId: string | undefined): Promise<string> {
+  const trimmed = line.trim().replace(/^\/research\s+/i, '').replace(/^\//, '')
+  const parts = trimmed.split(/\s+/)
+  const sub = (parts[0] ?? '').toLowerCase()
+  const rest = trimmed.slice(sub.length).trim()
+
+  switch (sub) {
+    case '':
+    case 'help': {
+      return 'Commands:\n'
+        + '  /research new <name> [json]      create project + Scope Gate\n'
+        + '  /research list                   all projects\n'
+        + '  /research status [project_id]    phase, gates, jobs, budget\n'
+        + '  /research survey <query>         multi-source search + snapshot\n'
+        + '  /research ideas                  IdeaCards\n'
+        + '  /research gates [project_id]     gate list + decisions\n'
+        + '  /research jobs [project_id]      job list\n'
+        + '  /research contract <json>        pre-register a contract\n'
+        + '  /research run <json>             submit a job\n'
+        + '  /research evidence <json>        ingest evidence\n'
+        + '  /research claims [project_id]    claims + verification status\n'
+        + '  /research write / review / export / release\n'
+        + '\nTry: /research new demo1 or /research status'
+    }
+    case 'new': {
+      const name = parts[1] ?? ''
+      if (name === '') return 'usage: /research new <name> [json]'
+      const json = chatJsonArg(rest)
+      const brief = {
+        problem: String(json?.problem ?? 'To be specified in the Scope Gate.'),
+        scope: String(json?.scope ?? 'To be specified in the Scope Gate.'),
+        questions: Array.isArray(json?.questions) ? json.questions.map(String) : [],
+        primary_metrics: Array.isArray(json?.primary_metrics) ? json.primary_metrics.map(String) : [],
+        resources: String(json?.resources ?? ''),
+        risks: [],
+        target_outputs: ['conference-paper'],
+        target_venue: null,
+        baseline_repo: null,
+        domain: 'machine-learning',
+      }
+      const project = await api<{ project_id?: string; name?: string; status?: string }>('/v1/projects', {
+        method: 'POST',
+        body: JSON.stringify({ name, workspace: `/research/${name}`, brief, mode: 'gate-only' }),
+      })
+      if (project === null || project.project_id === undefined) return 'create failed — kernel unreachable?'
+      await api(`/v1/projects/${encodeURIComponent(project.project_id)}/gates`, {
+        method: 'POST',
+        body: JSON.stringify({ type: 'scope', title: `Scope Gate — ${name}`, summary: 'Approve the research scope, data policy, budget and target venue.' }),
+      })
+      projectId = project.project_id
+      void rerender()
+      return `Project **${project.project_id}** (${name}) created — DRAFT.\nScope Gate opened: approve it in the Gates tab (human only).`
+    }
+    case 'list': {
+      const projects = (await api<Array<{ project_id?: string; name?: string; status?: string }>>('/v1/projects')) ?? []
+      if (projects.length === 0) return 'No projects yet — try /research new demo1'
+      return `Projects (${projects.length}):\n${projects.map(fmtProjectRow).join('\n')}`
+    }
+    case 'status': {
+      const id = parts[1] ?? activeProjectId
+      if (id === undefined) return 'No project selected — /research new <name> or /research status <project_id>'
+      const p = await api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)
+      if (p === null || p.project === undefined) return `project ${id} not found`
+      const pending = (p.pending_gates ?? []).map(g => `- ${g.type} gate ${g.gate_id}: ${g.title} (${g.status})`).join('\n') || 'none'
+      const jobs = (p.jobs ?? []).slice(-5).map(j => `- ${j.job_id} [${j.kind}] ${j.status}`).join('\n') || 'none'
+      return `**${p.project.name}** (\`${id}\`) — phase \`${p.project.status}\` rev ${p.project.revision ?? 0}\n\n`
+        + `Next actions:\n${(p.next_actions ?? []).map(a => `- ${a}`).join('\n') || 'none'}\n\n`
+        + `Pending gates:\n${pending}\n\n`
+        + `Recent jobs:\n${jobs}\n\n`
+        + `Budget: $${p.budget?.model_cost_usd ?? 0} / ${p.project.constraints?.max_model_cost_usd ?? '∞'} max, `
+        + `${p.budget?.gpu_hours ?? 0} / ${p.project.constraints?.max_gpu_hours ?? '∞'} GPU-h`
+    }
+    case 'survey': {
+      const query = rest.trim()
+      if (query === '') return 'usage: /research survey <query>'
+      if (activeProjectId === undefined) return 'No project selected — /research new <name> first'
+      const response = await fetch(`${base()}/api/chat/survey`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(await authHeaders()) },
+        body: JSON.stringify({ project_id: activeProjectId, query }),
+      })
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '')
+        return `survey unavailable on this host (${response.status} ${bodyText.slice(0, 120)})`
+      }
+      const result = (await response.json()) as { snapshot_id?: string; papers?: number; removed?: number; top?: Array<{ paper_id: string; title: string; year?: number }> }
+      const top = (result.top ?? []).slice(0, 5).map(h => `- ${h.paper_id}: ${h.title} (${h.year ?? 'n.d.'})`).join('\n')
+      return `Survey complete: **${result.snapshot_id}** — ${result.papers ?? 0} papers after dedup (${result.removed ?? 0} removed).\n\nTop hits:\n${top}\n\nNext: /research ideas`
+    }
+    case 'ideas': {
+      if (activeProjectId === undefined) return 'No project selected — /research new <name> first'
+      const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(activeProjectId)}/ideas`)) ?? []
+      if (ideas.length === 0) return 'No IdeaCards yet — create them with the idea_create tool, then novelty_audit before the Idea Gate.'
+      return `IdeaCards:\n${ideas.map(i => `- \`${String(i.idea_id)}\` [${String(i.status ?? '')}] ${String(i.title ?? '')}`).join('\n')}`
+    }
+    case 'gates': {
+      const id = parts[1] ?? activeProjectId
+      if (id === undefined) return 'No project selected'
+      const gates = (await api<GateRow[]>(`/v1/projects/${encodeURIComponent(id)}/gates`)) ?? []
+      if (gates.length === 0) return 'No gates yet.'
+      return `Gates:\n${gates.map(g => `- ${g.type} \`${g.gate_id}\` [${g.status}] ${g.title ?? ''}`).join('\n')}`
+    }
+    case 'jobs': {
+      const id = parts[1] ?? activeProjectId
+      if (id === undefined) return 'No project selected'
+      const jobs = (await api<Array<{ job_id?: string; kind?: string; status?: string }>>(`/v1/projects/${encodeURIComponent(id)}/jobs`)) ?? []
+      if (jobs.length === 0) return 'No jobs yet.'
+      return `Jobs:\n${jobs.map(j => `- \`${j.job_id}\` [${j.kind}] ${j.status}`).join('\n')}`
+    }
+    case 'contract': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const json = chatJsonArg(rest)
+      if (json === null) return 'usage: /research contract {"idea_id":"...","dataset_id":"...","baseline":"b","treatment":"a","primary_metric":"m","seeds":[11,23,47]}'
+      const seeds = Array.isArray(json.seeds) ? json.seeds.map(Number) : [11, 23, 47]
+      const c = await api<{ contract_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/contracts`, {
+        method: 'POST',
+        body: JSON.stringify({
+          idea_id: String(json.idea_id ?? ''),
+          data: { dataset_id: String(json.dataset_id ?? ''), version: 'official', split: 'official' },
+          methods: { baseline: String(json.baseline ?? ''), treatment: String(json.treatment ?? '') },
+          metrics: { primary: String(json.primary_metric ?? ''), secondary: [] },
+          seeds,
+          analysis: { effect_size: 'mean_difference', interval: 'bootstrap_95', multiple_testing: 'holm' },
+          ablations: [],
+          stop_conditions: { max_gpu_hours: 48, min_completed_seeds: seeds.length, stop_on_data_leakage: true },
+        }),
+      })
+      if (c === null || c.contract_id === undefined) return 'contract registration failed'
+      return `Contract **${c.contract_id}** registered — approve it in the Gates tab (human).`
+    }
+    case 'run': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const json = chatJsonArg(rest)
+      if (json === null || !Array.isArray(json.command)) return 'usage: /research run {"kind":"echo","command":["echo","hi"]}'
+      const kind = String(json.kind ?? 'echo')
+      const job = await api<{ job_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/jobs`, {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotency_key: String(json.idempotency_key ?? `chat-${Date.now()}`),
+          kind,
+          command: json.command.map(String),
+          payload: { message: `chat /research run ${kind}` },
+          contract_id: typeof json.contract_id === 'string' ? json.contract_id : null,
+        }),
+      })
+      if (job === null || job.job_id === undefined) return 'job submission failed'
+      return `Job **${job.job_id}** [${kind}] submitted (${job.status}). Watch it in the Runs tab.`
+    }
+    case 'evidence': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const json = chatJsonArg(rest)
+      if (json === null || typeof json.analysis_method !== 'string') {
+        return 'usage: /research evidence {"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"acc","value":0.9,"baseline_value":0.8,"effect_size":0.1,"ci_low":0.05,"ci_high":0.15,"n_seeds":3}}'
+      }
+      const ev = await api<{ evidence_id?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/evidence`, {
+        method: 'POST',
+        body: JSON.stringify({
+          source_type: 'analysis',
+          run_ids: Array.isArray(json.run_ids) ? json.run_ids.map(String) : [],
+          artifact_refs: Array.isArray(json.artifact_refs) ? json.artifact_refs.map(String) : [],
+          analysis_method: json.analysis_method,
+          result: (json.result ?? {}) as Record<string, unknown>,
+          provenance_status: 'draft_unverified',
+        }),
+      })
+      if (ev === null || ev.evidence_id === undefined) return 'evidence ingestion failed'
+      return `Evidence **${ev.evidence_id}** ingested (draft_unverified — only the Analysis Worker can verify).`
+    }
+    case 'claims': {
+      const id = parts[1] ?? activeProjectId
+      if (id === undefined) return 'No project selected'
+      const claims = (await api<ClaimRow[]>(`/v1/projects/${encodeURIComponent(id)}/claims`)) ?? []
+      if (claims.length === 0) return 'No claims yet.'
+      return `Claims:\n${claims.map(c => `- \`${c.claim_id}\` [${c.status}] ${(c.statement ?? '').slice(0, 70)}`).join('\n')}`
+    }
+    case 'write': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const draft = await api<{ manuscript_id?: string; claims_used?: number }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/manuscripts/build`, {
+        method: 'POST',
+        body: JSON.stringify({ format: 'markdown', include_limitations: true }),
+      })
+      if (draft === null || draft.manuscript_id === undefined) return 'manuscript build failed'
+      return `Manuscript **${draft.manuscript_id}** built (${draft.claims_used ?? 0} supported claims).`
+    }
+    case 'review': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const review = await api<{ pass?: boolean; checks?: Array<{ check?: string; status?: string; detail?: string }> }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/manuscript-review`)
+      if (review === null) return 'review failed'
+      const checks = (review.checks ?? []).map(c => `- [${c.status}] ${c.check}: ${c.detail}`).join('\n')
+      return `Reviewer: ${review.pass === true ? 'PASS' : 'SEE CHECKS'}\n${checks}`
+    }
+    case 'export': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const bundle = await api<{ bundle_id?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/release-bundle`, { method: 'POST' })
+      if (bundle === null || bundle.bundle_id === undefined) return 'export failed'
+      return `Release bundle **${bundle.bundle_id}** generated (private export, not publication).`
+    }
+    case 'release': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const gate = await api<{ gate_id?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/gates`, {
+        method: 'POST',
+        body: JSON.stringify({ type: 'release', title: 'Release Gate — explicit human decision required', summary: 'Explicit human decision required: authors, licenses, public scope and target platform.' }),
+      })
+      if (gate === null || gate.gate_id === undefined) return 'release gate creation failed'
+      return `Release Gate **${gate.gate_id}** created and left **pending** (human only).`
+    }
+    default:
+      return `Unknown command: /research ${sub}. Try /research help`
+  }
+}
+
+/**
+ * Chat tab: message bubbles (dsh-web style) + a composer that runs
+ * /research commands directly against the Kernel bridge. The transcript
+ * survives 8s panel refreshes (chatMessages), as does the draft text.
+ */
+async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
+  const shell = el('div')
+  shell.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:420px'
+
+  const stream = el('div')
+  stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
+  if (chatMessages.length === 0) {
+    chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
+  }
+  for (const msg of chatMessages) {
+    const bubble = el('div')
+    bubble.style.cssText = msg.role === 'user'
+      ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;white-space:pre-wrap;word-break:break-word;font-size:12px'
+      : msg.role === 'error'
+        ? 'align-self:flex-start;background:var(--tone-red-bg);color:var(--tone-red);border:1px solid var(--tone-red);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;white-space:pre-wrap;word-break:break-word;font-size:12px'
+        : 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;white-space:pre-wrap;word-break:break-word;font-size:12px'
+    // Bold + inline-code-ish rendering (textContent-safe: only ** ** and ` `).
+    const rendered = msg.text
+      .replace(/\*\*([^*]+)\*\*/g, '**$1**')
+    bubble.textContent = rendered
+    // Simple inline formatting: split on ** pairs and wrap in <strong> via
+    // textContent-safe nodes only.
+    bubble.replaceChildren(...formatChatText(msg.text))
+    stream.appendChild(bubble)
+    const stamp = el('div')
+    stamp.style.cssText = msg.role === 'user'
+      ? 'align-self:flex-end;color:var(--text-3);font-size:9px;margin-top:-4px'
+      : 'align-self:flex-start;color:var(--text-3);font-size:9px;margin-top:-4px'
+    stamp.textContent = msg.time
+    stream.appendChild(stamp)
+  }
+  shell.appendChild(stream)
+
+  // Composer (persists across refreshes via chatDraft).
+  const composer = el('div')
+  composer.style.cssText = 'display:flex;gap:8px;margin-top:10px'
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.placeholder = '/research status — type a command'
+  input.value = chatDraft
+  input.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.4 ui-monospace,Menlo,monospace;outline:none'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  input.oninput = () => { chatDraft = input.value }
+  const send = el('button', 'btn approve', 'Send')
+  send.style.cssText = 'padding:7px 16px;border-radius:9px'
+  const run = async (): Promise<void> => {
+    const line = input.value.trim()
+    if (line === '') return
+    input.value = ''
+    chatDraft = ''
+    chatPush('user', line)
+    try {
+      const answer = await executeChatCommand(line, projectId)
+      chatPush('assistant', answer)
+    } catch (error) {
+      chatPush('error', `command failed: ${(error as Error).message}`)
+    }
+    rerender()
+  }
+  send.onclick = () => { void run() }
+  input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); void run() } }
+  composer.append(input, send)
+  shell.appendChild(composer)
+
+  body.appendChild(shell)
+}
+
+/** Render **bold** and `code` spans with textContent-only nodes. */
+function formatChatText(text: string): HTMLElement[] {
+  const nodes: HTMLElement[] = []
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+  for (const part of parts) {
+    if (part === '') continue
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      const strong = el('strong', '', part.slice(2, -2))
+      nodes.push(strong)
+    } else if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      const code = el('code', '', part.slice(1, -1))
+      code.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:4px;padding:0 4px;font:10.5px/1.4 ui-monospace,Menlo,monospace'
+      nodes.push(code)
+    } else {
+      nodes.push(el('span', '', part))
+    }
+  }
+  return nodes
 }

@@ -27,6 +27,7 @@ import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { UiKernelSidecar } from '../host/sidecar.js'
+import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 
 const DEFAULT_PORT = 18610
 const DEFAULT_KERNEL_PORT = 17413
@@ -306,6 +307,62 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           sendJson(res, 200, { ok: true })
         } else {
           sendJson(res, 401, { ok: false, error: 'invalid token' })
+        }
+        return
+      }
+
+      // Chat /research survey: the browser client cannot run the scholar
+      // connectors (OpenAlex/Crossref/arXiv fetchers), so the standalone
+      // server performs the multi-source search + corpus snapshot on its
+      // behalf (same surface as the DSH-hosted /research survey command).
+      if (method === 'POST' && url.pathname === '/api/chat/survey') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            return
+          }
+        }
+        const { body } = await readBody(req)
+        let projectId = ''
+        let query = ''
+        try {
+          const parsed = JSON.parse(body) as { project_id?: unknown; query?: unknown }
+          projectId = typeof parsed.project_id === 'string' ? parsed.project_id : ''
+          query = typeof parsed.query === 'string' ? parsed.query : ''
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad request' })
+          return
+        }
+        if (projectId === '' || query === '') {
+          sendJson(res, 400, { ok: false, error: 'project_id and query required' })
+          return
+        }
+        try {
+          const result = await multiSourceSearch(query, { limit: 20 })
+          const snapshotResponse = await fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/corpus`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({
+              queries: result.queries,
+              papers: result.hits.map(h => h.paper),
+            }),
+          })
+          if (!snapshotResponse.ok) {
+            sendJson(res, 502, { ok: false, error: 'corpus snapshot failed' })
+            return
+          }
+          const snapshot = (await snapshotResponse.json()) as { snapshot_id?: string; papers?: unknown[] }
+          sendJson(res, 200, {
+            ok: true,
+            snapshot_id: snapshot.snapshot_id,
+            papers: Array.isArray(snapshot.papers) ? snapshot.papers.length : 0,
+            removed: result.dedup_removed,
+            top: result.hits.slice(0, 5).map(h => ({ paper_id: h.paper.paper_id, title: h.paper.title, year: h.paper.year })),
+          })
+        } catch (error) {
+          sendJson(res, 502, { ok: false, error: `survey failed: ${(error as Error).message}` })
         }
         return
       }

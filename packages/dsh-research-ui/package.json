@@ -37,7 +37,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@dsh-scholar/research-kernel": "file:../research-kernel"
+    "@dsh-scholar/research-kernel": "file:../research-kernel",
+    "@dsh-scholar/scholar-connectors": "file:../scholar-connectors"
   },
   "peerDependencies": {
     "cordis": ">=4.0.0-rc.7"
