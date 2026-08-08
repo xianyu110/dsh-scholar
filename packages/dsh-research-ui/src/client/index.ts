@@ -3269,7 +3269,14 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
       tokValue.textContent = t ?? '(none)'
       reveal.remove()
     }
-    tokRow.append(tokLabel, tokValue, reveal)
+    const copyTok = el('button', 'hbtn', '⧉')
+    copyTok.title = 'copy token'
+    copyTok.style.cssText = 'padding:1px 8px'
+    copyTok.onclick = async () => {
+      const t = await tokenProvider()
+      if (t !== null && t !== undefined) copyText(t)
+    }
+    tokRow.append(tokLabel, tokValue, reveal, copyTok)
     modal.appendChild(tokRow)
   }
 
@@ -5072,9 +5079,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const column = el('div')
   column.style.cssText = 'flex:1;display:flex;flex-direction:column;min-width:0'
 
-  // dsh-web session tabs: switch / create / close chat sessions.
+  // dsh-web session tabs: switch / create / close chat sessions (the row
+  // scrolls horizontally instead of wrapping with many sessions).
   const sessionTabs = el('div')
-  sessionTabs.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap;align-items:center'
+  sessionTabs.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;align-items:center;overflow-x:auto;flex-wrap:nowrap;max-width:100%;padding-bottom:2px;scrollbar-width:thin'
   for (const s of chatSessions) {
     const tab = el('button', 'hbtn')
     tab.textContent = s.name
@@ -6087,7 +6095,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   // dsh-web composer: a multi-line textarea that auto-grows.
   const input = document.createElement('textarea')
   input.rows = 1
-  input.placeholder = '/research status — type a command (Enter sends, Shift+Enter newline)'
+  // dsh-web context: the placeholder shows the active project.
+  input.placeholder = `/research status — ${projectId !== '' && projectId !== undefined ? `active: ${projectId.slice(0, 16)}` : 'no project selected'} (Enter sends, Shift+Enter newline)`
   input.setAttribute('aria-label', 'Research command composer')
   input.value = chatDraft
   input.style.cssText = 'flex:1;resize:none;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.5 ui-monospace,Menlo,monospace;outline:none;min-height:34px;max-height:120px;overflow-y:auto'
