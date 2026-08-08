@@ -2,7 +2,10 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 
 export const MAX_BODY_BYTES = 16 * 1024 * 1024
-export const DEFAULT_RATE_LIMIT = { windowMs: 60_000, max: 60 } as const
+// Loopback-only UI: the panel polls every 8s and fires parallel fetches per
+// render, so 60/min starves an active session. 300/min still bounds abusive
+// bursts while keeping the workspace usable (security-baseline.md §loopback).
+export const DEFAULT_RATE_LIMIT = { windowMs: 60_000, max: 300 } as const
 
 /** Tokenless standalone mode is only safe on an explicit loopback bind. */
 export function isLoopbackHost(host: string): boolean {
