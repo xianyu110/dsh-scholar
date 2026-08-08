@@ -29,11 +29,11 @@
 | STAT-01 | 单一正式分析实现 | 部分 | Analysis Worker 严格；Kernel computeAnalysis 仍是另一套较浅算法 |
 | RUN-01 | 正式 Docker/快照/fencing | 基本具备 | 默认 Runner CLI 仍 subprocess；签名 enforcement 默认兼容关闭；integrity require_signed_manifest Schema 未持久化 |
 | RUN-02 | 完整容器基线 | 部分 | 当前 flags 有 network/user/memory/cpu/tmpfs，但需 read-only、cap-drop、no-new-privileges、pids 等完整策略 |
-| TERM-01 | 实时有序终端 | 未实现 | Runner 结束后才返回 stdout/stderr，Kernel 无 frames/SSE，UI 无 Terminal tab |
+| TERM-01 | 实时有序终端 | 部分 | Terminal tab(运行选择、通道筛选、SSE 客户端、ANSI 白名单、实时状态栏、lastSeq 续传)已实现;Kernel frames 存储与 SSE 端点落地中 |
 | TEX-01 | TeX workspace/editor/version | 未实现 | buildManuscript 只生成字符串和 Artifact，无文件树/保存/CAS version |
 | TEX-02 | latex-compile Job/诊断/PDF | 部分 | eval 脚本能 pdflatex/bibtex；产品接口和 UI 不存在；Job kind 不含 latex-compile |
 | UI-01 | standalone-only 单一 UI | 基本具备，待 CI 运行 | 根轻面板、两个 DSH HTTP bridge、UI Cordis host/patch 与 client floating 死分支已删除；manifest/files allowlist、docs verifier 和 standalone CI build 已接入，尚需 clean checkout 实跑 |
-| UI-02 | i18n zh/en | 未实现 | 单个约 7,500 行 client 含大量硬编码英文；standalone 首屏固定 lang=en |
+| UI-02 | i18n zh/en | 部分 | locale adapter(resolve/subscribe/setLocale/t)+zh/en 字典(common/shell/standalone)+设置语言切换与即时重渲染已实现;其余 chrome 迁移与解锁页接入进行中 |
 | UI-03 | standalone locale/theme adapter | 部分 | 已去除 DSH slots/LocaleFace 目标；当前仍是硬编码文案和局部 localStorage |
 | UI-04 | browser client strict typecheck | 未达成 | UI tsconfig 当前只覆盖 standalone Node 文件；将 client 纳入 `tsc` 会暴露状态 tuple、nullability、ShadowRoot 和作用域错误，必须在拆分巨型 client 时全部清零 |
 | UI-05 | standalone settings runtime | 代码已修，待 UI 验收 | Auto refresh timer 与暗色 Accent 移到可达作用域，删除 DSH boot token 文案；需补浏览器交互测试 |
