@@ -11,6 +11,8 @@
  * @module @dsh-scholar/research-ui/client
  */
 
+import { t, getLocale, setLocale, resolveLocale, subscribeLocale, assertLocaleParity } from './i18n/index'
+
 /** Standalone BFF configuration supplied by the bootstrap page. */
 let apiBase = ''
 let tokenProvider: (() => Promise<string | undefined>) | undefined
@@ -336,6 +338,11 @@ let phaseHistoryAll = false
 let modalObserver: MutationObserver | null = null
 
 export function apply(): void {
+  // dsh-web i18n: locale resolves before the first render (§13.4); the
+  // document lang reflects the active locale and chrome re-renders on change.
+  assertLocaleParity()
+  try { document.documentElement.lang = getLocale() } catch { /* sandboxed */ }
+  subscribeLocale(() => { rerender() })
   const host = document.createElement('div')
   host.id = 'dsh-scholar-ui'
   host.style.cssText = 'position:fixed;inset:0;z-index:9999;font:14px/1.5 system-ui,sans-serif'
@@ -3763,6 +3770,30 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   }
   densRow.append(densLabel, densValue, densToggle)
   modal.appendChild(densRow)
+
+  // dsh-web i18n: locale switch (§13.2) — persisted, immediate re-render.
+  const localeRow = el('div', 'row')
+  localeRow.style.cssText = 'padding:4px 0'
+  const localeLabel = el('span', '', 'Language')
+  localeLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const localeSelect = el('select', 'picker')
+  localeSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+  const localeCurrent = getLocale()
+  for (const [code, label] of [['zh', '中文'], ['en', 'English']] as Array<[string, string]>) {
+    const opt = el('option', '', label)
+    opt.value = code
+    localeSelect.appendChild(opt)
+  }
+  localeSelect.value = localeCurrent
+  localeSelect.onchange = () => {
+    const next = localeSelect.value === 'zh' ? 'zh' : 'en'
+    setLocale(next)
+    localeSelect.value = next
+    document.dispatchEvent(new Event('dsh-scholar-locale-changed'))
+    rerender()
+  }
+  localeRow.append(localeLabel, localeSelect)
+  modal.appendChild(localeRow)
 
   const refreshRow = el('div', 'row')
   refreshRow.style.cssText = 'padding:4px 0'
