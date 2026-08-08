@@ -42,8 +42,8 @@
 | STORE-01 | 显式迁移版本 | 已实现 | schema_migrations 台账(每步 checksum=sha256(id+body)、applied_at、report_json)、事务化 up(失败 ROLLBACK)、幂等重开、checksum 篡改/版本超前 loud fail、schema_version=2 且仅全部成功后更新、database_id/created_at/last_migrated_at;0001 全量初始 DDL、0002 legacy v1 导入(principal 列、provenance 回填、artifacts 项目级重建+跨项目 ID 再生、jobs lease/snapshot+项目级幂等、manuscript→初始 TeX 工作区)、0003 terminal/tex/i18n 能力(早期 preview 库);真实 standalone 库原地 1→2 迁移验证(11 项目+TeX+terminal 数据保留);fixture tests/fixtures/databases/v1-kernel.db(3da1392 原版 v1 DDL)+ 可再生成脚本;单测 7 项;§3.1 列名级 DDL 对齐(如 brief_json/body_json/blob_objects/code_snapshots/runs 表)仍未实施,属 schema-parity 剩余项 |
 | STORE-02 | CodeSnapshot durable model | 部分 | archive/manifest 是 Artifact，但没有 code_snapshots 权威表；snapshot_id 与可执行 artifact id 容易混淆 |
 | EVENT-01 | 正确 DSH event assumption | 文档已修 | DSH SessionEventMap 实际可扩展；业务仍选择 Kernel Outbox 权威 |
-| SKILL-01 | 所有 Skill 可安装发现 | 代码已修，待安装验收 | provider 已从包根挂载 core、两个 domain 和 venue；仍需 clean tarball 安装、自动选择和 source/prepared hash 测试 |
-| PACK-01 | clean remote install | 未证实 | .dsh-plugin prepare 依赖未声明，generated assets 被 ignore；需要 tarball/install 测试 |
+| SKILL-01 | 所有 Skill 可安装发现 | 已实现 | 4 个 skill 包(research-core/两个 domain/venue)从包根 skills/ 挂载;clean tarball 安装后 4 个 SKILL.md 落盘且 name/description frontmatter 校验通过(packaging 测试);宿主内自动选择与 source/prepared hash 行为待 DSH fixture job(CI-01)验证 |
+| PACK-01 | clean remote install | 已实现 | 根插件与 5 个子包 pnpm pack 全部可打;tarball 完整性断言(lib/、4×SKILL.md、cordis.patch.yml);声明 @deepseek-ai/dsh-* 为 optional peer(仓库 autoInstallPeers:false)+ prepare 构建步骤;clean consumer 用 overrides 解析全部 file: 依赖并安装成功,skills 落盘;发布到 registry 与宿主全量 boot 仍需 CI-01 fixture |
 | SELFMOD-01 | dev-only Cordis self tools | 配置与隔离 wrapper 已新增，尚未自动验收 | shipped production composition 无 tool-cordis；需补 CI inspect/mount/unmount 与否定测试 |
 | SEC-UI-01 | standalone token/loopback | 代码已修，待 HTTP 验收 | 非 loopback + `--no-token` 已拒绝；旧 token 强制 0600 且拒绝 symlink/空文件；Origin 支持同一 127/8 host；仍需真实 bind/request 负向测试 |
 | OPS-01 | standalone 启动可靠报错 | 代码已修，待脚本验收 | 脚本解析 CLI host/port/dataDir 覆盖，用实际 URL + 当前 token-check readiness；失败清理进程组、非零并输出日志尾部 |
