@@ -376,7 +376,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.listProjectMembers(id))
               return
             }
-            if (sub === 'members' && method === 'POST') {
+            if (sub === 'members' && (method === 'POST' || method === 'PATCH')) {
               const input = z.object({
                 principal_id: z.string().min(1),
                 role: z.enum(['pi', 'researcher', 'operator', 'auditor', 'viewer']),

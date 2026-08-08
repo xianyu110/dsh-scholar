@@ -110,6 +110,10 @@ describe('v2 project adapter', () => {
       const capped = await fetch(`${base}/v2/projects?limit=500`)
       const cp = await capped.json() as { items: unknown[] }
       expect(cp.items.length).toBeLessThanOrEqual(200)
+      // Malformed cursor -> explicit 400 invalid_cursor (api-contracts §1).
+      const badCursor = await fetch(`${base}/v2/projects?cursor=not-a-cursor`)
+      expect(badCursor.status).toBe(400)
+      expect((await badCursor.json() as { error: { code: string } }).error.code).toBe('invalid_cursor')
     })
   })
 

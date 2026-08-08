@@ -234,40 +234,40 @@ approx() { # <actual> <expected> — within 1e-9
 
 jobs_api() { api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs"; }
 
-# ── baseline job (kind=baseline, seed 0, materialized from CAS) ──────────────
+# ── baseline jobs (kind=baseline, seeds 1/2/3, materialized from CAS) ─────
 
-echo "== baseline job: kind=baseline, code snapshot materialized to /work, real node in docker (seed 0) =="
-submit_job "gpv2-baseline" "baseline" "baseline.js" "$CODE_ART" 0 > /dev/null
-S=$(wait_job "gpv2-baseline" || echo timeout)
-if [[ "$S" == "succeeded" ]]; then
-  ok "baseline job succeeded (kind=baseline, docker mode, real execution from materialized CAS snapshot)"
+echo "== baseline jobs: kind=baseline, code snapshot materialized to /work, real node in docker (seeds 1/2/3) =="
+for BSEED in 1 2 3; do
+  submit_job "gpv2-baseline-$BSEED" "baseline" "baseline.js" "$CODE_ART" "$BSEED" > /dev/null
+  S=$(wait_job "gpv2-baseline-$BSEED" || echo timeout)
+  if [[ "$S" == "succeeded" ]]; then
+    ok "baseline job seed=$BSEED succeeded (kind=baseline, docker mode, real execution from materialized CAS snapshot)"
+  else
+    bad "baseline job seed=$BSEED status=$S"; tail -5 "$WORK/runner.log" || true
+  fi
+done
+B_M1=$(jobs_api | job_metric "gpv2-baseline-1" "m1")
+B_EXP=$(A=$(expect_m1 1) B=$(expect_m1 2) C=$(expect_m1 3) node -e "console.log((Number(process.env.A)+Number(process.env.B)+Number(process.env.C))/3)")
+if [ -n "$B_M1" ] && approx "$B_M1" "$(expect_m1 1)"; then
+  ok "baseline-1 m1=$B_M1 matches deterministic expectation $(expect_m1 1)"
 else
-  bad "baseline job status=$S"; tail -5 "$WORK/runner.log" || true
+  bad "baseline-1 m1='$B_M1' != expected $(expect_m1 1)"
 fi
-B_M1=$(jobs_api | job_metric "gpv2-baseline" "m1")
-B_EXP=$(expect_m1 0)
-if [ -n "$B_M1" ] && approx "$B_M1" "$B_EXP"; then
-  ok "baseline m1=$B_M1 matches deterministic expectation $B_EXP"
-else
-  bad "baseline m1='$B_M1' != expected $B_EXP"
-fi
-if B_S=$(jobs_api | check_metrics_artifact "gpv2-baseline" 0); then
+if B_S=$(jobs_api | check_metrics_artifact "gpv2-baseline-1" 1); then
   ok "baseline metrics artifact from fixed-schema FILE (§12.5, source=metrics-file): $B_S"
 else
   bad "baseline metrics artifact §12.5 check failed"
 fi
-if jobs_api | check_log_contains "gpv2-baseline" "#!/usr/bin/env node" > /dev/null; then
+if jobs_api | check_log_contains "gpv2-baseline-1" "#!/usr/bin/env node" > /dev/null; then
   ok "materialized baseline.js readable IN the container (shebang found in run log)"
 else
   bad "baseline materialization proof failed"
 fi
-if jobs_api | check_log_contains "gpv2-baseline" '{"schema_version":1' > /dev/null; then
+if jobs_api | check_log_contains "gpv2-baseline-1" '{"schema_version":1' > /dev/null; then
   ok "in-container /outputs/metrics.json written and cat'ed (fixed-schema line in log)"
 else
-  bad "in-container metrics file line not found in log"
+  bad "baseline metrics.json proof failed"
 fi
-
-# ── three formal jobs (seeds 1/2/3, materialized from CAS) ───────────────────
 
 echo "== formal jobs: kind=formal, seeds 1/2/3, real node execution in docker =="
 for seed in 1 2 3; do
@@ -320,6 +320,8 @@ jfield() { printf '%s' "$AN" | node -e "let d='';process.stdin.on('data',c=>d+=c
 # the host-side computation of the same formula (bit-identical doubles).
 EXPECT_MEAN=$(node -e "const r=(Number('$E1')+Number('$E2')+Number('$E3'))/3;console.log(Math.round(r*1e4)/1e4)")
 EXPECT_BASE=$(node -e "console.log(Math.round(Number('$B_EXP')*1e4)/1e4)")
+# Paired design (§13.6): effect = mean(formal_i - baseline_i) over matched seeds.
+EXPECT_EFF2=$(node -e "const f=(Number('$E1')+Number('$E2')+Number('$E3'))/3;const b=Number('$B_EXP');console.log(Math.round((f-b)*1e4)/1e4)")
 EXPECT_EFF=$(node -e "const r=(Number('$E1')+Number('$E2')+Number('$E3'))/3-Number('$B_EXP');console.log(Math.round(r*1e4)/1e4)")
 if AN_RES=$(AN_JSON="$AN" EXPECT_MEAN="$EXPECT_MEAN" EXPECT_BASE="$EXPECT_BASE" EXPECT_EFF="$EXPECT_EFF" node --input-type=module -e '
   const a=JSON.parse(process.env.AN_JSON)
@@ -337,7 +339,7 @@ if AN_RES=$(AN_JSON="$AN" EXPECT_MEAN="$EXPECT_MEAN" EXPECT_BASE="$EXPECT_BASE" 
   console.log(JSON.stringify({mean:a.mean,sd:a.sd,n:a.n,baseline_value:a.baseline_value,effect_size:a.effect_size,seeds:(a.runs??[]).map(r=>r.seed)}))'); then
   ok "analysis aggregated over real runs: $AN_RES (expected mean $EXPECT_MEAN, baseline $EXPECT_BASE, effect $EXPECT_EFF)"
 else
-  bad "analysis assertions failed"; printf '%s' "$AN" | head -c 400; echo
+  bad "analysis assertions failed"; printf '%s' "$AN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(JSON.stringify({mean:a.mean,sd:a.sd,n:a.n,baseline_value:a.baseline_value,effect_size:a.effect_size,adjusted_p:a.adjusted_p_value}))})"; echo "expected: MEAN=$EXPECT_MEAN BASE=$EXPECT_BASE EFF=$EXPECT_EFF B_EXP=$B_EXP"
 fi
 
 # ── patch changes the REAL algorithm (§19.3 step 4) ─────────────────────────

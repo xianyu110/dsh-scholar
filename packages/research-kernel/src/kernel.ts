@@ -326,13 +326,19 @@ export class ResearchKernel {
     const cap = Math.min(Math.max(limit, 1), 200)
     let after: { updated_at: string; project_id: string } | null = null
     if (cursor !== undefined && cursor !== '') {
+      // api-contracts.md §1: a malformed cursor is an explicit 400, never a
+      // silent restart-from-top.
+      let raw: string
       try {
-        const raw = Buffer.from(cursor, 'base64url').toString('utf8')
-        const [updatedAt, projectId] = raw.split('|')
-        if (updatedAt !== undefined && projectId !== undefined && updatedAt !== '' && projectId !== '') {
-          after = { updated_at: updatedAt, project_id: projectId }
-        }
-      } catch { /* malformed cursor -> start from the top */ }
+        raw = Buffer.from(cursor, 'base64url').toString('utf8')
+      } catch {
+        throw new KernelError(400, 'invalid_cursor', `malformed cursor: ${cursor}`)
+      }
+      const [updatedAt, projectId] = raw.split('|')
+      if (updatedAt === undefined || projectId === undefined || updatedAt === '' || projectId === '') {
+        throw new KernelError(400, 'invalid_cursor', `malformed cursor: ${cursor}`)
+      }
+      after = { updated_at: updatedAt, project_id: projectId }
     }
     const rows = after === null
       ? this.db.prepare('SELECT * FROM projects ORDER BY updated_at DESC, project_id DESC LIMIT ?').all(cap + 1) as unknown as ProjectRow[]
@@ -1250,12 +1256,28 @@ export class ResearchKernel {
       throw new KernelError(422, 'code_snapshot_required',
         `job kind ${input.kind} requires code_snapshot_id (the Runner materializes code from CAS, §11.3/§12.2)`)
     }
+    // STORE-02: code_snapshot_id may be the authoritative REGISTRY id
+    // (code_snap_…) or a raw archive artifact id; the registry id is
+    // resolved to its archive artifact and the job binds THAT (the Runner
+    // materializes from CAS via fetchArtifact).
+    let boundCodeSnapshotId = codeSnapshotId
     if (codeSnapshotId !== null && codeSnapshotId !== '') {
-      try {
-        this.getArtifact(project.project_id, codeSnapshotId)
-      } catch {
-        throw new KernelError(422, 'code_snapshot_unknown',
-          `code_snapshot_id ${codeSnapshotId} is not a registered artifact of project ${project.project_id}`)
+      if (codeSnapshotId.startsWith('code_snap_')) {
+        try {
+          const registered = this.getCodeSnapshot(codeSnapshotId)
+          this.getArtifact(project.project_id, registered.archive_artifact_id)
+          boundCodeSnapshotId = registered.archive_artifact_id
+        } catch {
+          throw new KernelError(422, 'code_snapshot_unknown',
+            `code_snapshot_id ${codeSnapshotId} is not a registered snapshot of project ${project.project_id}`)
+        }
+      } else {
+        try {
+          this.getArtifact(project.project_id, codeSnapshotId)
+        } catch {
+          throw new KernelError(422, 'code_snapshot_unknown',
+            `code_snapshot_id ${codeSnapshotId} is not a registered artifact of project ${project.project_id}`)
+        }
       }
     }
     // §12.2: image digest default; the rest of the binding travels in payload.
@@ -1280,7 +1302,7 @@ export class ResearchKernel {
       heartbeat_at: null,
       lease_generation: null,
       lease_token: null,
-      code_snapshot_id: codeSnapshotId,
+      code_snapshot_id: boundCodeSnapshotId,
       data_artifact_ids: input.data_artifact_ids ?? [],
       image_digest: String(payload.image_digest),
       output_contract: input.output_contract,

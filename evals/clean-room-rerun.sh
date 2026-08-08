@@ -35,12 +35,18 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"clean-ro
 ok "fresh project $PROJ created in clean room"
 
 # baseline + 2 formal runs with deterministic metrics
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'cr-baseline', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8000, seed: 0}) + \"'\"}}))")" > /dev/null
+# Baseline jobs are SECURE_KINDS: they bind a materialized code snapshot.
+mkdir -p "$WORK/code"
+printf '#!/bin/sh\necho "deterministic clean-room payload"\n' > "$WORK/code/run.sh"
+SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/code\",\"description\":\"clean-room fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
+[ -n "$SNAP" ] || { echo "failed to create code snapshot"; exit 1; }
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "const m=JSON.stringify({metric:'f1',value:0.8,seed:11});console.log(JSON.stringify({idempotency_key: 'cr-baseline-11', kind: 'baseline', code_snapshot_id: '$SNAP', command:['sh','-c','echo '+JSON.stringify(m)], payload:{}}))")" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "const m=JSON.stringify({metric:'f1',value:0.8,seed:23});console.log(JSON.stringify({idempotency_key: 'cr-baseline-23', kind: 'baseline', code_snapshot_id: '$SNAP', command:['sh','-c','echo '+JSON.stringify(m)], payload:{}}))")" > /dev/null
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'cr-formal-1', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8123, seed: 11}) + \"'\"}}))")" > /dev/null
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'cr-formal-2', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8245, seed: 23}) + \"'\"}}))")" > /dev/null
 for _ in $(seq 1 60); do
   N=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded').length)})")
-  [[ "$N" == "3" ]] && break
+  [[ "$N" == "4" ]] && break
   sleep 0.3
 done
 ANALYSIS=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/analysis" -d '{"metric":"f1"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).mean))")
@@ -64,12 +70,15 @@ ok "fresh kernel booted (old DB deleted); CAS artifacts still readable"
 
 # 4. Replay the bundle: re-create project + jobs with the SAME payloads.
 PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"clean-room-rerun\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'rerun-baseline', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8000, seed: 0}) + \"'\"}}))")" > /dev/null
+SNAP2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/code-snapshots" -d "{\"path\":\"$WORK/code\",\"description\":\"clean-room fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
+[ -n "$SNAP2" ] || { echo "failed to re-create code snapshot"; exit 1; }
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "const m=JSON.stringify({metric:'f1',value:0.8,seed:11});console.log(JSON.stringify({idempotency_key: 'rerun-baseline-11', kind: 'baseline', code_snapshot_id: '$SNAP2', command:['sh','-c','echo '+JSON.stringify(m)], payload:{}}))")" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "const m=JSON.stringify({metric:'f1',value:0.8,seed:23});console.log(JSON.stringify({idempotency_key: 'rerun-baseline-23', kind: 'baseline', code_snapshot_id: '$SNAP2', command:['sh','-c','echo '+JSON.stringify(m)], payload:{}}))")" > /dev/null
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'rerun-formal-1', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8123, seed: 11}) + \"'\"}}))")" > /dev/null
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" -d "$(node -e "console.log(JSON.stringify({idempotency_key: 'rerun-formal-2', kind: 'smoke', payload: {script: \"echo '\" + JSON.stringify({metric: 'f1', value: 0.8245, seed: 23}) + \"'\"}}))")" > /dev/null
 for _ in $(seq 1 60); do
   N=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ2/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded').length)})")
-  [[ "$N" == "3" ]] && break
+  [[ "$N" == "4" ]] && break
   sleep 0.3
 done
 RERUN=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/analysis" -d '{"metric":"f1"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).mean))")

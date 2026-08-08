@@ -72,20 +72,33 @@ function loadOrCreateSigningKey(file: string | undefined): { key: RunnerSigningK
   return { key: { keyId, privateKey }, publicKeyPem }
 }
 
-/** Best-effort public-key registration (§12.7); absent endpoint → warn and continue (compat). */
-async function registerRunnerKey(keyId: string, publicKeyPem: string): Promise<void> {
-  try {
-    await client.registerRunnerKey({ key_id: keyId, public_key_pem: publicKeyPem })
-    console.error(`[runner-gateway] runner key ${keyId} registered with kernel`)
-  } catch (error) {
-    if (error instanceof KernelApiError && error.status === 404) {
-      console.error(`[runner-gateway] warning: kernel has no /v1/runner-keys endpoint — key registration skipped (compat mode)`)
-    } else if (error instanceof KernelApiError) {
-      console.error(`[runner-gateway] warning: runner-key registration failed (${error.status}): ${error.message}`)
-    } else {
-      console.error(`[runner-gateway] warning: runner-key registration unreachable: ${(error as Error).message}`)
+/** Public-key registration (§12.7) with retry: the runner MUST NOT claim
+ * jobs before its key is registered — an unregistered key makes every
+ * signed-manifest completion fail at the kernel. The kernel is also
+ * booting concurrently, so registration retries with backoff until it
+ * succeeds; after `maxWaitMs` the runner exits non-zero (fail fast rather
+ * than claim jobs that can never complete). A kernel WITHOUT the
+ * /v1/runner-keys endpoint is treated as compat mode (unsigned manifests
+ * accepted) and the runner proceeds. */
+async function registerRunnerKey(keyId: string, publicKeyPem: string, maxWaitMs = 60_000): Promise<void> {
+  const deadline = Date.now() + maxWaitMs
+  let firstError: string | undefined
+  while (Date.now() < deadline) {
+    try {
+      await client.registerRunnerKey({ key_id: keyId, public_key_pem: publicKeyPem })
+      console.error(`[runner-gateway] runner key ${keyId} registered with kernel`)
+      return
+    } catch (error) {
+      if (error instanceof KernelApiError && error.status === 404) {
+        console.error(`[runner-gateway] warning: kernel has no /v1/runner-keys endpoint — key registration skipped (compat mode)`)
+        return
+      }
+      firstError = (error as Error).message
+      await new Promise(resolve => setTimeout(resolve, 1000))
     }
   }
+  console.error(`[runner-gateway] FATAL: runner key ${keyId} not registered after ${maxWaitMs}ms: ${firstError ?? 'unknown error'}`)
+  process.exit(1)
 }
 
 const { key: signingKey, publicKeyPem } = loadOrCreateSigningKey(keyFile)

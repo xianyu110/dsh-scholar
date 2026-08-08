@@ -758,6 +758,18 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
     expect(Buffer.from(archive.files['train.js']!.content_base64, 'base64').toString()).toBe('console.log("real code")\n')
     expect(archive.files['data/seed.json']!.sha256).toBe(createHash('sha256').update('{"baseline":[1,2]}').digest('hex'))
 
+    // STORE-02: submitJob binds a REGISTRY id (code_snap_…) by resolving it
+    // to the archive artifact; the job stores the artifact id the Runner
+    // materializes from CAS.
+    const bound = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'snap-bound',
+      kind: 'baseline',
+      code_snapshot_id: snap.snapshot_id,
+    })
+    expect(bound.code_snapshot_id).toBe(snap.archive_artifact_id)
+    expect(bound.code_snapshot_id).not.toBe(snap.snapshot_id)
+
     // STORE-02: the authoritative registry row exists and matches.
     const snapRow = kernel.getCodeSnapshot(snap.snapshot_id)
     expect(snapRow.archive_artifact_id).toBe(snap.archive_artifact_id)
