@@ -22,10 +22,10 @@
 
 | ID | 目标 | 当前状态 | 差距/修复方向 |
 |---|---|---|---|
-| GOV-01 | 认证 Human Principal durable | 未达成 | UI 提交 actor=web-user；HTTP schema 无 principal；DB decisions 无 principal column |
+| GOV-01 | 认证 Human Principal durable | 已实现 | decisions 表新增 principal_id/tenant_id/auth_method/session_id 列(含 ensureColumn 迁移);decideGate 事务持久化;listDecisions 重建 principal;decisionSchema 透传 principal 且 rejected/revised 强制 reason;单测覆盖持久化/旧行兼容 |
 | GOV-02 | Gate target freeze | 部分 | Gate transaction 有状态 CAS，但 target/version 和 Contract freeze 需要统一事务 |
 | API-01 | v2 + BFF AuthZ | 未达成 | 当前 /v1 loopback bridge 主要是 token/CSRF，不是 membership-aware BFF |
-| EVID-01 | accepted Evidence only from Worker | 未达成 | 公共 HTTP 可传 provenance_status；verifyClaim 不过滤 verified/accepted |
+| EVID-01 | accepted Evidence only from Worker | 已实现 | 公共 POST evidence 拒绝 verified(evidenceSchema 仅 draft/legacy);新增内部 POST /evidence/verified(ingestVerifiedEvidence);provenance_status 随 body 存储;verifyClaim 只读 verified 证据,无 verified 时返回 inconclusive(带原因);demo/standalone 脚本切换 verified 路径,14/14 绿 |
 | STAT-01 | 单一正式分析实现 | 部分 | Analysis Worker 严格；Kernel computeAnalysis 仍是另一套较浅算法 |
 | RUN-01 | 正式 Docker/快照/fencing | 基本具备 | 默认 Runner CLI 仍 subprocess；签名 enforcement 默认兼容关闭；integrity require_signed_manifest Schema 未持久化 |
 | RUN-02 | 完整容器基线 | 部分 | 当前 flags 有 network/user/memory/cpu/tmpfs，但需 read-only、cap-drop、no-new-privileges、pids 等完整策略 |
