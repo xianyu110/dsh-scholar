@@ -396,6 +396,13 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .ws-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:600 12px/1.3 system-ui,sans-serif; }
 .ws-status { font:600 8.5px/1 ui-monospace,Menlo,monospace; color:var(--text-3); letter-spacing:.3px; flex-shrink:0; }
 .sidebar-foot { padding:10px 12px; border-top:1px solid var(--border); color:var(--text-3); font-size:10px; }
+.sidebar.collapsed { width:44px; }
+.sidebar.collapsed .sidebar-head { justify-content:center; padding:12px 6px; }
+.sidebar.collapsed .sidebar-title, .sidebar.collapsed .sidebar-new, .sidebar.collapsed .sidebar input,
+.sidebar.collapsed .ws-name, .sidebar.collapsed .ws-status, .sidebar.collapsed .sidebar-foot { display:none; }
+.sidebar.collapsed .ws-item { justify-content:center; padding:8px 0; }
+.sidebar.collapsed .ws-dot { width:10px; height:10px; }
+.main.expanded { flex:1; }
 `
   root.appendChild(style)
 
@@ -444,9 +451,20 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   modeBadge.textContent = '🧭 gate-only'
   modeBadge.title = 'research mode: every gate requires a human decision'
   modeBadge.style.cssText = 'cursor:default;opacity:.9'
+  // dsh-web "Collapse sidebar": toggles the workspace sidebar width.
+  let sidebarCollapsed = false
+  const sidebarToggle = el('button', 'hbtn', '◧')
+  sidebarToggle.title = 'collapse / expand sidebar'
+  sidebarToggle.onclick = () => {
+    sidebarCollapsed = !sidebarCollapsed
+    if (sidebar !== null) sidebar.classList.toggle('collapsed', sidebarCollapsed)
+    if (main !== null) main.classList.toggle('expanded', sidebarCollapsed)
+    sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
+    void render()
+  }
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
-    header.append(modeBadge, commandsBtn, themeBtn, refresh)
+    header.append(sidebarToggle, modeBadge, commandsBtn, themeBtn, refresh)
   } else {
     header.append(themeBtn, refresh, close)
   }
@@ -1489,11 +1507,18 @@ async function executeChatCommand(line: string, activeProjectId: string | undefi
 
 /** Sidebar search filter (dsh-web "Search sessions" feel). */
 let sidebarQuery = ''
+/** Sidebar grouping (dsh-web "Group by" feel): all | active | done. */
+let sidebarGroup: 'all' | 'active' | 'done' = 'all'
+
+/** Projects considered "active" (still in the research pipeline). */
+function isProjectActive(status: string | undefined): boolean {
+  return status !== 'RELEASED' && status !== 'ARCHIVED'
+}
 
 /**
- * dsh-web-style workspace sidebar: search box, one row per project (name +
- * status dot/label), the active one highlighted; a ＋ button creates a
- * project.
+ * dsh-web-style workspace sidebar: search box + group filter, one row per
+ * project (name + status dot/label), the active one highlighted; a ＋
+ * button creates a project.
  */
 function renderSidebar(
   sidebar: HTMLElement,
@@ -1524,11 +1549,31 @@ function renderSidebar(
   search.onblur = () => { search.style.borderColor = 'var(--border)' }
   sidebar.appendChild(search)
 
+  // Group by (dsh-web "Group by"): all / active / done.
+  const groupRow = el('div')
+  groupRow.style.cssText = 'display:flex;gap:4px;padding:4px 10px 6px'
+  const GROUP_DEFS: Array<['all' | 'active' | 'done', string]> = [
+    ['all', 'All'], ['active', 'Active'], ['done', 'Done'],
+  ]
+  for (const [key, label] of GROUP_DEFS) {
+    const chip = el('button', 'sidebar-new')
+    chip.textContent = label
+    chip.style.cssText = 'flex:1;padding:3px 4px;font-size:10px;text-align:center'
+    if (sidebarGroup === key) {
+      chip.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
+    }
+    chip.onclick = () => { sidebarGroup = key; renderSidebar(sidebar, projects, activeId, onPick) }
+    groupRow.appendChild(chip)
+  }
+  sidebar.appendChild(groupRow)
+
   const list = el('div', 'sidebar-list')
   const renderRows = (): void => {
     list.replaceChildren()
     const q = sidebarQuery.trim().toLowerCase()
-    const filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q))
+    let filtered = q === '' ? projects : projects.filter(p => (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q))
+    if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
+    if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
     if (filtered.length === 0) {
       const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet.' : 'No matches.')
       empty.style.cssText = 'padding:10px 12px'
@@ -1582,16 +1627,11 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   for (const msg of chatMessages) {
     const bubble = el('div')
     bubble.style.cssText = msg.role === 'user'
-      ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;white-space:pre-wrap;word-break:break-word;font-size:12px'
+      ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;word-break:break-word;font-size:12px'
       : msg.role === 'error'
-        ? 'align-self:flex-start;background:var(--tone-red-bg);color:var(--tone-red);border:1px solid var(--tone-red);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;white-space:pre-wrap;word-break:break-word;font-size:12px'
-        : 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;white-space:pre-wrap;word-break:break-word;font-size:12px'
-    // Bold + inline-code-ish rendering (textContent-safe: only ** ** and ` `).
-    const rendered = msg.text
-      .replace(/\*\*([^*]+)\*\*/g, '**$1**')
-    bubble.textContent = rendered
-    // Simple inline formatting: split on ** pairs and wrap in <strong> via
-    // textContent-safe nodes only.
+        ? 'align-self:flex-start;background:var(--tone-red-bg);color:var(--tone-red);border:1px solid var(--tone-red);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px'
+        : 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px'
+    // Rich line rendering (headings/lists/code/bold) — textContent-safe.
     bubble.replaceChildren(...formatChatText(msg.text))
     stream.appendChild(bubble)
     const stamp = el('div')
@@ -1615,7 +1655,45 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   input.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.4 ui-monospace,Menlo,monospace;outline:none'
   input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
   input.onblur = () => { input.style.borderColor = 'var(--border)' }
-  input.oninput = () => { chatDraft = input.value }
+  input.oninput = () => {
+    chatDraft = input.value
+    renderCompletions()
+  }
+  // dsh-web "/" command completion: a small suggestion list under the
+  // composer while the draft starts with "/" (or "/research ").
+  const completionBox = el('div')
+  completionBox.style.cssText = 'display:none;flex-direction:column;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);overflow:hidden'
+  const renderCompletions = (): void => {
+    const draft = input.value.trim()
+    const match = /^\/(?:research\s+)?([a-z]*)$/i.exec(draft)
+    if (match === null || draft.startsWith('/research ')) {
+      completionBox.style.display = 'none'
+      return
+    }
+    const prefix = (match[1] ?? '').toLowerCase()
+    const hits = CHAT_COMMANDS.filter(([name]) => name.startsWith(prefix)).slice(0, 7)
+    if (hits.length === 0) {
+      completionBox.style.display = 'none'
+      return
+    }
+    completionBox.replaceChildren()
+    for (const [name, line] of hits) {
+      const row = el('button')
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:6px 10px;cursor:pointer;font:11px/1.4 ui-monospace,Menlo,monospace'
+      row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+      row.onmouseleave = () => { row.style.background = 'none' }
+      row.appendChild(el('span', 'artifact-kind', `/${name}`))
+      row.appendChild(el('span', 'grow', line.slice(0, 46)))
+      row.onclick = () => {
+        input.value = `/${name} `
+        chatDraft = input.value
+        completionBox.style.display = 'none'
+        input.focus()
+      }
+      completionBox.appendChild(row)
+    }
+    completionBox.style.display = 'flex'
+  }
   const send = el('button', 'btn approve', 'Send')
   send.style.cssText = 'padding:7px 16px;border-radius:9px'
   const run = async (): Promise<void> => {
@@ -1623,6 +1701,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     if (line === '') return
     input.value = ''
     chatDraft = ''
+    completionBox.style.display = 'none'
     chatPush('user', line)
     try {
       const answer = await executeChatCommand(line, projectId)
@@ -1633,7 +1712,23 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     rerender()
   }
   send.onclick = () => { void run() }
-  input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); void run() } }
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      // Enter while a completion is open fills the highlighted row instead
+      // of sending (first row default).
+      if (completionBox.style.display === 'flex') {
+        const first = completionBox.querySelector('button')
+        if (first !== null) {
+          first.click()
+          return
+        }
+      }
+      void run()
+    } else if (event.key === 'Escape') {
+      completionBox.style.display = 'none'
+    }
+  }
   composer.append(input, send)
   // dsh-web "session actions": clear this conversation.
   const clear = el('button', 'hbtn', '🗑')
@@ -1644,19 +1739,95 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   composerRow.append(composer, clear)
   shell.appendChild(composerRow)
+  shell.appendChild(completionBox)
 
   body.appendChild(shell)
 }
 
-/** Render **bold** and `code` spans with textContent-only nodes. */
+/**
+ * Rich line rendering for chat bubbles: ## headings, - bullets, ``` code
+ * fences, **bold** and `code` spans — all built with textContent-only
+ * nodes (design §15.4).
+ */
 function formatChatText(text: string): HTMLElement[] {
+  const nodes: HTMLElement[] = []
+  const lines = text.split('\n')
+  let inFence = false
+  let fence: HTMLElement | null = null
+  const flushFence = (): void => {
+    if (fence !== null) {
+      nodes.push(fence)
+      fence = null
+    }
+    inFence = false
+  }
+  for (const raw of lines) {
+    const line = raw.trimEnd()
+    if (/^```/.test(line)) {
+      if (inFence) {
+        flushFence()
+      } else {
+        inFence = true
+        fence = el('pre')
+        fence.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:10.5px/1.5 ui-monospace,Menlo,monospace;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:4px 0'
+        const lang = line.slice(3).trim()
+        if (lang !== '') {
+          const langTag = el('div', 'artifact-kind', lang.toUpperCase())
+          langTag.style.cssText += ';display:inline-block;margin-bottom:4px'
+          fence.appendChild(langTag)
+        }
+      }
+      continue
+    }
+    if (inFence && fence !== null) {
+      fence.appendChild(document.createTextNode(line + '\n'))
+      continue
+    }
+    if (/^#{1,3}\s/.test(line)) {
+      const h = el('div')
+      h.style.cssText = `font:700 ${line.startsWith('###') ? 11.5 : 12.5}px/1.4 system-ui,sans-serif;color:var(--text);margin:6px 0 3px`
+      h.append(...inlineChatText(line.replace(/^#{1,3}\s+/, '')))
+      nodes.push(h)
+      continue
+    }
+    if (/^[-*•]\s+/.test(line)) {
+      const row = el('div')
+      row.style.cssText = 'display:flex;gap:7px;padding:1px 0'
+      row.appendChild(el('span', '', '•'))
+      const content = el('span', '', '')
+      content.append(...inlineChatText(line.replace(/^[-*•]\s+/, '')))
+      row.appendChild(content)
+      nodes.push(row)
+      continue
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const row = el('div')
+      row.style.cssText = 'display:flex;gap:7px;padding:1px 0'
+      row.appendChild(el('span', '', line.match(/^\d+\./)?.[0] ?? '•'))
+      const content = el('span', '', '')
+      content.append(...inlineChatText(line.replace(/^\d+\.\s+/, '')))
+      row.appendChild(content)
+      nodes.push(row)
+      continue
+    }
+    if (line.trim() === '') {
+      nodes.push(el('div', '', '\u00a0'))
+      continue
+    }
+    nodes.push(el('div', '', ...inlineChatText(line)))
+  }
+  flushFence()
+  return nodes
+}
+
+/** Inline **bold** + `code` spans (shared by every line kind). */
+function inlineChatText(text: string): HTMLElement[] {
   const nodes: HTMLElement[] = []
   const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
   for (const part of parts) {
     if (part === '') continue
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
-      const strong = el('strong', '', part.slice(2, -2))
-      nodes.push(strong)
+      nodes.push(el('strong', '', part.slice(2, -2)))
     } else if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       const code = el('code', '', part.slice(1, -1))
       code.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:4px;padding:0 4px;font:10.5px/1.4 ui-monospace,Menlo,monospace'
