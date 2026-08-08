@@ -605,6 +605,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   if (fullscreen) {
     panel.classList.add('row')
     sidebar = el('div', 'sidebar')
+    sidebar.setAttribute('role', 'navigation')
+    sidebar.setAttribute('aria-label', 'projects')
     panel.appendChild(sidebar)
     panel.appendChild(main)
   }
@@ -3898,27 +3900,27 @@ function openGlobalSearchModal(root: ShadowRoot): void {
     globalSearchQuery = q
     results.replaceChildren(el('div', 'muted', 'Searching…'))
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
-    const hits: Array<{ projectId: string; project: string; kind: string; text: string }> = []
+    const hits: Array<{ projectId: string; project: string; status?: string; kind: string; text: string }> = []
     for (const p of projects) {
       if (p.project_id === undefined) continue
       const claims = (await api<ClaimRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/claims`)) ?? []
       for (const c of claims) {
         if ((c.statement ?? '').toLowerCase().includes(q)) {
-          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'claim', text: c.statement ?? '' })
+          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, status: p.status, kind: 'claim', text: c.statement ?? '' })
         }
       }
       const evidence = (await api<EvidenceRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/evidence`)) ?? []
       for (const e of evidence) {
         const label = `${e.result?.primary_metric ?? 'metric'} = ${e.result?.value ?? '?'} (Δ${e.result?.effect_size ?? '?'})`
         if (label.toLowerCase().includes(q)) {
-          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'evidence', text: label })
+          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, status: p.status, kind: 'evidence', text: label })
         }
       }
       const artifacts = (await api<ArtifactRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/artifacts`)) ?? []
       for (const a of artifacts) {
         const label = `${a.kind ?? 'artifact'} ${a.artifact_id ?? ''}${typeof a.metadata?.name === 'string' && a.metadata.name !== '' ? ` · ${a.metadata.name}` : ''}`
         if (label.toLowerCase().includes(q)) {
-          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'artifact', text: label })
+          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, status: p.status, kind: 'artifact', text: label })
         }
       }
     }
@@ -3945,7 +3947,7 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       row.appendChild(el('span', 'artifact-kind', h.kind.toUpperCase()))
       const bodyEl = el('div', 'grow')
       bodyEl.style.cssText = 'min-width:0'
-      const projEl = el('div', 'muted', h.project)
+      const projEl = el('div', 'muted', h.status !== undefined ? `${h.project} · ${STATUS_META[h.status]?.label ?? h.status}` : h.project)
       projEl.style.cssText = 'font-size:10px'
       const textEl = el('div', '', h.text)
       textEl.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
