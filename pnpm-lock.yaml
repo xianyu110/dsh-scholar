@@ -54,6 +54,9 @@ importers:
       '@dsh-scholar/research-kernel':
         specifier: file:../research-kernel
         version: link:../research-kernel
+      '@dsh-scholar/scholar-connectors':
+        specifier: file:../scholar-connectors
+        version: link:../scholar-connectors
       cordis:
         specifier: '>=4.0.0-rc.7'
         version: 4.0.0-rc.7
@@ -115,6 +118,24 @@ importers:
       '@dsh-scholar/research-schemas':
         specifier: file:../research-schemas
         version: link:../research-schemas
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  workers/analysis-worker:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  workers/research-orchestrator:
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

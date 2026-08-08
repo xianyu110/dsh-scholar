@@ -18,6 +18,13 @@ export interface ResearchUiConfig {
     port?: number
     dataDir?: string
   }
+  /** Web bridge hardening (design §15.2/§15.3). Defaults keep token mode off. */
+  bridge?: {
+    /** Bridge auth token; falls back to env DSH_SCHOLAR_BRIDGE_TOKEN. undefined = disabled. */
+    token?: string
+    /** Per-IP sliding window limits; defaults to 60 req/min. */
+    rateLimit?: { windowMs?: number; max?: number }
+  }
 }
 
 export function apply(ctx: Context, config: ResearchUiConfig = {}): void {
@@ -32,7 +39,7 @@ export function apply(ctx: Context, config: ResearchUiConfig = {}): void {
     ctx.logger('research-ui').error(`kernel sidecar failed to start: ${(error as Error).message}`)
   })
 
-  registerResearchUiBridge(ctx, sidecar)
+  registerResearchUiBridge(ctx, sidecar, { token: config.bridge?.token, rateLimit: config.bridge?.rateLimit })
 
   ctx.effect(() => () => { void sidecar.stop() }, 'research-ui: kernel sidecar')
 }

@@ -101,6 +101,22 @@ describe('prompt injection as untrusted data (design §4.9)', () => {
   })
 })
 
+describe('v2 §3.1 default-deny ACL', () => {
+  it('unregistered agents get role none and are denied research tools', async () => {
+    const { RoleRegistry } = await import('@dsh-scholar/research-plugin')
+    const roles = new RoleRegistry()
+    expect(roles.get('some-unknown-session')).toBe('none')
+    expect(roles.allows('none', 'research_project')).toBe(false)
+    expect(roles.allows('none', 'research_status')).toBe(false)
+    expect(roles.allows('none', 'literature_search')).toBe(false)
+    // Registered roles keep their surfaces.
+    roles.set('known-session', 'scholar')
+    expect(roles.get('known-session')).toBe('scholar')
+    expect(roles.allows('scholar', 'literature_search')).toBe(true)
+    expect(roles.allows('scholar', 'experiment_submit')).toBe(false)
+  })
+})
+
 describe('connector SSRF surface (design §4.4)', () => {
   it('search targets are fixed domains, not caller-provided URLs', async () => {
     // The connectors build URLs from query strings only; there is no
@@ -126,5 +142,125 @@ describe('runner isolation surface (design §4.6.1)', () => {
     expect(parsed.cwd).toBe(ws)
     // No DSH credentials/harness vars leak into the child.
     expect(parsed.keys.join(',')).not.toMatch(/DEEPSEEK|API_KEY|DSH_/)
+  })
+})
+
+// ─── Web bridge hardening (design §15.2/§15.3, SCH-WEB-001/002) ─────────────
+// The bridge pure functions live in src/plugin/web-bridge.ts (the
+// standalone /research-ui-api bridge in packages/dsh-research-ui/src/host
+// mirrors the same logic).
+import {
+  MAX_BODY_BYTES,
+  SlidingWindowRateLimiter,
+  constantTimeEqual,
+  isAllowedOrigin,
+  isJsonContentType,
+  verifyBridgeToken,
+  withinBodyLimit,
+} from '../../src/plugin/web-bridge'
+
+describe('web bridge CSRF origin check (design §15.2)', () => {
+  it('accepts same-host origins on the request port', () => {
+    expect(isAllowedOrigin('http://127.0.0.1:3080', '127.0.0.1:3080')).toBe(true)
+    expect(isAllowedOrigin('http://localhost:3080', '127.0.0.1:3080')).toBe(true)
+    expect(isAllowedOrigin('http://127.0.0.1:3080', 'localhost:3080')).toBe(true)
+  })
+
+  it('rejects foreign hostnames even on the same port', () => {
+    expect(isAllowedOrigin('https://evil.example:3080', '127.0.0.1:3080')).toBe(false)
+    expect(isAllowedOrigin('http://attacker.test', '127.0.0.1:3080')).toBe(false)
+  })
+
+  it('rejects port mismatches (cross-origin write)', () => {
+    expect(isAllowedOrigin('http://127.0.0.1:3081', '127.0.0.1:3080')).toBe(false)
+    expect(isAllowedOrigin('http://localhost:9999', '127.0.0.1:3080')).toBe(false)
+  })
+
+  it('handles default ports and malformed inputs', () => {
+    expect(isAllowedOrigin('http://127.0.0.1', '127.0.0.1:80')).toBe(true)
+    expect(isAllowedOrigin('not-a-url', '127.0.0.1:3080')).toBe(false)
+    expect(isAllowedOrigin('ftp://127.0.0.1:3080', '127.0.0.1:3080')).toBe(false)
+    expect(isAllowedOrigin('http://127.0.0.1:3080', undefined)).toBe(false)
+    expect(isAllowedOrigin('http://127.0.0.1:3080', 'not a host')).toBe(false)
+  })
+
+  it('allows requests without an Origin header (curl / non-browser clients)', () => {
+    expect(isAllowedOrigin(undefined, '127.0.0.1:3080')).toBe(true)
+  })
+})
+
+describe('web bridge body size limit (design §15.2)', () => {
+  it('accepts bodies up to the 16 MiB cap', () => {
+    expect(withinBodyLimit(0)).toBe(true)
+    expect(withinBodyLimit(1024)).toBe(true)
+    expect(withinBodyLimit(MAX_BODY_BYTES)).toBe(true)
+  })
+
+  it('rejects bodies beyond the cap', () => {
+    expect(withinBodyLimit(MAX_BODY_BYTES + 1)).toBe(false)
+    expect(withinBodyLimit(-1)).toBe(false)
+    expect(withinBodyLimit(Number.POSITIVE_INFINITY)).toBe(false)
+  })
+
+  it('honors a custom limit', () => {
+    expect(withinBodyLimit(100, 100)).toBe(true)
+    expect(withinBodyLimit(101, 100)).toBe(false)
+  })
+})
+
+describe('web bridge content-type routing', () => {
+  it('routes JSON upstream responses through the text path', () => {
+    expect(isJsonContentType('application/json')).toBe(true)
+    expect(isJsonContentType('application/json; charset=utf-8')).toBe(true)
+    expect(isJsonContentType('application/vnd.api+json')).toBe(true)
+  })
+
+  it('routes binary artifact responses through the byte path', () => {
+    expect(isJsonContentType('application/octet-stream')).toBe(false)
+    expect(isJsonContentType('image/png')).toBe(false)
+    expect(isJsonContentType('application/pdf')).toBe(false)
+    expect(isJsonContentType(undefined)).toBe(false)
+    expect(isJsonContentType(null)).toBe(false)
+  })
+})
+
+describe('web bridge token mode (design §15.3, SCH-SEC-002)', () => {
+  it('is disabled (allow all) when no token is configured', () => {
+    expect(verifyBridgeToken(undefined, undefined)).toBe(true)
+    expect(verifyBridgeToken('anything', undefined)).toBe(true)
+  })
+
+  it('requires an exact match when enabled', () => {
+    expect(verifyBridgeToken('s3cret', 's3cret')).toBe(true)
+    expect(verifyBridgeToken('wrong', 's3cret')).toBe(false)
+    expect(verifyBridgeToken(undefined, 's3cret')).toBe(false)
+    expect(verifyBridgeToken('', 's3cret')).toBe(false)
+  })
+
+  it('compares constant-time (no length side channel via sha256)', () => {
+    expect(constantTimeEqual('a', 'a')).toBe(true)
+    expect(constantTimeEqual('a', 'b')).toBe(false)
+    expect(constantTimeEqual('short', 'a-much-longer-secret')).toBe(false)
+    expect(constantTimeEqual(undefined, 'x')).toBe(false)
+  })
+})
+
+describe('web bridge rate limit (design §15.2)', () => {
+  it('allows up to max requests per sliding window, then 429s', () => {
+    const limiter = new SlidingWindowRateLimiter({ windowMs: 60_000, max: 3 })
+    const now = 1_000_000
+    expect(limiter.allow('ip-1', now)).toBe(true)
+    expect(limiter.allow('ip-1', now + 1)).toBe(true)
+    expect(limiter.allow('ip-1', now + 2)).toBe(true)
+    expect(limiter.allow('ip-1', now + 3)).toBe(false) // 4th in window
+    expect(limiter.allow('ip-2', now + 4)).toBe(true) // other IP unaffected
+  })
+
+  it('frees the slot once the window slides past', () => {
+    const limiter = new SlidingWindowRateLimiter({ windowMs: 60_000, max: 1 })
+    const now = 1_000_000
+    expect(limiter.allow('ip-1', now)).toBe(true)
+    expect(limiter.allow('ip-1', now + 59_999)).toBe(false)
+    expect(limiter.allow('ip-1', now + 60_001)).toBe(true) // old hit expired
   })
 })

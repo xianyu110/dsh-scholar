@@ -1,0 +1,7 @@
+# Development-only overlay. Never include this file in production/headless bundles.
+# Use only with an isolated DSH_HOME, loopback Web, and human approval=ask.
+- insert:
+    - id: tool-cordis
+      name: '@deepseek-ai/dsh-tool-cordis'
+      config:
+        vmTimeoutMs: 5000

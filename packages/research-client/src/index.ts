@@ -7,7 +7,7 @@
 
 import type {
   ArtifactRecord, Claim, CorpusSnapshot, Decision, EvidenceItem, ExperimentContract, Gate,
-  IdeaCard, JobRecord, KernelEvent, ResearchProject, SessionLink,
+  IdeaCard, JobRecord, KernelEvent, ResearchProject, RunnerKey, SessionLink,
 } from '@dsh-scholar/research-schemas'
 
 export class KernelUnavailableError extends Error {
@@ -104,6 +104,18 @@ export class ResearchClient {
     return this.request('GET', `/v1/projects/${projectId}`)
   }
 
+  renameProject(projectId: string, name: string): Promise<ResearchProject> {
+    return this.request('PATCH', `/v1/projects/${projectId}`, { name })
+  }
+
+  archiveProject(projectId: string): Promise<ResearchProject> {
+    return this.request('POST', `/v1/projects/${projectId}/archive`)
+  }
+
+  unarchiveProject(projectId: string): Promise<ResearchProject> {
+    return this.request('POST', `/v1/projects/${projectId}/unarchive`)
+  }
+
   projectProjection(projectId: string): Promise<{
     project: ResearchProject
     pending_gates: Gate[]
@@ -174,6 +186,28 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${String(input.project_id)}/corpus`, input)
   }
 
+  /**
+   * §11.3 (SCH-EXEC-002): archive a directory's ACTUAL file contents into a
+   * content-addressed `code` artifact (+ `manifest` artifact). The Runner
+   * materializes jobs from this snapshot — never from agent host dirs.
+   */
+  snapshotCodeArchive(projectId: string, path: string, description?: string): Promise<{
+    snapshot_id: string
+    project_id: string
+    path: string
+    description: string
+    archive_artifact_id: string
+    manifest_artifact_id: string
+    submodules_artifact_id: string | null
+    lockfiles: string[]
+    files: number
+    total_bytes: number
+    sha256: string
+    created_at: string
+  }> {
+    return this.request('POST', `/v1/projects/${projectId}/code-snapshots`, { path, description })
+  }
+
   // ── jobs ─────────────────────────────────────────────────────────────────
 
   submitJob(input: {
@@ -183,6 +217,11 @@ export class ResearchClient {
     command?: string[]
     payload?: Record<string, unknown>
     contract_id?: string | null
+    // §12.2 JobSpec binding (SCH-EXEC-002).
+    code_snapshot_id?: string | null
+    data_artifact_ids?: string[]
+    image_digest?: string
+    output_contract?: { metrics: string; logs: string }
   }): Promise<JobRecord> {
     return this.request('POST', `/v1/projects/${input.project_id}/jobs`, input)
   }
@@ -195,12 +234,27 @@ export class ResearchClient {
     return this.request('GET', `/v1/projects/${projectId}/jobs`)
   }
 
-  completeJob(input: { job_id: string; owner: string; status: 'succeeded' | 'failed' | 'cancelled'; run_manifest?: Record<string, unknown>; failure_class?: string | null; error?: string }): Promise<JobRecord> {
+  completeJob(input: {
+    job_id: string
+    owner: string
+    status: 'succeeded' | 'failed' | 'cancelled'
+    run_manifest?: Record<string, unknown>
+    failure_class?: string | null
+    error?: string
+    /** §12.6 lease fencing: pass the values returned by claimJobs to prove liveness. */
+    lease_generation?: number | null
+    lease_token?: string | null
+  }): Promise<JobRecord> {
     return this.request('POST', `/v1/jobs/${input.job_id}/status`, input)
   }
 
-  heartbeatJob(jobId: string, owner: string): Promise<JobRecord> {
-    return this.request('POST', `/v1/jobs/${jobId}/heartbeat`, { owner })
+  /** §12.6: heartbeat carries the claim's generation/token when available. */
+  heartbeatJob(jobId: string, owner: string, leaseGeneration?: number | null, leaseToken?: string | null): Promise<JobRecord> {
+    return this.request('POST', `/v1/jobs/${jobId}/heartbeat`, {
+      owner,
+      lease_generation: leaseGeneration ?? null,
+      lease_token: leaseToken ?? null,
+    })
   }
 
   cancelJob(jobId: string, actor: string, reason?: string): Promise<JobRecord> {
@@ -209,6 +263,15 @@ export class ResearchClient {
 
   claimJobs(owner: string, limit = 1, leaseTtlSeconds = 300): Promise<JobRecord[]> {
     return this.request('POST', '/v1/jobs-claim/run', { owner, limit, lease_ttl_seconds: leaseTtlSeconds })
+  }
+
+  /** §12.7: register a runner Ed25519 public key for manifest verification. */
+  registerRunnerKey(input: { key_id: string; public_key_pem: string }): Promise<RunnerKey> {
+    return this.request('POST', '/v1/runner-keys', input)
+  }
+
+  listRunnerKeys(): Promise<RunnerKey[]> {
+    return this.request('GET', '/v1/runner-keys')
   }
 
   recoverExpiredLeases(): Promise<{ recovered: number }> {
@@ -221,7 +284,7 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${input.project_id}/claims`, input)
   }
 
-  ingestEvidence(input: Record<string, unknown>): Promise<EvidenceItem> {
+  ingestEvidence(input: Record<string, unknown> & { provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified' }): Promise<EvidenceItem> {
     return this.request('POST', `/v1/projects/${String(input.project_id)}/evidence`, input)
   }
 
@@ -295,11 +358,11 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${projectId}/analysis`, { contract_id: contractId, metric })
   }
 
-  /** Read an artifact blob (text) from the CAS by sha256/id. */
-  async fetchArtifact(sha256OrId: string): Promise<string | null> {
+  /** Read an artifact blob (text) from the CAS (project-scoped, v2 §7.4). */
+  async fetchArtifact(projectId: string, sha256OrId: string): Promise<string | null> {
     const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
     try {
-      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10000) })
+      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { signal: AbortSignal.timeout(10000) })
       if (!response.ok) return null
       return await response.text()
     } catch {

@@ -1,82 +1,141 @@
-# 需求:独立 DSH 测试实例(与生产 GUI 隔离)
+# 开发、测试与部署运行规范
 
-> 状态:**需求已登记并实现**(2026-08-07)。本文件定义并记录独立测试实例的
-> 动机、隔离边界、配置、启动方法与验证清单。
+> 规范性文档。所有实例必须明确 DSH_HOME、Web port、Kernel endpoint 和 dataDir，禁止意外复用。
 
-## 1. 动机
+## 1. 实例矩阵
 
-当前 DSH Web GUI 运行在 `127.0.0.1:3080`(`$DSH_HOME=/home/dev/.dsh`,
-profile `web`),是日常生产面。直接在它上面测试科研插件存在相互影响:
+| 实例 | DSH_HOME / data | Web | Kernel | Self-mod | 用途 |
+|---|---|---:|---:|---|---|
+| 日常 DSH | 用户默认 | 3080 | 7412 | 禁止 | 非 Scholar 日常工作 |
+| Scholar test | ~/.dsh-scholar-test | 3081 | 17412 | 默认禁用 | DSH 嵌入集成 |
+| Scholar standalone | ~/.dsh-scholar-standalone | 18610 | 17413 | 不支持 | 独立 UI |
+| Scholar selfmod dev | 临时独立目录 | 自选 | 自选 | 显式启用 | Cordis 运行时调试 |
+| CI | mktemp workspace | 随机 | 随机/Unix | 仅专门 case | 自动验收 |
 
-| 风险 | 说明 |
-|---|---|
-| 会话/项目污染 | 测试产生的 research projects、jobs、gates 混入生产 sessions |
-| Kernel 数据混用 | 生产与测试共享 `$DSH_HOME/research-kernel/kernel.db` |
-| 插件版本覆盖 | 测试中装卸/降级插件影响生产 GUI 下次启动 |
-| 端口/租约冲突 | kernel sidecar 固定 7412;runner lease 归属混淆 |
+端口只是默认值。真正隔离以 dataDir/database_id 为准；health 必须返回 instance_id、protocol_version、schema_version 和 database_id。
 
-因此:**另起一个独立 DSH 实例专用于测试 dsh-scholar 项目**。
+## 2. 前置环境
 
-## 2. 隔离边界
+- Node.js 24；
+- pnpm 11；
+- DSH checkout，通过 DSH_SCHOLAR_DSH_ROOT 指定；
+- Docker，用于正式 Job、Terminal、Golden、TeX 和 clean-room；
+- 固定 TeX Live image；本机不要求安装 pdflatex；
+- Linux/macOS 文件权限语义；团队部署另需反代/SSO/PostgreSQL/K8s 设计。
 
-| 维度 | 生产实例 | 测试实例 |
-|---|---|---|
-| DSH_HOME | `/home/dev/.dsh` | `~/.dsh-scholar-test`(可经 `DSH_SCHOLAR_TEST_HOME` 覆盖) |
-| Web 端口 | 3080 | **3081**(可经 `DSH_SCHOLAR_TEST_PORT` 覆盖) |
-| Kernel 端口 | 7412 | **17412**(profile patch 配置,防 sidecar 复用生产 kernel) |
-| profile | `web` | `web`(**必须同名**:`dsh web` 是 `--profile web` 的别名,不会解析其他 profile 名) |
-| 会话/项目 | 生产数据 | 测试数据,可随时删除重建 |
-| Runner | 生产 runner(如有) | 测试 job 走同一 runner 但 kernel 不同,租约互不干扰 |
+## 3. Clean setup
 
-## 3. 一键启动
+~~~bash
+pnpm install --frozen-lockfile
+./scripts/link-dsh-deps.sh
+pnpm build
+pnpm typecheck
+pnpm test
+~~~
 
-```bash
-bash scripts/start-test-dsh.sh            # 首次自动初始化 profile + 安装插件
-# 环境变量覆盖:
-#   DSH_SCHOLAR_TEST_HOME=~/.dsh-scholar-test
-#   DSH_SCHOLAR_TEST_PORT=3081
-#   DSH_SCHOLAR_TEST_KERNEL_PORT=17412
-```
+link-dsh-deps 只用于本地开发。发布验收必须在没有这些 symlink 的 package tarball 和全新 DSH profile 中运行。
 
-脚本行为(幂等):
-1. 创建 `$TEST_HOME` 与 profile `test-web`(不存在时);
-2. `dsh plugin --profile web add <本仓库>`(未安装时),bundles 含
-   `@dsh-scholar/research-plugin`;
-3. 写入 profile `cordis.patch.yml`,id-targeted 覆盖
-   `research-plugin.config.kernel.port` 为测试 kernel 端口;
-4. 以 `DSH_HOME=$TEST_HOME` 启动 `dsh web --port $PORT`;
-5. 打印访问地址与验证命令。
+## 4. 独立 UI
 
-## 4. 验证清单(每次启动后)
+~~~bash
+bash scripts/start-standalone-ui.sh
+~~~
 
-- [ ] `http://127.0.0.1:3081` 返回 200;
-- [ ] 测试 kernel 健康:`curl http://127.0.0.1:17412/v1/health`(注意:不是 7412);
-- [ ] `/research-api` 桥经测试实例可达:`curl http://127.0.0.1:3081/research-api/v1/health`;
-- [ ] client bundle 可加载:`curl -s http://127.0.0.1:3081/plugins/@dsh-scholar/research-plugin/client.js | head`;
-- [ ] 生产实例(3080)不受影响;两实例 kernel 数据目录不同。
+默认 http://127.0.0.1:18610。Token 生成到 0600 文件并由用户在本地解锁页输入。可覆盖：
 
-## 5. 清理
+- DSH_SCHOLAR_STANDALONE_PORT；
+- DSH_SCHOLAR_STANDALONE_KERNEL_PORT；
+- DSH_SCHOLAR_STANDALONE_DATA。
 
-```bash
-# 停止测试实例(按 pid):
-#    pkill -f 'lib/bin.js web --host 127.0.0.1 --port 3081'
-# 删除测试数据(整个实例重置):
-#    rm -rf ~/.dsh-scholar-test
-```
+目标 v2 独立 host 必须使用同源 BFF、正确流式 Artifact/SSE、locale 首屏和单一共享 UI。--no-token 只允许 loopback 明确开发，不作为默认文档路径。
 
-## 6. 已知坑(已解决,记录在案)
+## 5. DSH 嵌入测试实例
 
-- **`dsh web` 固定解析 profile `web`**:早期版本脚本创建 `test-web` profile,
-  结果 `dsh web` 自动初始化了**空的 web profile**(无插件),表现为"web 起来
-  了但插件/kernel/桥/面板全部缺失"。修复:独立 home 内的 profile 必须命名为
-  `web`。排查结论:组合树(dump-config)与运行时加载可能不一致——以运行时
-  探活为准(bridge / kernel 端口 / boot manifest entries)。
-- **Kernel 端口必须显式覆盖**:sidecar 默认 7412;测试实例若不覆盖会复用
-  (或冲突)生产 kernel。patch 用 id-targeted 行替换 config(insert 重复行
-  无效)。
+~~~bash
+bash scripts/start-test-dsh.sh
+~~~
 
-## 7. 后续演进(登记)
+脚本设置独立 DSH_HOME、web profile、Web 3081、Kernel 17412 并安装根插件。DSH 的 web 命令实际使用 profile 名 web，因此隔离来自不同 DSH_HOME，不要创建名为 test-web 却期望 dsh web 自动使用。
 
-- 测试实例接入自动化:每次 push 后重建测试实例并跑 `evals/*` 冒烟;
-- 可选:测试实例挂 `--dev` 支持前端 HMR(需要 `pnpm run dev:web`);
-- 可选:多实例矩阵(不同 DSH snapshot / 插件版本)验证兼容性。
+当前仓库迁移期验证：
+
+~~~bash
+curl http://127.0.0.1:3081/
+curl http://127.0.0.1:17412/v1/health
+curl http://127.0.0.1:3081/research-api/v1/health
+~~~
+
+目标 v2 完成后，根插件与独立 UI 合并为同一个 /research-ui-api BFF，再把检查升级为 /v2/health；capabilities 必须含 terminal_stream、tex_workspace 和 locales。当前脚本只安装根 research-plugin，不应把 :7412 推断成第二个 research-ui Kernel。
+
+## 6. 开发模式启用 Cordis self-referential
+
+它不是 dsh web --dev 的隐含能力，必须显式 overlay：
+
+~~~bash
+DSH_SCHOLAR_ENABLE_SELFMOD=1 bash scripts/start-selfmod-dev.sh
+~~~
+
+wrapper 使用独立 ~/.dsh-scholar-selfmod-dev、loopback Web 3082、Kernel 17414，并显式加载 research-dev-selfmod overlay。可用 DSH_SCHOLAR_SELFMOD_HOME/PORT/KERNEL_PORT 覆盖，但脚本拒绝 HOME、默认 ~/.dsh 和 /；未设置 DSH_SCHOLAR_ENABLE_SELFMOD=1 直接退出。shared、headless、unattended 和 approval=never 仍不支持。
+
+验证流程：
+
+1. cordis_inspect what=temporary；
+2. cordis_mount 挂载只注册 dev_probe 的无害临时插件；
+3. 下一轮调用 dev_probe；
+4. cordis_inspect 确认 dyn-N；
+5. cordis_unmount id=dyn-N；
+6. 工具立即消失；重启后不恢复。
+
+动态修改需要永久保留时，必须转为源码、测试和 docs 变更。不得复制 dyn-N 作为部署状态。
+
+## 7. Runner
+
+开发 smoke 可以显式 trusted fixture adapter。正式测试运行 Docker Runner，默认轮询 2s、heartbeat 15s、cancel poll 5s、timeout 60s（具体正式合同可覆盖）。Runner key 文件 0600；先注册 public key，再 claim。
+
+Terminal 测试使用产生交错 stdout/stderr、长输出、非零退出、signal 和 cancel 的 fixture。TeX 使用固定 image digest，不依赖宿主 pdflatex。
+
+## 8. 测试命令
+
+以下是目标脚本面，生成项目必须在 package.json 实现；当前迁移仓库使用后面的现有命令：
+
+~~~bash
+pnpm build
+pnpm typecheck
+pnpm test
+pnpm test:ui
+pnpm test:security
+pnpm test:docker
+pnpm test:golden
+pnpm test:all
+~~~
+
+~~~bash
+pnpm test
+pnpm test:security
+bash evals/docker-eval.sh
+bash evals/golden-path-v2/run-golden-v2.sh
+bash tests/security/run-latex-tests.sh
+bash evals/clean-room-rerun.sh
+~~~
+
+CI 中 Docker、TeX、Golden、clean-room 不允许因为依赖缺失而 skip 成功。
+
+## 9. 数据清理
+
+开发实例必须先停止进程，再删除它自己的显式 dataDir。不得使用未解析变量、通配符、HOME 根或 workspace 根作为递归删除目标。优先移动到 trash 或备份目录；发布/生产数据按 retention policy 清理。
+
+## 10. Team/Cluster
+
+团队模式改用 SSO Principal、PostgreSQL、S3/MinIO、K8s/Slurm Runner、mTLS internal interface 和集中日志。Browser 仍只走 BFF；Terminal SSE 可由 gateway 转发。Cordis self-mod 在 shared/team 环境保持禁用。
+
+## 11. 运维检查
+
+- health instance/protocol/schema/database 匹配；
+- migration 与 backup 成功；
+- DB WAL、CAS 空间、孤儿 Blob、过期 lease、孤儿容器；
+- Terminal retention/连接数/dropped bytes；
+- TeX build queue、image digest 和 PDF Artifact；
+- Outbox backlog；
+- Runner key 有效期；
+- production tool catalog 无 cordis_*；
+- zh/en locale 资源 revision 和客户端 bundle 一致。

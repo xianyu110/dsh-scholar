@@ -5,19 +5,20 @@
  * @module @dsh-scholar/research-kernel/kernel
  */
 
-import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
-  ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CorpusSnapshot, Decision,
+  ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision,
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
-  SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, type ArtifactKind, type GateType, type JobStatus, type ProjectStatus,
+  RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
+  buildProjectId, type ArtifactKind, type GateType, type JobSpecBound, type JobStatus, type ProjectStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
-import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow } from './store.js'
+import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 
 export interface KernelOptions {
   /** SQLite database path (defaults to `:memory:`). */
@@ -26,6 +27,8 @@ export interface KernelOptions {
   casRoot?: string
   /** Kernel identity used for leases. */
   instanceId?: string
+  /** §12.7: reject unsigned run manifests at job completion (default: compatible, accept). */
+  requireSignedManifest?: boolean
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -88,7 +91,13 @@ function gateFromRow(row: GateRow): Gate {
   }
 }
 
-function jobFromRow(row: JobRow): JobRecord {
+function jobFromRow(row: JobRow): JobSpecBound {
+  const payload = jsonParse(row.payload, {} as Record<string, unknown>)
+  // §12.6: the opaque lease token is persisted inside payload.__lease_token
+  // (avoids a schema column); surface it as a first-class field and keep the
+  // public payload clean.
+  const leaseToken = typeof payload.__lease_token === 'string' ? payload.__lease_token : null
+  if (leaseToken !== null) delete payload.__lease_token
   return {
     job_id: row.job_id,
     project_id: row.project_id,
@@ -96,12 +105,21 @@ function jobFromRow(row: JobRow): JobRecord {
     idempotency_key: row.idempotency_key,
     kind: row.kind as JobRecord['kind'],
     command: jsonParse(row.command, [] as string[]),
-    payload: jsonParse(row.payload, {}),
+    payload,
     status: row.status as JobStatus,
     failure_class: row.failure_class as JobRecord['failure_class'],
     lease_owner: row.lease_owner,
     lease_expires_at: row.lease_expires_at,
     heartbeat_at: row.heartbeat_at,
+    lease_generation: row.lease_generation ?? null,
+    lease_token: leaseToken,
+    // §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized from CAS.
+    code_snapshot_id: row.code_snapshot_id,
+    data_artifact_ids: Array.isArray(payload.data_artifact_ids) ? payload.data_artifact_ids.map(String) : [],
+    image_digest: typeof payload.image_digest === 'string' ? payload.image_digest : '',
+    output_contract: typeof payload.output_contract === 'object' && payload.output_contract !== null
+      ? { metrics: String((payload.output_contract as Record<string, unknown>).metrics ?? '/outputs/metrics.json'), logs: String((payload.output_contract as Record<string, unknown>).logs ?? '/outputs/run.log') }
+      : undefined,
     attempts: row.attempts,
     max_attempts: row.max_attempts,
     run_manifest: jsonParse(row.run_manifest, null),
@@ -132,15 +150,31 @@ const GATE_APPROVAL_TRANSITION: Record<GateType, { from: ProjectStatus; to: Proj
   release: { from: 'RELEASE_READY', to: 'RELEASED' },
 }
 
+/** Run `fn` inside a single SQLite transaction (v2 §7.6 transactional kernel). */
+export function withTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const result = fn()
+    db.exec('COMMIT')
+    return result
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
+    throw error
+  }
+}
+
 export class ResearchKernel {
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
   readonly instanceId: string
+  /** §12.7: when true, unsigned run manifests are rejected at completion. */
+  requireSignedManifest: boolean
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
+    this.requireSignedManifest = options.requireSignedManifest ?? false
   }
 
   close(): void {
@@ -254,6 +288,50 @@ export class ResearchKernel {
     return updated
   }
 
+  /** Rename a project (dsh-web session actions); audited in history. */
+  renameProject(projectId: string, name: string): ResearchProject {
+    const clean = name.trim()
+    if (clean === '') throw new KernelError(422, 'invalid_name', 'project name must not be empty')
+    if (clean.length > 120) throw new KernelError(422, 'invalid_name', 'project name too long (max 120 chars)')
+    const project = this.getProject(projectId)
+    const now = nowIso()
+    this.db.prepare('UPDATE projects SET name = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
+      .run(clean, now, JSON.stringify([...project.history, `renamed to "${clean}"`]), projectId)
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.renamed', { from: project.name, to: clean, revision: updated.revision })
+    return updated
+  }
+
+  /**
+   * Archive a project (dsh-web session actions): data is kept, the project
+   * leaves the Active group and all further gates/actions are blocked.
+   * Reversible via unarchiveProject.
+   */
+  archiveProject(projectId: string): ResearchProject {
+    const project = this.getProject(projectId)
+    if (project.status === 'ARCHIVED') return project
+    const now = nowIso()
+    this.db.prepare('UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
+      .run('ARCHIVED', now, JSON.stringify([...project.history, `${project.status}->ARCHIVED (archived)`]), projectId)
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.transitioned', { from: project.status, to: 'ARCHIVED', revision: updated.revision, reason: 'archived' })
+    return updated
+  }
+
+  /** Restore an archived project (back to RELEASE_READY when it was done,
+   * otherwise to its pre-archive phase). */
+  unarchiveProject(projectId: string): ResearchProject {
+    const project = this.getProject(projectId)
+    if (project.status !== 'ARCHIVED') return project
+    const restored = project.history.at(-1)?.startsWith('RELEASED') === true ? 'RELEASED' as ProjectStatus : 'RELEASE_READY' as ProjectStatus
+    const now = nowIso()
+    this.db.prepare('UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
+      .run(restored, now, JSON.stringify([...project.history, 'ARCHIVED->restored']), projectId)
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.transitioned', { from: 'ARCHIVED', to: restored, revision: updated.revision, reason: 'restored' })
+    return updated
+  }
+
   /** Link a DSH session to a project (design RSP-006). */
   linkSession(sessionId: string, projectId: string): SessionLink {
     this.getProject(projectId)
@@ -318,10 +396,17 @@ export class ResearchKernel {
     return gateFromRow(row)
   }
 
-  /** Record a human decision and apply the gate side effect (design §5.2, §6.6). */
+  /** Record a human decision and apply the gate side effect (v2 §6.5, §6.6). */
   decideGate(input: {
     gate_id: string
     actor: string
+    /** v2: authenticated human principal; agents cannot call this path. */
+    principal?: {
+      principal_id: string
+      tenant_id?: string
+      auth_method?: string
+      session_id?: string | null
+    }
     decision: 'approved' | 'rejected' | 'revised'
     reason?: string
     diff?: string
@@ -334,55 +419,62 @@ export class ResearchKernel {
     if (gate.status !== 'pending') {
       throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} already ${gate.status}`)
     }
-    const decision: Decision = {
-      decision_id: `dec_${randomUUID().replaceAll('-', '')}`,
-      gate_id: gate.gate_id,
-      project_id: gate.project_id,
-      gate_type: gate.type,
-      actor: input.actor,
-      decision: input.decision,
-      reason: input.reason ?? '',
-      diff: input.diff ?? '',
-      session_id: input.session_id ?? null,
-      event_id: input.event_id ?? null,
-      decided_at: nowIso(),
-    }
-    this.db.prepare(
-      'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor, decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at)
-    const gateUpdate = this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
-      .run(input.decision, decision.decided_at, gate.gate_id, 'pending')
-    if (Number(gateUpdate.changes) !== 1) {
-      // Lost the CAS race to a concurrent decision (design §11.2: two browsers
-      // deciding the same gate — exactly one wins, the conflict is recorded).
-      this.db.prepare('DELETE FROM decisions WHERE decision_id = ?').run(decision.decision_id)
-      throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} was decided concurrently (CAS race)`)
-    }
-
-    let project = this.getProject(gate.project_id)
-    const now = nowIso()
-    if (input.decision === 'approved') {
-      const mapping = GATE_APPROVAL_TRANSITION[gate.type]
-      if (gate.type === 'budget') {
-        const resumeTo = input.resume_to ?? project.status
-        if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
-          // Budget gate approval may resume from BLOCKED_GATE to any prior state.
-          project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
-        }
-      } else if (project.status === mapping.from) {
-        project = this.forceTransition(project.project_id, mapping.to, `gate ${gate.gate_id} approved`)
-      } else if (project.status === mapping.to) {
-        // Already in target state (idempotent replay) — no-op.
-      } else {
-        throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
+    return withTransaction(this.db, () => {
+      const decision: Decision = {
+        decision_id: `dec_${randomUUID().replaceAll('-', '')}`,
+        gate_id: gate.gate_id,
+        project_id: gate.project_id,
+        gate_type: gate.type,
+        actor: input.actor,
+        // v2 §6.4: authenticated principal record; missing principal is only
+        // tolerated for legacy rows (actor == 'legacy_unverified').
+        principal: input.principal === undefined && input.actor === 'legacy_unverified'
+          ? undefined
+          : {
+              principal_id: input.principal?.principal_id ?? input.actor,
+              tenant_id: input.principal?.tenant_id ?? '',
+              auth_method: input.principal?.auth_method ?? 'unverified',
+              session_id: input.principal?.session_id ?? input.session_id ?? null,
+            },
+        decision: input.decision,
+        reason: input.reason ?? '',
+        diff: input.diff ?? '',
+        session_id: input.session_id ?? null,
+        event_id: input.event_id ?? null,
+        decided_at: nowIso(),
       }
-    } else if (input.decision === 'rejected' && gate.type === 'scope') {
-      project = this.forceTransition(project.project_id, 'FAILED', `scope gate ${gate.gate_id} rejected`)
-    }
-    this.emit(gate.project_id, 'gate.decided', {
-      gate_id: gate.gate_id, type: gate.type, decision: input.decision, actor: input.actor, decision_id: decision.decision_id,
+      this.db.prepare(
+        'INSERT INTO decisions (decision_id, gate_id, project_id, gate_type, actor, decision, reason, diff, session_id, event_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(decision.decision_id, decision.gate_id, decision.project_id, decision.gate_type, decision.actor, decision.decision, decision.reason, decision.diff, decision.session_id, decision.event_id, decision.decided_at)
+      const gateUpdate = this.db.prepare('UPDATE gates SET status = ?, decided_at = ? WHERE gate_id = ? AND status = ?')
+        .run(input.decision, decision.decided_at, gate.gate_id, 'pending')
+      if (Number(gateUpdate.changes) !== 1) {
+        // Lost the CAS race to a concurrent decision (design §11.2).
+        throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} was decided concurrently (CAS race)`)
+      }
+      let project = this.getProject(gate.project_id)
+      if (input.decision === 'approved') {
+        const mapping = GATE_APPROVAL_TRANSITION[gate.type]
+        if (gate.type === 'budget') {
+          const resumeTo = input.resume_to ?? project.status
+          if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
+            project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
+          }
+        } else if (project.status === mapping.from) {
+          project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
+        } else if (project.status === mapping.to) {
+          // Already in target state (idempotent replay) — no-op.
+        } else {
+          throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
+        }
+      } else if (input.decision === 'rejected' && gate.type === 'scope') {
+        project = this.forceTransition(project.project_id, 'FAILED', `scope gate ${gate.gate_id} rejected`)
+      }
+      this.emit(gate.project_id, 'gate.decided', {
+        gate_id: gate.gate_id, type: gate.type, decision: input.decision, actor: input.actor, decision_id: decision.decision_id,
+      })
+      return { gate: this.getGate(gate.gate_id), decision, project }
     })
-    return { gate: this.getGate(gate.gate_id), decision, project }
   }
 
   listDecisions(projectId: string): Decision[] {
@@ -400,6 +492,28 @@ export class ResearchKernel {
       event_id: row.event_id as string | null,
       decided_at: row.decided_at as string,
     }))
+  }
+
+  /** Gate-transaction transition: the ONLY path into gate-controlled states
+   * (v2 §6.2). Bypasses the generic TRANSITION_TABLE (which excludes those
+   * states) but still performs revision CAS and appends history. */
+  private gateTransition(projectId: string, to: ProjectStatus, from: ProjectStatus, gateId: string, reason: string): ResearchProject {
+    const project = this.getProject(projectId)
+    if (project.status !== from) {
+      throw new KernelError(422, 'gate_state_mismatch', `gate ${gateId} cannot transition from ${project.status} (expected ${from})`)
+    }
+    // Bypasses the generic TRANSITION_TABLE on purpose (§6.2): the gate
+    // transaction is the ONLY authorized path into gate-controlled states.
+    const now = nowIso()
+    const result = this.db.prepare(
+      'UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ? AND revision = ?',
+    ).run(to, now, JSON.stringify([...project.history, `${from}->${to} (${reason}; gate ${gateId})`]), projectId, project.revision)
+    if (Number(result.changes) !== 1) {
+      throw new KernelError(409, 'revision_conflict', `gate transition lost CAS race on project ${projectId}`)
+    }
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.transitioned', { from, to, revision: updated.revision, reason, via: 'gate' })
+    return updated
   }
 
   /** Internal: transition without CAS check (gate side effects, budget resume). */
@@ -420,31 +534,34 @@ export class ResearchKernel {
   }
 
   recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): BudgetRecord {
-    const project = this.getProject(projectId)
-    const current = this.getBudget(projectId)
-    const next: BudgetRecord = {
-      project_id: projectId,
-      model_cost_usd: current.model_cost_usd + (usage.model_cost_usd ?? 0),
-      gpu_hours: current.gpu_hours + (usage.gpu_hours ?? 0),
-      api_requests: current.api_requests + (usage.api_requests ?? 0),
-      updated_at: nowIso(),
-    }
-    this.db.prepare(
-      'INSERT INTO budget (project_id, model_cost_usd, gpu_hours, api_requests, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET model_cost_usd = excluded.model_cost_usd, gpu_hours = excluded.gpu_hours, api_requests = excluded.api_requests, updated_at = excluded.updated_at',
-    ).run(projectId, next.model_cost_usd, next.gpu_hours, next.api_requests, next.updated_at)
-    this.emit(projectId, 'budget.updated', { model_cost_usd: next.model_cost_usd, gpu_hours: next.gpu_hours })
-    // Hard limit check: crossing a limit stops the project into BLOCKED_GATE.
-    if (project.status !== 'BLOCKED_GATE' && project.status !== 'FAILED' && project.status !== 'STOPPED') {
-      const exceeded: string[] = []
-      if (next.model_cost_usd > project.constraints.max_model_cost_usd) exceeded.push(`model cost $${next.model_cost_usd} > $${project.constraints.max_model_cost_usd}`)
-      if (next.gpu_hours > project.constraints.max_gpu_hours) exceeded.push(`gpu hours ${next.gpu_hours} > ${project.constraints.max_gpu_hours}`)
-      if (exceeded.length > 0) {
-        this.emit(projectId, 'policy.violation', { reasons: exceeded })
-        this.db.prepare('UPDATE projects SET status = ?, updated_at = ?, history = ? WHERE project_id = ?')
-          .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')})`]), projectId)
+    // v2 §7.6: budget increment + limit check + block state + outbox in ONE transaction.
+    return withTransaction(this.db, () => {
+      const project = this.getProject(projectId)
+      const current = this.getBudget(projectId)
+      const next: BudgetRecord = {
+        project_id: projectId,
+        model_cost_usd: current.model_cost_usd + (usage.model_cost_usd ?? 0),
+        gpu_hours: current.gpu_hours + (usage.gpu_hours ?? 0),
+        api_requests: current.api_requests + (usage.api_requests ?? 0),
+        updated_at: nowIso(),
       }
-    }
-    return this.getBudget(projectId)
+      this.db.prepare(
+        'INSERT INTO budget (project_id, model_cost_usd, gpu_hours, api_requests, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET model_cost_usd = excluded.model_cost_usd, gpu_hours = excluded.gpu_hours, api_requests = excluded.api_requests, updated_at = excluded.updated_at',
+      ).run(projectId, next.model_cost_usd, next.gpu_hours, next.api_requests, next.updated_at)
+      this.emit(projectId, 'budget.updated', { model_cost_usd: next.model_cost_usd, gpu_hours: next.gpu_hours })
+      // Hard limit check: crossing a limit stops the project into BLOCKED_GATE.
+      if (project.status !== 'BLOCKED_GATE' && project.status !== 'FAILED' && project.status !== 'STOPPED') {
+        const exceeded: string[] = []
+        if (next.model_cost_usd > project.constraints.max_model_cost_usd) exceeded.push(`model cost $${next.model_cost_usd} > $${project.constraints.max_model_cost_usd}`)
+        if (next.gpu_hours > project.constraints.max_gpu_hours) exceeded.push(`gpu hours ${next.gpu_hours} > ${project.constraints.max_gpu_hours}`)
+        if (exceeded.length > 0) {
+          this.emit(projectId, 'policy.violation', { reasons: exceeded })
+          this.db.prepare('UPDATE projects SET status = ?, updated_at = ?, history = ? WHERE project_id = ?')
+            .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')})`]), projectId)
+        }
+      }
+      return this.getBudget(projectId)
+    })
   }
 
   // ── artifacts (CAS) ──────────────────────────────────────────────────────
@@ -457,10 +574,14 @@ export class ResearchKernel {
   }): ArtifactRecord {
     this.getProject(input.project_id)
     const { sha256, size_bytes } = this.cas.put(input.content)
-    const existing = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(`sha256:${sha256}`) as ArtifactRecord | undefined
-    if (existing !== undefined) return existing // content-addressed dedupe (RSP-008)
+    const artifactId = `sha256:${sha256}`
+    // v2 §7.4: blobs are global (CAS), artifact records are project-scoped —
+    // the same blob in another project yields that project's OWN record.
+    const existing = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
+      .get(input.project_id, artifactId) as ArtifactRecord | undefined
+    if (existing !== undefined) return existing
     const record: ArtifactRecord = {
-      artifact_id: `sha256:${sha256}`,
+      artifact_id: artifactId,
       project_id: input.project_id,
       kind: input.kind,
       size_bytes,
@@ -474,15 +595,26 @@ export class ResearchKernel {
     return record
   }
 
-  getArtifact(sha256OrId: string): ArtifactRecord {
+  /** Project-scoped artifact lookup (v2 §3.4 isolation). */
+  getArtifact(projectId: string, sha256OrId: string): ArtifactRecord {
     const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
-    const row = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(id) as ArtifactRecord | undefined
-    if (row === undefined) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found`)
-    return row
+    const row = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
+      .get(projectId, id) as ArtifactRecord | undefined
+    if (row === undefined) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found in project ${projectId}`)
+    // metadata is stored as JSON TEXT — surface it as the schema object.
+    return { ...row, metadata: jsonParse(row.metadata as unknown as string, {}) }
   }
 
+
   listArtifacts(projectId: string): ArtifactRecord[] {
-    return this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as ArtifactRecord[]
+    const rows = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as ArtifactRecord[]
+    return rows.map(row => ({ ...row, metadata: jsonParse(row.metadata as unknown as string, {}) }))
+  }
+
+  /** All project records referencing one blob (v2 §7.4 compatibility). */
+  listArtifactsForBlob(sha256OrId: string): ArtifactRecord[] {
+    const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
+    return this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ? ORDER BY project_id').all(id) as unknown as ArtifactRecord[]
   }
 
   /** Verify a RunManifest's artifact refs exist in CAS (design §4.6.1). */
@@ -660,6 +792,143 @@ export class ResearchKernel {
     return JSON.parse(row.body) as CorpusSnapshot
   }
 
+  // ── code snapshot archive (design §11.3, SCH-EXEC-002) ───────────────────
+
+  /**
+   * Archive a directory's ACTUAL file contents into a content-addressed
+   * `code` artifact (JSON `{schema_version, project_id, description, files:
+   * {rel: {sha256, content_base64}}, excludes}`) plus a lightweight `manifest`
+   * artifact (file list + hashes, no content). The Runner materializes the
+   * code snapshot ONLY from the Artifact Store — never from agent host dirs.
+   *
+   * Safety (path escape / symlink protection): the walk rejects any file whose
+   * relative path escapes the root, and any symbolic link whose realpath
+   * resolves OUTSIDE the real root (422 `snapshot_path_escape`); directories
+   * `.git`, `node_modules` and `.research-cas` are excluded.
+   */
+  snapshotCodeArchive(projectId: string, rootPath: string, description = ''): CodeSnapshot {
+    this.getProject(projectId)
+    const absRoot = resolve(rootPath)
+    let rootInfo
+    try {
+      rootInfo = statSync(absRoot)
+    } catch {
+      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root not readable: ${rootPath}`)
+    }
+    if (!rootInfo.isDirectory()) {
+      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root is not a directory: ${rootPath}`)
+    }
+    const realRoot = realpathSync(absRoot)
+    // Directories that are never part of a code snapshot (build/vendor/state).
+    const EXCLUDED_DIRS = new Set(['.git', 'node_modules', '.research-cas'])
+    const files: Record<string, { sha256: string; content_base64: string; size_bytes: number }> = {}
+    let totalBytes = 0
+    const walk = (dir: string): void => {
+      let entries: string[]
+      try {
+        entries = readdirSync(dir)
+      } catch (error) {
+        throw new KernelError(422, 'snapshot_read_error', `code snapshot: directory not readable: ${dir} (${(error as Error).message})`)
+      }
+      for (const entry of entries) {
+        const full = join(dir, entry)
+        let info
+        try {
+          info = lstatSync(full)
+        } catch {
+          continue // raced with deletion — skip
+        }
+        if (info.isSymbolicLink()) {
+          // §11.3 escape protection: symlinks resolving outside the archived
+          // root are rejected; symlinks staying inside are followed.
+          let target: string
+          try {
+            target = realpathSync(full)
+          } catch {
+            continue // dangling symlink — skip
+          }
+          if (target !== realRoot && !target.startsWith(`${realRoot}${sep}`)) {
+            throw new KernelError(422, 'snapshot_path_escape',
+              `code snapshot: symbolic link escapes the archived root: ${relative(absRoot, full)} -> ${target}`)
+          }
+          try {
+            info = statSync(full)
+          } catch {
+            continue
+          }
+        }
+        if (info.isDirectory()) {
+          if (EXCLUDED_DIRS.has(entry)) continue
+          walk(full)
+        } else if (info.isFile()) {
+          const rel = relative(absRoot, full)
+          if (rel.startsWith('..') || rel.startsWith(sep)) {
+            throw new KernelError(422, 'snapshot_path_escape', `code snapshot: path escapes the archived root: ${full}`)
+          }
+          let content: Buffer
+          try {
+            content = readFileSync(full)
+          } catch (error) {
+            throw new KernelError(422, 'snapshot_read_error', `code snapshot: unreadable file ${rel}: ${(error as Error).message}`)
+          }
+          const sha256 = createHash('sha256').update(content).digest('hex')
+          files[rel] = { sha256, content_base64: content.toString('base64'), size_bytes: content.byteLength }
+          totalBytes += content.byteLength
+        }
+        // sockets/fifos/devices are skipped silently (never part of source).
+      }
+    }
+    walk(absRoot)
+
+    const archive = {
+      schema_version: 1,
+      project_id: projectId,
+      description,
+      root: absRoot,
+      files,
+      excludes: [...EXCLUDED_DIRS],
+      created_at: nowIso(),
+    }
+    const archiveRecord = this.registerArtifact({
+      project_id: projectId,
+      kind: 'code',
+      content: JSON.stringify(archive),
+      metadata: { kind: 'code-snapshot-archive', files: Object.keys(files).length, total_bytes: totalBytes, root: absRoot },
+    })
+    // Lightweight manifest artifact (file list + hashes, no content) — §11.3
+    // `manifest_artifact_id`. Same sha256 space; content-addressed.
+    const manifestRecord = this.registerArtifact({
+      project_id: projectId,
+      kind: 'manifest',
+      content: JSON.stringify({
+        schema_version: 1,
+        project_id: projectId,
+        description,
+        root: absRoot,
+        files: Object.fromEntries(Object.entries(files).map(([rel, f]) => [rel, { sha256: f.sha256, size_bytes: f.size_bytes }])),
+        excludes: [...EXCLUDED_DIRS],
+        created_at: nowIso(),
+      }),
+      metadata: { kind: 'code-snapshot-manifest', files: Object.keys(files).length },
+    })
+    const snapshot: CodeSnapshot = {
+      snapshot_id: `code_snap_${randomUUID().slice(0, 8)}`,
+      project_id: projectId,
+      path: absRoot,
+      description,
+      archive_artifact_id: archiveRecord.artifact_id,
+      manifest_artifact_id: manifestRecord.artifact_id,
+      submodules_artifact_id: null,
+      lockfiles: [],
+      files: Object.keys(files).length,
+      total_bytes: totalBytes,
+      sha256: archiveRecord.sha256,
+      created_at: nowIso(),
+    }
+    // Both artifacts already emit artifact.registered events (outbox).
+    return snapshot
+  }
+
   // ── durable jobs (design §4.2 Job Controller, §9.3) ──────────────────────
 
   /** Idempotent job submission: same idempotency_key returns the existing job. */
@@ -671,23 +940,68 @@ export class ResearchKernel {
     payload?: Record<string, unknown>
     contract_id?: string | null
     max_attempts?: number
-  }): JobRecord {
-    this.getProject(input.project_id)
-    const existing = this.db.prepare('SELECT * FROM jobs WHERE idempotency_key = ?').get(input.idempotency_key) as JobRow | undefined
+    // §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized by the
+    // Runner from CAS; image_digest/output_contract/data_artifact_ids travel
+    // inside payload.
+    code_snapshot_id?: string | null
+    data_artifact_ids?: string[]
+    image_digest?: string
+    output_contract?: { metrics: string; logs: string }
+  }): JobSpecBound {
+    const project = this.getProject(input.project_id)
+    // v2 §3.4: idempotency is project-scoped — the same key in two projects
+    // yields two independent jobs.
+    const existing = this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?')
+      .get(input.project_id, input.idempotency_key) as JobRow | undefined
     if (existing !== undefined) return jobFromRow(existing)
-    const job: JobRecord = {
+    // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
+    // isolated-subprocess is rejected at submission time (kernel layer).
+    const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+    if (SECURE_KINDS.includes(input.kind) && project.execution.runner_profile === 'isolated-subprocess') {
+      throw new KernelError(422, 'container_execution_required',
+        `job kind ${input.kind} requires a container runner profile (got ${project.execution.runner_profile}); host subprocess is prohibited (v2 §3.2)`)
+    }
+    // §12.2 (SCH-EXEC-002): formal-class jobs MUST bind a materialized code
+    // snapshot — the Runner never executes agent host directories.
+    const codeSnapshotId = input.code_snapshot_id ?? null
+    if (SECURE_KINDS.includes(input.kind) && (codeSnapshotId === null || codeSnapshotId === '')) {
+      throw new KernelError(422, 'code_snapshot_required',
+        `job kind ${input.kind} requires code_snapshot_id (the Runner materializes code from CAS, §11.3/§12.2)`)
+    }
+    if (codeSnapshotId !== null && codeSnapshotId !== '') {
+      try {
+        this.getArtifact(project.project_id, codeSnapshotId)
+      } catch {
+        throw new KernelError(422, 'code_snapshot_unknown',
+          `code_snapshot_id ${codeSnapshotId} is not a registered artifact of project ${project.project_id}`)
+      }
+    }
+    // §12.2: image digest default; the rest of the binding travels in payload.
+    const payload = {
+      ...(input.payload ?? {}),
+      image_digest: input.image_digest ?? (SECURE_KINDS.includes(input.kind) ? 'node:22-alpine' : ''),
+      ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
+      ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
+    }
+    const job: JobSpecBound = {
       job_id: `job_${randomUUID().slice(0, 12)}`,
       project_id: input.project_id,
       contract_id: input.contract_id ?? null,
       idempotency_key: input.idempotency_key,
       kind: input.kind,
       command: input.command ?? [],
-      payload: input.payload ?? {},
+      payload,
       status: 'queued',
       failure_class: null,
       lease_owner: null,
       lease_expires_at: null,
       heartbeat_at: null,
+      lease_generation: null,
+      lease_token: null,
+      code_snapshot_id: codeSnapshotId,
+      data_artifact_ids: input.data_artifact_ids ?? [],
+      image_digest: String(payload.image_digest),
+      output_contract: input.output_contract,
       attempts: 0,
       max_attempts: input.max_attempts ?? 3,
       run_manifest: null,
@@ -696,13 +1010,13 @@ export class ResearchKernel {
       updated_at: nowIso(),
     }
     this.db.prepare(
-      `INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at, code_snapshot_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       job.job_id, job.project_id, job.contract_id, job.idempotency_key, job.kind, JSON.stringify(job.command),
       JSON.stringify(job.payload), job.status, job.failure_class, job.lease_owner, job.lease_expires_at,
       job.heartbeat_at, job.attempts, job.max_attempts, job.run_manifest === null ? null : JSON.stringify(job.run_manifest),
-      job.error, job.created_at, job.updated_at,
+      job.error, job.created_at, job.updated_at, job.code_snapshot_id,
     )
     this.emit(input.project_id, 'job.submitted', { job_id: job.job_id, kind: job.kind, idempotency_key: input.idempotency_key })
     return job
@@ -721,31 +1035,45 @@ export class ResearchKernel {
     return rows.map(jobFromRow)
   }
 
-  /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3). */
+  /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3, §12.6).
+   * Every claim bumps `lease_generation` and issues a fresh opaque
+   * `lease_token`; runners must echo both on heartbeat/complete, and stale
+   * generations are fenced out (an old runner can never finish the job). */
   claimJobs(owner: string, leaseTtlSeconds = 300, limit = 8): JobRecord[] {
     const now = nowIso()
-    const expired = new Date(Date.now() - leaseTtlSeconds * 1000).toISOString()
     const rows = this.db.prepare(
       `SELECT * FROM jobs WHERE status = 'queued' OR (status = 'retryable' AND attempts < max_attempts) ORDER BY created_at LIMIT ?`,
     ).all(limit) as unknown as JobRow[]
     const claimed: JobRecord[] = []
     const update = this.db.prepare(
-      `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
+      `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, lease_generation = COALESCE(lease_generation, 0) + 1, payload = ?, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
     )
     for (const row of rows) {
       const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
-      const result = update.run(owner, leaseExpires, now, now, row.job_id)
+      const payload = jsonParse(row.payload, {} as Record<string, unknown>)
+      const leaseToken = `lt_${randomUUID().replaceAll('-', '')}${randomUUID().slice(0, 8)}`
+      payload.__lease_token = leaseToken
+      const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
       if (Number(result.changes) === 1) claimed.push(jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow))
     }
-    void expired
     return claimed
   }
 
-  /** Renew a lease (heartbeat); rejects when owned by another instance. */
-  heartbeatJob(jobId: string, owner: string, leaseTtlSeconds = 300): JobRecord {
+  /**
+   * Renew a lease (heartbeat); rejects when owned by another instance.
+   * §12.6: when `generation`/`token` are provided the lease is fenced —
+   * both must match the CURRENT lease, otherwise 409 `lease_stale`.
+   * Legacy callers that pass neither keep the old owner-only check.
+   */
+  heartbeatJob(jobId: string, owner: string, generation?: number | null, token?: string | null, leaseTtlSeconds = 300): JobRecord {
     const job = this.getJob(jobId)
     if (job.lease_owner !== null && job.lease_owner !== owner) {
       throw new KernelError(409, 'lease_conflict', `job ${jobId} leased by ${job.lease_owner}`)
+    }
+    const fenced = (generation !== undefined && generation !== null) || (token !== undefined && token !== null)
+    if (fenced && (job.lease_generation !== (generation ?? null) || job.lease_token !== (token ?? null))) {
+      throw new KernelError(409, 'lease_stale',
+        `job ${jobId} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${generation ?? 'n/a'} token ${token ?? 'n/a'}`)
     }
     const now = nowIso()
     const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
@@ -762,7 +1090,16 @@ export class ResearchKernel {
     return Number(result.changes)
   }
 
-  /** Finalize a job with a validated RunManifest (design §4.6.1, §6.5). */
+  /**
+   * Finalize a job with a validated RunManifest (design §4.6.1, §6.5, §12.6-12.7).
+   * §12.6 fencing: when `lease_generation`/`lease_token` are provided both must
+   * match the CURRENT lease — a stale runner (old generation/token) is rejected
+   * with 409 `lease_stale` even if its owner matches. Legacy callers that pass
+   * neither keep the old owner-only check.
+   * §12.7: when the manifest carries an Ed25519 `signature`, the kernel
+   * verifies runner key registration, payload hash and signature; when it does
+   * not, the manifest is accepted unless the kernel/project requires signing.
+   */
   completeJob(input: {
     job_id: string
     owner: string
@@ -770,6 +1107,8 @@ export class ResearchKernel {
     run_manifest?: Record<string, unknown>
     failure_class?: JobRecord['failure_class']
     error?: string
+    lease_generation?: number | null
+    lease_token?: string | null
   }): JobRecord {
     const job = this.getJob(input.job_id)
     if (job.lease_owner !== null && job.lease_owner !== input.owner) {
@@ -778,12 +1117,29 @@ export class ResearchKernel {
     if (job.status !== 'running') {
       throw new KernelError(409, 'job_not_running', `job ${input.job_id} is ${job.status}, not running`)
     }
+    // §12.6 strict lease fencing when generation/token are supplied.
+    const fence = (input.lease_generation !== undefined && input.lease_generation !== null) || (input.lease_token !== undefined && input.lease_token !== null)
+    if (fence && (job.lease_generation !== (input.lease_generation ?? null) || job.lease_token !== (input.lease_token ?? null))) {
+      throw new KernelError(409, 'lease_stale',
+        `job ${input.job_id} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${input.lease_generation ?? 'n/a'} token ${input.lease_token ?? 'n/a'}`)
+    }
+    if (input.run_manifest !== undefined) {
+      this.verifyRunManifest(input.run_manifest, job)
+    }
     if (input.status === 'succeeded' && input.run_manifest !== undefined) {
       const refs = collectManifestRefs(input.run_manifest)
       if (refs.length > 0) {
         const { ok, missing } = this.verifyArtifactRefs(refs)
         if (!ok) {
           throw new KernelError(422, 'manifest_refs_missing', `run manifest references missing artifacts: ${missing.join(', ')}`)
+        }
+        // §12.7: artifacts must exist AND belong to the job's project.
+        for (const ref of refs) {
+          try {
+            this.getArtifact(job.project_id, ref)
+          } catch {
+            throw new KernelError(422, 'manifest_refs_missing', `artifact ${ref} is not registered in project ${job.project_id}`)
+          }
         }
       }
     }
@@ -796,6 +1152,103 @@ export class ResearchKernel {
       job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,
     })
     return jobRecord
+  }
+
+  /**
+   * §12.7: register a runner Ed25519 public key used to verify RunManifest
+   * signatures. Rejects non-Ed25519 / unparseable PEMs (422 runner_key_invalid).
+   */
+  registerRunnerKey(input: { key_id: string; public_key_pem: string }): RunnerKey {
+    let publicKey: KeyObject
+    try {
+      publicKey = createPublicKey(input.public_key_pem)
+    } catch (error) {
+      throw new KernelError(422, 'runner_key_invalid', `public_key_pem is not a valid public key: ${(error as Error).message}`)
+    }
+    if (publicKey.asymmetricKeyType !== 'ed25519') {
+      throw new KernelError(422, 'runner_key_invalid', `runner key ${input.key_id} must be Ed25519, got ${publicKey.asymmetricKeyType}`)
+    }
+    const record: RunnerKey = { key_id: input.key_id, public_key_pem: input.public_key_pem, created_at: nowIso() }
+    this.db.prepare(
+      'INSERT INTO runner_keys (key_id, public_key_pem, created_at) VALUES (?, ?, ?) ON CONFLICT(key_id) DO UPDATE SET public_key_pem = excluded.public_key_pem, created_at = excluded.created_at',
+    ).run(record.key_id, record.public_key_pem, record.created_at)
+    return record
+  }
+
+  listRunnerKeys(): RunnerKey[] {
+    const rows = this.db.prepare('SELECT * FROM runner_keys ORDER BY created_at').all() as unknown as RunnerKeyRow[]
+    return rows.map(row => ({ key_id: row.key_id, public_key_pem: row.public_key_pem, created_at: row.created_at }))
+  }
+
+  /**
+   * §12.7: verify a run manifest against the job it claims to belong to.
+   *  - identity: job_id/project_id/contract_id/lease.generation must match the
+   *    job when present (422 manifest_*_mismatch);
+   *  - signature: when `signature` is present the runner key must be
+   *    registered (422 manifest_key_unknown), the canonical payload hash must
+   *    match `payload_sha256` when provided (422 manifest_hash_mismatch) and
+   *    the Ed25519 signature must verify (422 manifest_signature_invalid);
+   *  - unsigned manifests are accepted by default (backward compatible) and
+   *    rejected only when the kernel or project requires signing
+   *    (422 manifest_signature_required).
+   * Field-level checks only: partial manifests (legacy callers) keep working.
+   */
+  private verifyRunManifest(manifest: Record<string, unknown>, job: JobRecord): void {
+    // Job/Project/Contract matching (§12.7) — only when the fields are present.
+    if (manifest.job_id !== undefined && manifest.job_id !== job.job_id) {
+      throw new KernelError(422, 'manifest_job_mismatch', `run manifest job_id ${String(manifest.job_id)} does not match job ${job.job_id}`)
+    }
+    if (manifest.project_id !== undefined && manifest.project_id !== job.project_id) {
+      throw new KernelError(422, 'manifest_project_mismatch', `run manifest project_id ${String(manifest.project_id)} does not match project ${job.project_id}`)
+    }
+    if (manifest.contract_id !== undefined && (job.contract_id === null || manifest.contract_id !== job.contract_id)) {
+      throw new KernelError(422, 'manifest_contract_mismatch',
+        `run manifest contract_id ${String(manifest.contract_id)} does not match job contract ${job.contract_id ?? 'none'}`)
+    }
+    // Lease fencing recorded inside the manifest (§12.6/§12.7).
+    const lease = manifest.lease
+    if (typeof lease === 'object' && lease !== null && typeof (lease as { generation?: unknown }).generation === 'number'
+      && job.lease_generation !== null && (lease as { generation: number }).generation !== job.lease_generation) {
+      throw new KernelError(422, 'manifest_lease_mismatch',
+        `run manifest lease generation ${String((lease as { generation: number }).generation)} does not match job lease generation ${job.lease_generation}`)
+    }
+
+    const signature = manifest.signature
+    if (typeof signature !== 'string' || signature === '') {
+      // No signature: accept by default; enforce only when required.
+      const integrity = this.getProject(job.project_id).integrity as Record<string, unknown>
+      if (this.requireSignedManifest || integrity.require_signed_manifest === true) {
+        throw new KernelError(422, 'manifest_signature_required', 'run manifest must be signed (require_signed_manifest)')
+      }
+      return
+    }
+    const runnerKeyId = manifest.runner_key_id
+    if (typeof runnerKeyId !== 'string' || runnerKeyId === '') {
+      throw new KernelError(422, 'manifest_key_unknown', 'run manifest carries a signature but no runner_key_id')
+    }
+    const keyRow = this.db.prepare('SELECT * FROM runner_keys WHERE key_id = ?').get(runnerKeyId) as RunnerKeyRow | undefined
+    if (keyRow === undefined) {
+      throw new KernelError(422, 'manifest_key_unknown', `runner key ${runnerKeyId} is not registered`)
+    }
+    // Signed payload = the manifest minus its signature field, canonicalized.
+    const { signedPayload, signatureBytes } = stripManifestSignature(manifest)
+    const payloadSha256 = manifest.payload_sha256
+    if (typeof payloadSha256 === 'string' && payloadSha256 !== '') {
+      const actual = sha256Hex(manifestHashPayload(manifest))
+      if (actual !== payloadSha256) {
+        throw new KernelError(422, 'manifest_hash_mismatch', `payload_sha256 mismatch: got ${actual}, manifest claims ${payloadSha256}`)
+      }
+    }
+    let publicKey: KeyObject
+    try {
+      publicKey = createPublicKey(keyRow.public_key_pem)
+    } catch {
+      throw new KernelError(422, 'manifest_key_unknown', `runner key ${runnerKeyId} is not a valid public key`)
+    }
+    const valid = verify(null, Buffer.from(canonicalJson(signedPayload), 'utf8'), publicKey, signatureBytes)
+    if (!valid) {
+      throw new KernelError(422, 'manifest_signature_invalid', `run manifest signature verification failed for key ${runnerKeyId}`)
+    }
   }
 
   cancelJob(jobId: string, actor: string, reason = ''): JobRecord {
@@ -818,6 +1271,9 @@ export class ResearchKernel {
     analysis_method: string
     result: EvidenceItem['result']
     uncertainty?: string
+    /** v2 §13.1: agent-written notes are draft_unverified; verified is
+     * reserved for the Analysis Worker internal path (ingestVerifiedEvidence). */
+    provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified'
   }): import('@dsh-scholar/research-schemas').EvidenceItem {
     this.getProject(input.project_id)
     const item = {
@@ -833,9 +1289,23 @@ export class ResearchKernel {
       generated_by: 'statistician',
       created_at: nowIso(),
     }
-    this.db.prepare('INSERT INTO evidence (evidence_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
-      .run(item.evidence_id, item.project_id, JSON.stringify(item), item.created_at)
-    return item
+    const provenance = input.provenance_status ?? 'legacy_unverified'
+    this.db.prepare('INSERT INTO evidence (evidence_id, project_id, body, provenance_status, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(item.evidence_id, item.project_id, JSON.stringify(item), provenance, item.created_at)
+    return { ...item, provenance_status: provenance } as import('@dsh-scholar/research-schemas').EvidenceItem & { provenance_status: string }
+  }
+
+  /** v2 §13.1 / §17.3: Analysis-Worker-only verified evidence path. */
+  ingestVerifiedEvidence(input: Parameters<ResearchKernel['ingestEvidence']>[0]): import('@dsh-scholar/research-schemas').EvidenceItem {
+    return this.ingestEvidence({ ...input, provenance_status: 'verified' })
+  }
+
+  /** v2: only verified (Analysis-Worker) evidence may support a Claim. */
+  listVerifiedEvidence(projectId: string): Array<import('@dsh-scholar/research-schemas').EvidenceItem> {
+    const rows = this.db.prepare(
+      "SELECT * FROM evidence WHERE project_id = ? AND provenance_status = 'verified' ORDER BY created_at",
+    ).all(projectId) as unknown as Array<{ body: string }>
+    return rows.map(row => JSON.parse(row.body) as import('@dsh-scholar/research-schemas').EvidenceItem)
   }
 
   listEvidence(projectId: string): import('@dsh-scholar/research-schemas').EvidenceItem[] {
@@ -857,17 +1327,29 @@ export class ResearchKernel {
     if (evidence.length === 0) {
       throw new KernelError(422, 'no_evidence', `claim ${input.claim_id} has no resolvable evidence`)
     }
-    // Rule (deterministic): supported when all evidence accepted and CIs
-    // exclude zero or effect_size > 0; contradicted when CI includes zero
-    // with negative effect; else inconclusive.
-    let status: Claim['status'] = 'supported'
-    const effects = evidence.filter(e => e.result.effect_size !== undefined)
-    if (evidence.some(e => e.status === 'conflicted')) {
-      status = 'inconclusive'
-    } else if (effects.length > 0) {
-      const allPositive = effects.every(e => (e.result.effect_size ?? 0) > 0 && (e.result.ci_low ?? -Infinity) > 0)
-      const anyNegative = effects.some(e => (e.result.effect_size ?? 0) < 0)
-      status = allPositive ? 'supported' : anyNegative ? 'contradicted' : 'inconclusive'
+    // v2 §13.5: deterministic strict rules. Default is inconclusive.
+    // supported requires: verified evidence, effect size present, CI present,
+    // n >= contract minimum (n_seeds or run count), CI excludes zero, and
+    // effect direction consistent with the claim (no direction info -> at
+    // most inconclusive).
+    let status: Claim['status'] = 'inconclusive'
+    const conflicted = evidence.some(e => e.status === 'conflicted')
+    const complete = evidence.filter(e =>
+      e.result.effect_size !== undefined
+      && e.result.ci_low !== undefined && e.result.ci_high !== undefined
+      && (e.result.n_seeds ?? e.run_ids.length) > 0,
+    )
+    if (!conflicted && complete.length > 0) {
+      const allCiExcludeZero = complete.every(e => e.result.ci_low! > 0 || e.result.ci_high! < 0)
+      const anyNegativeEffect = complete.some(e => (e.result.effect_size ?? 0) < 0)
+      const allPositiveEffect = complete.every(e => (e.result.effect_size ?? 0) > 0)
+      if (allCiExcludeZero && allPositiveEffect) {
+        status = 'supported'
+      } else if (allCiExcludeZero && anyNegativeEffect && !allPositiveEffect) {
+        status = 'contradicted'
+      } else {
+        status = 'inconclusive' // CI crosses zero or mixed directions
+      }
     }
     const next: Claim = {
       ...current,
@@ -921,7 +1403,13 @@ export class ResearchKernel {
    * percentile bootstrap 95% CI and effect size vs the baseline run. Writes
    * one analysis artifact; numbers in manuscripts must come from this.
    */
-  computeAnalysis(projectId: string, contractId?: string, metric?: string): {
+  computeAnalysis(projectId: string, contractId?: string, metric?: string, options: {
+    /** Minimum completed seeds required (v2 §13.6; default 1 keeps compat). */
+    minimum_n?: number
+    /** Restrict to these job kinds (v2 §13.6: never mix kinds). Defaults to
+     * formal; falls back to non-baseline kinds only when no formal exists. */
+    kinds?: string[]
+  } = {}): {
     artifact_id: string
     chart_artifact: string
     contract_id: string | null
@@ -934,33 +1422,65 @@ export class ResearchKernel {
     ci_high: number
     baseline_value: number | null
     effect_size: number | null
+    used_kinds: string[]
     generated_at: string
   } {
     const project = this.getProject(projectId)
     const jobs = this.listJobs(projectId).filter(j => j.status === 'succeeded' && j.run_manifest !== null)
-    const metricValues: Array<{ run_id: string; job_id: string; value: number; seed?: number }> = []
+    const metricValues: Array<{ run_id: string; job_id: string; kind: string; value: number; seed?: number }> = []
     let baselineValue: number | null = null
+    let formalSeen = false
     for (const job of jobs) {
       if (contractId !== undefined && job.contract_id !== contractId) continue
+      if (job.kind === 'formal') formalSeen = true
       const metricsArtifact = job.run_manifest?.metrics_artifact
       if (typeof metricsArtifact !== 'string') continue
       const sha = metricsArtifact.replace(/^sha256:/, '')
       if (!this.cas.has(sha)) continue
-      const parsed = JSON.parse(this.cas.read(sha).toString('utf8')) as { metrics?: Array<{ metric?: string; value?: number; seed?: number }> }
+      // §12.5 (SCH-EXEC-002): metrics artifacts carry the fixed-schema file
+      // record ({schema_version, seed, metrics: [{name, value, unit}]});
+      // legacy stdout-derived artifacts used {metric, value, seed}. Both keys
+      // are accepted, and the §12.5 top-level `seed` is used as the per-entry
+      // fallback.
+      const parsed = JSON.parse(this.cas.read(sha).toString('utf8')) as { metrics?: Array<{ metric?: string; name?: string; value?: number; seed?: number }>; seed?: number }
       for (const entry of parsed.metrics ?? []) {
-        if (entry.value === undefined || entry.metric === undefined) continue
-        if (metric !== undefined && entry.metric !== metric) continue
-        const targetMetric = entry.metric
+        const metricName = entry.name ?? entry.metric
+        if (entry.value === undefined || metricName === undefined) continue
+        if (metric !== undefined && metricName !== metric) continue
         if (job.kind === 'baseline') {
           baselineValue = entry.value
         } else {
-          metricValues.push({ run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id, job_id: job.job_id, value: entry.value, seed: entry.seed })
+          metricValues.push({
+            run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id,
+            job_id: job.job_id,
+            kind: job.kind,
+            value: entry.value,
+            seed: entry.seed ?? parsed.seed,
+          })
         }
-        void targetMetric
       }
     }
+    // v2 §13.6: never mix job kinds. Prefer formal runs; only when a contract
+    // has none, fall back to the other non-baseline kinds (explicitly noted).
+    let allowedKinds = options.kinds ?? ['formal']
+    const hasFormal = formalSeen
+    if (options.kinds === undefined && !hasFormal) allowedKinds = ['pilot', 'smoke', 'analysis', 'reproduce']
+    const kindFiltered = metricValues.filter(v => allowedKinds.includes(v.kind))
+    metricValues.length = 0
+    metricValues.push(...kindFiltered)
+    const usedKinds = [...new Set(kindFiltered.map(v => v.kind))]
     if (metricValues.length === 0) {
       throw new KernelError(422, 'no_metrics', 'no succeeded runs with metrics artifacts found for analysis')
+    }
+    // Seed uniqueness (v2 §13.6): duplicate seeds within one analysis are
+    // rejected — mixing seeds across runs would bias the paired statistics.
+    const seeds = metricValues.filter(v => v.seed !== undefined).map(v => v.seed!)
+    if (new Set(seeds).size !== seeds.length) {
+      throw new KernelError(422, 'duplicate_seeds', `duplicate seeds in analysis run set: ${seeds.join(', ')}`)
+    }
+    const minimumN = options.minimum_n ?? 1
+    if (metricValues.length < minimumN) {
+      throw new KernelError(422, 'minimum_seeds_not_met', `analysis requires >= ${minimumN} runs, got ${metricValues.length}`)
     }
     const values = metricValues.map(v => v.value)
     const mean = values.reduce((a, b) => a + b, 0) / values.length
@@ -971,7 +1491,7 @@ export class ResearchKernel {
     const result = {
       contract_id: contractId ?? null,
       metric: metric ?? 'auto',
-      runs: metricValues,
+      runs: metricValues.map(({ kind: _kind, ...rest }) => rest),
       mean: round(mean),
       sd: round(sd),
       n: values.length,
@@ -989,7 +1509,7 @@ export class ResearchKernel {
     this.emit(projectId, 'artifact.registered', { artifact_id: artifact.artifact_id, kind: 'analysis' })
     // Deterministic chart artifact bound to the same analysis numbers (§11.3).
     const chart = this.buildChartSvg(projectId, { artifact_id: artifact.artifact_id, ...result })
-    return { artifact_id: artifact.artifact_id, chart_artifact: chart.chart_artifact, ...result, generated_at: nowIso() }
+    return { artifact_id: artifact.artifact_id, chart_artifact: chart.chart_artifact, used_kinds: usedKinds, ...result, generated_at: nowIso() }
   }
 
   /**
@@ -1082,8 +1602,15 @@ export class ResearchKernel {
       }
       lines.push('\\section{Results}')
       if (evidenceRows.length > 0) {
+        // LaTeX tabular rows: '&'-separated, en dashes as '--' (§14.3: the
+        // fixed build image must compile; raw unicode dashes break pdflatex).
+        const latexRows = evidence.map(e => {
+          const claimsFor = (byEvidence.get(e.evidence_id) ?? []).map(c => c.claim_id).join(', ') || '--'
+          const ci = `${e.result.ci_low ?? '--'}--${e.result.ci_high ?? '--'}`
+          return `${escapeLatex(e.result.primary_metric)} & ${e.result.value} & ${e.result.baseline_value ?? '--'} & ${e.result.effect_size ?? '--'} & ${ci} & ${e.result.n_seeds ?? e.run_ids.length} & ${escapeLatex(e.analysis_method)} & ${escapeLatex(claimsFor)}`
+        })
         lines.push('\\begin{tabular}{llllllll}', '\\toprule', 'Metric & Value & Baseline & Effect & 95\\% CI & Seeds & Method & Claims \\\\', '\\midrule')
-        lines.push(...evidenceRows.map(r => `${r} \\\\`))
+        lines.push(...latexRows.map(r => `${r} \\\\`))
         lines.push('\\bottomrule', '\\end{tabular}')
       } else {
         lines.push('No verified evidence items yet — results table intentionally empty.')
@@ -1292,6 +1819,37 @@ function collectManifestRefs(manifest: Record<string, unknown>): string[] {
     if (typeof value === 'string' && value.startsWith('sha256:')) refs.push(value)
   }
   return refs
+}
+
+/**
+ * §12.7: canonical JSON used for manifest hashing/signing — top-level keys
+ * sorted, no whitespace. This MUST match the runner's canonicalization
+ * (workers/runner-gateway `canonicalJson`/`signManifest`) so signatures
+ * verify end-to-end: `JSON.stringify(obj, sortedTopLevelKeys)`.
+ */
+export function canonicalJson(value: Record<string, unknown>): string {
+  return JSON.stringify(value, Object.keys(value).sort())
+}
+
+function sha256Hex(data: string): string {
+  return createHash('sha256').update(data, 'utf8').digest('hex')
+}
+
+/**
+ * §12.7: the payload a runner hashes is the manifest WITHOUT its envelope
+ * fields (runner_key_id, payload_sha256, signature) — matches the runner's
+ * `payload_sha256 = sha256(canonicalJson(manifest))` computed before the
+ * envelope is attached.
+ */
+function manifestHashPayload(manifest: Record<string, unknown>): string {
+  const { signature: _signature, runner_key_id: _keyId, payload_sha256: _payloadHash, ...payload } = manifest
+  return canonicalJson(payload)
+}
+
+/** Manifest minus its `signature` field + the base64 signature bytes (§12.7). */
+function stripManifestSignature(manifest: Record<string, unknown>): { signedPayload: Record<string, unknown>; signatureBytes: Buffer } {
+  const { signature, ...signedPayload } = manifest
+  return { signedPayload, signatureBytes: Buffer.from(String(signature), 'base64') }
 }
 
 

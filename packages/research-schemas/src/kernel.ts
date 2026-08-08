@@ -28,13 +28,20 @@ export const Gate = z.object({
 })
 export type Gate = z.infer<typeof Gate>
 
-/** Append-only human decision record (design §6.6: actor, diff, reason kept forever). */
+/** Append-only human decision record (v2 §6.4: authenticated principal, diff, reason kept forever). */
 export const Decision = z.object({
   decision_id: z.string().min(1),
   gate_id: z.string().min(1),
   project_id: z.string().min(1),
   gate_type: GateType,
+  /** v2: authenticated human principal; 'legacy_unverified' marks pre-v2 rows. */
   actor: z.string().min(1),
+  principal: z.object({
+    principal_id: z.string().min(1),
+    tenant_id: z.string().default(''),
+    auth_method: z.string().default('dsh-session'),
+    session_id: z.string().nullable().default(null),
+  }).optional(),
   decision: z.enum(['approved', 'rejected', 'revised']),
   reason: z.string().default(''),
   diff: z.string().default(''),
@@ -78,6 +85,10 @@ export const JobRecord = z.object({
   lease_owner: z.string().nullable().default(null),
   lease_expires_at: z.string().nullable().default(null),
   heartbeat_at: z.string().nullable().default(null),
+  /** §12.6: bumped on every claim; old-generation runners are fenced out. */
+  lease_generation: z.number().int().nonnegative().nullable().default(null),
+  /** §12.6: opaque lease token returned at claim time; persisted in payload.__lease_token. */
+  lease_token: z.string().nullable().default(null),
   attempts: z.number().int().nonnegative().default(0),
   max_attempts: z.number().int().positive().default(3),
   run_manifest: z.record(z.unknown()).nullable().default(null),
@@ -86,6 +97,14 @@ export const JobRecord = z.object({
   updated_at: z.string(),
 })
 export type JobRecord = z.infer<typeof JobRecord>
+
+/** Registered runner Ed25519 public key for RunManifest signing (§12.7). */
+export const RunnerKey = z.object({
+  key_id: z.string().min(1),
+  public_key_pem: z.string().min(1),
+  created_at: z.string(),
+})
+export type RunnerKey = z.infer<typeof RunnerKey>
 
 /** Budget accounting record (design §4.2 Budget & Policy). */
 export const BudgetRecord = z.object({

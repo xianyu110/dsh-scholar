@@ -51,17 +51,54 @@ export const ExperimentContract = z.object({
 })
 export type ExperimentContract = z.infer<typeof ExperimentContract>
 
-/** Immutable code snapshot reference (content-addressed). */
+/**
+ * Immutable code snapshot reference (content-addressed, design §11.3).
+ * v2 (SCH-EXEC-002): the snapshot MUST carry the ACTUAL content —
+ * `archive_artifact_id` points at the CAS artifact holding the file contents
+ * (JSON `{schema_version, files: {rel: {sha256, content_base64}}}`) and
+ * `manifest_artifact_id` at the lightweight file manifest. The Runner only
+ * ever materializes from the Artifact Store — never from agent host dirs.
+ * `commit`/`hash`/`path` remain optional for legacy manifest-style records.
+ */
 export const CodeSnapshot = z.object({
   snapshot_id: z.string().min(1),
   project_id: z.string().min(1),
-  commit: z.string().min(1),
-  hash: z.string().min(1), // sha256:...
-  path: z.string().min(1),
+  commit: z.string().optional(),
+  hash: z.string().optional(), // sha256:... (legacy manifest hash)
+  path: z.string().optional(), // archived root path
   description: z.string().default(''),
+  // §11.3: actual content materialized from CAS.
+  archive_artifact_id: z.string().optional(), // sha256:... code artifact with file contents
+  manifest_artifact_id: z.string().optional(), // sha256:... manifest artifact (file list + hashes)
+  submodules_artifact_id: z.string().nullable().optional(),
+  lockfiles: z.array(z.string()).default([]),
+  files: z.number().int().nonnegative().optional(), // archived file count
+  total_bytes: z.number().int().nonnegative().optional(), // raw content bytes
+  sha256: z.string().optional(), // sha256 of the archive content itself
   created_at: z.string(),
 })
 export type CodeSnapshot = z.infer<typeof CodeSnapshot>
+
+/**
+ * §12.2 JobSpec binding attached to a durable job (v2 SCH-EXEC-002).
+ * `code_snapshot_id` is persisted in the jobs table column; the remaining
+ * fields travel in `payload` (image_digest, output_contract, data_artifact_ids)
+ * — see ResearchKernel.submitJob. The Runner materializes the code snapshot
+ * from CAS and reads the metrics file at `output_contract.metrics`.
+ */
+export const JobSpecBinding = z.object({
+  code_snapshot_id: z.string().nullable().default(null),
+  data_artifact_ids: z.array(z.string()).default([]),
+  image_digest: z.string().default(''), // default resolved by the kernel: 'node:22-alpine'
+  output_contract: z.object({
+    metrics: z.string().default('/outputs/metrics.json'),
+    logs: z.string().default('/outputs/run.log'),
+  }).optional(),
+})
+export type JobSpecBinding = z.infer<typeof JobSpecBinding>
+
+/** A durable job record carrying the §12.2 JobSpec binding fields. */
+export type JobSpecBound = import('./kernel.js').JobRecord & JobSpecBinding
 
 /** Job failure classification with automatic decision mapping (design §4.6.2). */
 export const FailureClass = z.enum([
@@ -81,6 +118,7 @@ export const RunManifest = z.object({
   run_id: z.string().min(1),
   contract_id: z.string().min(1),
   job_id: z.string().min(1),
+  project_id: z.string().optional(),
   code_commit: z.string().min(1),
   container_digest: z.string().default(''),
   data_hash: z.string().default(''),
@@ -98,5 +136,11 @@ export const RunManifest = z.object({
   log_artifact: z.string().optional(), // sha256:...
   checkpoint_artifact: z.string().optional(), // sha256:...
   signed_by: z.string().default('runner-gateway'),
+  /** §12.6: lease generation at run time; kernel fences stale generations. */
+  lease: z.object({ generation: z.number().int().nonnegative() }).optional(),
+  /** §12.7: Ed25519 envelope — runner_key_id + payload hash + signature. */
+  runner_key_id: z.string().optional(),
+  payload_sha256: z.string().optional(),
+  signature: z.string().optional(),
 })
 export type RunManifest = z.infer<typeof RunManifest>

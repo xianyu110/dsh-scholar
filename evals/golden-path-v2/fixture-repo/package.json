@@ -1,0 +1,6 @@
+{
+  "name": "golden-path-v2-fixture",
+  "private": true,
+  "type": "module",
+  "description": "Golden Path v2 fixture repo — ESM so /work/*.js is interpreted identically on host and in the node:22-alpine container (the archive materializes this package.json into /work)."
+}

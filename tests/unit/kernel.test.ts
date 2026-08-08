@@ -1,18 +1,39 @@
 /**
  * Research Kernel unit tests: state machine CAS, gates/decisions, CAS
  * artifacts, durable jobs with idempotency + leases + recovery, claims,
- * manuscript determinism (design §11.1, §11.2).
+ * manuscript determinism (design §11.1, §11.2), §11.3 code-snapshot archive
+ * + §12.2 JobSpec binding + §12.5 metrics-file parsing (SCH-EXEC-002).
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync } from 'node:fs'
+import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { fixtureCorpus, fixtureIdea } from '@dsh-scholar/research-schemas'
+import { materializeCodeSnapshot, unpackCodeSnapshot } from '@dsh-scholar/runner-gateway'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-test-'))
   return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+}
+
+/** Register a minimal valid §11.3 code-snapshot archive artifact. */
+function codeArtifact(kernel: ResearchKernel, projectId: string): import('@dsh-scholar/research-schemas').ArtifactRecord {
+  const content = Buffer.from('console.log("train")\n')
+  return kernel.registerArtifact({
+    project_id: projectId,
+    kind: 'code',
+    content: JSON.stringify({
+      schema_version: 1,
+      project_id: projectId,
+      files: {
+        'train.js': { sha256: createHash('sha256').update(content).digest('hex'), content_base64: content.toString('base64') },
+      },
+      excludes: ['.git', 'node_modules', '.research-cas'],
+    }),
+    metadata: { kind: 'code-snapshot-archive' },
+  })
 }
 
 function makeBrief(overrides: Record<string, unknown> = {}) {
@@ -20,6 +41,50 @@ function makeBrief(overrides: Record<string, unknown> = {}) {
     problem: 'p', scope: 's', questions: [], primary_metrics: ['m'],
     resources: '', risks: [], target_outputs: ['paper'], target_venue: null,
     baseline_repo: null, domain: 'ml', ...overrides,
+  }
+}
+
+/** Assert a KernelError with an exact HTTP status + error code. */
+function expectKernelError(fn: () => unknown, status: number, code: string): void {
+  try {
+    fn()
+    throw new Error('expected KernelError to be thrown')
+  } catch (error) {
+    expect(error).toBeInstanceOf(KernelError)
+    expect((error as KernelError).status).toBe(status)
+    expect((error as KernelError).code).toBe(code)
+  }
+}
+
+/**
+ * §12.7 signing helper mirroring the runner-gateway contract exactly:
+ * payload_sha256 = sha256(canonicalJson(manifest)) BEFORE the envelope is
+ * attached; the Ed25519 signature covers canonicalJson(manifest +
+ * runner_key_id + payload_sha256); canonicalJson sorts top-level keys.
+ * (Uses crypto.sign(null, …) — createSign('ed25519') is rejected on Node ≥ 24.)
+ */
+function signManifest(manifest: Record<string, unknown>, privateKey: KeyObject, keyId: string): Record<string, unknown> {
+  const canonical = (m: Record<string, unknown>): string => JSON.stringify(m, Object.keys(m).sort())
+  const payloadSha256 = createHash('sha256').update(canonical(manifest)).digest('hex')
+  const signed = { ...manifest, runner_key_id: keyId, payload_sha256: payloadSha256 }
+  const signature = sign(null, Buffer.from(canonical(signed), 'utf8'), privateKey).toString('base64')
+  return { ...signed, signature }
+}
+
+/** A realistic manifest payload (with a nested `resources` object). */
+function makeManifest(job: { job_id: string; project_id: string }, metricsArtifact: string): Record<string, unknown> {
+  return {
+    run_id: 'run_test_1',
+    job_id: job.job_id,
+    project_id: job.project_id,
+    code_commit: 'abc123',
+    command: ['python', 'train.py', '--seed', '11'],
+    resources: { gpu: 1, cpu: 8, memory_gb: 32 },
+    started_at: '2026-01-01T00:00:00.000Z',
+    finished_at: '2026-01-01T01:00:00.000Z',
+    exit_code: 0,
+    metrics_artifact: metricsArtifact,
+    log_artifact: metricsArtifact,
   }
 }
 
@@ -36,10 +101,48 @@ describe('project state machine', () => {
   it('transitions only with matching expected_revision (CAS)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    expect(() => kernel.transition(project.project_id, 'SCOPED', 5)).toThrow(KernelError)
-    const moved = kernel.transition(project.project_id, 'SCOPED', 0)
-    expect(moved.status).toBe('SCOPED')
-    expect(moved.revision).toBe(1)
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' })
+    // project is SCOPED now (gate-controlled entry)
+    expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+    expect(() => kernel.transition(project.project_id, 'SURVEYING', 5)).toThrow(KernelError)
+    const moved = kernel.transition(project.project_id, 'SURVEYING', 1)
+    expect(moved.status).toBe('SURVEYING')
+    expect(moved.revision).toBe(2)
+    kernel.close()
+  })
+
+  it('renames a project with audit history and revision bump', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'old-name', workspace: '/w', brief: makeBrief() })
+    const renamed = kernel.renameProject(project.project_id, 'new-name')
+    expect(renamed.name).toBe('new-name')
+    expect(renamed.revision).toBe(1)
+    expect(renamed.history.at(-1)).toBe('renamed to "new-name"')
+    expect(kernel.listProjects()[0]!.name).toBe('new-name')
+    expect(() => kernel.renameProject(project.project_id, '   ')).toThrow(KernelError)
+    kernel.close()
+  })
+
+  it('archives and restores a project (data kept, audited)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const archived = kernel.archiveProject(project.project_id)
+    expect(archived.status).toBe('ARCHIVED')
+    expect(archived.history.at(-1)).toContain('ARCHIVED')
+    const restored = kernel.unarchiveProject(project.project_id)
+    expect(restored.status).not.toBe('ARCHIVED')
+    expect(restored.history.at(-1)).toBe('ARCHIVED->restored')
+    // archive is idempotent
+    kernel.archiveProject(project.project_id)
+    expect(kernel.archiveProject(project.project_id).status).toBe('ARCHIVED')
+    kernel.close()
+  })
+
+  it('v2 §6.2: generic transition cannot enter gate-controlled states', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expect(() => kernel.transition(project.project_id, 'SCOPED', 0)).toThrow(/not allowed/)
     kernel.close()
   })
 
@@ -50,18 +153,44 @@ describe('project state machine', () => {
     kernel.close()
   })
 
-  it('walks the golden path state sequence', () => {
+  it('walks the golden path state sequence via gates + transitions', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const seq = ['SCOPED', 'SURVEYING', 'IDEATING', 'IDEA_APPROVED', 'BASELINE_REPRO', 'CONTRACT_APPROVED', 'EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY', 'RELEASED']
-    let rev = 0
-    for (const to of seq) {
-      const next = kernel.transition(project.project_id, to, rev)
-      expect(next.status).toBe(to)
-      rev = next.revision
+    const decide = (type: 'scope' | 'idea' | 'contract' | 'release'): ResearchProject => {
+      const gate = kernel.createGate({ project_id: project.project_id, type, title: `${type} gate` })
+      return kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' }).project
     }
+    let p = decide('scope')                       // DRAFT -> SCOPED (gate)
+    expect(p.status).toBe('SCOPED')
+    p = kernel.transition(p.project_id, 'SURVEYING', p.revision) // SCOPED -> SURVEYING
+    p = kernel.transition(p.project_id, 'IDEATING', p.revision)  // SURVEYING -> IDEATING
+    p = decide('idea')                            // IDEATING -> IDEA_APPROVED (gate)
+    p = kernel.transition(p.project_id, 'BASELINE_REPRO', p.revision)
+    p = decide('contract')                        // BASELINE_REPRO -> CONTRACT_APPROVED (gate)
+    p = kernel.transition(p.project_id, 'EXPERIMENTING', p.revision)
+    p = kernel.transition(p.project_id, 'EVIDENCE_READY', p.revision)
+    p = kernel.transition(p.project_id, 'WRITING', p.revision)
+    p = kernel.transition(p.project_id, 'REVIEWING', p.revision)
+    p = kernel.transition(p.project_id, 'RELEASE_READY', p.revision)
+    p = decide('release')                         // RELEASE_READY -> RELEASED (gate)
+    expect(p.status).toBe('RELEASED')
     const events = kernel.listEvents(project.project_id)
-    expect(events.filter(e => e.kind === 'project.transitioned')).toHaveLength(seq.length)
+    expect(events.filter(e => e.kind === 'project.transitioned').length).toBeGreaterThanOrEqual(10)
+    kernel.close()
+  })
+})
+
+describe('v2 §3.4 project isolation', () => {
+  it('same idempotency_key in different projects yields independent jobs', () => {
+    const kernel = freshKernel()
+    const a = kernel.createProject({ name: 'a', workspace: '/a', brief: makeBrief() })
+    const b = kernel.createProject({ name: 'b', workspace: '/b', brief: makeBrief() })
+    const ja = kernel.submitJob({ project_id: a.project_id, idempotency_key: 'shared-key', kind: 'echo' })
+    const jb = kernel.submitJob({ project_id: b.project_id, idempotency_key: 'shared-key', kind: 'echo' })
+    expect(ja.job_id).not.toBe(jb.job_id)
+    // Re-submission inside the SAME project still dedupes.
+    const ja2 = kernel.submitJob({ project_id: a.project_id, idempotency_key: 'shared-key', kind: 'echo' })
+    expect(ja2.job_id).toBe(ja.job_id)
     kernel.close()
   })
 })
@@ -189,7 +318,8 @@ describe('analysis pipeline (E5)', () => {
     // baseline run with a metrics artifact
     const baselineMetrics = JSON.stringify({ metrics: [{ metric: 'f1', value: 0.8, seed: 0 }] })
     const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: baselineMetrics })
-    const baselineJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'b1', kind: 'baseline', payload: {} })
+    const code = codeArtifact(kernel, project.project_id)
+    const baselineJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'b1', kind: 'baseline', payload: {}, code_snapshot_id: code.artifact_id })
     kernel.claimJobs('r1', 60, 8)
     kernel.completeJob({ job_id: baselineJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id, run_id: 'run_base' } })
     // five formal runs with metrics
@@ -199,7 +329,7 @@ describe('analysis pipeline (E5)', () => {
         project_id: project.project_id, kind: 'analysis',
         content: JSON.stringify({ metrics: [{ metric: 'f1', value: values[i], seed: 10 + i }] }),
       })
-      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {} })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
       kernel.claimJobs('r1', 60, 8)
       kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id, run_id: `run_${i}` } })
     }
@@ -254,9 +384,10 @@ describe('§11.2 recovery & concurrency cases', () => {
     expect(kernel.getProjectBySession('session-old')?.project_id).toBe(project.project_id)
     expect(other.session_id).toBeNull()
     // Phase is not duplicated on resume: revision/status stay monotonic.
-    const moved = kernel.transition(project.project_id, 'SCOPED', project.revision)
-    expect(moved.revision).toBe(1)
-    expect(kernel.transition(project.project_id, 'SURVEYING', moved.revision).status).toBe('SURVEYING')
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    const approved = kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(approved.project.revision).toBe(1)
+    expect(kernel.transition(project.project_id, 'SURVEYING', 1).status).toBe('SURVEYING')
     kernel.close()
   })
 
@@ -288,7 +419,7 @@ describe('claims and evidence', () => {
   it('verifyClaim marks supported when CIs exclude zero', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const item = kernel.ingestEvidence({
+    const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['r1'], artifact_refs: ['sha256:' + 'b'.repeat(64)],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
     })
@@ -302,7 +433,7 @@ describe('claims and evidence', () => {
   it('verifyClaim marks contradicted on negative effects', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const item = kernel.ingestEvidence({
+    const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['r1'], artifact_refs: [],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.7, baseline_value: 0.8, effect_size: -0.1, ci_low: -0.18, ci_high: -0.02, n_seeds: 5 },
     })
@@ -341,7 +472,7 @@ describe('corpus + ideas + manuscript', () => {
     expect(kernel.getIdea(card.idea_id).status).toBe('proposed')
 
     const analysis = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ f1: 0.9 }) })
-    const item = kernel.ingestEvidence({
+    const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['r1', 'r2'], artifact_refs: [analysis.artifact_id],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 2 },
     })
@@ -356,6 +487,423 @@ describe('corpus + ideas + manuscript', () => {
 
     const bundle = kernel.releaseBundle(project.project_id)
     expect(bundle.release_gate).toBe('unapproved')
+    kernel.close()
+  })
+})
+
+describe('§12.6 lease fencing (SCH-JOB-001)', () => {
+  it('claim returns lease_owner/lease_generation/lease_token; generation bumps on re-claim', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f1', kind: 'smoke' })
+    const [first] = kernel.claimJobs('runner-1', 1, 8)
+    expect(first?.lease_owner).toBe('runner-1')
+    expect(first?.lease_generation).toBe(1)
+    expect(first?.lease_token).toMatch(/^lt_/)
+    // The opaque token must not leak into the public payload.
+    expect(JSON.stringify(first?.payload ?? {})).not.toContain('__lease_token')
+    // Expire + re-claim: generation advances, token rotates.
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    const [second] = kernel.claimJobs('runner-1', 60, 8)
+    expect(second?.lease_generation).toBe(2)
+    expect(second?.lease_token).not.toBe(first?.lease_token)
+    kernel.close()
+  })
+
+  it('stale-runner-fencing-token-rejected: old generation/token cannot complete the job', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f2', kind: 'smoke' })
+    const [claim1] = kernel.claimJobs('runner-1', 1, 8)
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    // The SAME runner re-claims: old process still holds generation 1 + token 1.
+    const [claim2] = kernel.claimJobs('runner-1', 60, 8)
+    expect(claim2?.lease_generation).toBe(2)
+    // Old credentials -> 409 lease_stale (owner matches, generation/token stale).
+    expectKernelError(
+      () => kernel.completeJob({
+        job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
+        lease_generation: claim1?.lease_generation ?? 0, lease_token: claim1?.lease_token ?? '',
+      }),
+      409, 'lease_stale',
+    )
+    // Job must still be running — the stale completion changed nothing.
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // Current credentials -> success.
+    const done = kernel.completeJob({
+      job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
+      lease_generation: claim2?.lease_generation ?? 0, lease_token: claim2?.lease_token ?? '',
+    })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
+  it('stale heartbeat is rejected with 409 lease_stale; current token renews', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f3', kind: 'smoke' })
+    const [claim1] = kernel.claimJobs('runner-1', 1, 8)
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    const [claim2] = kernel.claimJobs('runner-1', 60, 8)
+    expectKernelError(
+      () => kernel.heartbeatJob(job.job_id, 'runner-1', claim1?.lease_generation ?? 0, claim1?.lease_token ?? ''),
+      409, 'lease_stale',
+    )
+    const heartbeated = kernel.heartbeatJob(job.job_id, 'runner-1', claim2?.lease_generation ?? 0, claim2?.lease_token ?? '')
+    expect(heartbeated.heartbeat_at).not.toBeNull()
+    kernel.close()
+  })
+
+  it('legacy heartbeat/complete without generation/token keep the owner-only check', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f4', kind: 'smoke' })
+    kernel.claimJobs('runner-1', 60, 8)
+    expect(kernel.heartbeatJob(job.job_id, 'runner-1').heartbeat_at).not.toBeNull()
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded' })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+})
+
+describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
+  function signedJobSetup(overrides: { requireSignedManifest?: boolean } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-sig-'))
+    const kernel = new ResearchKernel({
+      dbPath: join(dir, 'kernel.db'),
+      casRoot: join(dir, 'cas'),
+      requireSignedManifest: overrides.requireSignedManifest,
+    })
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
+    kernel.claimJobs('runner-1', 60, 8)
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+    const keyId = 'runner-key-test-1'
+    const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    kernel.registerRunnerKey({ key_id: keyId, public_key_pem: publicPem })
+    return { kernel, job, metrics, privateKey, keyId }
+  }
+
+  it('manifest-signature-invalid-rejected: forged signature -> 422; valid signature -> succeeded', () => {
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    const canonical = (m: Record<string, unknown>): string => JSON.stringify(m, Object.keys(m).sort())
+    // Attacker tamper: payload_sha256 is honestly recomputed over the mutated
+    // payload (hash check passes), but the signature still covers the ORIGINAL
+    // payload -> the Ed25519 verification must fail.
+    const forged = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    forged.exit_code = 1
+    // Recompute the hash over the payload ONLY (envelope fields excluded),
+    // exactly like the kernel does — the signature still covers the original.
+    const { signature: _sig, runner_key_id: _rid, payload_sha256: _ph, ...payloadOnly } = forged
+    forged.payload_sha256 = createHash('sha256').update(canonical(payloadOnly)).digest('hex')
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: forged }),
+      422, 'manifest_signature_invalid',
+    )
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // A signature made with a DIFFERENT key is also invalid.
+    const otherKey = generateKeyPairSync('ed25519')
+    const crossSigned = signManifest(makeManifest(job, metrics.artifact_id), otherKey.privateKey, keyId)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: crossSigned }),
+      422, 'manifest_signature_invalid',
+    )
+    // Correct signature -> accepted.
+    const good = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: good })
+    expect(done.status).toBe('succeeded')
+    expect(done.run_manifest?.signature).toBe(good.signature)
+    kernel.close()
+  })
+
+  it('payload_sha256 mismatch is rejected even with a valid signature', () => {
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    signed.payload_sha256 = '0'.repeat(64)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      422, 'manifest_hash_mismatch',
+    )
+    kernel.close()
+  })
+
+  it('signature referencing an unregistered runner key -> 422 manifest_key_unknown', () => {
+    const { kernel, job, metrics, privateKey } = signedJobSetup()
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, 'runner-key-never-registered')
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      422, 'manifest_key_unknown',
+    )
+    kernel.close()
+  })
+
+  it('registerRunnerKey rejects non-Ed25519 keys', () => {
+    const kernel = freshKernel()
+    const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    expectKernelError(
+      () => kernel.registerRunnerKey({ key_id: 'rsa-key', public_key_pem: rsa.publicKey.export({ type: 'spki', format: 'pem' }).toString() }),
+      422, 'runner_key_invalid',
+    )
+    expectKernelError(
+      () => kernel.registerRunnerKey({ key_id: 'garbage', public_key_pem: 'not a pem' }),
+      422, 'runner_key_invalid',
+    )
+    kernel.close()
+  })
+
+  it('requireSignedManifest (kernel option) rejects unsigned manifests', () => {
+    const { kernel, job } = signedJobSetup({ requireSignedManifest: true })
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
+      422, 'manifest_signature_required',
+    )
+    kernel.close()
+  })
+
+  it('project integrity require_signed_manifest rejects unsigned manifests', () => {
+    const { kernel, job } = signedJobSetup()
+    // Flag stored on the project's integrity record (raw JSON, read verbatim).
+    kernel.db.prepare('UPDATE projects SET integrity = ? WHERE project_id = ?')
+      .run(JSON.stringify({ require_signed_manifest: true }), job.project_id)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
+      422, 'manifest_signature_required',
+    )
+    kernel.close()
+  })
+
+  it('manifest job/project identity mismatch is rejected', () => {
+    const { kernel, job, metrics } = signedJobSetup()
+    const manifest = makeManifest(job, metrics.artifact_id)
+    manifest.job_id = 'job_some_other'
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: manifest }),
+      422, 'manifest_job_mismatch',
+    )
+    kernel.close()
+  })
+
+  it('manifest lease generation mismatch is rejected (fencing inside the manifest)', () => {
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    const manifest = makeManifest(job, metrics.artifact_id)
+    manifest.lease = { generation: 99 }
+    const signed = signManifest(manifest, privateKey, keyId)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      422, 'manifest_lease_mismatch',
+    )
+    kernel.close()
+  })
+})
+
+describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
+  it('archives ACTUAL file contents into a code artifact + manifest artifact', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-'))
+    mkdirSync(join(dir, 'data'), { recursive: true })
+    mkdirSync(join(dir, 'node_modules'), { recursive: true })
+    mkdirSync(join(dir, '.git', 'objects'), { recursive: true })
+    writeFileSync(join(dir, 'train.js'), 'console.log("real code")\n')
+    writeFileSync(join(dir, 'data', 'seed.json'), '{"baseline":[1,2]}')
+    writeFileSync(join(dir, 'node_modules', 'junk.js'), 'ignored')
+    writeFileSync(join(dir, '.git', 'objects', 'pack'), 'ignored')
+
+    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'unit test snapshot')
+    expect(snap.files).toBe(2)
+    expect(snap.total_bytes).toBe(Buffer.byteLength('console.log("real code")\n') + Buffer.byteLength('{"baseline":[1,2]}'))
+    expect(snap.archive_artifact_id.startsWith('sha256:')).toBe(true)
+    expect(snap.manifest_artifact_id.startsWith('sha256:')).toBe(true)
+    expect(snap.archive_artifact_id).not.toBe(snap.manifest_artifact_id)
+    expect(snap.sha256).toBe(snap.archive_artifact_id.replace('sha256:', ''))
+
+    // The archive artifact really contains the file CONTENT (base64) + hashes.
+    const archive = JSON.parse(kernel.cas.read(snap.sha256).toString('utf8')) as {
+      schema_version: number
+      files: Record<string, { sha256: string; content_base64: string }>
+    }
+    expect(archive.schema_version).toBe(1)
+    expect(Buffer.from(archive.files['train.js']!.content_base64, 'base64').toString()).toBe('console.log("real code")\n')
+    expect(archive.files['data/seed.json']!.sha256).toBe(createHash('sha256').update('{"baseline":[1,2]}').digest('hex'))
+    expect(archive.files['node_modules/junk.js']).toBeUndefined()
+    expect(archive.files['.git/objects/pack']).toBeUndefined()
+
+    // The manifest artifact carries the file list + hashes WITHOUT content.
+    const manifest = JSON.parse(kernel.cas.read(snap.manifest_artifact_id!.replace('sha256:', '')).toString('utf8')) as {
+      files: Record<string, { sha256: string }>
+    }
+    expect(manifest.files['train.js']?.sha256).toBe(archive.files['train.js']!.sha256)
+    expect(JSON.stringify(manifest)).not.toContain('content_base64')
+
+    // Events recorded (artifact.registered for both artifacts).
+    const registered = kernel.listEvents(project.project_id).filter(e => e.kind === 'artifact.registered')
+    expect(registered.filter(e => String(e.payload.kind) === 'code').length).toBe(1)
+    expect(registered.filter(e => String(e.payload.kind) === 'manifest').length).toBe(1)
+    kernel.close()
+  })
+
+  it('rejects symlinks escaping the archived root (path escape protection)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const root = mkdtempSync(join(tmpdir(), 'dsh-snap-root-'))
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-snap-outside-'))
+    writeFileSync(join(root, 'ok.js'), 'fine')
+    writeFileSync(join(outside, 'secret.txt'), 'secret')
+    symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt'))
+    expectKernelError(
+      () => kernel.snapshotCodeArchive(project.project_id, root, 'escape test'),
+      422, 'snapshot_path_escape',
+    )
+    // A symlink INSIDE the root is followed and archived (after the escaping
+    // symlink is removed).
+    rmSync(join(root, 'leak.txt'))
+    symlinkSync(join(root, 'ok.js'), join(root, 'alias.js'))
+    const snap = kernel.snapshotCodeArchive(project.project_id, root, 'escape test')
+    expect(snap.files).toBe(2)
+    kernel.close()
+  })
+
+  it('rejects a missing root with 422 snapshot_root_missing', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expectKernelError(
+      () => kernel.snapshotCodeArchive(project.project_id, join(tmpdir(), 'does-not-exist-' + Date.now())),
+      422, 'snapshot_root_missing',
+    )
+    kernel.close()
+  })
+})
+
+describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
+  it('formal-class jobs REQUIRE code_snapshot_id (422) and validate it', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap', kind: 'baseline' }),
+      422, 'code_snapshot_required',
+    )
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap2', kind: 'formal' }),
+      422, 'code_snapshot_required',
+    )
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap3', kind: 'pilot' }),
+      422, 'code_snapshot_required',
+    )
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap4', kind: 'reproduce' }),
+      422, 'code_snapshot_required',
+    )
+    // Unknown snapshot id -> 422 code_snapshot_unknown.
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bad-snap', kind: 'formal', code_snapshot_id: 'sha256:' + 'a'.repeat(64) }),
+      422, 'code_snapshot_unknown',
+    )
+    // A snapshot from ANOTHER project is also unknown here.
+    const other = kernel.createProject({ name: 'o', workspace: '/o', brief: makeBrief() })
+    const foreignCode = codeArtifact(kernel, other.project_id)
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'foreign-snap', kind: 'formal', code_snapshot_id: foreignCode.artifact_id }),
+      422, 'code_snapshot_unknown',
+    )
+    // smoke/echo stay binding-free.
+    const smoke = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'smoke-ok', kind: 'smoke', payload: { script: 'echo hi' } })
+    expect(smoke.code_snapshot_id).toBeNull()
+    kernel.close()
+  })
+
+  it('persists code_snapshot_id column + image_digest/output_contract/data_artifact_ids payload', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'bound-1',
+      kind: 'formal',
+      code_snapshot_id: code.artifact_id,
+      data_artifact_ids: ['sha256:' + 'b'.repeat(64)],
+      image_digest: 'node:22-alpine',
+      output_contract: { metrics: '/outputs/metrics.json', logs: '/outputs/run.log' },
+    })
+    expect(job.code_snapshot_id).toBe(code.artifact_id)
+    expect(job.image_digest).toBe('node:22-alpine')
+    expect(job.output_contract?.metrics).toBe('/outputs/metrics.json')
+    expect(job.payload.data_artifact_ids).toEqual(['sha256:' + 'b'.repeat(64)])
+
+    // Survives a read-back from the DB (jobFromRow).
+    const reloaded = kernel.getJob(job.job_id)
+    expect(reloaded.code_snapshot_id).toBe(code.artifact_id)
+    expect(reloaded.image_digest).toBe('node:22-alpine')
+    expect(reloaded.output_contract?.logs).toBe('/outputs/run.log')
+
+    // Secure kinds default image_digest to node:22-alpine.
+    const defaulted = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bound-2', kind: 'formal', code_snapshot_id: code.artifact_id })
+    expect(defaulted.image_digest).toBe('node:22-alpine')
+    kernel.close()
+  })
+})
+
+describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
+  it('unpackCodeSnapshot round-trips an archived snapshot and rejects tampering', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-unpack-'))
+    mkdirSync(join(dir, 'lib'), { recursive: true })
+    writeFileSync(join(dir, 'train.js'), '#!/usr/bin/env node\nconsole.log("hi")\n')
+    writeFileSync(join(dir, 'lib', 'util.js'), 'export const f = 1\n')
+    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'unpack test')
+
+    const archiveText = kernel.cas.read(snap.sha256).toString('utf8')
+    const files = unpackCodeSnapshot(archiveText)
+    expect(files.size).toBe(2)
+    expect(files.get('train.js')?.toString()).toBe('#!/usr/bin/env node\nconsole.log("hi")\n')
+    expect(files.get('lib/util.js')?.toString()).toBe('export const f = 1\n')
+
+    // Tampered hash -> integrity failure.
+    const tampered = JSON.parse(archiveText) as { files: Record<string, { sha256: string; content_base64: string }> }
+    tampered.files['train.js']!.sha256 = '0'.repeat(64)
+    expect(() => unpackCodeSnapshot(JSON.stringify(tampered))).toThrow(/integrity mismatch/)
+
+    // Unsupported schema_version -> rejected.
+    const bad = JSON.parse(archiveText) as { schema_version: number }
+    bad.schema_version = 2
+    expect(() => unpackCodeSnapshot(JSON.stringify(bad))).toThrow(/schema_version/)
+
+    // Materialization writes real files into a workdir (runner behavior).
+    const workDir = mkdtempSync(join(tmpdir(), 'dsh-materialize-'))
+    const count = materializeCodeSnapshot(unpackCodeSnapshot(archiveText), workDir)
+    expect(count).toBe(2)
+    expect(readFileSync(join(workDir, 'train.js'), 'utf8')).toBe('#!/usr/bin/env node\nconsole.log("hi")\n')
+    expect(readFileSync(join(workDir, 'lib', 'util.js'), 'utf8')).toBe('export const f = 1\n')
+    kernel.close()
+  })
+
+  it('computeAnalysis reads §12.5 fixed-schema metrics artifacts (name/value/unit)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const fileSchema = (seed: number, value: number) => JSON.stringify({
+      schema_version: 1, run_id: `run-${seed}`, contract_id: 'expc_x', seed,
+      metrics: [{ name: 'f1', value, unit: 'ratio' }],
+    })
+    const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(0, 0.8) })
+    const bJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'fb', kind: 'baseline', code_snapshot_id: code.artifact_id })
+    kernel.claimJobs('r1', 60, 8)
+    kernel.completeJob({ job_id: bJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id } })
+    const values = [0.81, 0.83, 0.85]
+    for (let i = 0; i < values.length; i++) {
+      const art = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(11 + i, values[i]!) })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ff${i}`, kind: 'formal', code_snapshot_id: code.artifact_id })
+      kernel.claimJobs('r1', 60, 8)
+      kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id } })
+    }
+    const analysis = kernel.computeAnalysis(project.project_id, undefined, 'f1')
+    expect(analysis.n).toBe(3)
+    expect(analysis.mean).toBeCloseTo(0.83, 3)
+    expect(analysis.baseline_value).toBeCloseTo(0.8, 3)
+    expect(analysis.runs.map(r => r.seed).sort()).toEqual([11, 12, 13])
     kernel.close()
   })
 })

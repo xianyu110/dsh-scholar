@@ -14,6 +14,8 @@ export interface KernelServerOptions {
   port?: number
   /** Optional static bearer token for local loopback auth. */
   token?: string
+  /** §12.7: require signed run manifests (also settable on the kernel itself). */
+  requireSignedManifest?: boolean
 }
 
 const idSchema = z.string().min(1)
@@ -92,6 +94,16 @@ const jobSchema = z.object({
   payload: z.record(z.unknown()).optional(),
   contract_id: z.string().nullable().optional(),
   max_attempts: z.number().int().positive().optional(),
+  // §12.2 JobSpec binding (SCH-EXEC-002).
+  code_snapshot_id: z.string().nullable().optional(),
+  data_artifact_ids: z.array(z.string()).optional(),
+  image_digest: z.string().optional(),
+  output_contract: z.object({ metrics: z.string(), logs: z.string() }).optional(),
+})
+
+const codeSnapshotSchema = z.object({
+  path: z.string().min(1),
+  description: z.string().optional(),
 })
 
 const jobCompleteSchema = z.object({
@@ -100,6 +112,14 @@ const jobCompleteSchema = z.object({
   run_manifest: z.record(z.unknown()).optional(),
   failure_class: z.enum(['environment', 'resources', 'code_error', 'data_issue', 'no_improvement', 'unstable_results', 'budget_exhausted', 'unknown']).nullable().optional(),
   error: z.string().optional(),
+  // §12.6 lease fencing: when provided, both must match the current lease.
+  lease_generation: z.number().int().nonnegative().nullable().optional(),
+  lease_token: z.string().nullable().optional(),
+})
+
+const runnerKeySchema = z.object({
+  key_id: z.string().min(1),
+  public_key_pem: z.string().min(1),
 })
 
 const ideaSchema = z.object({
@@ -129,6 +149,9 @@ const evidenceSchema = z.object({
   analysis_method: z.string().min(1),
   result: z.record(z.unknown()),
   uncertainty: z.string().optional(),
+  // v2 §13.1: agent-facing write defaults to draft_unverified; 'verified' is
+  // the Analysis-Worker internal path (ingestVerifiedEvidence).
+  provenance_status: z.enum(['draft_unverified', 'legacy_unverified', 'verified']).optional(),
 })
 
 const claimVerifySchema = z.object({
@@ -245,6 +268,19 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.getProject(id))
               return
             }
+            if (method === 'PATCH' && sub === undefined) {
+              const input = z.object({ name: z.string().min(1) }).parse(body)
+              ok(res, kernel.renameProject(id, input.name))
+              return
+            }
+            if (method === 'POST' && sub === 'archive') {
+              ok(res, kernel.archiveProject(id))
+              return
+            }
+            if (method === 'POST' && sub === 'unarchive') {
+              ok(res, kernel.unarchiveProject(id))
+              return
+            }
             if (method === 'GET' && sub === 'projection') {
               ok(res, kernel.projectProjection(id))
               return
@@ -346,6 +382,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               send(res, 201, job)
               return
             }
+            if (method === 'POST' && sub === 'code-snapshots') {
+              // §11.3 (SCH-EXEC-002): archive ACTUAL directory contents into
+              // a content-addressed `code` artifact (+ manifest artifact).
+              const input = codeSnapshotSchema.parse(body)
+              const snapshot = kernel.snapshotCodeArchive(id, input.path, input.description ?? '')
+              send(res, 201, snapshot)
+              return
+            }
             if (method === 'POST' && sub === 'claims') {
               const input = claimCreateSchema.parse(body)
               const claim = kernel.createClaim({ project_id: input.project_id ?? id, statement: input.statement, scope: input.scope as never })
@@ -388,12 +432,24 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (id !== undefined && method === 'GET' && sub === undefined) {
-            const record = kernel.getArtifact(id)
+            // v2: project-scoped lookup via ?project_id=; legacy unqualified
+            // lookup resolves only when the blob has a single project record.
+            const projectId = url.searchParams.get('project_id') ?? undefined
+            let record: import('@dsh-scholar/research-schemas').ArtifactRecord
+            if (projectId !== undefined) {
+              record = kernel.getArtifact(projectId, id)
+            } else {
+              const matches = kernel.listArtifactsForBlob(id)
+              if (matches.length === 0) throw new KernelError(404, 'artifact_not_found', `artifact ${id} not found`)
+              if (matches.length > 1) throw new KernelError(409, 'artifact_ambiguous', `artifact ${id} exists in multiple projects; pass project_id`)
+              record = matches[0]!
+            }
             const content = kernel.cas.read(record.sha256)
             res.writeHead(200, {
               'content-type': 'application/octet-stream',
               'content-length': content.byteLength,
               'x-artifact-id': record.artifact_id,
+              'x-project-id': record.project_id,
             })
             res.end(content)
             return
@@ -430,12 +486,20 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           if (id !== undefined && sub === 'status' && method === 'POST') {
             const input = jobCompleteSchema.parse(body)
-            ok(res, kernel.completeJob({ job_id: id, ...input }))
+            ok(res, kernel.completeJob({
+              job_id: id, ...input,
+              lease_generation: input.lease_generation ?? null,
+              lease_token: input.lease_token ?? null,
+            }))
             return
           }
           if (id !== undefined && sub === 'heartbeat' && method === 'POST') {
-            const input = z.object({ owner: z.string().min(1) }).parse(body)
-            ok(res, kernel.heartbeatJob(id, input.owner))
+            const input = z.object({
+              owner: z.string().min(1),
+              lease_generation: z.number().int().nonnegative().nullable().optional(),
+              lease_token: z.string().nullable().optional(),
+            }).parse(body)
+            ok(res, kernel.heartbeatJob(id, input.owner, input.lease_generation ?? null, input.lease_token ?? null))
             return
           }
           if (id !== undefined && sub === 'cancel' && method === 'POST') {
@@ -476,6 +540,18 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           break
         }
+        case 'runner-keys': {
+          if (method === 'POST' && id === undefined) {
+            const input = runnerKeySchema.parse(body)
+            send(res, 201, kernel.registerRunnerKey(input))
+            return
+          }
+          if (method === 'GET' && id === undefined) {
+            ok(res, kernel.listRunnerKeys())
+            return
+          }
+          break
+        }
         case 'recover': {
           if (method === 'POST' && id === 'leases') {
             ok(res, { recovered: kernel.recoverExpiredLeases() })
@@ -496,6 +572,8 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
 /** Start the kernel API server; returns the listening server. */
 export function startKernelServer(options: KernelServerOptions): Promise<{ server: Server; url: string; port: number }> {
   const { kernel, host = '127.0.0.1', port = 7412, token } = options
+  // §12.7 server-level startup parameter (see also KernelOptions.requireSignedManifest).
+  if (options.requireSignedManifest !== undefined) kernel.requireSignedManifest = options.requireSignedManifest
   const server = createServer((req, res) => route(req, res, kernel, token))
   return new Promise((resolve, reject) => {
     server.once('error', reject)

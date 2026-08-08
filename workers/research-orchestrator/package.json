@@ -1,0 +1,31 @@
+{
+  "name": "@dsh-scholar/research-orchestrator",
+  "version": "0.1.0",
+  "description": "DSH Research OS — Durable Research Orchestrator (v2 §8): state-driven poller over the Research Kernel projection API. Advances projects from their current status toward the next Human Gate and pauses there. Self-contained: own SQLite action store (node:sqlite), talks to the Kernel only over HTTP; no dependency on long-lived sessions or in-process Tasks.",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "bin": {
+    "orchestrator": "lib/bin/orchestrator.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./bin/orchestrator.js": "./lib/bin/orchestrator.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "orchestrator": "node lib/bin/orchestrator.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}

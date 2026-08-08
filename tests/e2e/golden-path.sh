@@ -42,7 +42,10 @@ KERNEL_PID=$!
 for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done
 curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null || { bad "kernel failed to start"; exit 1; }
 
-nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner golden-runner --poll-ms 250 > "$WORK/runner.log" 2>&1 &
+if ! docker info > /dev/null 2>&1; then
+  echo "golden-path-v2 requires docker (formal jobs are container-only, design §3.2)"; exit 2
+fi
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner golden-runner --poll-ms 250 --mode docker > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
 
 api() { curl -sf -H 'content-type: application/json' "$@"; }
@@ -82,7 +85,7 @@ STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"BASELINE_REPRO","expected_revision":4}' > /dev/null
 
 say "5. baseline reproduction via isolated runner → RunManifest with hashes"
-BJOB=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"baseline-1","kind":"baseline","payload":{"code_commit":"abc123","data_hash":"sha256:data1","message":"baseline reproduced"}}' | jqfield job_id)
+BJOB=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"baseline-1","kind":"smoke","payload":{"script":"echo \"{\\\"metric\\\":\\\"mAP@0.5\\\",\\\"value\\\":58.4,\\\"seed\\\":0}\"","code_commit":"abc123","data_hash":"sha256:data1"}}' | jqfield job_id)
 for _ in $(seq 1 80); do
   BS=$(api "http://127.0.0.1:$PORT/v1/jobs/$BJOB" | jqfield status)
   [[ "$BS" == "succeeded" ]] && break
@@ -102,11 +105,16 @@ api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\
 
 say "7. formal multi-seed runs (idempotent)"
 for seed in 11 23 47; do
-  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"formal-$seed\",\"kind\":\"formal\",\"contract_id\":\"$CONTRACT\",\"payload\":{\"message\":\"{\\\"metric\\\":\\\"mAP@0.5\\\",\\\"value\\\":$((60 + seed % 5)).$((seed)),\\\"seed\\\":$seed}\"}}" > /dev/null
+  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$(CONTRACT="$CONTRACT" node -e "
+    const seed = Number(process.argv[1])
+    const v = (60 + seed % 5) + '.' + seed
+    const script = \"echo '\" + JSON.stringify({ metric: 'mAP@0.5', value: Number(v), seed }) + \"'\"
+    console.log(JSON.stringify({ idempotency_key: 'formal-' + seed, kind: 'smoke', contract_id: process.env.CONTRACT, payload: { script } }))
+  " "$seed")" > /dev/null
 done
 DONE=0
 for _ in $(seq 1 100); do
-  N=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded'&&x.kind==='formal').length)})")
+  N=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded'&&x.idempotency_key.startsWith('formal-')).length)})")
   [[ "$N" == "3" ]] && DONE=1 && break
   sleep 0.3
 done

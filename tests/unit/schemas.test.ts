@@ -26,12 +26,19 @@ describe('research schemas', () => {
   })
 
   it('state machine rejects illegal transitions', () => {
-    // RELEASED is unreachable from DRAFT; STOPPED is a terminal sink.
-    expect(TRANSITION_TABLE.DRAFT).not.toContain('RELEASED')
+    // STOPPED is a terminal sink.
     expect(TRANSITION_TABLE.STOPPED).toHaveLength(0)
-    expect(TRANSITION_TABLE.DRAFT).toContain('SCOPED')
     expect(TRANSITION_TABLE.SURVEYING).toContain('IDEATING')
     expect(TRANSITION_TABLE.EXPERIMENTING).toContain('EVIDENCE_READY')
+  })
+
+  it('v2 §6.2: gate-controlled states are unreachable via generic transition()', () => {
+    expect(TRANSITION_TABLE.DRAFT).not.toContain('SCOPED')
+    expect(TRANSITION_TABLE.IDEATING).not.toContain('IDEA_APPROVED')
+    expect(TRANSITION_TABLE.BASELINE_REPRO).not.toContain('CONTRACT_APPROVED')
+    expect(TRANSITION_TABLE.RELEASE_READY).not.toContain('RELEASED')
+    expect(TRANSITION_TABLE.DRAFT).toContain('FAILED')
+    expect(TRANSITION_TABLE.SURVEYING).toContain('IDEATING')
   })
 
   it('every status is reachable in the table', () => {
