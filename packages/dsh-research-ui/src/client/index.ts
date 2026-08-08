@@ -2783,7 +2783,17 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
     modal.appendChild(el('div', 'empty', 'none'))
   }
   for (const j of jobs) {
-    modal.appendChild(el('div', '', `- \`${j.job_id}\` [${j.kind}] ${j.status}`))
+    const jrow = el('div', '', `- \`${j.job_id}\` [${j.kind}] ${j.status}`)
+    // dsh-web depth: jump to the Runs tab from a recent job.
+    jrow.style.cssText = 'cursor:pointer'
+    jrow.title = 'open the Runs tab'
+    jrow.onclick = () => {
+      overlay.remove()
+      activeTab = 'runs'
+      tabSave()
+      rerender()
+    }
+    modal.appendChild(jrow)
   }
 
   // dsh-web guidance: next actions of the kernel for this project.
@@ -3876,7 +3886,9 @@ function openNotificationsModal(root: ShadowRoot): void {
     const count = n.count ?? 1
     const text = el('div', 'grow', count > 1 ? `${n.text} ×${count}` : n.text)
     if (count > 1) text.style.cssText += ';font-weight:600'
-    text.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
+    text.style.cssText += ';font-size:11.5px;color:var(--text);word-break:break-word;cursor:pointer'
+    text.title = 'click to copy'
+    text.onclick = () => copyText(n.text)
     const time = el('span', 'muted', n.time)
     time.style.cssText = 'font-size:9px;flex-shrink:0'
     // dsh-web notification management: dismiss a single entry.
