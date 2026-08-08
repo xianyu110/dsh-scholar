@@ -540,6 +540,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const commandsBtn = el('button', 'hbtn', '⌘ Commands')
   commandsBtn.title = 'browse /research commands'
   commandsBtn.onclick = () => { openCommandsModal(root) }
+  const shortcutsBtn = el('button', 'hbtn', '⌨ Shortcuts')
+  shortcutsBtn.title = 'keyboard shortcuts'
+  shortcutsBtn.onclick = () => { openShortcutsModal(root) }
   const modeBadge = el('span', 'hbtn')
   modeBadge.textContent = '🧭 gate-only'
   modeBadge.title = 'research mode: every gate requires a human decision'
@@ -573,7 +576,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   densityApply(panel)
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
-    header.append(sidebarToggle, modeBadge, commandsBtn, densitySelect, themeBtn, refresh)
+    header.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, densitySelect, themeBtn, refresh)
   } else {
     header.append(themeBtn, refresh, close)
   }
@@ -1562,6 +1565,48 @@ function runChatLine(line: string): void {
   rerender()
 }
 
+/* ─────────────────────────── shortcuts modal ─────────────────────────── */
+
+const SHORTCUTS: Array<[string, string]> = [
+  ['Alt+1..7', 'switch tab (Chat, Phase, Gates, Runs, Artifacts, Evidence, Budget)'],
+  ['Ctrl/Cmd+K', 'open the command palette'],
+  ['Ctrl/Cmd+Shift+T', 'toggle light/dark theme'],
+  ['Ctrl+↑ / Ctrl+↓', 'walk chat messages (details panel)'],
+  ['/ (not typing)', 'focus the chat composer with a leading slash'],
+  ['↑ / ↓ (composer)', 'walk command history'],
+  ['Tab (composer)', 'complete the command name'],
+  ['Shift+Enter (composer)', 'newline without sending'],
+  ['Enter (composer)', 'send / fill completion'],
+  ['Esc', 'close modal / details / quote'],
+  ['Double-click project', 'open the project detail drawer'],
+  ['Right-click tab', 'pin / unpin a favourite tab'],
+]
+
+/** dsh-web shortcut reference modal. */
+function openShortcutsModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+  const header = el('div', 'modal-header', '⌨ Keyboard Shortcuts')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+  for (const [keys, desc] of SHORTCUTS) {
+    const row = el('div', 'row')
+    row.style.cssText = 'padding:5px 0;align-items:flex-start'
+    const k = el('span', 'artifact-kind', keys)
+    k.style.cssText += ';min-width:150px;text-align:center'
+    const d = el('span', 'grow', desc)
+    d.style.cssText = 'font-size:11.5px;color:var(--text)'
+    row.append(k, d)
+    modal.appendChild(row)
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+}
+
 const CHAT_COMMANDS: Array<[string, string]> = [
   ['new', '/research new demo1', 'create a project + Scope Gate'],
   ['list', '/research list', 'list all projects'],
@@ -2043,6 +2088,69 @@ function openGlobalSearchModal(root: ShadowRoot): void {
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+}
+
+/* ─────────────────────────── compare modal ─────────────────────────── */
+
+/**
+ * dsh-web compare: side-by-side status/budget/counts table for selected
+ * projects.
+ */
+async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise<void> {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:720px;max-width:96vw'
+  const header = el('div', 'modal-header', '⇄ Compare Projects')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const loading = el('div', 'muted', 'Loading…')
+  modal.appendChild(loading)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+
+  const rows: Array<{ label: string; values: string[] }> = []
+  const projections = await Promise.all(projectIds.map(id => api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)))
+  const valid = projections.filter((p): p is Projection => p !== null && p.project !== undefined)
+  if (valid.length < 2) {
+    loading.textContent = 'Need at least two readable projects.'
+    return
+  }
+  modal.removeChild(loading)
+
+  const labels = valid.map(p => p.project!.name ?? p.project!.project_id!)
+  const cell = (text: string, head = false): HTMLElement => {
+    const c = el('div', head ? 'pname' : '')
+    c.style.cssText = `padding:5px 10px;font-size:11px;color:var(--text);border-bottom:1px solid var(--border-2);${head ? 'font-weight:700' : ''}`
+    c.textContent = text
+    return c
+  }
+  const addRow = (label: string, get: (p: Projection) => string): void => {
+    rows.push({ label, values: valid.map(get) })
+  }
+  addRow('Phase', p => `${p.project!.status ?? '?'} (rev ${p.project!.revision ?? 0})`)
+  addRow('Budget', p => `$${p.budget?.model_cost_usd ?? 0} / ${p.project!.constraints?.max_model_cost_usd ?? '∞'}`)
+  addRow('GPU hours', p => `${p.budget?.gpu_hours ?? 0} / ${p.project!.constraints?.max_gpu_hours ?? '∞'}`)
+  addRow('Ideas', p => String(p.counts?.ideas ?? 0))
+  addRow('Contracts', p => String(p.counts?.contracts ?? 0))
+  addRow('Claims', p => String(p.counts?.claims ?? 0))
+  addRow('Evidence', p => String(p.counts?.evidence ?? 0))
+  addRow('Artifacts', p => String(p.counts?.artifacts ?? 0))
+  addRow('Pending gates', p => String((p.pending_gates ?? []).length))
+
+  const table = el('div')
+  table.style.cssText = 'display:grid;grid-template-columns:140px repeat(${valid.length}, 1fr);gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-height:60vh;overflow-y:auto'
+  // header row
+  table.appendChild(cell('', true))
+  for (const l of labels) table.appendChild(cell(l, true))
+  for (const r of rows) {
+    table.appendChild(cell(r.label))
+    for (const v of r.values) table.appendChild(cell(v))
+  }
+  modal.appendChild(table)
 }
 
 /* ─────────────────────────── Chat (dialogue) tab ─────────────────────────── */
@@ -2557,7 +2665,16 @@ function renderSidebar(
       sidebarSelected.clear()
       rerender()
     }
-    foot.append(countLabel, archiveSel, doneBtn)
+    // dsh-web compare: side-by-side view of the selected projects.
+    const compareBtn = el('button', 'hbtn', '⇄ Compare')
+    compareBtn.disabled = sidebarSelected.size < 2
+    compareBtn.onclick = () => {
+      const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+      if (root !== null && sidebarSelected.size >= 2) {
+        void openCompareModal(root, [...sidebarSelected])
+      }
+    }
+    foot.append(countLabel, archiveSel, compareBtn, doneBtn)
   }
   sidebar.appendChild(foot)
 }
@@ -2701,6 +2818,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     // structured results) instead of raw text.
     const isStatus = msg.role === 'assistant' && /^\*\*.*\*\* \(`rsp_/.test(msg.text) && msg.text.includes('Next actions:')
     const isSurvey = msg.role === 'assistant' && msg.text.startsWith('Survey complete:')
+    const isRun = msg.role === 'assistant' && /Job \*\*[^*]+\*\* \[[^\]]+\] submitted/.test(msg.text)
+    const isEvidence = msg.role === 'assistant' && /Evidence \*\*[^*]+\*\* ingested/.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
       const phaseMatch = /phase `([^`]+)` rev (\d+)/.exec(msg.text)
@@ -2741,6 +2860,29 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         card.appendChild(el('div', 'muted', h.trim()))
       }
       structured = card
+    } else if (isRun && searchQ === '') {
+      // dsh-web run result card: job id, kind, status.
+      const jobMatch = /Job \*\*([^*]+)\*\* \[([^\]]+)\] submitted \(([^)]+)\)/.exec(msg.text)
+      const grid = el('div')
+      grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
+      if (jobMatch !== null) {
+        grid.appendChild(chatFieldCell('Job', jobMatch[1] ?? ''))
+        grid.appendChild(chatFieldCell('Kind', jobMatch[2] ?? ''))
+        grid.appendChild(chatFieldCell('Status', jobMatch[3] ?? ''))
+      } else {
+        grid.appendChild(chatFieldCell('Job', 'submitted'))
+      }
+      structured = grid
+    } else if (isEvidence && searchQ === '') {
+      // dsh-web evidence card: id + provenance status.
+      const evMatch = /Evidence \*\*([^*]+)\*\* ingested \(([^)]+)\)/.exec(msg.text)
+      const grid = el('div')
+      grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
+      if (evMatch !== null) {
+        grid.appendChild(chatFieldCell('Evidence', evMatch[1] ?? ''))
+        grid.appendChild(chatFieldCell('Status', evMatch[2] ?? ''))
+      }
+      structured = grid
     }
     const lineCount = msg.text.split('\n').length
     const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === '' && structured === null
