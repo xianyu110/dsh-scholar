@@ -47,6 +47,9 @@ interface StandaloneOptions {
   kernelPort: number
   dataDir: string
   token: string | null
+  /** API-01: loopback operator identity. When set, the BFF enforces project
+   * membership on project-scoped /v1 routes (non-member -> 404). */
+  principal: string | null
 }
 
 /** Constant-time token comparison (values never appear in logs). */
@@ -292,6 +295,7 @@ export function loadOptions(argv: string[]): StandaloneOptions {
       'data-dir': { type: 'string' },
       token: { type: 'string' },
       'no-token': { type: 'boolean', default: false },
+      'principal': { type: 'string' },
     },
   })
   const host = values.host ?? '127.0.0.1'
@@ -325,6 +329,7 @@ export function loadOptions(argv: string[]): StandaloneOptions {
     kernelPort: Number(values['kernel-port'] ?? DEFAULT_KERNEL_PORT),
     dataDir,
     token,
+    principal: (values['principal'] ?? null) as string | null,
   }
 }
 
@@ -347,6 +352,39 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   const bundlePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
 
   const limiter = new SlidingWindowRateLimiter()
+
+  // API-01 BFF AuthZ: the loopback operator identity maps to one principal
+  // (reconstruction-contracts.md §7 "standalone local identity 仅在 loopback
+  // 映射为单一 pi"). Project-scoped routes first resolve membership via the
+  // kernel's authoritative project_members table; missing project AND
+  // insufficient membership both answer 404 (no enumeration, api-contracts §1).
+  const memberCache = new Map<string, Promise<Array<{ principal_id: string; role: string }> | null>>()
+  async function projectMembers(projectId: string): Promise<Array<{ principal_id: string; role: string }> | null> {
+    const key = `p:${projectId}`
+    let hit = memberCache.get(key)
+    if (hit === undefined) {
+      hit = fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/members`, {
+        headers: { accept: 'application/json' },
+      }).then(async (r) => {
+        if (!r.ok) return null
+        return (await r.json()) as Array<{ principal_id: string; role: string }>
+      }).catch(() => null)
+      memberCache.set(key, hit)
+    }
+    return hit
+  }
+  async function isProjectMember(projectId: string): Promise<boolean> {
+    if (options.principal === null) return true
+    const members = await projectMembers(projectId)
+    if (members === null) return false
+    return members.some(m => m.principal_id === options.principal)
+  }
+  function projectIdFromPath(pathname: string): string | null {
+    const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'projects') return parts[2] ?? null
+    if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'gates') return parts[2] ?? null
+    return null
+  }
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       if (!limiter.allow(req.socket.remoteAddress ?? 'unknown')) {
@@ -475,6 +513,31 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
           if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
             sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
+            return
+          }
+        }
+        // API-01 BFF AuthZ: project-scoped routes require membership of the
+        // loopback operator identity; unknown project OR non-member -> 404.
+        if (options.principal !== null) {
+          const projectId = projectIdFromPath(url.pathname)
+          if (projectId !== null && !(await isProjectMember(projectId))) {
+            sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
+            return
+          }
+          // The projects LIST is filtered to the operator's memberships.
+          if (url.pathname === '/v1/projects' && method === 'GET') {
+            const upstreamList = await fetch(`${endpoint}/v1/projects`, { headers: { accept: 'application/json' } })
+            if (!upstreamList.ok) {
+              sendJson(res, 502, { ok: false, error: 'research kernel unavailable' })
+              return
+            }
+            const all = (await upstreamList.json()) as Array<{ project_id: string }>
+            const allowed: Array<Record<string, unknown>> = []
+            for (const p of all) {
+              const members = await projectMembers(p.project_id)
+              if (members !== null && members.some(m => m.principal_id === options.principal)) allowed.push(p as unknown as Record<string, unknown>)
+            }
+            sendJson(res, 200, allowed)
             return
           }
         }

@@ -104,6 +104,58 @@ else
   [ "$GOT" = "$PDF_B64" ] && ok "ART-01: proxied bytes round-trip intact" || fail "ART-01: bytes mismatch"
 fi
 
+# ── API-01: BFF membership enforcement (--principal) ───────────────────────
+MEM_WEB=$((WEB_PORT + 700))
+MEM_KERNEL=$((WEB_PORT + 701))
+MEM_DATA="$WORK/memdata"
+node "$SERVER_BIN" --host 127.0.0.1 --port "$MEM_WEB" --kernel-port "$MEM_KERNEL" \
+  --data-dir "$MEM_DATA" --token "$TOKEN" --principal ops-1 > "$WORK/mem.log" 2>&1 &
+MEM_PID=$!
+memready=0
+for _ in $(seq 1 60); do
+  if curl -sf -m 2 -X POST "http://127.0.0.1:$MEM_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then memready=1; break; fi
+  sleep 0.5
+done
+[ "$memready" = 1 ] && ok "API-01: BFF with --principal starts" || fail "API-01: BFF start"
+if [ "$memready" = 1 ]; then
+  # ops-1 creates a project (creator PI seeded via the kernel API field).
+  MP=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -X POST "http://127.0.0.1:$MEM_WEB/v1/projects" \
+    -d '{"name":"mem-rt","workspace":"/w/mem","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+  [ -n "$MP" ] && ok "API-01: member-created project ($MP)" || fail "API-01: create"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP")
+  [ "$R" = "200" ] && ok "API-01: PI reads own project -> 200" || fail "API-01: PI read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/jobs")
+  [ "$R" = "200" ] && ok "API-01: PI reads project jobs -> 200" || fail "API-01: PI jobs -> $R"
+  L=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a.some(p=>p.project_id==='$MP')?'included':'missing')})")
+  [ "$L" = "included" ] && ok "API-01: project list includes member project" || fail "API-01: list filter -> $L"
+fi
+# A second BFF with a DIFFERENT principal must not see the project (404).
+node "$SERVER_BIN" --host 127.0.0.1 --port "$((MEM_WEB + 2))" --kernel-port "$MEM_KERNEL" \
+  --data-dir "$MEM_DATA" --token "$TOKEN" --principal other-user > "$WORK/mem2.log" 2>&1 &
+MEM2_PID=$!
+for _ in $(seq 1 60); do
+  if curl -sf -m 2 -X POST "http://127.0.0.1:$((MEM_WEB + 2))/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then break; fi
+  sleep 0.5
+done
+if [ -n "$MP" ]; then
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/$MP")
+  [ "$R" = "404" ] && ok "API-01: non-member project read -> 404" || fail "API-01: non-member read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/$MP/jobs")
+  [ "$R" = "404" ] && ok "API-01: non-member project jobs -> 404" || fail "API-01: non-member jobs -> $R"
+  L=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a.some(p=>p.project_id==='$MP')?'leaked':'filtered')})")
+  [ "$L" = "filtered" ] && ok "API-01: non-member project list filtered" || fail "API-01: list leak -> $L"
+  # Unknown project id also 404 (no enumeration).
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/rsp_nonexistent")
+  [ "$R" = "404" ] && ok "API-01: unknown project -> 404" || fail "API-01: unknown -> $R"
+fi
+kill "$MEM_PID" "$MEM2_PID" 2>/dev/null || true
+for _ in $(seq 1 15); do
+  if ! ss -ltn 2>/dev/null | grep -qE ":$MEM_WEB |:$((MEM_WEB + 2)) "; then break; fi
+  sleep 0.5
+done
+ok "API-01: BFF instances cleaned up"
+
 # ── OPS-01: clean shutdown frees both ports ────────────────────────────────
 kill "$SPID" 2>/dev/null || true
 for _ in $(seq 1 20); do

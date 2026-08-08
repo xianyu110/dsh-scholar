@@ -47,6 +47,10 @@ const createProjectSchema = z.object({
   integrity: z.record(z.unknown()).optional(),
   session_id: z.string().nullable().optional(),
   dsh_workspace_id: z.string().nullable().optional(),
+  // API-01: the caller (BFF) resolves the authenticated principal and seeds
+  // the creator PI membership; callers never submit actor/principal fields.
+  creator_principal_id: z.string().optional(),
+  creator_tenant_id: z.string().optional(),
 })
 
 const transitionSchema = z.object({
@@ -341,6 +345,26 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.listContracts(id))
               return
             }
+            if (sub === 'members' && method === 'GET') {
+              ok(res, kernel.listProjectMembers(id))
+              return
+            }
+            if (sub === 'members' && method === 'POST') {
+              const input = z.object({
+                principal_id: z.string().min(1),
+                role: z.enum(['pi', 'researcher', 'operator', 'auditor', 'viewer']),
+                tenant_id: z.string().optional(),
+                actor: z.string().min(1),
+              }).parse(body)
+              ok(res, kernel.addProjectMember({ project_id: id, ...input }))
+              return
+            }
+            if (sub === 'members' && subId !== undefined && method === 'DELETE') {
+              const input = z.object({ actor: z.string().min(1) }).parse(body)
+              kernel.removeProjectMember({ project_id: id, principal_id: subId, actor: input.actor })
+              ok(res, { ok: true })
+              return
+            }
             if (method === 'GET' && sub === 'jobs') {
               ok(res, kernel.listJobs(id))
               return
@@ -473,29 +497,6 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           if (id !== undefined && sub === 'decisions' && method === 'POST') {
             const input = decisionSchema.parse(body)
             ok(res, kernel.decideGate({ gate_id: id, ...input, resume_to: input.resume_to as never }))
-            return
-          }
-          break
-        }
-        case 'members': {
-          if (id !== undefined && method === 'GET' && sub === undefined) {
-            ok(res, kernel.listProjectMembers(id))
-            return
-          }
-          if (id !== undefined && method === 'POST' && sub === undefined) {
-            const input = z.object({
-              principal_id: z.string().min(1),
-              role: z.enum(['pi', 'researcher', 'operator', 'auditor', 'viewer']),
-              tenant_id: z.string().optional(),
-              actor: z.string().min(1),
-            }).parse(body)
-            ok(res, kernel.addProjectMember({ project_id: id, ...input }))
-            return
-          }
-          if (id !== undefined && sub !== undefined && method === 'DELETE') {
-            const input = z.object({ actor: z.string().min(1) }).parse(body)
-            kernel.removeProjectMember({ project_id: id, principal_id: sub, actor: input.actor })
-            ok(res, { ok: true })
             return
           }
           break
