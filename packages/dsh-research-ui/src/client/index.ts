@@ -2254,6 +2254,18 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
         if (root !== null) openClaimDetailModal(root, claim)
       }
+      // dsh-web context menu: details / copy id.
+      card.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root === null || claim.claim_id === undefined) return
+        const cid = claim.claim_id
+        openContextMenu(root, event.clientX, event.clientY, [
+          { label: '⧉ Details', onPick: () => openClaimDetailModal(root, claim) },
+          { label: 'Copy claim ID', hint: cid, onPick: () => copyText(cid) },
+        ])
+      }
       const stmt = el('div', 'grow', claim.statement ?? '')
       stmt.style.cssText = 'margin-top:5px;color:var(--text);font-size:11.5px'
       card.appendChild(stmt)
@@ -2332,6 +2344,18 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
         if (root !== null) openEvidenceDetailModal(root, item)
+      }
+      // dsh-web context menu: details / copy id.
+      card.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root === null || item.evidence_id === undefined) return
+        const eid = item.evidence_id
+        openContextMenu(root, event.clientX, event.clientY, [
+          { label: '⧉ Details', onPick: () => openEvidenceDetailModal(root, item) },
+          { label: 'Copy evidence ID', hint: eid, onPick: () => copyText(eid) },
+        ])
       }
       listEl.appendChild(card)
     }
