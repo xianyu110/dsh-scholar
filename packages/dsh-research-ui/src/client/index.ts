@@ -4161,6 +4161,12 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       bodyEl.style.cssText = 'min-width:0'
       const projEl = el('div', 'muted', h.status !== undefined ? `${h.project} · ${STATUS_META[h.status]?.label ?? h.status}` : h.project)
       projEl.style.cssText = 'font-size:10px'
+      if (h.status !== undefined) {
+        // dsh-web status colour: dot mirroring the sidebar tones.
+        const statusDot = el('span')
+        statusDot.style.cssText = `width:6px;height:6px;border-radius:50%;background:var(--tone-${STATUS_META[h.status]?.tone ?? 'slate'});display:inline-block;margin-right:4px`
+        projEl.prepend(statusDot)
+      }
       const textEl = el('div', '', h.text)
       textEl.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
       bodyEl.append(projEl, textEl)
