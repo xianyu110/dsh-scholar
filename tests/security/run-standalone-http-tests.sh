@@ -80,6 +80,30 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/a
   -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$(($WEB_PORT + 100))" -H 'content-type: application/json' -d '{}')
 [ "$R" = "403" ] && ok "SEC: cross-port loopback origin -> 403" || fail "SEC: cross-port origin -> $R"
 
+# ── ART-01: binary round-trip through the same-origin proxy ────────────────
+P=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -X POST "http://127.0.0.1:$WEB_PORT/v1/projects" \
+  -d '{"name":"art-rt","workspace":"/w/art-rt","mode":"gate-only","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+[ -n "$P" ] && ok "ART-01: project via proxy ($P)" || fail "ART-01: project create via proxy" 
+# Register a binary artifact (fake PDF bytes) via the proxy and fetch it back:
+# media type, exact bytes and the ETag must survive the Web-stream proxy.
+PDF_B64=$(printf '%%PDF-1.4 fake-binary-\\x00-\\xff-bytes' | base64 | tr -d '\n')
+ART=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -X POST "http://127.0.0.1:$WEB_PORT/v1/artifacts" \
+  -d "{\"project_id\":\"$P\",\"kind\":\"pdf\",\"content_base64\":\"$PDF_B64\",\"media_type\":\"application/pdf\",\"file_name\":\"roundtrip.pdf\"}" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.artifact_id||j.error?.code||'')})")
+if [ -z "$ART" ]; then
+  fail "ART-01: artifact register via proxy"
+else
+  ok "ART-01: artifact registered via proxy ($ART)"
+  HDR=$(curl -sI -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P")
+  echo "$HDR" | grep -qi "content-type: application/pdf" && ok "ART-01: proxied pdf content-type" || fail "ART-01: proxied content-type ($(echo "$HDR" | grep -i content-type || true))"
+  echo "$HDR" | grep -qi "etag: \"sha256:" && ok "ART-01: proxied etag present" || fail "ART-01: proxied etag missing"
+  GOT=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P" | base64 | tr -d '\n')
+  [ "$GOT" = "$PDF_B64" ] && ok "ART-01: proxied bytes round-trip intact" || fail "ART-01: bytes mismatch"
+fi
+
 # ── OPS-01: clean shutdown frees both ports ────────────────────────────────
 kill "$SPID" 2>/dev/null || true
 for _ in $(seq 1 20); do
