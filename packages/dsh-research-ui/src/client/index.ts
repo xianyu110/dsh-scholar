@@ -82,6 +82,7 @@ function base(): string {
 interface Projection {
   project?: {
     project_id?: string; name?: string; status?: string; revision?: number
+    brief?: { problem?: string; primary_metrics?: string[] }
     constraints?: { max_model_cost_usd?: number; max_gpu_hours?: number; max_parallel_jobs?: number }
     history?: string[]
   }
@@ -412,6 +413,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .ws-rename:hover { color:var(--accent); }
 .ws-item:hover .ws-rename { display:inline; }
 .ws-item:hover .ws-item > span[style*="display:none"] { display:flex; }
+.ws-item.blocked { border:1px solid var(--tone-red); background:var(--tone-red-bg); }
+.ws-item.blocked .ws-name { color:var(--tone-red); font-weight:700; }
 .sidebar-foot { padding:10px 12px; border-top:1px solid var(--border); color:var(--text-3); font-size:10px; }
 .sidebar.collapsed { width:44px; }
 .sidebar.collapsed .sidebar-head { justify-content:center; padding:12px 6px; }
@@ -581,7 +584,31 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       }
     }
     if (target === undefined) {
-      body.replaceChildren(el('div', 'empty', 'No research projects yet — create one with the ＋ New Project button.'))
+      // dsh-web hero: a guided empty state instead of a bare message.
+      const hero = el('div')
+      hero.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:14px;padding:60px 20px;text-align:center'
+      hero.appendChild(el('div', '', '🧪'))
+      hero.appendChild(el('div', '', 'Welcome to **Research OS**'))
+      hero.appendChild(el('div', 'muted', 'A fully standalone DSH Scholar web plugin: plan, run and review research with human-gated decisions. Start by creating your first project.'))
+      const steps = el('div')
+      steps.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:4px;font-size:11.5px;color:var(--text-2)'
+      const addStep = (t: string): void => {
+        const row = el('div', 'row')
+        row.style.cssText = 'justify-content:center'
+        row.appendChild(el('span', '', '·'))
+        row.appendChild(el('span', '', t))
+        steps.appendChild(row)
+      }
+      addStep('＋ New Project in the sidebar, or /research new demo1 in Chat')
+      addStep('Approve the Scope Gate in the Gates tab (human only)')
+      addStep('Survey literature, pre-register a contract, run container experiments')
+      addStep('Build the manuscript, review it, export the Release Bundle')
+      hero.appendChild(steps)
+      const go = el('button', 'btn approve', '＋ Create your first project')
+      go.style.cssText = 'padding:9px 20px;margin-top:6px'
+      go.onclick = () => { openNewProjectModal(root) }
+      hero.appendChild(go)
+      body.replaceChildren(hero)
       return
     }
     if (projection === null) {
@@ -1407,6 +1434,42 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   convRow.append(convLabel, convValue, clearBtn)
   modal.appendChild(convRow)
 
+  // dsh-web share/summary: copy a markdown summary of the active project.
+  modal.appendChild(section('Project'))
+  const projRow = el('div', 'row')
+  projRow.style.cssText = 'padding:4px 0'
+  const projLabel = el('span', '', 'Summary')
+  projLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const summaryBtn = el('button', 'hbtn', 'Copy markdown')
+  summaryBtn.style.cssText = 'padding:2px 10px'
+  summaryBtn.onclick = async () => {
+    const id = projectId
+    if (id === undefined) return
+    const p = await api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)
+    if (p === null || p.project === undefined) {
+      summaryBtn.textContent = 'unavailable'
+      return
+    }
+    const counts = p.counts ?? {}
+    const lines = [
+      `# ${p.project.name}`,
+      '',
+      `- Project: \`${id}\``,
+      `- Phase: \`${p.project.status}\` (rev ${p.project.revision ?? 0})`,
+      `- Problem: ${p.project.brief?.problem ?? '—'}`,
+      `- Primary metrics: ${(p.project.brief?.primary_metrics ?? []).join(', ') || '—'}`,
+      `- Corpus snapshots: ${counts.corpus_snapshots ?? 0} · Ideas: ${counts.ideas ?? 0} · Contracts: ${counts.contracts ?? 0}`,
+      `- Claims: ${counts.claims ?? 0} · Evidence: ${counts.evidence ?? 0} · Artifacts: ${counts.artifacts ?? 0}`,
+      `- Pending gates: ${(p.pending_gates ?? []).map(g => `${g.type} (${g.status})`).join(', ') || 'none'}`,
+      `- Next: ${(p.next_actions ?? []).join('; ') || '—'}`,
+    ]
+    await navigator.clipboard.writeText(lines.join('\n'))
+    summaryBtn.textContent = '✓ copied'
+    setTimeout(() => { summaryBtn.textContent = 'Copy markdown' }, 1800)
+  }
+  projRow.append(projLabel, summaryBtn)
+  modal.appendChild(projRow)
+
   const about = el('div', 'muted', 'DSH Scholar · Research OS standalone web plugin · v0.2 hardening')
   about.style.cssText = 'margin-top:16px;font-size:10.5px'
   modal.appendChild(about)
@@ -1805,11 +1868,21 @@ function renderSidebar(
     for (const p of filtered) {
       const item = el('button', 'ws-item')
       if (p.project_id === activeId) item.classList.add('active')
+      // dsh-web "attention" feel: BLOCKED_GATE projects get a red ring and
+      // an ⏳ badge so a parked project is visible in the sidebar.
+      const blocked = p.status === 'BLOCKED_GATE'
+      if (blocked) item.classList.add('blocked')
       const tone = STATUS_META[p.status ?? '']?.tone ?? 'slate'
       const dot = el('span', 'ws-dot')
       dot.style.background = `var(--tone-${tone})`
       item.appendChild(dot)
       item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
+      if (blocked) {
+        const badge = el('span', 'ws-status', '⏳')
+        badge.title = 'blocked on a human gate decision'
+        badge.style.cssText = 'color:var(--tone-amber);font-weight:700'
+        item.appendChild(badge)
+      }
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
       // dsh-web sidebar stats: counts of the active project under its row.
