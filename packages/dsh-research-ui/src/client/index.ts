@@ -4153,6 +4153,25 @@ function openCommandHistoryModal(root: ShadowRoot): void {
       setTimeout(() => { copyHist.textContent = '⧉' }, 1600)
     }
     row.append(copyHist)
+    // dsh-web context menu: copy or re-run the command.
+    row.oncontextmenu = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const ctxRoot = rootHost()
+      if (ctxRoot === null) return
+      openContextMenu(ctxRoot, event.clientX, event.clientY, [
+        { label: '⧉ Copy command', onPick: () => copyText(line) },
+        {
+          label: '↻ Re-run in Chat',
+          onPick: () => {
+            overlay.remove()
+            chatDraft = line
+            activeTab = 'chat'
+            rerender()
+          },
+        },
+      ])
+    }
     row.onclick = () => {
       overlay.remove()
       chatDraft = line
