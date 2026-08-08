@@ -1247,6 +1247,14 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     }
     addBar('Model', budget.model_cost_usd ?? 0, maxUsd, '$')
     addBar('GPU', budget.gpu_hours ?? 0, maxGpu, 'h')
+    // dsh-web depth: click the usage card to open the Budget tab.
+    bcard.style.cursor = 'pointer'
+    bcard.title = 'open the Budget tab'
+    bcard.onclick = () => {
+      activeTab = 'budget'
+      tabSave()
+      rerender()
+    }
     body.appendChild(bcard)
   }
   // dsh-web data panel: IdeaCards of this project.
@@ -3916,6 +3924,19 @@ function openCommandHistoryModal(root: ShadowRoot): void {
     const text = el('span', 'grow mono', line)
     text.style.cssText = 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
     row.append(idx, text)
+    // dsh-web history: copy the command line from the list.
+    const copyHist = el('button', 'hbtn', '⧉')
+    copyHist.title = 'copy command'
+    copyHist.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+    copyHist.onclick = (event) => {
+      event.stopPropagation()
+      void navigator.clipboard.writeText(line).then(
+        () => { copyHist.textContent = '✓' },
+        () => { copyHist.textContent = '✗' },
+      )
+      setTimeout(() => { copyHist.textContent = '⧉' }, 1600)
+    }
+    row.append(copyHist)
     row.onclick = () => {
       overlay.remove()
       chatDraft = line
@@ -4901,6 +4922,15 @@ function renderSidebar(
   search.style.cssText = 'margin:8px 10px 2px;padding:6px 10px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;font:11px/1.4 system-ui,sans-serif;outline:none'
   search.onfocus = () => { search.style.borderColor = 'var(--accent)' }
   search.onblur = () => { search.style.borderColor = 'var(--border)' }
+  // dsh-web search box: Escape clears the filter in place.
+  search.onkeydown = (event) => {
+    if (event.key === 'Escape' && search.value !== '') {
+      event.stopPropagation()
+      search.value = ''
+      sidebarQuery = ''
+      renderRows()
+    }
+  }
   sidebar.appendChild(search)
 
   // Group by (dsh-web "Group by"): all / active / done.
