@@ -2641,6 +2641,18 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   for (const g of pending) {
     modal.appendChild(el('div', '', `- ${g.type} gate \`${g.gate_id}\`: ${g.title} (${g.status})`))
   }
+  if (pending.length > 0) {
+    // dsh-web depth: jump from the drawer to the Gates tab.
+    const goGates = el('button', 'hbtn', '→ open Gates tab')
+    goGates.style.cssText = 'margin-top:8px'
+    goGates.onclick = () => {
+      overlay.remove()
+      activeTab = 'gates'
+      tabSave()
+      rerender()
+    }
+    modal.appendChild(goGates)
+  }
 
   const jobs = (p.jobs ?? []).slice(-5)
   modal.appendChild(el('div', 'section-label', 'Recent jobs'))
@@ -4126,7 +4138,7 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
   addRow('Pending gates', p => String((p.pending_gates ?? []).length))
 
   const table = el('div')
-  table.style.cssText = 'display:grid;grid-template-columns:140px repeat(${valid.length}, 1fr);gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-height:60vh;overflow-y:auto'
+  table.style.cssText = `display:grid;grid-template-columns:140px repeat(${valid.length}, 1fr);gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-height:60vh;overflow-y:auto`
   // header row
   table.appendChild(cell('', true))
   for (const l of labels) table.appendChild(cell(l, true))
@@ -4135,6 +4147,26 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
     for (const v of r.values) table.appendChild(cell(v))
   }
   modal.appendChild(table)
+  // dsh-web data viz: highlight the best (max) and worst (min) numeric
+  // cell per row (only pure-number cells count, e.g. Ideas/Claims counts).
+  const numeric = (s: string): number | null => /^-?\d+(\.\d+)?$/.test(s.trim()) ? Number(s.trim()) : null
+  const gridCells = [...table.querySelectorAll('div')] as HTMLElement[]
+  const perRow = valid.length + 1
+  for (let r = 0; r < rows.length; r++) {
+    const values: Array<number | null> = []
+    for (let c = 1; c < perRow; c++) values.push(numeric(gridCells[(r + 1) * perRow + c]?.textContent ?? ''))
+    const nums = values.filter((v): v is number => v !== null)
+    if (nums.length < 2) continue
+    const max = Math.max(...nums)
+    const min = Math.min(...nums)
+    for (let c = 1; c < perRow; c++) {
+      const v = values[c - 1]
+      if (v === null) continue
+      const cellEl = gridCells[(r + 1) * perRow + c]!
+      if (v === max) cellEl.style.color = 'var(--tone-green)'
+      else if (v === min) cellEl.style.color = 'var(--tone-red)'
+    }
+  }
   // dsh-web export: download the comparison as CSV, or copy as markdown.
   const exportRow = el('div', 'row')
   exportRow.style.cssText = 'margin-top:10px;gap:8px'
@@ -5576,7 +5608,23 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'grow'))
       card.appendChild(head)
       for (const r of rows.slice(0, 6)) {
-        card.appendChild(el('div', 'muted', r.trim().replace(/^- /, '· ')))
+        // dsh-web depth: each project row jumps to that project.
+        const idMatch = /`([^`]+)`/.exec(r)
+        const row = el('div')
+        row.style.cssText = 'font-size:11px;color:var(--text-2);cursor:pointer;border-radius:6px;padding:2px 4px'
+        row.textContent = r.trim().replace(/^- /, '· ')
+        if (idMatch !== null) {
+          const pid = idMatch[1]!
+          row.title = `switch to ${pid}`
+          row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+          row.onmouseleave = () => { row.style.background = 'none' }
+          row.onclick = () => {
+            projectId = pid
+            rerender()
+            showToast(rootHost(), `⇥ Switched to ${pid.slice(0, 22)}…`)
+          }
+        }
+        card.appendChild(row)
       }
       if (rows.length > 6) card.appendChild(el('div', 'muted', `… and ${rows.length - 6} more`))
       structured = card
