@@ -1921,12 +1921,18 @@ async function previewArtifact(artifactId: string): Promise<void> {
     const revoke = (): void => { for (const url of blobUrls) URL.revokeObjectURL(url) }
     overlay.onclick = (event) => { if (event.target === overlay) { revoke(); overlay.remove() } }
     const modal = el('div', 'modal')
+    const contentType = (blob.type ?? '').toLowerCase()
     const header = el('div', 'modal-header', `📦 ${artifactId.slice(0, 28)}${artifactId.length > 28 ? '…' : ''}`)
+    if (contentType !== '') {
+      // dsh-web metadata: show the served content type in the header.
+      const chip = el('span', 'artifact-kind', contentType.slice(0, 24))
+      chip.style.cssText += ';color:var(--text-3);font-size:9px'
+      header.appendChild(chip)
+    }
     const closeBtn = el('button', 'hbtn ghost', '×')
     closeBtn.onclick = () => { revoke(); overlay.remove() }
     header.appendChild(closeBtn)
     modal.appendChild(header)
-    const contentType = (blob.type ?? '').toLowerCase()
     const text = contentType.startsWith('text/') ? await blob.text() : undefined
     const trimmed = text?.trim() ?? ''
     const isSvg = contentType === 'image/svg+xml' || trimmed.startsWith('<svg')
@@ -3917,6 +3923,13 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       paintSelection()
     }
   }
+  // dsh-web search-as-you-type: live search with a 350ms debounce (Enter
+  // still triggers an immediate search).
+  let debounceTimer: number | undefined
+  input.oninput = () => {
+    if (debounceTimer !== undefined) window.clearTimeout(debounceTimer)
+    debounceTimer = window.setTimeout(() => { void runSearch() }, 350)
+  }
   overlay.appendChild(modal)
   root.appendChild(overlay)
   input.focus()
@@ -5629,8 +5642,16 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   if (detailMsg !== null) {
     const panel = el('div')
     panel.style.cssText = 'width:240px;flex-shrink:0;margin-left:10px;border-left:1px solid var(--border);padding-left:12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto'
-    const head = el('div', 'section-label', 'Message details')
-    panel.appendChild(head)
+    const headRow = el('div', 'row')
+    headRow.style.cssText = 'justify-content:space-between;align-items:center'
+    headRow.appendChild(el('div', 'section-label', 'Message details'))
+    const closeDetail = el('button', 'hbtn ghost', '×')
+    closeDetail.title = 'close details panel'
+    closeDetail.setAttribute('aria-label', 'Close details panel')
+    closeDetail.style.cssText = 'padding:0 4px;font-size:11px'
+    closeDetail.onclick = () => { chatDetailIndex = -1; rerender() }
+    headRow.appendChild(closeDetail)
+    panel.appendChild(headRow)
     const meta = el('div')
     meta.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-size:10.5px'
     const roleRow = el('div', 'row')
