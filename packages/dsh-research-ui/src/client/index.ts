@@ -282,6 +282,9 @@ function tabTogglePin(key: string): void {
 }
 let projectId: string | undefined
 let lastError: string | undefined
+/** Kernel reachability (dsh-web offline indicator). */
+let kernelOnline = true
+let lastKernelCheck = 0
 
 /**
  * Assigned by apply() to the full re-render closure. Module-level panel
@@ -480,6 +483,19 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .panel.density-compact .tab { padding:7px 2px 6px; }
 .panel.density-compact .section-label { margin:10px 0 4px; }
 .panel.density-compact .pstep .lbl { font-size:7px; }
+/* dsh-web mobile: full-viewport panel, scrollable tabs, compact chrome. */
+@media (max-width: 640px) {
+  :host { position: fixed; inset: 0; }
+  .panel { border-radius: 0; border: 0; }
+  .sidebar { width: 180px; }
+  .sidebar.collapsed { width: 36px; }
+  .tabs { overflow-x: auto; }
+  .tab { flex: 0 0 auto; padding-left: 10px; padding-right: 10px; }
+  .header .hbtn { padding-left: 6px; padding-right: 6px; }
+  .header select.picker { display: none; }
+  .body { padding: 12px 10px 8px; }
+  .chat-table { font-size: 9.5px; }
+}
 `
   root.appendChild(style)
 
@@ -615,10 +631,32 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   const render = async (): Promise<void> => {
     styleTabs()
+    // dsh-web offline indicator: throttled kernel health probe.
+    const now = Date.now()
+    if (now - lastKernelCheck > 5000) {
+      lastKernelCheck = now
+      const health = await api<{ ok?: boolean }>('/v1/health')
+      kernelOnline = health !== null && health.ok === true
+    }
     // Project list: drives the sidebar (fullscreen) or the picker (float).
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
     // dsh-web session ordering: most recently active first (by updated_at).
     projects.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+    if (!kernelOnline) {
+      const banner = el('div')
+      banner.style.cssText = 'position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:center;gap:8px;padding:6px 12px;background:var(--tone-red-bg);border-bottom:1px solid var(--tone-red);color:var(--tone-red);font:600 11px/1.4 system-ui,sans-serif'
+      banner.appendChild(el('span', '', '⚠'))
+      const text = el('span', '', 'Research kernel unreachable — reconnecting…')
+      banner.appendChild(text)
+      const retry = el('button', 'hbtn', 'Retry now')
+      retry.style.cssText = 'padding:1px 8px'
+      retry.onclick = () => {
+        lastKernelCheck = 0
+        void render()
+      }
+      banner.appendChild(retry)
+      body.prepend(banner)
+    }
     const target = projectId ?? projects[0]?.project_id
     let projection: Projection | null = null
     if (target !== undefined) {
@@ -2662,7 +2700,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     // /research status answers render as a field-card grid (dsh-web
     // structured results) instead of raw text.
     const isStatus = msg.role === 'assistant' && /^\*\*.*\*\* \(`rsp_/.test(msg.text) && msg.text.includes('Next actions:')
-    let statusCards: HTMLElement | null = null
+    const isSurvey = msg.role === 'assistant' && msg.text.startsWith('Survey complete:')
+    let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
       const phaseMatch = /phase `([^`]+)` rev (\d+)/.exec(msg.text)
       const pendingMatch = msg.text.match(/Pending gates:\n([\s\S]*?)\n\n/)
@@ -2670,35 +2709,44 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       const budgetMatch = /Budget: \$([\d.]+) \/ ([\d.]+|\S+) max, ([\d.]+) \/ ([\d.]+|\S+) GPU-h/.exec(msg.text)
       const grid = el('div')
       grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
-      const cell = (label: string, value: string): HTMLElement => {
-        const c = el('div')
-        c.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:6px 9px'
-        const l = el('div', 'muted', label)
-        l.style.cssText = 'font-size:9px;text-transform:uppercase;letter-spacing:.5px'
-        const v = el('div', 'mono', value)
-        v.style.cssText = 'font-size:11px;color:var(--text);margin-top:2px;word-break:break-word'
-        c.append(l, v)
-        return c
-      }
       if (phaseMatch !== null) {
-        grid.appendChild(cell('Phase', `${phaseMatch[1]} · rev ${phaseMatch[2]}`))
+        grid.appendChild(chatFieldCell('Phase', `${phaseMatch[1]} · rev ${phaseMatch[2]}`))
       }
       const next = msg.text.split('Next actions:')[1]?.split('\n\n')[0]?.split('\n').filter(l => l.trim().startsWith('- ')).map(l => l.trim().slice(2)).slice(0, 3).join('; ') ?? '—'
-      grid.appendChild(cell('Next', next || '—'))
+      grid.appendChild(chatFieldCell('Next', next || '—'))
       const pending = pendingMatch !== null ? pendingMatch[1].split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
-      grid.appendChild(cell('Pending gates', pending || 'none'))
+      grid.appendChild(chatFieldCell('Pending gates', pending || 'none'))
       const jobs = jobsMatch !== null ? jobsMatch[1].split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
-      grid.appendChild(cell('Jobs', jobs || 'none'))
+      grid.appendChild(chatFieldCell('Jobs', jobs || 'none'))
       if (budgetMatch !== null) {
-        grid.appendChild(cell('Budget', `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
+        grid.appendChild(chatFieldCell('Budget', `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
       }
-      statusCards = grid
+      structured = grid
+    } else if (isSurvey && searchQ === '') {
+      // dsh-web survey result card: snapshot + dedup + top hits.
+      const snap = /Survey complete: \*\*([^*]+)\*\* — (\d+) papers after dedup \((\d+) removed\)/.exec(msg.text)
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const headRow = el('div', 'row')
+      headRow.style.cssText = 'align-items:center;gap:8px'
+      headRow.appendChild(el('span', '', '📚'))
+      const snapName = el('span', 'pname', snap?.[1] ?? 'snapshot')
+      snapName.style.cssText = 'font-size:12px'
+      headRow.appendChild(snapName)
+      headRow.appendChild(el('span', 'grow'))
+      if (snap !== null) headRow.appendChild(el('span', 'muted', `${snap[2]} papers · ${snap[3]} dedup`))
+      card.appendChild(headRow)
+      const hits = msg.text.split('Top hits:')[1]?.split('\n').filter(l => /^- /.test(l.trim())).slice(0, 5) ?? []
+      for (const h of hits) {
+        card.appendChild(el('div', 'muted', h.trim()))
+      }
+      structured = card
     }
     const lineCount = msg.text.split('\n').length
-    const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === '' && statusCards === null
+    const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === '' && structured === null
     const renderBubble = (): void => {
-      if (statusCards !== null) {
-        bubble.replaceChildren(statusCards)
+      if (structured !== null) {
+        bubble.replaceChildren(structured)
       } else {
         bubble.replaceChildren(...formatChatText(collapsed ? msg.text.split('\n').slice(0, 6).join('\n') + '\n…' : msg.text, searchQ === '' ? undefined : searchQ))
       }
@@ -3060,6 +3108,18 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   column.appendChild(completionBox)
 
   body.appendChild(shell)
+}
+
+/** Structured chat field cell (status/survey cards). */
+function chatFieldCell(label: string, value: string): HTMLElement {
+  const c = el('div')
+  c.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:6px 9px'
+  const l = el('div', 'muted', label)
+  l.style.cssText = 'font-size:9px;text-transform:uppercase;letter-spacing:.5px'
+  const v = el('div', 'mono', value)
+  v.style.cssText = 'font-size:11px;color:var(--text);margin-top:2px;word-break:break-word'
+  c.append(l, v)
+  return c
 }
 
 /**
