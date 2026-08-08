@@ -125,3 +125,6 @@ kill "$RUNNER_PID" "$KERNEL_PID" 2>/dev/null || true
 rm -rf "$WORK"
 echo "hardening-tests: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] || exit 1
+
+# §OPS-01/SEC-UI-01: standalone startup reliability + token/loopback HTTP.
+bash "$REPO/tests/security/run-standalone-http-tests.sh"
