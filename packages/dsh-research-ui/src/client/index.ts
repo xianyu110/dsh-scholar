@@ -5210,7 +5210,10 @@ async function terminalConnect(projectId: string, jobId: string): Promise<void> 
   terminalStatus = 'connecting'
   terminalAttempt = 0
   const readLoop = async (): Promise<void> => {
-    const url = `${base()}/v1/jobs/${encodeURIComponent(jobId)}/terminal?after_seq=${terminalLastSeq}&channel=${terminalChannel}&run_id=${encodeURIComponent(runId)}`
+    // dsh-web: the server resolves the job's current run identity (frames
+    // are stored under the runner's run_id); the client keys its cursor by
+    // the job id.
+    const url = `${base()}/v1/jobs/${encodeURIComponent(jobId)}/terminal?after_seq=${terminalLastSeq}&channel=${terminalChannel}`
     try {
       const response = await fetch(url, { headers: { accept: 'text/event-stream', ...(await authHeaders()) }, signal: controller.signal })
       if (!response.ok || response.body === null) throw new Error(`terminal http ${response.status}`)

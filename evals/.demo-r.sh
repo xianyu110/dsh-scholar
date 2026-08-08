@@ -113,7 +113,7 @@ ANA=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/analysis" -d '{"met
 EV=$(printf '%s' "$ANA" | node -e "
 let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{
   const a=JSON.parse(d);
-  const body={source_type:'analysis',run_ids:['formal:demo:11','formal:demo:23','formal:demo:47'],artifact_refs:[a.artifact],analysis_method:'bootstrap_95_mean_difference',result:{primary_metric:'macro_f1',value:a.mean,baseline_value:0.6,effect_size:a.effect,ci_low:a.ci[0],ci_high:a.ci[1],n_seeds:3}};
+  const body={source_type:'analysis',run_ids:['formal:demo:11','formal:demo:23','formal:demo:47'],artifact_refs:[a.artifact_id],analysis_method:'bootstrap_95_mean_difference',result:{primary_metric:'macro_f1',value:a.mean,baseline_value:0.6,effect_size:a.effect_size,ci_low:a.ci_low,ci_high:a.ci_high,n_seeds:3}};
   try {
     const r=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/verified',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json();

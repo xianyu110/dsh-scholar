@@ -14,7 +14,15 @@ PASS=0; FAIL=0
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; PASS=$((PASS+1)); }
 bad() { printf '\033[1;31m  ✗ %s\033[0m\n' "$*"; FAIL=$((FAIL+1)); }
 say() { printf '\033[1;34m\n== %s ==\033[0m\n' "$*"; }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+api() {
+  local code body
+  if [[ "$*" == *"/evidence"* ]]; then printf '%s' "$4" > /tmp/ev-body-exact; fi
+  body=$(mktemp)
+  code=$(curl -s -o "$body" -w '%{http_code}' -H 'content-type: application/json' "$@")
+  if [[ "$code" != 2* ]]; then echo "API_FAIL $code $* -> $(head -c 200 "$body")" >> /tmp/api-fail.log; fi
+  cat "$body"
+  rm -f "$body"
+}
 
 # ── 0. 环境:连接测试实例 kernel(web sidecar 已起 17412),另起独立 runner ──
 say "0. 环境准备"
@@ -110,16 +118,7 @@ done
 # ── 9. 统计 → 可信 Evidence → Claim 验证 ─────────────────────────────────
 say "9. 确定性分析 → verified Evidence → Claim"
 ANA=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/analysis" -d '{"metric":"macro_f1"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(JSON.stringify({artifact:a.artifact_id,mean:a.mean,effect:a.effect_size,ci:[a.ci_low,a.ci_high]}))})")
-EV=$(printf '%s' "$ANA" | node -e "
-let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{
-  const a=JSON.parse(d);
-  const body={source_type:'analysis',run_ids:['formal:demo:11','formal:demo:23','formal:demo:47'],artifact_refs:[a.artifact],analysis_method:'bootstrap_95_mean_difference',result:{primary_metric:'macro_f1',value:a.mean,baseline_value:0.6,effect_size:a.effect,ci_low:a.ci[0],ci_high:a.ci[1],n_seeds:3}};
-  try {
-    const r=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/verified',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-    const j=await r.json();
-    console.log(j.evidence_id||'');
-  } catch(e) { console.log(''); }
-})" "$KPORT" "$PROJ")
+EV=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/evidence/verified" -d "{\"source_type\":\"analysis\",\"run_ids\":[\"formal:demo:11\",\"formal:demo:23\",\"formal:demo:47\"],\"artifact_refs\":[\"$(echo "$ANA" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).artifact))")\"],\"analysis_method\":\"bootstrap_95_mean_difference\",\"result\":{\"primary_metric\":\"macro_f1\",\"value\":$(echo "$ANA" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).mean))"),\"baseline_value\":0.6,\"effect_size\":$(echo "$ANA" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).effect||0))"),\"ci_low\":$(echo "$ANA" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).ci[0]))"),\"ci_high\":$(echo "$ANA" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).ci[1]))"),\"n_seeds\":3}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).evidence_id))")
 CL=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/claims" -d '{"statement":"Treatment A improves macro_f1 over baseline on the fixture dataset","scope":{"dataset":"fixture_v1","split":"official"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).claim_id))")
 CS=$(api -X POST "http://127.0.0.1:$KPORT/v1/claims/verify" -d "{\"claim_id\":\"$CL\",\"evidence_ids\":[\"$EV\"],\"analysis_artifact\":\"$(echo "$ANA" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).artifact))")\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
 echo "     分析: $ANA"

@@ -466,10 +466,11 @@ async function runDocker(
  */
 export async function executeJob(job: JobRecord, options: RunnerOptions): Promise<{ job: JobRecord; run: RunOutcome }> {
   const { client, owner, mode = 'subprocess', timeoutMs = 60000, maxLogBytes = 4 * 1024 * 1024, signal, signingKey } = options
-  // §6 terminal frames: the terminal run identity is the JOB id (the kernel
-  // stores frames under (job, run) and the SSE endpoint defaults run_id to
-  // the job id); the ledger run_id stays `run_…` in the manifest.
-  const runId = job.job_id
+  // §6 terminal frames: the run identity is fixed BEFORE execution so live
+  // chunks can be uploaded while the process is still running. The manifest
+  // and metrics validation use the same run_id (run_…), so frames MUST use
+  // it too; the SSE endpoint resolves the job's current run_id server-side.
+  const runId = `run_${randomUUID().slice(0, 12)}`
   const leaseGeneration = options.leaseGeneration ?? undefined
   const pendingFrames: Array<{
     seq: number; stream_seq?: number | null; channel?: 'stdout' | 'stderr' | null

@@ -648,7 +648,9 @@ function handleTerminalSse(
   jobId: string,
   url: URL,
 ): void {
-  const runId = url.searchParams.get('run_id') ?? jobId
+  const runId = url.searchParams.get('run_id')
+    ?? kernel.resolveTerminalRun(jobId)
+    ?? jobId
   const afterSeq = Math.max(0, Number(url.searchParams.get('after_seq') ?? 0) || 0)
   const writeEvent = (event: string, data: unknown): void => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)

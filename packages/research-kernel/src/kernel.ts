@@ -1448,6 +1448,15 @@ export class ResearchKernel {
     }
   }
 
+  /** Resolve the terminal run identity for a job: the most recent run that
+   * uploaded frames, or null when none exists yet (the SSE endpoint then
+   * falls back to the job id). */
+  resolveTerminalRun(jobId: string): string | null {
+    const row = this.db.prepare('SELECT run_id FROM terminal_frames WHERE job_id = ? ORDER BY created_at DESC, seq DESC LIMIT 1')
+      .get(jobId) as { run_id?: string } | undefined
+    return row?.run_id ?? null
+  }
+
   // ── evidence & claims (design §4.7) ──────────────────────────────────────
 
   ingestEvidence(input: {
