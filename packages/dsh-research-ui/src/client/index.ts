@@ -888,6 +888,12 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       addStep('Survey literature, pre-register a contract, run container experiments')
       addStep('Build the manuscript, review it, export the Release Bundle')
       hero.appendChild(steps)
+      // dsh-web overview: how many projects live on this kernel.
+      if (projects.length > 0) {
+        const stat = el('div', 'muted', `${projects.length} project(s) on this kernel — pick one in the sidebar, or switch with Ctrl/Cmd+P.`)
+        stat.style.cssText = 'font-size:11px;margin-top:10px'
+        hero.appendChild(stat)
+      }
       const go = el('button', 'btn approve', '＋ Create your first project')
       go.style.cssText = 'padding:9px 20px;margin-top:6px'
       go.onclick = () => { openNewProjectModal(root) }
@@ -3446,6 +3452,15 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   modal.appendChild(about)
 
   // dsh-web data management: clear every local preference/transcript.
+  modal.appendChild(section('Help'))
+  const helpRow = el('div', 'row')
+  helpRow.style.cssText = 'padding:4px 0'
+  const helpBtn = el('button', 'hbtn', '⌨ Keyboard shortcuts')
+  helpBtn.style.cssText = 'padding:2px 10px'
+  helpBtn.onclick = () => { overlay.remove(); openShortcutsModal(root) }
+  helpRow.appendChild(helpBtn)
+  modal.appendChild(helpRow)
+
   modal.appendChild(section('Data'))
   const resetRow = el('div', 'row')
   resetRow.style.cssText = 'padding:4px 0'
@@ -4162,7 +4177,21 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
   table.style.cssText = `display:grid;grid-template-columns:140px repeat(${valid.length}, 1fr);gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-height:60vh;overflow-y:auto`
   // header row
   table.appendChild(cell('', true))
-  for (const l of labels) table.appendChild(cell(l, true))
+  for (let i = 0; i < labels.length; i++) {
+    const headCell = cell(labels[i]!, true)
+    // dsh-web depth: click a column header to open that project.
+    const pid = valid[i]!.project!.project_id
+    if (pid !== undefined) {
+      headCell.style.cursor = 'pointer'
+      headCell.title = `open ${labels[i]}`
+      headCell.onclick = () => {
+        overlay.remove()
+        projectId = pid
+        rerender()
+      }
+    }
+    table.appendChild(headCell)
+  }
   for (const r of rows) {
     table.appendChild(cell(r.label))
     for (const v of r.values) table.appendChild(cell(v))
