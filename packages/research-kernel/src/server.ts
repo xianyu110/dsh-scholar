@@ -86,7 +86,6 @@ const decisionSchema = z.object({
   diff: z.string().optional(),
   session_id: z.string().nullable().optional(),
   event_id: z.string().nullable().optional(),
-  resume_to: z.string().optional(),
 }).superRefine((value, ctx) => {
   if ((value.decision === 'rejected' || value.decision === 'revised') && (value.reason === undefined || value.reason.trim() === '')) {
     ctx.addIssue({ code: 'custom', message: 'reason is required for rejected/revised decisions', path: ['reason'] })
@@ -509,7 +508,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
         case 'gates': {
           if (id !== undefined && sub === 'decisions' && method === 'POST') {
             const input = decisionSchema.parse(body)
-            ok(res, kernel.decideGate({ gate_id: id, ...input, resume_to: input.resume_to as never }))
+            ok(res, kernel.decideGate({ gate_id: id, ...input }))
             return
           }
           break

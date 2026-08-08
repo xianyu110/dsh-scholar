@@ -157,7 +157,6 @@ export class ResearchClient {
     diff?: string
     session_id?: string | null
     event_id?: string | null
-    resume_to?: string
   }): Promise<{ gate: Gate; decision: Decision; project: ResearchProject }> {
     return this.request('POST', `/v1/gates/${input.gate_id}/decisions`, input)
   }

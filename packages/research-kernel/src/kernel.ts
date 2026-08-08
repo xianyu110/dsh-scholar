@@ -535,7 +535,11 @@ export class ResearchKernel {
       if (input.decision === 'approved') {
         const mapping = GATE_APPROVAL_TRANSITION[gate.type]
         if (gate.type === 'budget') {
-          const resumeTo = input.resume_to ?? project.status
+          // budget-gate-resume (acceptance-tests.md §2): ONLY the resume
+          // target declared in the gate payload may be used; client-supplied
+          // resume_to is ignored.
+          const declared = typeof gate.payload.resume_to === 'string' ? gate.payload.resume_to : ''
+          const resumeTo = declared !== '' && declared !== 'BLOCKED_GATE' ? declared as ProjectStatus : project.status
           if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
             project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
           }
@@ -662,8 +666,16 @@ export class ResearchKernel {
         if (next.gpu_hours > project.constraints.max_gpu_hours) exceeded.push(`gpu hours ${next.gpu_hours} > ${project.constraints.max_gpu_hours}`)
         if (exceeded.length > 0) {
           this.emit(projectId, 'policy.violation', { reasons: exceeded })
+          // Budget Gate declares the ONLY allowed resume target: the status
+          // the project was in before the block (acceptance-tests.md §2
+          // budget-gate-resume — never client-supplied).
+          const resumeTo = project.status
+          this.db.prepare(
+            `INSERT INTO gates (gate_id, project_id, type, title, summary, payload, status, dsh_session_id, dsh_event_id, created_at, decided_at)
+             VALUES (?, ?, 'budget', ?, '', ?, 'pending', NULL, NULL, ?, NULL)`,
+          ).run(buildGateId(), projectId, 'Budget Gate', JSON.stringify({ resume_to: resumeTo }), nowIso())
           this.db.prepare('UPDATE projects SET status = ?, updated_at = ?, history = ? WHERE project_id = ?')
-            .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')})`]), projectId)
+            .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')}; resume allowed to ${resumeTo})`]), projectId)
         }
       }
       return this.getBudget(projectId)

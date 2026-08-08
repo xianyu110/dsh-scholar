@@ -1645,7 +1645,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
             actor: 'web-user',
             decision: 'approved',
             reason: 'bulk approved from Research OS panel',
-            ...(g?.type === 'budget' ? { resume_to: 'EXPERIMENTING' } : {}),
+
           }),
         })
       }
@@ -1758,7 +1758,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
           // dsh-web resume: approving a budget gate on a BLOCKED_GATE project
           // must pin the resume target (kernel §6.6 default: EXPERIMENTING),
           // otherwise the project stays parked after approval.
-          ...(gate.type === 'budget' ? { resume_to: 'EXPERIMENTING' } : {}),
+
         }),
       })
       if (ok === null) {
