@@ -669,6 +669,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   for (const [key, label] of TAB_DEFS) {
     const button = el('button', 'tab', label)
     button.dataset.tab = key
+    button.id = `tab-${key}`
+    button.setAttribute('aria-controls', 'panel-body')
     button.setAttribute('role', 'tab')
     button.setAttribute('aria-selected', key === activeTab ? 'true' : 'false')
     // dsh-web "pin view": ★ marks a favourite tab (persisted).
@@ -702,6 +704,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   // ── body + picker ──
   const body = el('div', 'body')
+  body.id = 'panel-body'
+  body.setAttribute('role', 'tabpanel')
+  body.setAttribute('aria-label', 'active panel content')
   main.appendChild(body)
   const picker = el('select', 'picker')
   picker.style.cssText = 'margin:10px 12px 0;width:calc(100% - 24px)'
@@ -1022,6 +1027,13 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     steps.appendChild(step)
   }
   pipeline.appendChild(steps)
+  // dsh-web progress: completion % of the pipeline.
+  const statusIdx2 = statusIdx >= 0 ? statusIdx : PHASE_PIPELINE.length
+  const pct = Math.round((statusIdx2 / PHASE_PIPELINE.length) * 100)
+  const pctRow = el('div', 'muted')
+  pctRow.style.cssText = 'font-size:10px;margin-top:6px;text-align:right'
+  pctRow.textContent = `${pct}% complete`
+  pipeline.appendChild(pctRow)
   body.appendChild(pipeline)
 
   // next actions
@@ -3598,9 +3610,9 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const tab = el('button', 'hbtn')
     tab.textContent = s.name
     tab.style.cssText = 'padding:3px 10px;font-size:10.5px'
-    if (s.id !== chatActiveId && s.messages.length > 0) {
-      const badge = el('span', 'artifact-kind', `${s.messages.length}`)
-      badge.style.cssText += ';margin-left:4px;color:var(--text-3)'
+    if (s.id !== chatActiveId && (s.unread ?? 0) > 0) {
+      const badge = el('span', 'artifact-kind', `${s.unread}`)
+      badge.style.cssText += ';margin-left:4px;color:var(--tone-amber);font-weight:700'
       tab.appendChild(badge)
     }
     if (s.id === chatActiveId) {
@@ -4368,6 +4380,9 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     // dsh-web quote-reply: attach a pending quote to this message.
     const quote = chatQuoteTarget
     chatQuoteTarget = null
+    // The session that launched this command (the reply lands back here
+    // even if the user switched sessions while it ran).
+    const originSessionId = chatActiveId
     chatPush('user', line, quote ?? undefined)
     // dsh-web streaming feel: a "running…" bubble while the command works.
     const runningBubble = el('div')
@@ -4394,8 +4409,20 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         const next = done + 1
         if (next >= lines.length) {
           answerBubble.replaceChildren(...formatChatText(answer))
-          chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
-          chatPersist()
+          // dsh-web session unread: if the user switched sessions while
+          // the command ran, the reply lands in the origin session and the
+          // current session gets no unread.
+          if (originSessionId !== null && originSessionId !== chatActiveId) {
+            const origin = chatSessions.find(x => x.id === originSessionId)
+            if (origin !== undefined) {
+              origin.messages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
+              origin.unread = (origin.unread ?? 0) + 1
+            }
+            chatSessionsPersist()
+          } else {
+            chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
+            chatPersist()
+          }
           rerender()
           showToast(rootHost(), `✓ ${line.slice(0, 40)}${line.length > 40 ? '…' : ''}`)
           return
