@@ -4047,6 +4047,27 @@ function openNotificationsModal(root: ShadowRoot): void {
     row.append(text, time, del)
     row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
     row.onmouseleave = () => { row.style.background = 'none' }
+    // dsh-web context menu: copy or dismiss a single notification.
+    row.oncontextmenu = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const ctxRoot = rootHost()
+      if (ctxRoot === null) return
+      openContextMenu(ctxRoot, event.clientX, event.clientY, [
+        { label: '⧉ Copy text', onPick: () => copyText(n.text) },
+        {
+          label: '🗑 Dismiss',
+          danger: true,
+          onPick: () => {
+            notifHistory.splice(i, 1)
+            notifPersist()
+            notifMarkRead()
+            overlay.remove()
+            openNotificationsModal(root)
+          },
+        },
+      ])
+    }
     list.appendChild(row)
   }
   modal.appendChild(list)
