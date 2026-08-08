@@ -38,8 +38,8 @@
 | UI-04 | browser client strict typecheck | 未达成 | UI tsconfig 当前只覆盖 standalone Node 文件；将 client 纳入 `tsc` 会暴露状态 tuple、nullability、ShadowRoot 和作用域错误，必须在拆分巨型 client 时全部清零 |
 | UI-05 | standalone settings runtime | 代码已修，待 UI 验收 | Auto refresh timer 与暗色 Accent 移到可达作用域，删除 DSH boot token 文案；需补浏览器交互测试 |
 | ART-01 | standalone binary/SSE 流式 | 代码已修，待验收 | proxy 已改为 Web stream 转发、保留 media headers 并处理 source/client 中断；需补真实 PDF/image/SSE round-trip CI |
-| ART-02 | media type | 部分 | Kernel Artifact GET 常用 application/octet-stream，PDF preview 依赖猜测 |
-| STORE-01 | 显式迁移版本 | 未达成 | SCHEMA_VERSION 仍为 1，同时启动代码隐式 ensure/rebuild v2 字段 |
+| ART-02 | media type | 已实现 | 迁移 0004 增加 media_type/file_name 列;GET /v1/artifacts/:id 按存储类型服务(pdf→application/pdf、log→text/plain)、ETag+If-None-Match 304、Content-Disposition(inline/attachment)、单区间 Range 206/416;runner 上传 run log 带 media_type;单测 3 项;真实库原地迁移验证 |
+| STORE-01 | 显式迁移版本 | 已实现 | schema_migrations 台账(每步 checksum=sha256(id+body)、applied_at、report_json)、事务化 up(失败 ROLLBACK)、幂等重开、checksum 篡改/版本超前 loud fail、schema_version=2 且仅全部成功后更新、database_id/created_at/last_migrated_at;0001 全量初始 DDL、0002 legacy v1 导入(principal 列、provenance 回填、artifacts 项目级重建+跨项目 ID 再生、jobs lease/snapshot+项目级幂等、manuscript→初始 TeX 工作区)、0003 terminal/tex/i18n 能力(早期 preview 库);真实 standalone 库原地 1→2 迁移验证(11 项目+TeX+terminal 数据保留);fixture tests/fixtures/databases/v1-kernel.db(3da1392 原版 v1 DDL)+ 可再生成脚本;单测 7 项;§3.1 列名级 DDL 对齐(如 brief_json/body_json/blob_objects/code_snapshots/runs 表)仍未实施,属 schema-parity 剩余项 |
 | STORE-02 | CodeSnapshot durable model | 部分 | archive/manifest 是 Artifact，但没有 code_snapshots 权威表；snapshot_id 与可执行 artifact id 容易混淆 |
 | EVENT-01 | 正确 DSH event assumption | 文档已修 | DSH SessionEventMap 实际可扩展；业务仍选择 Kernel Outbox 权威 |
 | SKILL-01 | 所有 Skill 可安装发现 | 代码已修，待安装验收 | provider 已从包根挂载 core、两个 domain 和 venue；仍需 clean tarball 安装、自动选择和 source/prepared hash 测试 |
