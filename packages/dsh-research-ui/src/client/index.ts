@@ -415,6 +415,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .ws-item:hover .ws-item > span[style*="display:none"] { display:flex; }
 .ws-item.blocked { border:1px solid var(--tone-red); background:var(--tone-red-bg); }
 .ws-item.blocked .ws-name { color:var(--tone-red); font-weight:700; }
+.ws-item.selected { outline:1px solid var(--accent); background:var(--accent-soft); }
+.ws-check { font-size:12px; color:var(--text-2); flex-shrink:0; }
 .sidebar-foot { padding:10px 12px; border-top:1px solid var(--border); color:var(--text-3); font-size:10px; }
 .sidebar.collapsed { width:44px; }
 .sidebar.collapsed .sidebar-head { justify-content:center; padding:12px 6px; }
@@ -691,6 +693,18 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         rerender()
       } else if (chatQuoteTarget !== null) {
         chatQuoteTarget = null
+        rerender()
+      }
+      return
+    }
+    // dsh-web keyboard navigation: Alt+1..7 switches tabs.
+    if (event.altKey && /^[1-7]$/.test(event.key) && !typing) {
+      event.preventDefault()
+      const idx = Number(event.key) - 1
+      const tab = TAB_DEFS[idx]
+      if (tab !== undefined) {
+        activeTab = tab[0]
+        tabSave()
         rerender()
       }
     }
@@ -1875,6 +1889,19 @@ function renderSidebar(
     for (const p of filtered) {
       const item = el('button', 'ws-item')
       if (p.project_id === activeId) item.classList.add('active')
+      if (sidebarSelecting && p.project_id !== undefined) {
+        if (sidebarSelected.has(p.project_id)) item.classList.add('selected')
+        const box = el('span', 'ws-check', sidebarSelected.has(p.project_id) ? '☑' : '☐')
+        box.title = 'toggle selection'
+        box.onclick = (event) => {
+          event.stopPropagation()
+          if (p.project_id === undefined) return
+          if (sidebarSelected.has(p.project_id)) sidebarSelected.delete(p.project_id)
+          else sidebarSelected.add(p.project_id)
+          renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+        }
+        item.prepend(box)
+      }
       // dsh-web "attention" feel: BLOCKED_GATE projects get a red ring and
       // an ⏳ badge so a parked project is visible in the sidebar.
       const blocked = p.status === 'BLOCKED_GATE'
@@ -1950,7 +1977,35 @@ function renderSidebar(
     const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
     if (root !== null) openSettingsModal(root)
   }
-  foot.append(footLabel, settingsBtn)
+  if (!sidebarSelecting) {
+    const selectBtn = el('button', 'hbtn', '☑ Select')
+    selectBtn.title = 'multi-select projects (bulk actions)'
+    selectBtn.onclick = () => {
+      sidebarSelecting = true
+      sidebarSelected.clear()
+      renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+    }
+    foot.append(footLabel, selectBtn, settingsBtn)
+  } else {
+    const doneBtn = el('button', 'hbtn', 'Done')
+    doneBtn.onclick = () => {
+      sidebarSelecting = false
+      sidebarSelected.clear()
+      renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
+    }
+    const countLabel = el('span', '', `${sidebarSelected.size} selected`)
+    const archiveSel = el('button', 'hbtn', '🗄 Archive')
+    archiveSel.disabled = sidebarSelected.size === 0
+    archiveSel.onclick = async () => {
+      for (const id of sidebarSelected) {
+        await api(`/v1/projects/${encodeURIComponent(id)}/archive`, { method: 'POST' })
+      }
+      sidebarSelecting = false
+      sidebarSelected.clear()
+      rerender()
+    }
+    foot.append(countLabel, archiveSel, doneBtn)
+  }
   sidebar.appendChild(foot)
 }
 
@@ -1967,6 +2022,9 @@ let chatSearchQuery = ''
 let chatQuoteTarget: { index: number; text: string } | null = null
 /** Commands-only view: show just the user command messages. */
 let chatCommandsOnly = false
+/** Multi-select mode for the sidebar (dsh-web bulk session actions). */
+let sidebarSelecting = false
+let sidebarSelected = new Set<string>()
 
 async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const shell = el('div')
@@ -2045,7 +2103,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       bubble.style.outline = '2px solid var(--accent)'
     }
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
-    bubble.replaceChildren(...formatChatText(msg.text))
+    bubble.replaceChildren(...formatChatText(msg.text, searchQ === '' ? undefined : searchQ))
     // dsh-web "details": click a message to inspect it in the side panel.
     bubble.title = 'click for details'
     bubble.onclick = () => {
@@ -2389,7 +2447,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
  * fences, **bold** and `code` spans — all built with textContent-only
  * nodes (design §15.4).
  */
-function formatChatText(text: string): HTMLElement[] {
+function formatChatText(text: string, highlight?: string): HTMLElement[] {
   const nodes: HTMLElement[] = []
   const lines = text.split('\n')
   let inFence = false
@@ -2442,7 +2500,7 @@ function formatChatText(text: string): HTMLElement[] {
     if (/^#{1,3}\s/.test(line)) {
       const h = el('div')
       h.style.cssText = `font:700 ${line.startsWith('###') ? 11.5 : 12.5}px/1.4 system-ui,sans-serif;color:var(--text);margin:6px 0 3px`
-      h.append(...inlineChatText(line.replace(/^#{1,3}\s+/, '')))
+      h.append(...inlineChatText(line.replace(/^#{1,3}\s+/, ''), highlight))
       nodes.push(h)
       continue
     }
@@ -2451,7 +2509,7 @@ function formatChatText(text: string): HTMLElement[] {
       row.style.cssText = 'display:flex;gap:7px;padding:1px 0'
       row.appendChild(el('span', '', '•'))
       const content = el('span', '', '')
-      content.append(...inlineChatText(line.replace(/^[-*•]\s+/, '')))
+      content.append(...inlineChatText(line.replace(/^[-*•]\s+/, ''), highlight))
       row.appendChild(content)
       nodes.push(row)
       continue
@@ -2461,7 +2519,7 @@ function formatChatText(text: string): HTMLElement[] {
       row.style.cssText = 'display:flex;gap:7px;padding:1px 0'
       row.appendChild(el('span', '', line.match(/^\d+\./)?.[0] ?? '•'))
       const content = el('span', '', '')
-      content.append(...inlineChatText(line.replace(/^\d+\.\s+/, '')))
+      content.append(...inlineChatText(line.replace(/^\d+\.\s+/, ''), highlight))
       row.appendChild(content)
       nodes.push(row)
       continue
@@ -2470,14 +2528,14 @@ function formatChatText(text: string): HTMLElement[] {
       nodes.push(el('div', '', '\u00a0'))
       continue
     }
-    nodes.push(el('div', '', ...inlineChatText(line)))
+    nodes.push(el('div', '', ...inlineChatText(line, highlight)))
   }
   flushFence()
   return nodes
 }
 
 /** Inline **bold** + `code` spans (shared by every line kind). */
-function inlineChatText(text: string): HTMLElement[] {
+function inlineChatText(text: string, highlight?: string): HTMLElement[] {
   const nodes: HTMLElement[] = []
   const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
   for (const part of parts) {
@@ -2488,6 +2546,20 @@ function inlineChatText(text: string): HTMLElement[] {
       const code = el('code', '', part.slice(1, -1))
       code.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:4px;padding:0 4px;font:10.5px/1.4 ui-monospace,Menlo,monospace'
       nodes.push(code)
+    } else if (highlight !== undefined && highlight !== '' && part.toLowerCase().includes(highlight)) {
+      // dsh-web search feel: highlight every occurrence of the query.
+      const low = part.toLowerCase()
+      let cursor = 0
+      let idx = low.indexOf(highlight)
+      while (idx >= 0) {
+        if (idx > cursor) nodes.push(el('span', '', part.slice(cursor, idx)))
+        const mark = el('mark', '', part.slice(idx, idx + highlight.length))
+        mark.style.cssText = 'background:var(--tone-amber);color:var(--text);border-radius:3px;padding:0 2px'
+        nodes.push(mark)
+        cursor = idx + highlight.length
+        idx = low.indexOf(highlight, cursor)
+      }
+      if (cursor < part.length) nodes.push(el('span', '', part.slice(cursor)))
     } else {
       nodes.push(el('span', '', part))
     }
