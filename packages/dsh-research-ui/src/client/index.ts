@@ -545,6 +545,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const spacer = el('span', 'spacer')
   header.appendChild(spacer)
   const themeBtn = el('button', 'hbtn')
+  themeBtn.setAttribute('aria-label', 'Toggle theme')
   const paintTheme = (): void => {
     const dark = host.dataset.theme === 'dark'
     themeBtn.textContent = dark ? '☀️ Light' : '🌙 Dark'
@@ -558,6 +559,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   paintTheme()
   const refresh = el('button', 'hbtn', '⟳ Refresh')
   refresh.title = 'refresh now'
+  refresh.setAttribute('aria-label', 'Refresh')
   const close = el('button', 'hbtn ghost', '×')
   close.title = 'collapse'
   close.onclick = () => { panel.style.display = 'none' }
@@ -626,6 +628,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   for (const [key, label] of TAB_DEFS) {
     const button = el('button', 'tab', label)
     button.dataset.tab = key
+    button.setAttribute('role', 'tab')
+    button.setAttribute('aria-selected', key === activeTab ? 'true' : 'false')
     // dsh-web "pin view": ★ marks a favourite tab (persisted).
     const pinned = tabPinned(key)
     if (pinned) {
@@ -1020,13 +1024,59 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
   }
 }
 
+/** Runs multi-select (dsh-web bulk cancel). */
+let runsSelecting = false
+let runsSelected = new Set<string>()
+
 function renderRuns(body: HTMLElement, p: Projection): void {
   const jobs = (p.jobs ?? []).slice(-12).reverse()
   const cancellable = new Set(['queued', 'running', 'retryable'])
-  body.appendChild(el('div', 'section-label', `Runs (${(p.jobs ?? []).length})`))
+  const labelRow = el('div', 'row')
+  labelRow.style.cssText = 'justify-content:space-between;align-items:center'
+  labelRow.appendChild(el('div', 'section-label', `Runs (${(p.jobs ?? []).length})`))
+  if (jobs.length > 0) {
+    const selBtn = el('button', 'hbtn', runsSelecting ? '☑ Selecting…' : '☑ Select')
+    selBtn.title = runsSelecting ? 'exit multi-select' : 'multi-select runs (bulk cancel)'
+    selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
+    selBtn.onclick = () => {
+      runsSelecting = !runsSelecting
+      runsSelected.clear()
+      rerender()
+    }
+    labelRow.appendChild(selBtn)
+  }
+  body.appendChild(labelRow)
   if (jobs.length === 0) {
     body.appendChild(el('div', 'empty', 'No experiment runs yet.'))
     return
+  }
+  // Bulk cancel bar when selecting.
+  if (runsSelecting) {
+    const bar = el('div', 'card border-red')
+    bar.style.cssText = 'padding:8px 10px;margin:4px 0;display:flex;align-items:center;gap:10px'
+    const count = el('span', 'mono', `${runsSelected.size} selected`)
+    count.style.cssText = 'font-size:11px;color:var(--text)'
+    const cancelSel = el('button', 'btn cancel', '✕ Cancel selected')
+    cancelSel.disabled = runsSelected.size === 0
+    cancelSel.onclick = async () => {
+      for (const id of runsSelected) {
+        await api(`/v1/jobs/${encodeURIComponent(id)}/cancel`, {
+          method: 'POST',
+          body: JSON.stringify({ actor: 'web-user', reason: 'bulk cancelled from Research OS panel' }),
+        })
+      }
+      runsSelecting = false
+      runsSelected.clear()
+      rerender()
+    }
+    const doneSel = el('button', 'hbtn', 'Done')
+    doneSel.onclick = () => {
+      runsSelecting = false
+      runsSelected.clear()
+      rerender()
+    }
+    bar.append(count, cancelSel, doneSel)
+    body.appendChild(bar)
   }
   for (const job of jobs) {
     const card = el('div', 'card')
@@ -1035,6 +1085,19 @@ function renderRuns(body: HTMLElement, p: Projection): void {
     const kind = el('span', 'artifact-kind', job.kind ?? '?')
     kind.style.cssText += ';text-transform:uppercase'
     row.appendChild(kind)
+    // Multi-select checkbox.
+    if (runsSelecting && job.job_id !== undefined && cancellable.has(job.status ?? '')) {
+      const box = el('span', 'ws-check', runsSelected.has(job.job_id) ? '☑' : '☐')
+      box.style.cssText += ';cursor:pointer'
+      box.onclick = () => {
+        if (job.job_id === undefined) return
+        if (runsSelected.has(job.job_id)) runsSelected.delete(job.job_id)
+        else runsSelected.add(job.job_id)
+        rerender()
+      }
+      row.prepend(box)
+      if (runsSelected.has(job.job_id)) card.style.outline = '1px solid var(--tone-red)'
+    }
     const text = el('span', 'grow mono', fmtId(job.job_id))
     row.appendChild(text)
     row.appendChild(pill(job.status))
@@ -1044,7 +1107,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       err.style.cssText = 'margin-top:4px;color:var(--tone-red);font-size:10.5px;word-break:break-all'
       card.appendChild(err)
     }
-    if (job.job_id !== undefined && cancellable.has(job.status ?? '')) {
+    if (job.job_id !== undefined && cancellable.has(job.status ?? '') && !runsSelecting) {
       const cancel = el('button', 'btn cancel', '✕ Cancel')
       cancel.onclick = async () => {
         const ok = await api(`/v1/jobs/${encodeURIComponent(job.job_id ?? '')}/cancel`, {
@@ -1403,6 +1466,8 @@ function openRenameModal(root: ShadowRoot, projectId: string, currentName: strin
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:440px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Rename project')
   const header = el('div', 'modal-header', '✎ Rename Project')
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
@@ -2684,6 +2749,8 @@ function renderSidebar(
     }
     for (const p of filtered) {
       const item = el('button', 'ws-item')
+      item.setAttribute('role', 'listitem')
+      item.setAttribute('aria-label', `project ${p.name ?? p.project_id ?? ''}`)
       if (p.project_id === activeId) item.classList.add('active')
       if (sidebarSelecting && p.project_id !== undefined) {
         if (sidebarSelected.has(p.project_id)) item.classList.add('selected')
@@ -3031,6 +3098,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       for (const h of hits) {
         card.appendChild(el('div', 'muted', h.trim()))
       }
+      // dsh-web depth: jump to the artifacts tab (snapshot lives there).
+      const goArtifacts = el('button', 'hbtn', '→ view artifacts')
+      goArtifacts.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goArtifacts.onclick = () => {
+        activeTab = 'artifacts'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goArtifacts)
       structured = card
     } else if (isRun && searchQ === '') {
       // dsh-web run result card: job id, kind, status.
@@ -3044,6 +3120,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       } else {
         grid.appendChild(chatFieldCell('Job', 'submitted'))
       }
+      // dsh-web depth: jump to the Runs tab to watch progress.
+      const goRuns = el('button', 'hbtn', '→ watch in Runs tab')
+      goRuns.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goRuns.onclick = () => {
+        activeTab = 'runs'
+        tabSave()
+        rerender()
+      }
+      grid.appendChild(goRuns)
       structured = grid
     } else if (isEvidence && searchQ === '') {
       // dsh-web evidence card: id + provenance status.
@@ -3265,6 +3350,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const input = document.createElement('textarea')
   input.rows = 1
   input.placeholder = '/research status — type a command (Enter sends, Shift+Enter newline)'
+  input.setAttribute('aria-label', 'Research command composer')
   input.value = chatDraft
   input.style.cssText = 'flex:1;resize:none;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.5 ui-monospace,Menlo,monospace;outline:none;min-height:34px;max-height:120px;overflow-y:auto'
   const autosize = (): void => {
@@ -3330,6 +3416,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   const send = el('button', 'btn approve', 'Send')
   send.style.cssText = 'padding:7px 16px;border-radius:9px'
+  send.setAttribute('aria-label', 'Send command')
   const run = async (): Promise<void> => {
     const line = input.value.trim()
     if (line === '') return
