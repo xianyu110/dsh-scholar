@@ -402,6 +402,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .tab { flex:1; border:0; background:none; color:var(--text-2); padding:${fullscreen ? '12px 2px 11px' : '9px 2px 8px'}; cursor:pointer; font:600 ${fullscreen ? 12 : 11}px/1 system-ui,sans-serif; border-bottom:2px solid transparent; letter-spacing:.3px; }
 .tab:hover { color:var(--text-2); }
 .tab.active { color:var(--text); border-bottom-color:var(--accent); }
+.tab.pinned { color:var(--tone-amber); }
+.tab.pinned.active { color:var(--tone-amber); border-bottom-color:var(--tone-amber); }
 .body { flex:1; overflow-y:auto; padding:${fullscreen ? '18px 22px 14px' : '12px 14px 10px'}; scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
 .body::-webkit-scrollbar { width:8px; }
 .body::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
@@ -639,6 +641,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     // dsh-web "pin view": ★ marks a favourite tab (persisted).
     const pinned = tabPinned(key)
     if (pinned) {
+      button.classList.add('pinned')
       const pin = el('span', '', '★ ')
       pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
       button.prepend(pin)
@@ -673,7 +676,21 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   if (!fullscreen) main.insertBefore(picker, body)
 
   const styleTabs = (): void => {
-    for (const [key, button] of tabButtons) button.classList.toggle('active', key === activeTab)
+    for (const [key, button] of tabButtons) {
+      button.classList.toggle('active', key === activeTab)
+      // dsh-web pinned tabs: keep the ★ marker in sync (buttons are built
+      // once, so the pin class must be refreshed on every render).
+      const pinned = tabPinned(key)
+      button.classList.toggle('pinned', pinned)
+      const hasStar = button.querySelector('span') !== null
+      if (pinned && !hasStar) {
+        const pin = el('span', '', '★ ')
+        pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
+        button.prepend(pin)
+      } else if (!pinned && hasStar) {
+        button.querySelector('span')?.remove()
+      }
+    }
   }
 
   const render = async (): Promise<void> => {
@@ -1140,15 +1157,83 @@ function renderRuns(body: HTMLElement, p: Projection): void {
   }
 }
 
+/** Artifacts multi-select (dsh-web bulk download). */
+let artifactsSelecting = false
+let artifactsSelected = new Set<string>()
+
 async function renderArtifacts(body: HTMLElement, projectId: string): Promise<void> {
   const artifacts = (await api<ArtifactRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/artifacts`)) ?? []
-  body.appendChild(el('div', 'section-label', `Artifacts (${artifacts.length}, click to preview)`))
+  const labelRow = el('div', 'row')
+  labelRow.style.cssText = 'justify-content:space-between;align-items:center'
+  labelRow.appendChild(el('div', 'section-label', `Artifacts (${artifacts.length}, click to preview)`))
+  if (artifacts.length > 0) {
+    const selBtn = el('button', 'hbtn', artifactsSelecting ? '☑ Selecting…' : '☑ Select')
+    selBtn.title = artifactsSelecting ? 'exit multi-select' : 'multi-select artifacts (bulk download)'
+    selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
+    selBtn.onclick = () => {
+      artifactsSelecting = !artifactsSelecting
+      artifactsSelected.clear()
+      rerender()
+    }
+    labelRow.appendChild(selBtn)
+  }
+  body.appendChild(labelRow)
   if (artifacts.length === 0) {
     body.appendChild(el('div', 'empty', 'No artifacts yet — runs and analysis produce them.'))
     return
   }
+  // Bulk download bar.
+  if (artifactsSelecting) {
+    const bar = el('div', 'card')
+    bar.style.cssText = 'padding:8px 10px;margin:4px 0;display:flex;align-items:center;gap:10px;border-color:var(--accent)'
+    const count = el('span', 'mono', `${artifactsSelected.size} selected`)
+    count.style.cssText = 'font-size:11px;color:var(--text)'
+    const downloadSel = el('button', 'btn approve', '⬇ Download selected')
+    downloadSel.disabled = artifactsSelected.size === 0
+    downloadSel.onclick = async () => {
+      for (const id of artifactsSelected) {
+        const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
+          headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
+        })
+        if (!response.ok) continue
+        const blob = await response.blob()
+        const url = URL.createObjectURL(blob)
+        const a = el('a', 'dl', 'download')
+        a.href = url
+        a.download = `${id.slice(0, 24)}.bin`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 4000)
+      }
+      artifactsSelecting = false
+      artifactsSelected.clear()
+      rerender()
+    }
+    const doneSel = el('button', 'hbtn', 'Done')
+    doneSel.onclick = () => {
+      artifactsSelecting = false
+      artifactsSelected.clear()
+      rerender()
+    }
+    bar.append(count, downloadSel, doneSel)
+    body.appendChild(bar)
+  }
   for (const artifact of artifacts.slice(-15).reverse()) {
     const row = el('div', 'artifact-row')
+    if (artifactsSelecting && artifact.artifact_id !== undefined) {
+      const box = el('span', 'ws-check', artifactsSelected.has(artifact.artifact_id) ? '☑' : '☐')
+      box.style.cssText += ';cursor:pointer'
+      box.onclick = (event) => {
+        event.stopPropagation()
+        if (artifact.artifact_id === undefined) return
+        if (artifactsSelected.has(artifact.artifact_id)) artifactsSelected.delete(artifact.artifact_id)
+        else artifactsSelected.add(artifact.artifact_id)
+        rerender()
+      }
+      row.prepend(box)
+      if (artifactsSelected.has(artifact.artifact_id)) row.style.outline = '1px solid var(--accent)'
+    }
     row.appendChild(el('span', 'artifact-kind', (artifact.kind ?? '?').toUpperCase()))
     const name = el('span', 'grow mono', fmtId(artifact.artifact_id, 22))
     row.appendChild(name)
@@ -3089,6 +3174,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isRun = msg.role === 'assistant' && /Job \*\*[^*]+\*\* \[[^\]]+\] submitted/.test(msg.text)
     const isEvidence = msg.role === 'assistant' && /Evidence \*\*[^*]+\*\* ingested/.test(msg.text)
     const isGate = msg.role === 'assistant' && /Gate \*\*[^*]+\*\* (?:created|opened)/.test(msg.text)
+    const isContract = msg.role === 'assistant' && /Contract \*\*[^*]+\*\* registered/.test(msg.text)
+    const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
       const phaseMatch = /phase `([^`]+)` rev (\d+)/.exec(msg.text)
@@ -3198,6 +3285,46 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         rerender()
       }
       card.appendChild(go)
+      structured = card
+    } else if (isContract && searchQ === '') {
+      // dsh-web contract card: id + jump to Gates for approval.
+      const cMatch = /Contract \*\*([^*]+)\*\* registered/.exec(msg.text)
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '📋'))
+      head.appendChild(el('span', 'pname', cMatch?.[1] ?? 'contract'))
+      head.appendChild(el('span', 'grow'))
+      head.appendChild(pill('pending'))
+      card.appendChild(head)
+      const goGates = el('button', 'hbtn', '→ approve in Gates tab')
+      goGates.style.cssText = 'align-self:flex-start'
+      goGates.onclick = () => {
+        activeTab = 'gates'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goGates)
+      structured = card
+    } else if (isClaims && searchQ === '') {
+      // dsh-web claims card: count + jump to Evidence.
+      const count = msg.text.split('\n').filter(l => /^- /m.test(l)).length
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '🧾'))
+      head.appendChild(el('span', 'pname', `${count} claim(s)`))
+      head.appendChild(el('span', 'grow'))
+      const goEv = el('button', 'hbtn', '→ view in Evidence tab')
+      goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goEv.onclick = () => {
+        activeTab = 'evidence'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goEv)
       structured = card
     }
     const lineCount = msg.text.split('\n').length
