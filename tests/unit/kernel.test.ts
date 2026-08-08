@@ -757,6 +757,14 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
     expect(archive.schema_version).toBe(1)
     expect(Buffer.from(archive.files['train.js']!.content_base64, 'base64').toString()).toBe('console.log("real code")\n')
     expect(archive.files['data/seed.json']!.sha256).toBe(createHash('sha256').update('{"baseline":[1,2]}').digest('hex'))
+
+    // STORE-02: the authoritative registry row exists and matches.
+    const snapRow = kernel.getCodeSnapshot(snap.snapshot_id)
+    expect(snapRow.archive_artifact_id).toBe(snap.archive_artifact_id)
+    expect(snapRow.manifest_artifact_id).toBe(snap.manifest_artifact_id)
+    expect(snapRow.sha256).toBe(snap.sha256)
+    expect(snapRow.file_count).toBe(2)
+    expect(snapRow.source.description).toBe('unit test snapshot')
     expect(archive.files['node_modules/junk.js']).toBeUndefined()
     expect(archive.files['.git/objects/pack']).toBeUndefined()
 

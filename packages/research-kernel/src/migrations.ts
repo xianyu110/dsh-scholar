@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -463,6 +463,30 @@ const terminalTexCapabilities = (db: DatabaseSync, report: MigrationReport): voi
 }
 
 /**
+ * 0005 — authoritative code_snapshots registry (STORE-02): one row per
+ * snapshotCodeArchive() call, binding snapshot_id to its archive/manifest
+ * artifacts, source description, content hash, file count and size.
+ */
+const codeSnapshotRegistry = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS code_snapshots (
+      snapshot_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      archive_artifact_id TEXT NOT NULL,
+      manifest_artifact_id TEXT NOT NULL,
+      source_json TEXT NOT NULL DEFAULT '{}',
+      sha256 TEXT NOT NULL,
+      file_count INTEGER NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_code_snapshots_project ON code_snapshots(project_id, created_at DESC);
+  `)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.code_snapshots = (db.prepare('SELECT COUNT(*) AS n FROM code_snapshots').get() as { n: number }).n
+}
+
+/**
  * 0004 — artifact media type (ART-02): RFC 2046 media_type served on GET
  * (pdf artifacts are application/pdf) plus a download file_name. Additive;
  * existing rows keep application/octet-stream / NULL.
@@ -503,6 +527,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'Artifact media_type + file_name columns (ART-02)',
     body: artifactMediaType.toString(),
     up: artifactMediaType,
+  },
+  {
+    id: '0005_code_snapshots',
+    description: 'Authoritative code_snapshots registry (STORE-02)',
+    body: codeSnapshotRegistry.toString(),
+    up: codeSnapshotRegistry,
   },
 ]
 

@@ -976,8 +976,46 @@ export class ResearchKernel {
       sha256: archiveRecord.sha256,
       created_at: nowIso(),
     }
+    // STORE-02: record the snapshot in the authoritative code_snapshots
+    // registry (snapshot_id -> archive/manifest artifacts + integrity).
+    this.db.prepare(`INSERT INTO code_snapshots
+        (snapshot_id, project_id, archive_artifact_id, manifest_artifact_id, source_json, sha256, file_count, size_bytes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(snapshot.snapshot_id, projectId, archiveRecord.artifact_id, manifestRecord.artifact_id,
+        JSON.stringify({ description, root: absRoot, excludes: [...EXCLUDED_DIRS] }),
+        archiveRecord.sha256, Object.keys(files).length, totalBytes, snapshot.created_at)
     // Both artifacts already emit artifact.registered events (outbox).
     return snapshot
+  }
+
+  /** STORE-02: authoritative code snapshot registry lookup. */
+  getCodeSnapshot(snapshotId: string): {
+    snapshot_id: string
+    project_id: string
+    archive_artifact_id: string
+    manifest_artifact_id: string
+    source: { description?: string; root?: string; excludes?: string[] }
+    sha256: string
+    file_count: number
+    size_bytes: number
+    created_at: string
+  } {
+    const row = this.db.prepare('SELECT * FROM code_snapshots WHERE snapshot_id = ?').get(snapshotId) as {
+      snapshot_id: string; project_id: string; archive_artifact_id: string; manifest_artifact_id: string
+      source_json: string; sha256: string; file_count: number; size_bytes: number; created_at: string
+    } | undefined
+    if (row === undefined) throw new KernelError(404, 'code_snapshot_not_found', `code snapshot ${snapshotId} not found`)
+    return {
+      snapshot_id: row.snapshot_id,
+      project_id: row.project_id,
+      archive_artifact_id: row.archive_artifact_id,
+      manifest_artifact_id: row.manifest_artifact_id,
+      source: JSON.parse(row.source_json) as { description?: string; root?: string; excludes?: string[] },
+      sha256: row.sha256,
+      file_count: row.file_count,
+      size_bytes: row.size_bytes,
+      created_at: row.created_at,
+    }
   }
 
   // ── durable jobs (design §4.2 Job Controller, §9.3) ──────────────────────
