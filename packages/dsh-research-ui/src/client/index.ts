@@ -2735,6 +2735,8 @@ const SHORTCUTS: Array<[string, string]> = [
   ['Alt+1..7', 'switch tab (Chat, Phase, Gates, Runs, Artifacts, Evidence, Budget)'],
   ['Ctrl/Cmd+K', 'open the command palette'],
   ['Ctrl/Cmd+Shift+T', 'toggle light/dark theme'],
+  ['Ctrl+1..9', 'select the Nth chat session'],
+  ['Ctrl+Tab', 'cycle chat sessions'],
   ['Ctrl+↑ / Ctrl+↓', 'walk chat messages (details panel)'],
   ['Home / End', 'jump to the first / last message'],
   ['/ (not typing)', 'focus the chat composer with a leading slash'],
@@ -2742,9 +2744,13 @@ const SHORTCUTS: Array<[string, string]> = [
   ['Tab (composer)', 'complete the command name'],
   ['Shift+Enter (composer)', 'newline without sending'],
   ['Enter (composer)', 'send / fill completion'],
-  ['Esc', 'close modal / details / quote'],
+  ['Esc', 'close modal / context menu / details / quote'],
+  ['?', 'open this shortcut reference'],
   ['Double-click project', 'open the project detail drawer'],
+  ['Double-click run / artifact', 'open the job / artifact detail drawer'],
+  ['Right-click project / session', 'context menu (open, rename, archive, copy)'],
   ['Right-click tab', 'pin / unpin a favourite tab'],
+  ['↑ / ↓ + Enter (global search)', 'walk hits and jump to the selected one'],
 ]
 
 /** dsh-web shortcut reference modal. */
@@ -3417,7 +3423,19 @@ function openNotificationsModal(root: ShadowRoot): void {
     text.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
     const time = el('span', 'muted', n.time)
     time.style.cssText = 'font-size:9px;flex-shrink:0'
-    row.append(text, time)
+    // dsh-web notification management: dismiss a single entry.
+    const del = el('button', 'hbtn ghost', '×')
+    del.title = 'dismiss notification'
+    del.setAttribute('aria-label', 'Dismiss notification')
+    del.style.cssText = 'padding:0 4px;font-size:10px;flex-shrink:0'
+    del.onclick = () => {
+      notifHistory.splice(i, 1)
+      notifPersist()
+      notifMarkRead()
+      overlay.remove()
+      openNotificationsModal(root)
+    }
+    row.append(text, time, del)
     list.appendChild(row)
   }
   modal.appendChild(list)
@@ -4598,6 +4616,29 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     setTimeout(() => URL.revokeObjectURL(url), 4000)
   }
   searchRow.appendChild(exportChatBtn)
+  // dsh-web export: the same transcript as JSON (session metadata included).
+  const exportJsonBtn = el('button', 'hbtn', '⬇ json')
+  exportJsonBtn.title = 'export conversation as JSON'
+  exportJsonBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
+  exportJsonBtn.onclick = () => {
+    const active = chatSessions.find(x => x.id === chatActiveId)
+    const payload = JSON.stringify({
+      name: active?.name ?? 'conversation',
+      session_id: chatActiveId,
+      exported_at: new Date().toISOString(),
+      messages: chatMessages,
+    }, null, 2)
+    const blob = new Blob([payload], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = el('a', 'dl', 'download')
+    a.href = url
+    a.download = `research-conversation-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+  }
+  searchRow.appendChild(exportJsonBtn)
   // dsh-web quick commands: favourite commands as one-tap chips.
   const favs = favCommands()
   for (const [name, line] of CHAT_COMMANDS) {
