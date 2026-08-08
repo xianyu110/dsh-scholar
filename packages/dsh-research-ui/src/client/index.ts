@@ -738,6 +738,16 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     }
   }
 
+  // dsh-web document title: reflect the active tab + project in the tab
+  // title so the plugin is identifiable among many tabs (ignored when the
+  // plugin runs inside a sandboxed iframe where the title is read-only).
+  const syncTitle = (projectName: string | undefined): void => {
+    try {
+      const tabLabel = TAB_DEFS.find(t => t[0] === activeTab)?.[1] ?? 'overview'
+      document.title = `dsh-scholar${projectName !== undefined && projectName !== '' ? ` · ${projectName}` : ''} — ${tabLabel}`
+    } catch { /* sandboxed iframe */ }
+  }
+
   const render = async (): Promise<void> => {
     styleTabs()
     // dsh-web skeleton: placeholders while the first paint loads.
@@ -785,6 +795,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       else projectId = projection.project.project_id
     }
     if (projection !== null && booting) booting = false
+    syncTitle(projection?.project?.name)
     if (fullscreen && sidebar !== null) {
       // dsh-web sidebar stats: counts of the active project under its row.
       renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() }, projection?.counts)
@@ -807,6 +818,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       }
     }
     if (target === undefined) {
+      syncTitle(undefined)
       // dsh-web hero: a guided empty state instead of a bare message.
       const hero = el('div')
       hero.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:14px;padding:60px 20px;text-align:center'
@@ -964,6 +976,11 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     // dsh-web behavior: Escape closes any open modal/overlay, the message
     // details panel and any pending quote.
     if (event.key === 'Escape' && !typing) {
+      const ctx = root.querySelectorAll('.ctx-scrim')
+      if (ctx.length > 0) {
+        ctx[ctx.length - 1]?.remove()
+        return
+      }
       const overlays = root.querySelectorAll('.overlay')
       if (overlays.length > 0) {
         overlays[overlays.length - 1]?.remove()
@@ -3020,6 +3037,89 @@ function trapFocus(overlay: HTMLElement, trigger: HTMLElement | null): () => voi
   }
 }
 
+/** dsh-web context menu: a right-click popup menu with keyboard support
+ * (↑/↓ navigate, Enter picks, Esc closes, click-away closes). The scrim is
+ * transparent so the page stays visible; Escape is also handled globally. */
+interface ContextMenuItem {
+  label: string
+  hint?: string
+  danger?: boolean
+  onPick: () => void
+}
+function openContextMenu(root: ShadowRoot, x: number, y: number, items: ContextMenuItem[]): void {
+  const scrim = el('div', 'ctx-scrim')
+  scrim.style.cssText = 'position:fixed;inset:0;z-index:10001;background:transparent'
+  const menu = el('div')
+  menu.setAttribute('role', 'menu')
+  menu.setAttribute('aria-label', 'context menu')
+  menu.style.cssText = 'position:fixed;min-width:200px;background:var(--bg-2);border:1px solid var(--border-strong);border-radius:10px;padding:4px;box-shadow:0 12px 40px rgba(0,0,0,.35);z-index:10002;font:12px/1.4 system-ui,sans-serif;color:var(--text)'
+  const menuButtons: HTMLButtonElement[] = []
+  for (const it of items) {
+    const btn = el('button')
+    btn.setAttribute('role', 'menuitem')
+    btn.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:6px 10px;border-radius:7px;cursor:pointer;font:inherit'
+    if (it.danger === true) btn.style.color = 'var(--tone-red)'
+    const label = el('span', '', it.label)
+    btn.appendChild(label)
+    if (it.hint !== undefined) {
+      const hint = el('span', 'muted', it.hint)
+      hint.style.cssText = 'font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      btn.appendChild(hint)
+    }
+    btn.onmouseenter = () => { btn.style.background = 'var(--bg-hover)' }
+    btn.onmouseleave = () => { btn.style.background = 'none' }
+    btn.onclick = () => { scrim.remove(); it.onPick() }
+    menu.appendChild(btn)
+    menuButtons.push(btn)
+  }
+  scrim.onclick = () => scrim.remove()
+  scrim.oncontextmenu = (event) => { event.preventDefault(); scrim.remove() }
+  scrim.appendChild(menu)
+  root.appendChild(scrim)
+  // Position near the cursor, flipping at the right/bottom viewport edges.
+  const mw = menu.offsetWidth
+  const mh = menu.offsetHeight
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - mw - 8))}px`
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - mh - 8))}px`
+  // Keyboard navigation (dsh-web menu feel).
+  let idx = 0
+  menuButtons[0]?.focus()
+  menu.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      idx = (idx + (event.key === 'ArrowDown' ? 1 : -1) + menuButtons.length) % menuButtons.length
+      menuButtons[idx]?.focus()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      scrim.remove()
+    }
+  })
+}
+
+/** Copy text to the clipboard with a toast confirmation and a fallback for
+ * non-secure contexts (dsh-web "copy" affordance). */
+function copyText(text: string): void {
+  const confirm = (): void => {
+    const root = rootHost()
+    if (root !== null) showToast(root, `Copied: ${text.length > 48 ? `${text.slice(0, 48)}…` : text}`)
+  }
+  const fallback = (): void => {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;opacity:0'
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy') } catch { /* ignore */ }
+    ta.remove()
+    confirm()
+  }
+  if (navigator.clipboard !== undefined && navigator.clipboard.writeText !== undefined) {
+    navigator.clipboard.writeText(text).then(confirm).catch(fallback)
+  } else {
+    fallback()
+  }
+}
+
 /** dsh-web toast: a transient status pill bottom-center (2.4s), recorded. */
 function showToast(root: ShadowRoot | null, text: string): void {
   notifHistory.push({ text, time: new Date().toLocaleTimeString() })
@@ -3054,7 +3154,12 @@ function openNotificationsModal(root: ShadowRoot): void {
   list.setAttribute('aria-live', 'polite')
   list.style.cssText = 'max-height:46vh;overflow-y:auto'
   if (notifHistory.length === 0) {
-    list.appendChild(el('div', 'empty', 'No notifications yet.'))
+    const emptyWrap = el('div')
+    emptyWrap.style.cssText = 'padding:28px 10px;text-align:center;display:flex;flex-direction:column;gap:8px;align-items:center'
+    emptyWrap.appendChild(el('div', '', '🎉'))
+    emptyWrap.appendChild(el('div', 'muted', 'You’re all caught up.'))
+    emptyWrap.appendChild(el('div', 'muted', 'Gate decisions, job results and exports land here.'))
+    list.appendChild(emptyWrap)
   }
   for (let i = notifHistory.length - 1; i >= 0; i--) {
     const n = notifHistory[i]!
@@ -3773,7 +3878,7 @@ function renderSidebar(
     if (sidebarGroup === 'active') filtered = filtered.filter(p => isProjectActive(p.status))
     if (sidebarGroup === 'done') filtered = filtered.filter(p => !isProjectActive(p.status))
     if (filtered.length === 0) {
-      const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet.' : 'No matches.')
+      const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet — create one with ＋ above or /research new in Chat.' : 'No matches for the current filter.')
       empty.style.cssText = 'padding:10px 12px'
       list.appendChild(empty)
       return
@@ -3816,6 +3921,36 @@ function renderSidebar(
       }
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
+      // dsh-web context menu: right-click on a project row.
+      item.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+        if (root === null || p.project_id === undefined) return
+        const id = p.project_id
+        const isArchived = p.status === 'ARCHIVED'
+        const ctxItems: ContextMenuItem[] = [
+          { label: 'Open', hint: p.status ?? '', onPick: () => onPick(id) },
+          { label: '✎ Rename', onPick: () => openRenameModal(root, id, p.name ?? '', () => rerender()) },
+        ]
+        if (isArchived) {
+          ctxItems.push({
+            label: '↩ Restore',
+            onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/unarchive`, { method: 'POST' }).then(() => rerender()) },
+          })
+        } else {
+          ctxItems.push({
+            label: '🗄 Archive',
+            hint: 'data kept',
+            onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/archive`, { method: 'POST' }).then(() => rerender()) },
+          })
+        }
+        ctxItems.push(
+          { label: '⧉ Details', onPick: () => { void openProjectDetailModal(root, id) } },
+          { label: 'Copy project ID', hint: id, onPick: () => copyText(id) },
+        )
+        openContextMenu(root, event.clientX, event.clientY, ctxItems)
+      }
       // dsh-web project drawer: double-click opens the full detail modal.
       item.ondblclick = (event) => {
         event.stopPropagation()
@@ -3991,6 +4126,21 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     wrap.style.cssText = 'display:inline-flex;align-items:center;gap:2px;border:1px solid var(--border);border-radius:8px;padding:1px 4px'
     if (s.id === chatActiveId) wrap.style.cssText += ';border-color:var(--accent);background:var(--accent-soft)'
     if (s.archived === true) wrap.style.cssText += ';opacity:.45'
+    // dsh-web context menu: right-click on a session chip.
+    wrap.oncontextmenu = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const root = rootHost()
+      if (root === null) return
+      const ctxItems: ContextMenuItem[] = [
+        { label: 'Open', onPick: () => chatSessionSelect(s.id) },
+        { label: '✎ Rename', onPick: () => chatSessionRename(s.id) },
+        { label: s.archived === true ? '↩ Restore' : '🗄 Archive', onPick: () => chatSessionArchive(s.id) },
+        { label: 'Copy session ID', hint: s.id, onPick: () => copyText(s.id) },
+        { label: '× Close', danger: true, onPick: () => chatSessionClose(s.id) },
+      ]
+      openContextMenu(root, event.clientX, event.clientY, ctxItems)
+    }
     wrap.appendChild(tab)
     wrap.appendChild(arch)
     wrap.appendChild(close)
