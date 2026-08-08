@@ -1873,6 +1873,9 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       downloadSel.disabled = artifactsSelected.size === 0
       downloadSel.onclick = async () => {
         let downloaded = 0
+        // dsh-web names: prefer the artifact kind/name in the file name.
+        const metaById = new Map<string, ArtifactRow>()
+        for (const a of artifacts) if (a.artifact_id !== undefined) metaById.set(a.artifact_id, a)
         for (const id of artifactsSelected) {
           const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
             headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
@@ -1883,7 +1886,11 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
           const url = URL.createObjectURL(blob)
           const a = el('a', 'dl', 'download')
           a.href = url
-          a.download = `${id.slice(0, 24)}.bin`
+          const meta = metaById.get(id)
+          const metaName = typeof meta?.metadata?.name === 'string' && meta.metadata.name !== ''
+            ? String(meta.metadata.name).replaceAll(' ', '-').slice(0, 20)
+            : (meta?.kind ?? 'artifact')
+          a.download = `${metaName}-${id.slice(0, 12)}.bin`
           document.body.appendChild(a)
           a.click()
           a.remove()
@@ -3141,6 +3148,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ['Tab (composer)', 'complete the command name'],
   ['Shift+Enter (composer)', 'newline without sending'],
   ['Enter (composer)', 'send / fill completion'],
+  ['Ctrl/Cmd+Enter (composer)', 'send (alias for Enter)'],
   ['Esc', 'close modal / context menu / details / quote'],
   ['?', 'open this shortcut reference'],
   ['Double-click project', 'open the project detail drawer'],
