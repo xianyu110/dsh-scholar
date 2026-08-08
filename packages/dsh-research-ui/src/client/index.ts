@@ -3065,7 +3065,7 @@ function openCommandsModal(root: ShadowRoot): void {
   header.appendChild(closeBtn)
   modal.appendChild(header)
 
-  const hint = el('div', 'muted', 'Click a command to run it in the Chat tab (or type it there directly).')
+  const hint = el('div', 'muted', `${CHAT_COMMANDS.length} commands — click one to run it in the Chat tab (or type it there directly).`)
   hint.id = 'cmd-desc'
   hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
   modal.appendChild(hint)
@@ -4260,6 +4260,8 @@ function chatSyncActive(): void {
 function chatSessionsPersist(): void {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(chatSessions.map(s => ({ ...s, messages: s.messages.slice(-CHAT_MAX) }))))
+    // dsh-web session memory: remember the active session across reloads.
+    if (chatActiveId !== null) localStorage.setItem('dsh-scholar-ui-active-session', chatActiveId)
   } catch { /* private mode */ }
 }
 function chatSessionEnsure(): void {
@@ -4422,7 +4424,11 @@ function chatLoad(): void {
           && typeof (s as ChatSession).name === 'string'
           && Array.isArray((s as ChatSession).messages))
         .map(s => ({ ...s, messages: s.messages.filter((m): m is ChatMessage => typeof m === 'object' && m !== null && typeof (m as ChatMessage).role === 'string' && (m as ChatMessage).role in { user: 1, assistant: 1, error: 1 } && typeof (m as ChatMessage).text === 'string').slice(-CHAT_MAX) }))
-      chatActiveId = chatSessions[0]?.id ?? null
+      // dsh-web session memory: restore the last active session if it exists.
+      const lastActive = localStorage.getItem('dsh-scholar-ui-active-session')
+      chatActiveId = lastActive !== null && chatSessions.some(s => s.id === lastActive)
+        ? lastActive
+        : (chatSessions[0]?.id ?? null)
       chatSyncActive()
       return
     }
