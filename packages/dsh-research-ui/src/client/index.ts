@@ -1394,6 +1394,8 @@ interface ChatMessage {
   role: 'user' | 'assistant' | 'error'
   text: string
   time: string
+  /** dsh-web quote-reply: the quoted message, shown above the bubble. */
+  quote?: { index: number; text: string }
 }
 
 let chatMessages: ChatMessage[] = []
@@ -1453,8 +1455,10 @@ function chatClear(): void {
   chatPersist()
 }
 
-function chatPush(role: ChatMessage['role'], text: string): void {
-  chatMessages.push({ role, text, time: new Date().toLocaleTimeString() })
+function chatPush(role: ChatMessage['role'], text: string, quote?: { index: number; text: string }): void {
+  const msg: ChatMessage = { role, text, time: new Date().toLocaleTimeString() }
+  if (quote !== undefined) msg.quote = quote
+  chatMessages.push(msg)
   chatPersist()
 }
 
@@ -1831,6 +1835,10 @@ function renderSidebar(
 let chatDetailIndex = -1
 /** Chat transcript search (dsh-web session search feel). */
 let chatSearchQuery = ''
+/** dsh-web quote-reply: pending quote attached to the next user message. */
+let chatQuoteTarget: { index: number; text: string } | null = null
+/** Commands-only view: show just the user command messages. */
+let chatCommandsOnly = false
 
 async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const shell = el('div')
@@ -1859,6 +1867,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     rerender()
   }
   searchRow.append(searchInput, clearSearch)
+  // dsh-web "commands only" filter: a compact list of just the commands.
+  const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? '⌘ commands on' : '⌘ commands')
+  commandsOnlyBtn.title = 'show only command messages'
+  commandsOnlyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
+  commandsOnlyBtn.onclick = () => {
+    chatCommandsOnly = !chatCommandsOnly
+    rerender()
+  }
+  searchRow.appendChild(commandsOnlyBtn)
   column.appendChild(searchRow)
 
   const stream = el('div')
@@ -1870,6 +1887,26 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   for (let i = 0; i < chatMessages.length; i++) {
     const msg = chatMessages[i]!
     if (searchQ !== '' && !msg.text.toLowerCase().includes(searchQ)) continue
+    if (chatCommandsOnly && msg.role !== 'user') continue
+    // dsh-web quote-reply: quoted message preview above the bubble.
+    if (msg.quote !== undefined) {
+      const quoteBox = el('div')
+      quoteBox.style.cssText = msg.role === 'user'
+        ? 'align-self:flex-end;max-width:85%;background:var(--accent-soft);border-left:3px solid var(--accent);border-radius:6px;padding:4px 10px;font-size:10.5px;color:var(--text-2);margin-bottom:-4px;cursor:pointer'
+        : 'align-self:flex-start;max-width:90%;background:var(--bg-3);border-left:3px solid var(--border-strong);border-radius:6px;padding:4px 10px;font-size:10.5px;color:var(--text-2);margin-bottom:-4px;cursor:pointer'
+      const quotedIndex = msg.quote.index
+      const quoted = chatMessages[quotedIndex]
+      const quoteLabel = el('span', '', quoted !== undefined
+        ? `↩ ${quoted.role === 'user' ? 'you' : 'assistant'}: ${quoted.text.slice(0, 60)}${quoted.text.length > 60 ? '…' : ''}`
+        : `↩ #${quotedIndex + 1}`)
+      quoteBox.appendChild(quoteLabel)
+      quoteBox.title = 'jump to quoted message'
+      quoteBox.onclick = () => {
+        chatDetailIndex = quotedIndex >= 0 && quotedIndex < chatMessages.length ? quotedIndex : -1
+        rerender()
+      }
+      stream.appendChild(quoteBox)
+    }
     const bubble = el('div')
     bubble.style.cssText = msg.role === 'user'
       ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;word-break:break-word;font-size:12px;cursor:pointer'
@@ -1888,7 +1925,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       rerender()
     }
     stream.appendChild(bubble)
-    // dsh-web message actions: copy the raw text (assistant messages only).
+    // dsh-web message actions: copy the raw text + quote-reply (hover).
     if (msg.role === 'assistant' || msg.role === 'error') {
       const actionsRow = el('div')
       actionsRow.style.cssText = 'align-self:flex-start;display:flex;gap:6px;margin-top:2px'
@@ -1902,6 +1939,22 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         setTimeout(() => { copy.textContent = '⧉ copy' }, 1600)
       }
       actionsRow.appendChild(copy)
+      // dsh-web quote-reply: reply quoting this message.
+      const quote = el('button', 'hbtn', '↩ reply')
+      quote.style.cssText = 'padding:0 6px;font-size:9px'
+      quote.onclick = () => {
+        chatDraft = ''
+        activeTab = 'chat'
+        chatQuoteTarget = { index: i, text: msg.text }
+        rerender()
+        setTimeout(() => {
+          const hostEl = document.querySelector('#dsh-scholar-ui')
+          const rootEl = hostEl !== null ? hostEl.shadowRoot : null
+          const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+          ta?.focus()
+        }, 120)
+      }
+      actionsRow.appendChild(quote)
       stream.appendChild(actionsRow)
     }
     const stamp = el('div')
@@ -1911,8 +1964,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     stamp.textContent = msg.time
     stream.appendChild(stamp)
   }
-  if (searchQ !== '' && stream.childElementCount === 0) {
-    const empty = el('div', 'empty', `No messages match "${chatSearchQuery.trim()}".`)
+  if (stream.childElementCount === 0 && (searchQ !== '' || chatCommandsOnly)) {
+    const empty = el('div', 'empty', chatCommandsOnly
+      ? 'No commands yet — run one with /research …'
+      : `No messages match "${chatSearchQuery.trim()}".`)
     empty.style.cssText = 'padding:10px 2px'
     stream.appendChild(empty)
   }
@@ -1986,6 +2041,21 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   // Composer (persists across refreshes via chatDraft) + session actions.
   const composerRow = el('div')
   composerRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:10px'
+  // dsh-web quote-reply: pending quote banner above the composer.
+  if (chatQuoteTarget !== null) {
+    const quoteBanner = el('div')
+    quoteBanner.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:5px 10px;font-size:10.5px;color:var(--text)'
+    const qText = el('span', 'grow', `Replying to: ${chatQuoteTarget.text.slice(0, 70)}${chatQuoteTarget.text.length > 70 ? '…' : ''}`)
+    quoteBanner.appendChild(qText)
+    const cancelQuote = el('button', 'hbtn', '×')
+    cancelQuote.style.cssText = 'padding:0 6px'
+    cancelQuote.onclick = () => {
+      chatQuoteTarget = null
+      rerender()
+    }
+    quoteBanner.appendChild(cancelQuote)
+    column.appendChild(quoteBanner)
+  }
   const composer = el('div')
   composer.style.cssText = 'flex:1;display:flex;gap:8px'
   // dsh-web composer: a multi-line textarea that auto-grows.
@@ -2064,7 +2134,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     input.value = ''
     chatDraft = ''
     completionBox.style.display = 'none'
-    chatPush('user', line)
+    // dsh-web quote-reply: attach a pending quote to this message.
+    const quote = chatQuoteTarget
+    chatQuoteTarget = null
+    chatPush('user', line, quote ?? undefined)
     // dsh-web streaming feel: a "running…" bubble while the command works.
     const runningBubble = el('div')
     runningBubble.style.cssText = 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;font-size:12px;display:flex;align-items:center;gap:8px'
