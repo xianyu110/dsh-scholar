@@ -44,7 +44,7 @@
 | EVENT-01 | 正确 DSH event assumption | 文档已修 | DSH SessionEventMap 实际可扩展；业务仍选择 Kernel Outbox 权威 |
 | SKILL-01 | 所有 Skill 可安装发现 | 已实现 | 4 个 skill 包(research-core/两个 domain/venue)从包根 skills/ 挂载;clean tarball 安装后 4 个 SKILL.md 落盘且 name/description frontmatter 校验通过(packaging 测试);宿主内自动选择与 source/prepared hash 行为待 DSH fixture job(CI-01)验证 |
 | PACK-01 | clean remote install | 已实现 | 根插件与 5 个子包 pnpm pack 全部可打;tarball 完整性断言(lib/、4×SKILL.md、cordis.patch.yml);声明 @deepseek-ai/dsh-* 为 optional peer(仓库 autoInstallPeers:false)+ prepare 构建步骤;clean consumer 用 overrides 解析全部 file: 依赖并安装成功,skills 落盘;发布到 registry 与宿主全量 boot 仍需 CI-01 fixture |
-| SELFMOD-01 | dev-only Cordis self tools | 配置与隔离 wrapper 已新增，尚未自动验收 | shipped production composition 无 tool-cordis；需补 CI inspect/mount/unmount 与否定测试 |
+| SELFMOD-01 | dev-only Cordis self tools | 已实现 | verify-docs 静态否定检查:production cordis.patch.yml 与 research-web/research-headless 配置禁止 tool-cordis;start-selfmod-dev.sh 必须显式加载 dev overlay 而 start-dsh-agent-dev.sh 禁止;CI unit-and-build 自动执行;mount/unmount 运行时行为仍待 DSH fixture(CI-01) |
 | SEC-UI-01 | standalone token/loopback | 已实现 | HTTP 验收 12 项全绿(tests/security/run-standalone-http-tests.sh):非 loopback+--no-token 拒绝且不监听、token 文件 0600/非 symlink/非空/与 --token 一致、token-check 401/200、/v1/* 无/bad/good bearer 401/401/200、跨源写 403、同源(127/8+同端口)放行、跨端口 loopback 403 |
 | OPS-01 | standalone 启动可靠报错 | 已实现 | 验收 6 项全绿:自定义 host/port/dataDir/token 启动并以真实 URL+token-check 就绪、kill 后 web+kernel 端口释放、占用端口启动非零退出且日志含 EADDRINUSE、--no-token 非 loopback 拒绝 |
 | CI-01 | clean DSH Agent fixture | 未达成 | 根 plugin 编译依赖 DSH host packages/cordis，目前仅开发机 symlink；CI 先阻断 standalone+docs，需新增可复现 DSH checkout/fixture job 后再启用 root build/full security unit |

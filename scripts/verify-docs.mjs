@@ -101,6 +101,29 @@ if (/\bfullscreen\b/.test(uiClientSource) || /position:fixed;right:12px;bottom:6
   errors.push('research-ui client must not retain floating/embedded mode branches')
 }
 
+// SELFMOD-01: tool-cordis is a dev-only self-modification surface. It must
+// never ship in the production bundle patch or any non-dev profile config.
+const shippedPatch = readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')
+if (shippedPatch.includes('tool-cordis')) {
+  errors.push('production cordis.patch.yml must not mount tool-cordis (SELFMOD-01)')
+}
+for (const profile of ['research-web', 'research-headless']) {
+  const config = resolve(root, `configs/${profile}.cordis.yml`)
+  if (!existsSync(config)) continue
+  const text = readFileSync(config, 'utf8')
+  if (text.includes('tool-cordis')) {
+    errors.push(`profile config ${profile} must not mount tool-cordis (SELFMOD-01)`)
+  }
+}
+const startSelfmod = readFileSync(resolve(root, 'scripts/start-selfmod-dev.sh'), 'utf8')
+const startAgent = readFileSync(resolve(root, 'scripts/start-dsh-agent-dev.sh'), 'utf8')
+if (!startSelfmod.includes('research-dev-selfmod.cordis.yml')) {
+  errors.push('start-selfmod-dev.sh must load the explicit dev-only overlay (SELFMOD-01)')
+}
+if (startAgent.includes('research-dev-selfmod.cordis.yml')) {
+  errors.push('start-dsh-agent-dev.sh must NOT load the selfmod overlay (SELFMOD-01)')
+}
+
 // DOC-02: change-aware docs sync — when source or eval files changed in the
 // reviewed range, the hardening status ledger must have moved too (DOC-01:
 // every implementation change updates hardening-v0.2-status.md).
