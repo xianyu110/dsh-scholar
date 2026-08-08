@@ -23,6 +23,8 @@ jobs:
         run: pnpm -r --filter './packages/*' --filter './workers/*' run build
       - name: Documentation and deleted-surface contract
         run: pnpm run verify:docs
+      - name: DOC-02 change-aware docs sync (src/eval diffs must move the hardening ledger)
+        run: node scripts/verify-docs.mjs --diff-check origin/main
       - name: Unit tests (standalone; DSH-host integration has a separate pending fixture)
         run: pnpm exec vitest run --exclude tests/unit/security.test.ts
 

@@ -101,6 +101,37 @@ if (/\bfullscreen\b/.test(uiClientSource) || /position:fixed;right:12px;bottom:6
   errors.push('research-ui client must not retain floating/embedded mode branches')
 }
 
+// DOC-02: change-aware docs sync — when source or eval files changed in the
+// reviewed range, the hardening status ledger must have moved too (DOC-01:
+// every implementation change updates hardening-v0.2-status.md).
+// Usage: node scripts/verify-docs.mjs --diff-check [<base-ref>]
+if (process.argv.includes('--diff-check')) {
+  const base = process.argv[process.argv.indexOf('--diff-check') + 1] ?? 'origin/main'
+  const changed = runGit(['diff', '--name-only', `${base}...HEAD`])
+  const sourceChanged = changed.some((file) =>
+    /^(?:packages|workers)\/[^/]+\/src\/.+\.(?:ts|tsx)$/.test(file) && !file.endsWith('.test.ts'))
+  const evalChanged = changed.some((file) => file.startsWith('evals/') && file.endsWith('.sh'))
+  const statusLedgerChanged = changed.some((file) => file === 'docs/hardening-v0.2-status.md')
+  if ((sourceChanged || evalChanged) && !statusLedgerChanged) {
+    errors.push(`DOC-02: source/eval changes in this range (${base}...HEAD) must also update docs/hardening-v0.2-status.md`)
+  }
+}
+
+function runGit(args) {
+  try {
+    const { execFileSync } = requireNode('node:child_process')
+    const out = execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    return out.split('\n').filter(Boolean)
+  } catch {
+    // No base ref available (e.g. first commit) — nothing to diff against.
+    return []
+  }
+}
+
+function requireNode(name) {
+  return globalThis.process.getBuiltinModule ? globalThis.process.getBuiltinModule(name) : import(name)
+}
+
 if (errors.length > 0) {
   for (const error of errors) console.error('[verify-docs] ' + error)
   process.exit(1)

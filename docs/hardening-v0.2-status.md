@@ -49,7 +49,7 @@
 | OPS-01 | standalone 启动可靠报错 | 已实现 | 验收 6 项全绿:自定义 host/port/dataDir/token 启动并以真实 URL+token-check 就绪、kill 后 web+kernel 端口释放、占用端口启动非零退出且日志含 EADDRINUSE、--no-token 非 loopback 拒绝 |
 | CI-01 | clean DSH Agent fixture | 未达成 | 根 plugin 编译依赖 DSH host packages/cordis，目前仅开发机 symlink；CI 先阻断 standalone+docs，需新增可复现 DSH checkout/fixture job 后再启用 root build/full security unit |
 | DOC-01 | Markdown 是生成权威 | 本轮建立 | 后续每个需求/修复必须同步规范、验收和本状态 |
-| DOC-02 | change-aware docs sync | 未达成 | verify-docs 校验结构、必需片段和删除面，但尚未根据 git diff 强制源码行为变化同步规范+acceptance+hardening |
+| DOC-02 | change-aware docs sync | 已实现 | verify-docs --diff-check:对 base...HEAD 范围检查,packages/workers src 或 evals 变更必须同时更新 hardening-v0.2-status.md,否则 CI 失败;已接入 CI unit-and-build job |
 
 ## 3. 当前代码中的具体不一致
 
