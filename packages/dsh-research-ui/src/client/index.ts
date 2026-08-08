@@ -598,6 +598,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   refresh.onclick = () => { void render() }
   rerender = () => { void render() }
   chatLoad()
+  historyLoad()
   void render()
   const timer = window.setInterval(() => { void render() }, 8000)
   // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
@@ -1367,6 +1368,30 @@ let chatMessages: ChatMessage[] = []
 let chatDraft = ''
 const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 const CHAT_MAX = 200
+/** Command history for ↑/↓ navigation (dsh-web shell feel), persisted. */
+const HISTORY_KEY = 'dsh-scholar-ui-history'
+let chatHistory: string[] = []
+let historyIndex = -1
+
+function historyLoad(): void {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY)
+    if (raw === null) return
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed)) {
+      chatHistory = parsed.filter((h): h is string => typeof h === 'string').slice(-50)
+    }
+  } catch { /* private mode */ }
+}
+
+function historyPush(line: string): void {
+  if (line === '') return
+  if (chatHistory[chatHistory.length - 1] === line) return
+  chatHistory.push(line)
+  chatHistory = chatHistory.slice(-50)
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory)) } catch { /* private mode */ }
+  historyIndex = -1
+}
 
 /** Restore the transcript persisted in localStorage (dsh-web session feel). */
 function chatLoad(): void {
@@ -1769,25 +1794,40 @@ function renderSidebar(
  * Chat tab: message bubbles (dsh-web style) + a composer that runs
  * /research commands directly against the Kernel bridge. The transcript
  * survives 8s panel refreshes (chatMessages), as does the draft text.
+ * Clicking a message opens the dsh-web "details" side panel.
  */
+let chatDetailIndex = -1
+
 async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const shell = el('div')
-  shell.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:420px'
+  shell.style.cssText = 'display:flex;flex-direction:row;height:100%;min-height:420px'
 
+  const column = el('div')
+  column.style.cssText = 'flex:1;display:flex;flex-direction:column;min-width:0'
   const stream = el('div')
   stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
   if (chatMessages.length === 0) {
     chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
   }
-  for (const msg of chatMessages) {
+  for (let i = 0; i < chatMessages.length; i++) {
+    const msg = chatMessages[i]!
     const bubble = el('div')
     bubble.style.cssText = msg.role === 'user'
-      ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;word-break:break-word;font-size:12px'
+      ? 'align-self:flex-end;background:var(--accent);color:#fff;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:85%;word-break:break-word;font-size:12px;cursor:pointer'
       : msg.role === 'error'
-        ? 'align-self:flex-start;background:var(--tone-red-bg);color:var(--tone-red);border:1px solid var(--tone-red);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px'
-        : 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px'
+        ? 'align-self:flex-start;background:var(--tone-red-bg);color:var(--tone-red);border:1px solid var(--tone-red);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px;cursor:pointer'
+        : 'align-self:flex-start;background:var(--bg-2);border:1px solid var(--border);border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:90%;word-break:break-word;font-size:12px;cursor:pointer'
+    if (chatDetailIndex === i) {
+      bubble.style.outline = '2px solid var(--accent)'
+    }
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
     bubble.replaceChildren(...formatChatText(msg.text))
+    // dsh-web "details": click a message to inspect it in the side panel.
+    bubble.title = 'click for details'
+    bubble.onclick = () => {
+      chatDetailIndex = chatDetailIndex === i ? -1 : i
+      rerender()
+    }
     stream.appendChild(bubble)
     // dsh-web message actions: copy the raw text (assistant messages only).
     if (msg.role === 'assistant' || msg.role === 'error') {
@@ -1814,7 +1854,50 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   // dsh-web behavior: always scroll to the newest message.
   stream.scrollTop = stream.scrollHeight
-  shell.appendChild(stream)
+  column.appendChild(stream)
+
+  // dsh-web "details" side panel: raw transcript of the selected message.
+  const detailMsg = chatDetailIndex >= 0 && chatDetailIndex < chatMessages.length ? chatMessages[chatDetailIndex] : null
+  if (detailMsg !== null) {
+    const panel = el('div')
+    panel.style.cssText = 'width:240px;flex-shrink:0;margin-left:10px;border-left:1px solid var(--border);padding-left:12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto'
+    const head = el('div', 'section-label', 'Message details')
+    panel.appendChild(head)
+    const meta = el('div')
+    meta.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-size:10.5px'
+    const roleRow = el('div', 'row')
+    roleRow.appendChild(el('span', 'muted', 'Role'))
+    roleRow.appendChild(pill(detailMsg.role))
+    const timeRow = el('div', 'row')
+    timeRow.appendChild(el('span', 'muted', 'Time'))
+    timeRow.appendChild(el('span', 'mono', detailMsg.time))
+    const linesRow = el('div', 'row')
+    linesRow.appendChild(el('span', 'muted', 'Lines'))
+    linesRow.appendChild(el('span', 'mono', String(detailMsg.text.split('\n').length)))
+    const charsRow = el('div', 'row')
+    charsRow.appendChild(el('span', 'muted', 'Chars'))
+    charsRow.appendChild(el('span', 'mono', String(detailMsg.text.length)))
+    meta.append(roleRow, timeRow, linesRow, charsRow)
+    panel.appendChild(meta)
+    const rawLabel = el('div', 'section-label', 'Raw text')
+    panel.appendChild(rawLabel)
+    const pre = el('pre', '')
+    pre.style.cssText = 'white-space:pre-wrap;word-break:break-all;font:10.5px/1.5 ui-monospace,Menlo,monospace;color:var(--text-2);margin:0'
+    pre.textContent = detailMsg.text
+    panel.appendChild(pre)
+    const copyRaw = el('button', 'hbtn', '⧉ copy raw')
+    copyRaw.style.cssText = 'align-self:flex-start'
+    copyRaw.onclick = () => {
+      void navigator.clipboard.writeText(detailMsg.text).then(
+        () => { copyRaw.textContent = '✓ copied' },
+        () => { copyRaw.textContent = 'copy failed' },
+      )
+      setTimeout(() => { copyRaw.textContent = '⧉ copy raw' }, 1600)
+    }
+    panel.appendChild(copyRaw)
+    shell.appendChild(panel)
+  }
+  shell.appendChild(column)
 
   // Composer (persists across refreshes via chatDraft) + session actions.
   const composerRow = el('div')
@@ -1878,6 +1961,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   const run = async (): Promise<void> => {
     const line = input.value.trim()
     if (line === '') return
+    historyPush(line)
     input.value = ''
     chatDraft = ''
     completionBox.style.display = 'none'
@@ -1918,6 +2002,27 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       void run()
     } else if (event.key === 'Escape') {
       completionBox.style.display = 'none'
+    } else if (event.key === 'ArrowUp' && chatHistory.length > 0) {
+      // dsh-web shell feel: ↑ always walks the command history.
+      event.preventDefault()
+      if (historyIndex < 0) historyIndex = chatHistory.length
+      historyIndex = Math.max(0, historyIndex - 1)
+      input.value = chatHistory[historyIndex] ?? ''
+      chatDraft = input.value
+      autosize()
+      input.setSelectionRange(input.value.length, input.value.length)
+    } else if (event.key === 'ArrowDown' && historyIndex >= 0) {
+      event.preventDefault()
+      historyIndex += 1
+      if (historyIndex >= chatHistory.length) {
+        historyIndex = -1
+        input.value = ''
+      } else {
+        input.value = chatHistory[historyIndex] ?? ''
+      }
+      chatDraft = input.value
+      autosize()
+      input.setSelectionRange(input.value.length, input.value.length)
     }
   }
   composer.append(input, send)
@@ -1929,8 +2034,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     rerender()
   }
   composerRow.append(composer, clear)
-  shell.appendChild(composerRow)
-  shell.appendChild(completionBox)
+  column.appendChild(composerRow)
+  column.appendChild(completionBox)
 
   body.appendChild(shell)
 }
