@@ -1013,6 +1013,10 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       if (event.key.toLowerCase() === 'k' && !typing) {
         event.preventDefault()
         openCommandsModal(root)
+      } else if (event.key.toLowerCase() === 'f' && event.shiftKey && !typing && activeTab === 'chat') {
+        // dsh-web cross-session search: Ctrl/Cmd+Shift+F.
+        event.preventDefault()
+        openSessionSearchModal(root)
       } else if (event.key.toLowerCase() === 'p' && !typing) {
         // dsh-web quick project switcher: Ctrl/Cmd+P.
         event.preventDefault()
@@ -3267,6 +3271,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ['Alt+1..7', 'switch tab (Chat, Phase, Gates, Runs, Artifacts, Evidence, Budget)'],
   ['Ctrl/Cmd+K', 'open the command palette'],
   ['Ctrl/Cmd+P', 'quick project switcher'],
+  ['Ctrl/Cmd+Shift+F (chat)', 'search across all sessions'],
   ['Ctrl/Cmd+Shift+T', 'toggle light/dark theme'],
   ['Ctrl+1..9', 'select the Nth chat session'],
   ['Ctrl+Tab', 'cycle chat sessions'],
@@ -5750,6 +5755,19 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         },
         { label: s.archived === true ? '↩ Restore' : '🗄 Archive', onPick: () => chatSessionArchive(s.id) },
         { label: 'Copy session ID', hint: s.id, onPick: () => copyText(s.id) },
+        {
+          label: '🔍 Search here',
+          onPick: () => {
+            chatSessionSelect(s.id)
+            activeTab = 'chat'
+            rerender()
+            setTimeout(() => {
+              const rootEl = rootHost()
+              const searchInput = rootEl?.querySelector('input[placeholder*="Search conversation"]') as HTMLInputElement | null
+              searchInput?.focus()
+            }, 120)
+          },
+        },
         {
           label: '⬇ Export JSON',
           divider: true,
