@@ -1665,6 +1665,13 @@ function renderRuns(body: HTMLElement, p: Projection): void {
     }
     const text = el('span', 'grow mono', fmtId(job.job_id))
     row.appendChild(text)
+    // dsh-web live feel: running jobs get a pulsing dot.
+    if (job.status === 'running') {
+      const pulse = el('span')
+      pulse.style.cssText = 'width:7px;height:7px;border-radius:50%;background:var(--tone-blue);animation:pulse 1.2s ease-in-out infinite;flex-shrink:0'
+      pulse.title = 'running'
+      row.appendChild(pulse)
+    }
     row.appendChild(pill(job.status))
     // dsh-web drawer: one-click job details (double-click still works).
     if (job.job_id !== undefined) {
@@ -4820,8 +4827,15 @@ function renderSidebar(
       item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
       if (blocked) {
         const badge = el('span', 'ws-status', '⏳')
-        badge.title = 'blocked on a human gate decision'
-        badge.style.cssText = 'color:var(--tone-amber);font-weight:700'
+        badge.title = 'blocked on a human gate decision — click to open Gates'
+        badge.style.cssText = 'color:var(--tone-amber);font-weight:700;cursor:pointer'
+        badge.onclick = (event) => {
+          event.stopPropagation()
+          if (p.project_id !== undefined) onPick(p.project_id)
+          activeTab = 'gates'
+          tabSave()
+          rerender()
+        }
         item.appendChild(badge)
       }
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
@@ -5274,11 +5288,25 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   column.appendChild(searchRow)
 
+  // dsh-web scroll affordance: wrap the transcript so a "jump to bottom"
+  // button can float over it while the user scrolls up.
+  const streamWrap = el('div')
+  streamWrap.style.cssText = 'flex:1;display:flex;flex-direction:column;position:relative;min-height:0'
   const stream = el('div')
   stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
   // dsh-web a11y: announce assistant replies as they land.
   stream.setAttribute('aria-live', 'polite')
   stream.setAttribute('aria-label', 'conversation')
+  const jumpBottom = el('button', 'hbtn', '↓')
+  jumpBottom.title = 'jump to the newest message'
+  jumpBottom.setAttribute('aria-label', 'Jump to newest message')
+  jumpBottom.style.cssText = 'position:absolute;right:10px;bottom:10px;padding:2px 10px;font-size:12px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.25)'
+  jumpBottom.onclick = () => { stream.scrollTop = stream.scrollHeight }
+  stream.onscroll = () => {
+    const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 120
+    jumpBottom.style.display = nearBottom ? 'none' : 'inline-block'
+  }
+  streamWrap.append(stream, jumpBottom)
   if (chatMessages.length === 0) {
     chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
     // dsh-web starter chips: one-tap quick commands for a fresh session.
@@ -5842,7 +5870,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   // dsh-web behavior: always scroll to the newest message.
   stream.scrollTop = stream.scrollHeight
-  column.appendChild(stream)
+  column.appendChild(streamWrap)
 
   // dsh-web "details" side panel: raw transcript of the selected message.
   const detailMsg = chatDetailIndex >= 0 && chatDetailIndex < chatMessages.length ? chatMessages[chatDetailIndex] : null
