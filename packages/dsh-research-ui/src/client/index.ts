@@ -1585,6 +1585,18 @@ function renderRuns(body: HTMLElement, p: Projection): void {
     const text = el('span', 'grow mono', fmtId(job.job_id))
     row.appendChild(text)
     row.appendChild(pill(job.status))
+    // dsh-web drawer: one-click job details (double-click still works).
+    if (job.job_id !== undefined) {
+      const detailsBtn = el('button', 'hbtn', '⧉')
+      detailsBtn.title = 'job details'
+      detailsBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      detailsBtn.onclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) void openJobDetailModal(root, job.job_id!)
+      }
+      row.appendChild(detailsBtn)
+    }
     card.appendChild(row)
     // dsh-web job drawer: double-click opens the full detail modal.
     card.title = 'double-click for job details'
@@ -1976,6 +1988,16 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       row.appendChild(delta)
       row.appendChild(el('span', 'grow'))
       row.appendChild(pill('verified'))
+      // dsh-web drawer: one-click evidence details (double-click still works).
+      const detailsBtn = el('button', 'hbtn', '⧉')
+      detailsBtn.title = 'evidence details'
+      detailsBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      detailsBtn.onclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openEvidenceDetailModal(root, item)
+      }
+      row.appendChild(detailsBtn)
       card.appendChild(row)
       const refsCount = Array.isArray(item.artifact_refs) ? item.artifact_refs.length : 0
       const runsCount = Array.isArray(item.run_ids) ? item.run_ids.length : 0
@@ -3857,6 +3879,8 @@ interface ChatMessage {
   time: string
   /** dsh-web quote-reply: the quoted message, shown above the bubble. */
   quote?: { index: number; text: string }
+  /** dsh-web pin: starred messages surface in a 📌 section at the top. */
+  pinned?: boolean
 }
 
 let chatMessages: ChatMessage[] = []
@@ -4476,6 +4500,7 @@ function renderSidebar(
         if ((activeCounts.ideas ?? 0) > 0) parts.push(`💡${activeCounts.ideas}`)
         if ((activeCounts.contracts ?? 0) > 0) parts.push(`📋${activeCounts.contracts}`)
         if ((activeCounts.claims ?? 0) > 0) parts.push(`🧾${activeCounts.claims}`)
+        if ((activeCounts.evidence ?? 0) > 0) parts.push(`📊${activeCounts.evidence}`)
         if ((activeCounts.artifacts ?? 0) > 0) parts.push(`📦${activeCounts.artifacts}`)
         if (parts.length === 0) parts.push('empty project')
         stats.textContent = parts.join(' · ')
@@ -4824,6 +4849,26 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const notice = el('div', 'muted', `Showing the newest 80 of ${chatMessages.length} messages — ↑/↓ walk history, or search to see more.`)
     notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
     stream.appendChild(notice)
+  }
+  // dsh-web pinned: starred messages surface in a 📌 box (click to jump).
+  const pinnedMsgs = chatMessages.filter(m => m.pinned === true)
+  if (pinnedMsgs.length > 0 && searchQ === '' && !chatCommandsOnly) {
+    const pinBox = el('div')
+    pinBox.style.cssText = 'border:1px dashed var(--tone-amber);border-radius:10px;padding:6px 10px;display:flex;flex-direction:column;gap:4px;background:var(--tone-amber-bg)'
+    pinBox.appendChild(el('div', 'muted', `📌 Pinned (${pinnedMsgs.length})`))
+    for (const pm of pinnedMsgs) {
+      const idx = chatMessages.indexOf(pm)
+      const prow = el('div')
+      prow.style.cssText = 'display:flex;gap:8px;align-items:center;cursor:pointer;font-size:11px;color:var(--text)'
+      prow.title = 'jump to pinned message'
+      const roleTag = el('span', 'artifact-kind', pm.role === 'user' ? 'YOU' : 'OS')
+      const preview = el('span', 'grow', pm.text.slice(0, 90) + (pm.text.length > 90 ? '…' : ''))
+      preview.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      prow.append(roleTag, preview)
+      prow.onclick = () => { chatDetailIndex = idx; rerender() }
+      pinBox.appendChild(prow)
+    }
+    stream.appendChild(pinBox)
   }
   for (let i = startIdx; i < chatMessages.length; i++) {
     const msg = chatMessages[i]!
@@ -5206,6 +5251,17 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         setTimeout(() => { copy.textContent = '⧉ copy' }, 1600)
       }
       actionsRow.appendChild(copy)
+      // dsh-web pin: star the message (📌 section at the top of the chat).
+      const pin = el('button', 'hbtn', msg.pinned === true ? '★' : '☆')
+      pin.title = msg.pinned === true ? 'unpin message' : 'pin message'
+      pin.style.cssText = `padding:0 6px;font-size:9px;${msg.pinned === true ? 'color:var(--tone-amber)' : ''}`
+      pin.onclick = () => {
+        msg.pinned = !msg.pinned
+        chatPersist()
+        chatSessionsPersist()
+        rerender()
+      }
+      actionsRow.appendChild(pin)
       stream.appendChild(actionsRow)
     }
     if (msg.role === 'assistant' || msg.role === 'error') {
@@ -5237,6 +5293,17 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         }, 120)
       }
       actionsRow.appendChild(quote)
+      // dsh-web pin: star the message (📌 section at the top of the chat).
+      const pin = el('button', 'hbtn', msg.pinned === true ? '★' : '☆')
+      pin.title = msg.pinned === true ? 'unpin message' : 'pin message'
+      pin.style.cssText = `padding:0 6px;font-size:9px;${msg.pinned === true ? 'color:var(--tone-amber)' : ''}`
+      pin.onclick = () => {
+        msg.pinned = !msg.pinned
+        chatPersist()
+        chatSessionsPersist()
+        rerender()
+      }
+      actionsRow.appendChild(pin)
       stream.appendChild(actionsRow)
     }
     const stamp = el('div')
