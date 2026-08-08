@@ -94,6 +94,8 @@ const artifactSchema = z.object({
   kind: z.enum(['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle']),
   content_base64: z.string().min(1),
   metadata: z.record(z.unknown()).optional(),
+  media_type: z.string().min(1).optional(),
+  file_name: z.string().min(1).optional(),
 })
 
 const corpusSchema = z.object({
@@ -479,7 +481,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           if (method === 'POST' && id === undefined) {
             const input = artifactSchema.parse(body)
             const content = Buffer.from(input.content_base64, 'base64')
-            const record = kernel.registerArtifact({ project_id: input.project_id, kind: input.kind, content, metadata: input.metadata })
+            const record = kernel.registerArtifact({
+              project_id: input.project_id,
+              kind: input.kind,
+              content,
+              metadata: input.metadata,
+              media_type: input.media_type,
+              file_name: input.file_name,
+            })
             send(res, 201, record)
             return
           }
@@ -497,12 +506,57 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               record = matches[0]!
             }
             const content = kernel.cas.read(record.sha256)
-            res.writeHead(200, {
-              'content-type': 'application/octet-stream',
-              'content-length': content.byteLength,
+            // ART-02: serve the stored media type (PDF artifacts must be
+            // application/pdf), with ETag + Content-Disposition + Range
+            // (api-contracts.md §artifact GET).
+            const mediaType = record.media_type !== null && record.media_type !== '' ? record.media_type
+              : (record.kind === 'pdf' ? 'application/pdf' : 'application/octet-stream')
+            const etag = `"sha256:${record.sha256}"`
+            if (req.headers['if-none-match'] === etag) {
+              res.writeHead(304, { etag, 'cache-control': 'no-store' })
+              res.end()
+              return
+            }
+            const fileName = record.file_name ?? `${record.kind}-${record.artifact_id.slice(0, 16)}`
+            const disposition = record.kind === 'pdf' || record.kind === 'chart' || record.kind === 'paper'
+              ? `inline; filename="${fileName.replaceAll('"', '')}"`
+              : `attachment; filename="${fileName.replaceAll('"', '')}"`
+            const baseHeaders: Record<string, string> = {
+              'content-type': mediaType,
+              'content-length': String(content.byteLength),
+              etag,
+              'cache-control': 'no-store',
+              'content-disposition': disposition,
               'x-artifact-id': record.artifact_id,
               'x-project-id': record.project_id,
-            })
+            }
+            // Single-range support (api-contracts.md): bytes=a-b.
+            const range = req.headers.range
+            const match = typeof range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null
+            if (match !== null && match[1] !== '' && match[2] !== '') {
+              let start = Number(match[1])
+              const end = Math.min(Number(match[2]), content.byteLength - 1)
+              if (start >= content.byteLength) {
+                res.writeHead(416, { 'content-range': `bytes */${content.byteLength}` })
+                res.end()
+                return
+              }
+              if (end < start) start = 0
+              res.writeHead(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) })
+              res.end(content.subarray(start, end + 1))
+              return
+            }
+            if (match !== null && (match[1] !== '' || match[2] !== '')) {
+              // bytes=a- or bytes=-n (suffix) — simple forms.
+              let start = 0
+              let end = content.byteLength - 1
+              if (match[1] !== '') start = Math.min(Number(match[1]), content.byteLength - 1)
+              if (match[2] !== '') start = Math.max(0, content.byteLength - Number(match[2]))
+              res.writeHead(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) })
+              res.end(content.subarray(start, end + 1))
+              return
+            }
+            res.writeHead(200, baseHeaders)
             res.end(content)
             return
           }

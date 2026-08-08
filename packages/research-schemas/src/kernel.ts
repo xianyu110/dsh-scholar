@@ -63,6 +63,10 @@ export const ArtifactRecord = z.object({
   size_bytes: z.number().int().nonnegative(),
   sha256: z.string().min(1),
   metadata: z.record(z.unknown()).default({}),
+  /** RFC 2046 media type served on GET (ART-02); pdf artifacts are application/pdf. */
+  media_type: z.string().default('application/octet-stream'),
+  /** Download file name for Content-Disposition (null when unknown). */
+  file_name: z.string().nullable().default(null),
   created_at: z.string(),
 })
 export type ArtifactRecord = z.infer<typeof ArtifactRecord>

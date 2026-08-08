@@ -164,7 +164,7 @@ export class ResearchClient {
 
   // ── artifacts ────────────────────────────────────────────────────────────
 
-  registerArtifact(input: { project_id: string; kind: string; content_base64: string; metadata?: Record<string, unknown> }): Promise<ArtifactRecord> {
+  registerArtifact(input: { project_id: string; kind: string; content_base64: string; metadata?: Record<string, unknown>; media_type?: string; file_name?: string }): Promise<ArtifactRecord> {
     return this.request('POST', '/v1/artifacts', input)
   }
 

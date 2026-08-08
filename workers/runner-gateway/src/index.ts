@@ -647,6 +647,8 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       kind: 'log',
       content_base64: Buffer.from(logContent).toString('base64'),
       metadata: { run_id: run.run_id, job_id: job.job_id },
+      media_type: 'text/plain; charset=utf-8',
+      file_name: `run-${run.run_id}.log`,
     })
     manifest.log_artifact = logArtifact.artifact_id
 

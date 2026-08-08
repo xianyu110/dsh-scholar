@@ -599,6 +599,10 @@ export class ResearchKernel {
     kind: ArtifactKind
     content: Uint8Array | string
     metadata?: Record<string, unknown>
+    /** RFC 2046 media type (ART-02); pdf artifacts should pass application/pdf. */
+    media_type?: string
+    /** Download file name for Content-Disposition. */
+    file_name?: string
   }): ArtifactRecord {
     this.getProject(input.project_id)
     const { sha256, size_bytes } = this.cas.put(input.content)
@@ -608,6 +612,9 @@ export class ResearchKernel {
     const existing = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
       .get(input.project_id, artifactId) as ArtifactRecord | undefined
     if (existing !== undefined) return existing
+    const mediaType = input.media_type !== undefined && input.media_type !== ''
+      ? input.media_type
+      : (input.kind === 'pdf' ? 'application/pdf' : 'application/octet-stream')
     const record: ArtifactRecord = {
       artifact_id: artifactId,
       project_id: input.project_id,
@@ -615,10 +622,12 @@ export class ResearchKernel {
       size_bytes,
       sha256,
       metadata: input.metadata ?? {},
+      media_type: mediaType,
+      file_name: input.file_name ?? null,
       created_at: nowIso(),
     }
-    this.db.prepare('INSERT INTO artifacts (artifact_id, project_id, kind, size_bytes, sha256, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(record.artifact_id, record.project_id, record.kind, record.size_bytes, record.sha256, JSON.stringify(record.metadata), record.created_at)
+    this.db.prepare('INSERT INTO artifacts (artifact_id, project_id, kind, size_bytes, sha256, metadata, media_type, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(record.artifact_id, record.project_id, record.kind, record.size_bytes, record.sha256, JSON.stringify(record.metadata), record.media_type, record.file_name, record.created_at)
     this.emit(input.project_id, 'artifact.registered', { artifact_id: record.artifact_id, kind: record.kind, size_bytes })
     return record
   }

@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -463,6 +463,18 @@ const terminalTexCapabilities = (db: DatabaseSync, report: MigrationReport): voi
 }
 
 /**
+ * 0004 — artifact media type (ART-02): RFC 2046 media_type served on GET
+ * (pdf artifacts are application/pdf) plus a download file_name. Additive;
+ * existing rows keep application/octet-stream / NULL.
+ */
+const artifactMediaType = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'artifacts', 'media_type', "TEXT NOT NULL DEFAULT 'application/octet-stream'")
+  ensureColumn(db, 'artifacts', 'file_name', 'TEXT')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.artifacts = (db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -485,6 +497,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'Terminal/TeX tables + v2 columns for early v2-preview databases',
     body: terminalTexCapabilities.toString(),
     up: terminalTexCapabilities,
+  },
+  {
+    id: '0004_artifact_media_type',
+    description: 'Artifact media_type + file_name columns (ART-02)',
+    body: artifactMediaType.toString(),
+    up: artifactMediaType,
   },
 ]
 
