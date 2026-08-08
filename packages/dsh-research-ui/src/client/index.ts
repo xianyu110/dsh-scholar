@@ -3644,7 +3644,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:520px;max-width:92vw'
-  const header = el('div', 'modal-header', '⚙ Settings')
+  const header = el('div', 'modal-header', t('shell', 'shell.settings.title'))
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
   header.appendChild(closeBtn)
@@ -3667,7 +3667,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   }
 
   // Connection: live kernel health through the bridge.
-  modal.appendChild(section('Connection'))
+  modal.appendChild(section(t('shell', 'shell.settings.connection')))
   const healthRow = el('div', 'row')
   healthRow.style.cssText = 'padding:4px 0'
   const healthLabel = el('span', '', 'Kernel')
@@ -3729,7 +3729,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   }
 
   // Appearance.
-  modal.appendChild(section('Appearance'))
+  modal.appendChild(section(t('shell', 'shell.settings.appearance')))
   const themeRow = el('div', 'row')
   themeRow.style.cssText = 'padding:4px 0'
   const themeLabel = el('span', '', 'Theme')
@@ -3751,7 +3751,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   modal.appendChild(themeRow)
 
   // Preferences: density, auto-refresh (dsh-web settings feel).
-  modal.appendChild(section('Preferences'))
+  modal.appendChild(section(t('shell', 'shell.settings.preferences')))
   const densRow = el('div', 'row')
   densRow.style.cssText = 'padding:4px 0'
   const densLabel = el('span', '', 'Density')
@@ -3790,7 +3790,10 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
     setLocale(next)
     localeSelect.value = next
     document.dispatchEvent(new Event('dsh-scholar-locale-changed'))
-    rerender()
+    // dsh-web i18n §13.4: the open settings modal re-renders in the new
+    // locale immediately (other overlays refresh on their next open).
+    overlay.remove()
+    void openSettingsModal(root)
   }
   localeRow.append(localeLabel, localeSelect)
   modal.appendChild(localeRow)
@@ -3891,7 +3894,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   modal.appendChild(textureRow)
 
   // Conversation.
-  modal.appendChild(section('Conversation'))
+  modal.appendChild(section(t('shell', 'shell.settings.conversation')))
   const convRow = el('div', 'row')
   convRow.style.cssText = 'padding:4px 0'
   const convLabel = el('span', '', 'Transcript')
@@ -3909,7 +3912,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   modal.appendChild(convRow)
 
   // dsh-web share/summary: copy a markdown summary of the active project.
-  modal.appendChild(section('Project'))
+  modal.appendChild(section(t('shell', 'shell.settings.project')))
   const projRow = el('div', 'row')
   projRow.style.cssText = 'padding:4px 0'
   const projLabel = el('span', '', 'Summary')
@@ -3950,7 +3953,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   modal.appendChild(about)
 
   // dsh-web data management: clear every local preference/transcript.
-  modal.appendChild(section('Help'))
+  modal.appendChild(section(t('shell', 'shell.settings.help')))
   const helpRow = el('div', 'row')
   helpRow.style.cssText = 'padding:4px 0'
   const helpBtn = el('button', 'hbtn', '⌨ Keyboard shortcuts')
@@ -3959,7 +3962,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   helpRow.appendChild(helpBtn)
   modal.appendChild(helpRow)
 
-  modal.appendChild(section('Data'))
+  modal.appendChild(section(t('shell', 'shell.settings.data')))
   const resetRow = el('div', 'row')
   resetRow.style.cssText = 'padding:4px 0'
   const resetLabel = el('span', '', 'Local data')

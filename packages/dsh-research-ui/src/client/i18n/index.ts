@@ -7,6 +7,7 @@
  */
 import { zh as commonZh, en as commonEn } from './locales/common'
 import { zh as standaloneZh, en as standaloneEn } from './locales/standalone'
+import { zh as shellZh, en as shellEn } from './locales/shell'
 
 export type Locale = 'zh' | 'en'
 
@@ -14,8 +15,16 @@ interface NamespaceDicts { [namespace: string]: Record<string, string> }
 interface AllDicts { zh: NamespaceDicts; en: NamespaceDicts }
 
 const DICTS: AllDicts = {
-  zh: { common: commonZh as unknown as Record<string, string>, standalone: standaloneZh as unknown as Record<string, string> },
-  en: { common: commonEn as unknown as Record<string, string>, standalone: standaloneEn as unknown as Record<string, string> },
+  zh: {
+    common: commonZh as unknown as Record<string, string>,
+    standalone: standaloneZh as unknown as Record<string, string>,
+    shell: shellZh as unknown as Record<string, string>,
+  },
+  en: {
+    common: commonEn as unknown as Record<string, string>,
+    standalone: standaloneEn as unknown as Record<string, string>,
+    shell: shellEn as unknown as Record<string, string>,
+  },
 }
 
 export const LOCALE_KEY = 'dsh.locale'
