@@ -1846,6 +1846,12 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
         if (artifactsSelected.has(artifact.artifact_id)) row.style.outline = '1px solid var(--accent)'
       }
       row.appendChild(el('span', 'artifact-kind', (artifact.kind ?? '?').toUpperCase()))
+      // dsh-web metadata: a human-readable name when the artifact has one.
+      if (typeof artifact.metadata?.name === 'string' && artifact.metadata.name !== '') {
+        const nameChip = el('span', 'artifact-kind', String(artifact.metadata.name).slice(0, 24))
+        nameChip.style.cssText += ';color:var(--text-3)'
+        row.appendChild(nameChip)
+      }
       const name = el('span', 'grow mono', fmtId(artifact.artifact_id, 22))
       row.appendChild(name)
       // dsh-web metadata: show the artifact kind detail (e.g. code-snapshot-archive).
@@ -2801,6 +2807,18 @@ async function openJobDetailModal(root: ShadowRoot, jobId: string): Promise<void
     if (typeof m.container_digest === 'string' && m.container_digest !== '') row('Container', m.container_digest)
     if (typeof m.runner_key_id === 'string') row('Signer', m.runner_key_id)
     if (typeof m.metrics_artifact === 'string') row('Metrics', fmtId(m.metrics_artifact, 24))
+    // dsh-web depth: copy the signed manifest for external verification.
+    const copyManifest = el('button', 'hbtn', '⧉ copy manifest')
+    copyManifest.title = 'copy the full RunManifest as JSON'
+    copyManifest.style.cssText = 'margin-top:8px'
+    copyManifest.onclick = () => {
+      void navigator.clipboard.writeText(JSON.stringify(m, null, 2)).then(
+        () => { copyManifest.textContent = '✓ copied' },
+        () => { copyManifest.textContent = 'copy failed' },
+      )
+      setTimeout(() => { copyManifest.textContent = '⧉ copy manifest' }, 1600)
+    }
+    modal.appendChild(copyManifest)
   }
 
   const status = String(job.status ?? '')
@@ -3976,6 +3994,19 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       textEl.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
       bodyEl.append(projEl, textEl)
       row.appendChild(bodyEl)
+      // dsh-web depth: copy the hit text straight from the result row.
+      const copyHit = el('button', 'hbtn', '⧉')
+      copyHit.title = 'copy hit text'
+      copyHit.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      copyHit.onclick = (event) => {
+        event.stopPropagation()
+        void navigator.clipboard.writeText(h.text).then(
+          () => { copyHit.textContent = '✓' },
+          () => { copyHit.textContent = '✗' },
+        )
+        setTimeout(() => { copyHit.textContent = '⧉' }, 1600)
+      }
+      row.appendChild(copyHit)
       row.onmouseenter = () => { selIdx = i; paintSelection() }
       row.onclick = () => {
         overlay.remove()
