@@ -1133,6 +1133,14 @@ function renderRuns(body: HTMLElement, p: Projection): void {
     row.appendChild(text)
     row.appendChild(pill(job.status))
     card.appendChild(row)
+    // dsh-web job drawer: double-click opens the full detail modal.
+    card.title = 'double-click for job details'
+    card.ondblclick = (event) => {
+      event.stopPropagation()
+      if (job.job_id === undefined) return
+      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+      if (root !== null) void openJobDetailModal(root, job.job_id)
+    }
     if (job.error !== undefined && job.error !== '') {
       const err = el('div', 'muted', job.error)
       err.style.cssText = 'margin-top:4px;color:var(--tone-red);font-size:10.5px;word-break:break-all'
@@ -1219,7 +1227,14 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
     bar.append(count, downloadSel, doneSel)
     body.appendChild(bar)
   }
-  for (const artifact of artifacts.slice(-15).reverse()) {
+  // dsh-web virtualized feel: window artifacts to the newest 15.
+  const shownArtifacts = artifacts.slice(-15).reverse()
+  if (artifacts.length > 15) {
+    const notice = el('div', 'muted', `Showing the newest 15 of ${artifacts.length} artifacts — use the global search or export for the rest.`)
+    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+    body.appendChild(notice)
+  }
+  for (const artifact of shownArtifacts) {
     const row = el('div', 'artifact-row')
     if (artifactsSelecting && artifact.artifact_id !== undefined) {
       const box = el('span', 'ws-check', artifactsSelected.has(artifact.artifact_id) ? '☑' : '☐')
@@ -1751,6 +1766,101 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   }
   exportRow.appendChild(exportBtn)
   modal.appendChild(exportRow)
+}
+
+/* ─────────────────────────── job detail modal ─────────────────────────── */
+
+/**
+ * dsh-web job drawer: full record of one run (kind, status, error,
+ * contract, run manifest digest) plus a cancel action when cancellable.
+ */
+async function openJobDetailModal(root: ShadowRoot, jobId: string): Promise<void> {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:560px;max-width:94vw'
+  const header = el('div', 'modal-header', '⚙️ Job details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const loading = el('div', 'muted', 'Loading…')
+  modal.appendChild(loading)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+
+  const jobs = (await api<Array<Record<string, unknown>>>(`/v1/jobs?job_id=${encodeURIComponent(jobId)}`))
+  let job = Array.isArray(jobs) ? jobs.find(j => j.job_id === jobId) : undefined
+  if (job === undefined) {
+    // Fall back to scanning projects' job lists.
+    const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
+    for (const p of projects) {
+      if (p.project_id === undefined) continue
+      const list = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(p.project_id)}/jobs`)) ?? []
+      job = list.find(j => j.job_id === jobId)
+      if (job !== undefined) break
+    }
+  }
+  if (job === undefined) {
+    loading.textContent = 'Job not found.'
+    return
+  }
+  modal.removeChild(loading)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:110px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const titleRow = el('div', 'row')
+  titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
+  titleRow.appendChild(el('span', 'artifact-kind', String(job.kind ?? '?')))
+  titleRow.appendChild(el('span', 'pname', fmtId(String(job.job_id), 30)))
+  titleRow.appendChild(el('span', 'grow'))
+  titleRow.appendChild(pill(String(job.status ?? '')))
+  modal.appendChild(titleRow)
+
+  modal.appendChild(el('div', 'section-label', 'Run'))
+  row('Job', `\`${String(job.job_id)}\``)
+  row('Kind', String(job.kind ?? '—'))
+  row('Status', String(job.status ?? '—'))
+  if (typeof job.contract_id === 'string' && job.contract_id !== '') row('Contract', job.contract_id)
+  if (typeof job.failure_class === 'string' && job.failure_class !== '') row('Failure', job.failure_class)
+  if (typeof job.error === 'string' && job.error !== '') row('Error', job.error)
+
+  const manifest = job.run_manifest
+  if (typeof manifest === 'object' && manifest !== null) {
+    modal.appendChild(el('div', 'section-label', 'RunManifest'))
+    const m = manifest as Record<string, unknown>
+    if (typeof m.run_id === 'string') row('Run', m.run_id)
+    if (typeof m.exit_code === 'number') row('Exit code', String(m.exit_code))
+    if (typeof m.container_digest === 'string' && m.container_digest !== '') row('Container', m.container_digest)
+    if (typeof m.runner_key_id === 'string') row('Signer', m.runner_key_id)
+    if (typeof m.metrics_artifact === 'string') row('Metrics', fmtId(m.metrics_artifact, 24))
+  }
+
+  const status = String(job.status ?? '')
+  if (['queued', 'running', 'retryable'].includes(status)) {
+    const cancelRow = el('div', 'row')
+    cancelRow.style.cssText = 'justify-content:flex-end;margin-top:12px'
+    const cancel = el('button', 'btn cancel', '✕ Cancel job')
+    cancel.onclick = async () => {
+      const ok = await api(`/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from job details' }),
+      })
+      if (ok !== null) overlay.remove()
+      rerender()
+    }
+    cancelRow.appendChild(cancel)
+    modal.appendChild(cancelRow)
+  }
 }
 
 /* ─────────────────────────── commands modal ─────────────────────────── */
@@ -3175,6 +3285,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isEvidence = msg.role === 'assistant' && /Evidence \*\*[^*]+\*\* ingested/.test(msg.text)
     const isGate = msg.role === 'assistant' && /Gate \*\*[^*]+\*\* (?:created|opened)/.test(msg.text)
     const isContract = msg.role === 'assistant' && /Contract \*\*[^*]+\*\* registered/.test(msg.text)
+    const isWrite = msg.role === 'assistant' && /Manuscript \*\*[^*]+\*\* built/.test(msg.text)
+    const isReview = msg.role === 'assistant' && msg.text.startsWith('Reviewer:')
     const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
@@ -3318,6 +3430,48 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'pname', `${count} claim(s)`))
       head.appendChild(el('span', 'grow'))
       const goEv = el('button', 'hbtn', '→ view in Evidence tab')
+      goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goEv.onclick = () => {
+        activeTab = 'evidence'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goEv)
+      structured = card
+    } else if (isWrite && searchQ === '') {
+      // dsh-web write card: manuscript id + jump to Phase.
+      const mMatch = /Manuscript \*\*([^*]+)\*\* built/.exec(msg.text)
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '📄'))
+      head.appendChild(el('span', 'pname', mMatch?.[1] ?? 'manuscript'))
+      head.appendChild(el('span', 'grow'))
+      head.appendChild(pill('built'))
+      card.appendChild(head)
+      const goPhase = el('button', 'hbtn', '→ open Phase tab')
+      goPhase.style.cssText = 'align-self:flex-start'
+      goPhase.onclick = () => {
+        activeTab = 'phase'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goPhase)
+      structured = card
+    } else if (isReview && searchQ === '') {
+      // dsh-web review card: PASS/SEE CHECKS + jump to Evidence.
+      const pass = msg.text.startsWith('Reviewer: PASS')
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '🔍'))
+      head.appendChild(el('span', 'pname', pass ? 'Review PASS' : 'Review SEE CHECKS'))
+      head.appendChild(el('span', 'grow'))
+      head.appendChild(pill(pass ? 'supported' : 'inconclusive'))
+      card.appendChild(head)
+      const goEv = el('button', 'hbtn', '→ view claims in Evidence tab')
       goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
       goEv.onclick = () => {
         activeTab = 'evidence'
