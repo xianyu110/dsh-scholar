@@ -95,7 +95,7 @@ interface Projection {
   next_actions?: string[]
 }
 
-interface ClaimRow { claim_id?: string; statement?: string; status?: string; confidence?: string }
+interface ClaimRow { claim_id?: string; statement?: string; status?: string; confidence?: string; scope?: { dataset?: string; split?: string }; evidence?: { evidence_ids?: string[]; analysis_artifact?: string }; limitations?: string[]; history?: Array<{ status?: string; at?: string; reason?: string }> }
 interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number }; artifact_refs?: string[]; run_ids?: string[] }
 interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number; metadata?: Record<string, unknown> }
 interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
@@ -1219,6 +1219,16 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
         if (root !== null) openIdeaDetailModal(root, idea)
       }
+      // dsh-web drawer: one-click idea details.
+      const ideaBtn = el('button', 'hbtn', '⧉')
+      ideaBtn.title = 'idea details'
+      ideaBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      ideaBtn.onclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openIdeaDetailModal(root, idea)
+      }
+      row.appendChild(ideaBtn)
       card.appendChild(row)
     }
     if (ideas.length > 5) card.appendChild(el('div', 'muted', `… and ${ideas.length - 5} more`))
@@ -1247,6 +1257,16 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
         if (root !== null) openContractDetailModal(root, c)
       }
+      // dsh-web drawer: one-click contract details.
+      const contractBtn = el('button', 'hbtn', '⧉')
+      contractBtn.title = 'contract details'
+      contractBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      contractBtn.onclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openContractDetailModal(root, c)
+      }
+      row.appendChild(contractBtn)
       card.appendChild(row)
     }
     if (contracts.length > 5) card.appendChild(el('div', 'muted', `… and ${contracts.length - 5} more`))
@@ -1955,7 +1975,24 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
       top.appendChild(pill(claim.status))
       const conf = el('span', 'muted', claim.confidence !== undefined && claim.confidence !== '' ? claim.confidence : '')
       top.appendChild(conf)
+      top.appendChild(el('span', 'grow'))
+      // dsh-web drawer: one-click claim details (double-click too).
+      const claimBtn = el('button', 'hbtn', '⧉')
+      claimBtn.title = 'claim details'
+      claimBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      claimBtn.onclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openClaimDetailModal(root, claim)
+      }
+      top.appendChild(claimBtn)
       card.appendChild(top)
+      card.title = 'double-click for claim details'
+      card.ondblclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openClaimDetailModal(root, claim)
+      }
       const stmt = el('div', 'grow', claim.statement ?? '')
       stmt.style.cssText = 'margin-top:5px;color:var(--text);font-size:11.5px'
       card.appendChild(stmt)
@@ -2040,6 +2077,78 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
   }
   searchInput.oninput = () => { evidenceQuery = searchInput.value; renderList() }
   renderList()
+}
+
+/** dsh-web claim drawer: statement, scope, evidence links and history. */
+function openClaimDetailModal(root: ShadowRoot, claim: ClaimRow): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:540px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Claim details')
+  const header = el('div', 'modal-header', '🧾 Claim details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:110px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const titleRow = el('div', 'row')
+  titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
+  titleRow.appendChild(el('span', 'artifact-kind', (claim.status ?? '?').toUpperCase()))
+  titleRow.appendChild(el('span', 'pname', fmtId(claim.claim_id ?? '', 30)))
+  modal.appendChild(titleRow)
+
+  const stmt = el('div', 'grow', claim.statement ?? '')
+  stmt.style.cssText = 'font-size:12px;color:var(--text);line-height:1.55;margin-bottom:8px'
+  modal.appendChild(stmt)
+
+  modal.appendChild(el('div', 'section-label', 'Claim'))
+  row('Claim', String(claim.claim_id ?? '—'))
+  row('Status', String(claim.status ?? '—'))
+  row('Confidence', String(claim.confidence ?? '—'))
+  const scope = claim.scope
+  if (scope !== undefined) {
+    row('Dataset', String(scope.dataset ?? '—'))
+    row('Split', String(scope.split ?? '—'))
+  }
+  const ev = claim.evidence
+  if (ev !== undefined && (ev.evidence_ids ?? []).length > 0) {
+    modal.appendChild(el('div', 'section-label', 'Supporting evidence'))
+    for (const id of ev.evidence_ids ?? []) row('Evidence', fmtId(id, 40))
+    if (typeof ev.analysis_artifact === 'string' && ev.analysis_artifact !== '') row('Analysis artifact', fmtId(ev.analysis_artifact, 40))
+  }
+  const limitations = claim.limitations ?? []
+  if (limitations.length > 0) {
+    modal.appendChild(el('div', 'section-label', 'Limitations'))
+    for (const l of limitations) modal.appendChild(el('div', 'muted', `· ${l}`))
+  }
+  const history = claim.history ?? []
+  if (history.length > 0) {
+    modal.appendChild(el('div', 'section-label', 'Verification history'))
+    for (const h of history) {
+      const hrow = el('div', 'row')
+      hrow.style.cssText = 'padding:2px 0;align-items:flex-start'
+      hrow.appendChild(el('span', 'artifact-kind', String(h.status ?? '?')))
+      const when = String(h.at ?? '').replace('T', ' ').slice(0, 16)
+      const meta = el('div', 'grow muted', `${when}${h.reason !== undefined && h.reason !== '' ? ` — ${h.reason}` : ''}`)
+      hrow.appendChild(meta)
+      modal.appendChild(hrow)
+    }
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  trapFocus(overlay, null)
 }
 
 /** dsh-web evidence drawer: provenance + result of one evidence item. */
