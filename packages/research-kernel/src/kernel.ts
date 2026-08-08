@@ -19,6 +19,7 @@ import {
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
+import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
 
 export interface KernelOptions {
   /** SQLite database path (defaults to `:memory:`). */
@@ -167,17 +168,21 @@ export class ResearchKernel {
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
   readonly instanceId: string
+  /** TeX workspace store (execution-runtime.md §12). */
+  readonly tex: import('./tex-workspace.js').TexWorkspaceStore
   /** §12.7: when true, unsigned run manifests are rejected at completion. */
   requireSignedManifest: boolean
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
+    this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
     this.requireSignedManifest = options.requireSignedManifest ?? false
   }
 
   close(): void {
+    this.tex.close()
     this.db.close()
   }
 
@@ -979,15 +984,25 @@ export class ResearchKernel {
     if (existing !== undefined) return jobFromRow(existing)
     // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
     // isolated-subprocess is rejected at submission time (kernel layer).
-    const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+    const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
     if (SECURE_KINDS.includes(input.kind) && project.execution.runner_profile === 'isolated-subprocess') {
       throw new KernelError(422, 'container_execution_required',
         `job kind ${input.kind} requires a container runner profile (got ${project.execution.runner_profile}); host subprocess is prohibited (v2 §3.2)`)
     }
+    // §12 latex-compile binds a frozen TeX snapshot, not a code snapshot.
+    if (input.kind === 'latex-compile') {
+      const docId = typeof input.payload?.tex_document_id === 'string' ? input.payload.tex_document_id : ''
+      const rev = typeof input.payload?.tex_revision === 'number' ? input.payload.tex_revision : undefined
+      if (docId === '' || rev === undefined) {
+        throw new KernelError(422, 'tex_snapshot_required', 'latex-compile jobs require payload.tex_document_id + payload.tex_revision')
+      }
+      this.texSnapshot(docId, rev)
+    }
     // §12.2 (SCH-EXEC-002): formal-class jobs MUST bind a materialized code
     // snapshot — the Runner never executes agent host directories.
+    // latex-compile binds a frozen TeX snapshot instead (§12).
     const codeSnapshotId = input.code_snapshot_id ?? null
-    if (SECURE_KINDS.includes(input.kind) && (codeSnapshotId === null || codeSnapshotId === '')) {
+    if (SECURE_KINDS.includes(input.kind) && input.kind !== 'latex-compile' && (codeSnapshotId === null || codeSnapshotId === '')) {
       throw new KernelError(422, 'code_snapshot_required',
         `job kind ${input.kind} requires code_snapshot_id (the Runner materializes code from CAS, §11.3/§12.2)`)
     }
@@ -1455,6 +1470,75 @@ export class ResearchKernel {
     const row = this.db.prepare('SELECT run_id FROM terminal_frames WHERE job_id = ? ORDER BY created_at DESC, seq DESC LIMIT 1')
       .get(jobId) as { run_id?: string } | undefined
     return row?.run_id ?? null
+  }
+
+  // ── TeX workspace (execution-runtime.md §12) ─────────────────────────────
+
+  texEnsure(projectId: string, rootFile = 'paper.tex'): TexDocumentInfo {
+    this.getProject(projectId)
+    return this.tex.ensureDocument(projectId, rootFile)
+  }
+
+  texTree(documentId: string): { document: TexDocumentInfo; files: TexFileEntry[] } {
+    return this.tex.tree(documentId)
+  }
+
+  texReadFile(documentId: string, path: string) {
+    return this.tex.readFile(documentId, path)
+  }
+
+  texWriteFile(documentId: string, path: string, content: string, expectedVersion?: number) {
+    return this.tex.writeFile(documentId, path, content, expectedVersion)
+  }
+
+  texDeleteFile(documentId: string, path: string, expectedVersion?: number): void {
+    this.tex.deleteFile(documentId, path, expectedVersion)
+  }
+
+  texMoveFile(documentId: string, fromPath: string, toPath: string, expectedVersion?: number): void {
+    this.tex.moveFile(documentId, fromPath, toPath, expectedVersion)
+  }
+
+  texHistory(documentId: string) {
+    return this.tex.history(documentId)
+  }
+
+  texSnapshot(documentId: string, expectedRevision?: number): { revision: number; manifest: TexSnapshotManifest } {
+    return this.tex.snapshot(documentId, expectedRevision)
+  }
+
+  texCreateBuild(documentId: string, revision: number, rootFile: string, jobId: string | null): TexBuild {
+    return this.tex.createBuild(documentId, revision, rootFile, jobId)
+  }
+
+  texUpdateBuild(buildId: string, patch: Parameters<import('./tex-workspace.js').TexWorkspaceStore['updateBuild']>[1]): TexBuild {
+    return this.tex.updateBuild(buildId, patch)
+  }
+
+  texGetBuild(buildId: string): TexBuild {
+    return this.tex.getBuild(buildId)
+  }
+
+  texListBuilds(documentId: string): TexBuild[] {
+    return this.tex.listBuilds(documentId)
+  }
+
+  /**
+   * Generate a versioned TeX workspace from the ledger (gui-plugin-plan
+   * §11): paper.tex with title/abstract/methods/results/limitations and a
+   * main.bib from the frozen corpus. Creates the document if absent; every
+   * generation writes a new revision via the CAS.
+   */
+  generateTexWorkspace(projectId: string, rootFile = 'paper.tex'): { document_id: string; revision: number; files: string[] } {
+    const project = this.getProject(projectId)
+    const document = this.texEnsure(projectId, rootFile)
+    const latex = this.buildManuscript(projectId, 'latex', true)
+    const paperTex = latex.text
+    const bibtex = latex.bibtex.trim() !== '' ? latex.bibtex : `@misc{corpus,\n  title = {Frozen corpus for ${escapeLatex(project.name)}},\n}\n`
+    this.texWriteFile(document.document_id, 'paper.tex', paperTex)
+    this.texWriteFile(document.document_id, 'main.bib', bibtex)
+    const tree = this.texTree(document.document_id)
+    return { document_id: document.document_id, revision: tree.document.revision, files: tree.files.map(f => f.path) }
   }
 
   // ── evidence & claims (design §4.7) ──────────────────────────────────────

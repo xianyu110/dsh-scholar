@@ -77,7 +77,7 @@ export const JobRecord = z.object({
   project_id: z.string().min(1),
   contract_id: z.string().nullable().default(null),
   idempotency_key: z.string().min(1),
-  kind: z.enum(['echo', 'smoke', 'baseline', 'pilot', 'formal', 'analysis', 'reproduce']),
+  kind: z.enum(['echo', 'smoke', 'baseline', 'pilot', 'formal', 'analysis', 'reproduce', 'latex-compile']),
   command: z.array(z.string()).default([]),
   payload: z.record(z.unknown()).default({}),
   status: JobStatus.default('queued'),

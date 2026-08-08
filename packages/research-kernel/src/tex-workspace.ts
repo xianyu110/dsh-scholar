@@ -1,0 +1,325 @@
+/**
+ * TeX Workspace store (execution-runtime.md §12, gui-plugin-plan §11):
+ * versioned document files with CAS writes (expected_version), frozen
+ * snapshots, and build records for latex-compile jobs. Text content lives
+ * inline (v1); binary assets are planned via the CAS. The store owns a
+ * second WAL connection to the kernel database.
+ * @module @dsh-scholar/research-kernel/tex-workspace
+ */
+
+import { DatabaseSync } from 'node:sqlite'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
+
+export class TexError extends Error {
+  readonly code: string
+  constructor(code: string, message: string) {
+    super(message)
+    this.code = code
+  }
+}
+
+export interface TexFileEntry {
+  path: string
+  version: number
+  content_hash: string
+  content?: string
+  created_at: string
+}
+
+export interface TexDocumentInfo {
+  document_id: string
+  project_id: string
+  root_file: string
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export interface TexSnapshotManifest {
+  schema_version: number
+  document_id: string
+  revision: number
+  root_file: string
+  files: Array<{ path: string; version: number; content_hash: string }>
+  frozen_at: string
+}
+
+export interface TexBuild {
+  build_id: string
+  document_id: string
+  revision: number
+  root_file: string
+  job_id: string | null
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  diagnostics: string
+  pdf_artifact: string | null
+  log_artifact: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS tex_documents (
+  document_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  root_file TEXT NOT NULL DEFAULT 'paper.tex',
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tex_files (
+  document_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (document_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_tex_files_doc ON tex_files(document_id);
+CREATE TABLE IF NOT EXISTS tex_snapshots (
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  manifest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (document_id, revision)
+);
+CREATE TABLE IF NOT EXISTS tex_builds (
+  build_id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  root_file TEXT NOT NULL,
+  job_id TEXT,
+  status TEXT NOT NULL,
+  diagnostics TEXT NOT NULL DEFAULT '[]',
+  pdf_artifact TEXT,
+  log_artifact TEXT,
+  created_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tex_builds_doc ON tex_builds(document_id);
+`
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+function normalizePath(path: string): string {
+  const clean = path.replaceAll('\\', '/')
+  if (clean.startsWith('/') || clean.includes('..')) {
+    throw new TexError('invalid_path', `path must be root-relative without '..': ${path}`)
+  }
+  return clean
+}
+
+/** Create (or open) the TeX workspace store on the kernel database path. */
+export function openTexWorkspace(dbPath: string): TexWorkspaceStore {
+  return new TexWorkspaceStore(dbPath)
+}
+
+export class TexWorkspaceStore {
+  private readonly db: DatabaseSync
+
+  constructor(dbPath: string) {
+    if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true })
+    this.db = new DatabaseSync(dbPath)
+    this.db.exec('PRAGMA journal_mode = WAL')
+    this.db.exec('PRAGMA foreign_keys = ON')
+    this.db.exec(SCHEMA)
+  }
+
+  close(): void {
+    this.db.close()
+  }
+
+  ensureDocument(projectId: string, rootFile = 'paper.tex'): TexDocumentInfo {
+    const row = this.db.prepare('SELECT * FROM tex_documents WHERE project_id = ?').get(projectId) as TexDocumentInfo | undefined
+    if (row !== undefined) return row
+    const document: TexDocumentInfo = {
+      document_id: `doc_${randomUUID().slice(0, 12)}`,
+      project_id: projectId,
+      root_file: normalizePath(rootFile),
+      revision: 1,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    }
+    this.db.prepare('INSERT INTO tex_documents (document_id, project_id, root_file, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(document.document_id, document.project_id, document.root_file, document.revision, document.created_at, document.updated_at)
+    return document
+  }
+
+  getDocument(documentId: string): TexDocumentInfo {
+    const row = this.db.prepare('SELECT * FROM tex_documents WHERE document_id = ?').get(documentId) as TexDocumentInfo | undefined
+    if (row === undefined) throw new TexError('document_not_found', `tex document ${documentId} not found`)
+    return row
+  }
+
+  /** Bump the document revision (every mutation), returns the new revision. */
+  private bumpRevision(documentId: string): number {
+    const doc = this.getDocument(documentId)
+    const next = doc.revision + 1
+    this.db.prepare('UPDATE tex_documents SET revision = ?, updated_at = ? WHERE document_id = ?')
+      .run(next, nowIso(), documentId)
+    return next
+  }
+
+  tree(documentId: string): { document: TexDocumentInfo; files: TexFileEntry[] } {
+    const document = this.getDocument(documentId)
+    const rows = this.db.prepare('SELECT path, version, content, content_hash, created_at FROM tex_files WHERE document_id = ? ORDER BY path')
+      .all(documentId) as unknown as Array<{ path: string; version: number; content: string; content_hash: string; created_at: string }>
+    return {
+      document,
+      files: rows.map(r => ({ path: r.path, version: r.version, content_hash: r.content_hash, created_at: r.created_at })),
+    }
+  }
+
+  readFile(documentId: string, path: string): { path: string; version: number; content: string; content_hash: string } | null {
+    const row = this.db.prepare('SELECT path, version, content, content_hash FROM tex_files WHERE document_id = ? AND path = ?')
+      .get(documentId, normalizePath(path)) as { path: string; version: number; content: string; content_hash: string } | undefined
+    return row ?? null
+  }
+
+  /**
+   * CAS write: expected_version must match the stored version (or be
+   * undefined for create-if-absent). Conflict → TexError 409.
+   */
+  writeFile(documentId: string, path: string, content: string, expectedVersion?: number): { version: number; content_hash: string } {
+    const clean = normalizePath(path)
+    this.getDocument(documentId)
+    const existing = this.db.prepare('SELECT version, content FROM tex_files WHERE document_id = ? AND path = ?')
+      .get(documentId, clean) as { version: number; content: string } | undefined
+    if (existing === undefined) {
+      if (expectedVersion !== undefined && expectedVersion !== 0) {
+        throw new TexError('document_version_conflict', `file ${clean} does not exist (expected version ${expectedVersion})`)
+      }
+      const hash = sha256(content)
+      this.db.prepare('INSERT INTO tex_files (document_id, path, version, content, content_hash, created_at) VALUES (?, ?, 1, ?, ?, ?)')
+        .run(documentId, clean, content, hash, nowIso())
+      this.bumpRevision(documentId)
+      return { version: 1, content_hash: hash }
+    }
+    if (expectedVersion !== undefined && expectedVersion !== existing.version) {
+      throw new TexError('document_version_conflict',
+        `file ${clean} version ${existing.version} does not match expected version ${expectedVersion} — reload and merge`)
+    }
+    const hash = sha256(content)
+    this.db.prepare('UPDATE tex_files SET version = version + 1, content = ?, content_hash = ?, created_at = ? WHERE document_id = ? AND path = ?')
+      .run(content, hash, nowIso(), documentId, clean)
+    this.bumpRevision(documentId)
+    return { version: existing.version + 1, content_hash: hash }
+  }
+
+  deleteFile(documentId: string, path: string, expectedVersion?: number): void {
+    const clean = normalizePath(path)
+    const existing = this.db.prepare('SELECT version FROM tex_files WHERE document_id = ? AND path = ?')
+      .get(documentId, clean) as { version: number } | undefined
+    if (existing === undefined) throw new TexError('file_not_found', `file ${clean} not found`)
+    if (expectedVersion !== undefined && expectedVersion !== existing.version) {
+      throw new TexError('document_version_conflict', `file ${clean} version changed; reload before deleting`)
+    }
+    this.db.prepare('DELETE FROM tex_files WHERE document_id = ? AND path = ?').run(documentId, clean)
+    this.bumpRevision(documentId)
+  }
+
+  moveFile(documentId: string, fromPath: string, toPath: string, expectedVersion?: number): void {
+    const from = normalizePath(fromPath)
+    const to = normalizePath(toPath)
+    const file = this.readFile(documentId, from)
+    if (file === null) throw new TexError('file_not_found', `file ${from} not found`)
+    if (expectedVersion !== undefined && expectedVersion !== file.version) {
+      throw new TexError('document_version_conflict', `file ${from} version changed; reload before moving`)
+    }
+    this.writeFile(documentId, to, file.content)
+    this.db.prepare('DELETE FROM tex_files WHERE document_id = ? AND path = ?').run(documentId, from)
+    this.bumpRevision(documentId)
+  }
+
+  history(documentId: string): Array<{ revision: number; at: string }> {
+    this.getDocument(documentId)
+    const rows = this.db.prepare('SELECT DISTINCT revision, created_at FROM tex_files WHERE document_id = ? ORDER BY version DESC LIMIT 20')
+      .all(documentId) as unknown as Array<{ revision: number; created_at: string }>
+    const doc = this.getDocument(documentId)
+    return rows.length > 0 ? rows.map(r => ({ revision: r.revision, at: r.created_at })) : [{ revision: doc.revision, at: doc.updated_at }]
+  }
+
+  /** Freeze the current file set into a snapshot manifest (build input). */
+  snapshot(documentId: string, expectedRevision?: number): { revision: number; manifest: TexSnapshotManifest } {
+    const document = this.getDocument(documentId)
+    if (expectedRevision !== undefined && expectedRevision !== document.revision) {
+      throw new TexError('document_version_conflict',
+        `document revision ${document.revision} does not match expected revision ${expectedRevision} — save before building`)
+    }
+    const { files } = this.tree(documentId)
+    const manifest: TexSnapshotManifest = {
+      schema_version: 1,
+      document_id: documentId,
+      revision: document.revision,
+      root_file: document.root_file,
+      files: files.map(f => ({ path: f.path, version: f.version, content_hash: f.content_hash })),
+      frozen_at: nowIso(),
+    }
+    this.db.prepare('INSERT OR REPLACE INTO tex_snapshots (document_id, revision, manifest, created_at) VALUES (?, ?, ?, ?)')
+      .run(documentId, document.revision, JSON.stringify(manifest), manifest.frozen_at)
+    return { revision: document.revision, manifest }
+  }
+
+  createBuild(documentId: string, revision: number, rootFile: string, jobId: string | null): TexBuild {
+    const build: TexBuild = {
+      build_id: `build_${randomUUID().slice(0, 12)}`,
+      document_id: documentId,
+      revision,
+      root_file: rootFile,
+      job_id: jobId,
+      status: 'queued',
+      diagnostics: '[]',
+      pdf_artifact: null,
+      log_artifact: null,
+      created_at: nowIso(),
+      finished_at: null,
+    }
+    this.db.prepare('INSERT INTO tex_builds (build_id, document_id, revision, root_file, job_id, status, diagnostics, pdf_artifact, log_artifact, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(build.build_id, build.document_id, build.revision, build.root_file, build.job_id, build.status, build.diagnostics, build.pdf_artifact, build.log_artifact, build.created_at, build.finished_at)
+    return build
+  }
+
+  updateBuild(buildId: string, patch: {
+    status?: TexBuild['status']
+    diagnostics?: string
+    pdf_artifact?: string | null
+    log_artifact?: string | null
+    job_id?: string | null
+  }): TexBuild {
+    const current = this.getBuild(buildId)
+    const next: TexBuild = {
+      ...current,
+      ...patch,
+      status: patch.status ?? current.status,
+      diagnostics: patch.diagnostics ?? current.diagnostics,
+      pdf_artifact: patch.pdf_artifact !== undefined ? patch.pdf_artifact : current.pdf_artifact,
+      log_artifact: patch.log_artifact !== undefined ? patch.log_artifact : current.log_artifact,
+      job_id: patch.job_id !== undefined ? patch.job_id : current.job_id,
+      finished_at: (patch.status === 'succeeded' || patch.status === 'failed' || patch.status === 'cancelled') ? (current.finished_at ?? nowIso()) : current.finished_at,
+    }
+    this.db.prepare('UPDATE tex_builds SET status = ?, diagnostics = ?, pdf_artifact = ?, log_artifact = ?, job_id = ?, finished_at = ? WHERE build_id = ?')
+      .run(next.status, next.diagnostics, next.pdf_artifact, next.log_artifact, next.job_id, next.finished_at, buildId)
+    return next
+  }
+
+  getBuild(buildId: string): TexBuild {
+    const row = this.db.prepare('SELECT * FROM tex_builds WHERE build_id = ?').get(buildId) as TexBuild | undefined
+    if (row === undefined) throw new TexError('build_not_found', `tex build ${buildId} not found`)
+    return row
+  }
+
+  listBuilds(documentId: string): TexBuild[] {
+    this.getDocument(documentId)
+    const rows = this.db.prepare('SELECT * FROM tex_builds WHERE document_id = ? ORDER BY created_at DESC').all(documentId) as unknown as TexBuild[]
+    return rows
+  }
+}

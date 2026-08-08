@@ -7,6 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { z } from 'zod'
 import { ResearchKernel, KernelError } from './kernel.js'
+import { TexError } from './tex-workspace.js'
 
 export interface KernelServerOptions {
   kernel: ResearchKernel
@@ -250,6 +251,10 @@ function ok(res: ServerResponse, body: unknown): void {
 function fail(res: ServerResponse, error: unknown): void {
   if (error instanceof KernelError) {
     send(res, error.status, { error: { code: error.code, message: error.message } })
+  } else if (error instanceof TexError) {
+    // CAS write conflicts and invalid TeX paths map to HTTP semantics.
+    const status = error.code === 'document_version_conflict' ? 409 : 422
+    send(res, status, { error: { code: error.code, message: error.message } })
   } else if (error instanceof z.ZodError) {
     const issues = error.issues.map(i => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ')
     send(res, 422, { error: { code: 'validation_error', message: issues } })
@@ -370,6 +375,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             if (method === 'POST' && sub === 'analysis') {
               const input = z.object({ contract_id: z.string().optional(), metric: z.string().optional() }).parse(body)
               ok(res, kernel.computeAnalysis(id, input.contract_id, input.metric))
+              return
+            }
+            if (method === 'POST' && sub === 'manuscript-drafts') {
+              // gui-plugin-plan §11: generate a versioned TeX workspace.
+              const input = z.object({ root_file: z.string().optional() }).parse(body)
+              ok(res, kernel.generateTexWorkspace(id, input.root_file))
               return
             }
             if (method === 'GET' && sub === 'events') {
@@ -578,6 +589,93 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           if (method === 'POST' && id === 'verify') {
             const input = claimVerifySchema.parse(body)
             ok(res, kernel.verifyClaim(input))
+            return
+          }
+          break
+        }
+        case 'documents': {
+          // TeX workspace (api-contracts.md §11, execution-runtime.md §12).
+          if (id !== undefined && sub === 'tree' && method === 'GET') {
+            ok(res, kernel.texTree(id))
+            return
+          }
+          if (id !== undefined && sub === 'file' && method === 'GET') {
+            const path = url.searchParams.get('path')
+            if (path === null) throw new KernelError(422, 'missing_path', '?path= is required')
+            ok(res, kernel.texReadFile(id, path))
+            return
+          }
+          if (id !== undefined && sub === 'file' && method === 'PUT') {
+            const input = z.object({
+              path: z.string().min(1),
+              content: z.string(),
+              expected_version: z.number().int().positive().optional(),
+            }).parse(body)
+            ok(res, kernel.texWriteFile(id, input.path, input.content, input.expected_version))
+            return
+          }
+          if (id !== undefined && sub === 'file' && method === 'DELETE') {
+            const path = url.searchParams.get('path')
+            const expected = Number(url.searchParams.get('expected_version') ?? '') || undefined
+            if (path === null) throw new KernelError(422, 'missing_path', '?path= is required')
+            kernel.texDeleteFile(id, path, expected)
+            ok(res, { ok: true })
+            return
+          }
+          if (id !== undefined && sub === 'moves' && method === 'POST') {
+            const input = z.object({
+              from_path: z.string().min(1),
+              to_path: z.string().min(1),
+              expected_version: z.number().int().positive().optional(),
+            }).parse(body)
+            kernel.texMoveFile(id, input.from_path, input.to_path, input.expected_version)
+            ok(res, { ok: true })
+            return
+          }
+          if (id !== undefined && sub === 'history' && method === 'GET') {
+            ok(res, kernel.texHistory(id))
+            return
+          }
+          if (id !== undefined && sub === 'snapshots' && method === 'POST') {
+            const input = z.object({ expected_revision: z.number().int().positive().optional() }).parse(body)
+            ok(res, kernel.texSnapshot(id, input.expected_revision))
+            return
+          }
+          if (id !== undefined && sub === 'builds' && method === 'GET') {
+            ok(res, kernel.texListBuilds(id))
+            return
+          }
+          if (id !== undefined && sub === 'builds' && subId === undefined && method === 'POST') {
+            const input = z.object({
+              expected_document_revision: z.number().int().positive(),
+              root_file: z.string().optional(),
+              engine: z.string().optional(),
+              max_passes: z.number().int().positive().optional(),
+              idempotency_key: z.string().optional(),
+              image_digest: z.string().optional(),
+            }).parse(body)
+            // Freeze the workspace manifest, then submit the latex-compile job.
+            const snap = kernel.texSnapshot(id, input.expected_document_revision)
+            const tree = kernel.texTree(id)
+            const rootFile = input.root_file ?? tree.document.root_file
+            const job = kernel.submitJob({
+              project_id: tree.document.project_id,
+              idempotency_key: input.idempotency_key ?? `latex:${id}:${snap.revision}:${input.engine ?? 'pdflatex'}`,
+              kind: 'latex-compile',
+              command: [input.engine ?? 'pdflatex', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-no-shell-escape', rootFile],
+              payload: {
+                tex_document_id: id,
+                tex_revision: snap.revision,
+                tex_snapshot: snap.manifest,
+                image_digest: input.image_digest ?? '',
+              },
+            })
+            const build = kernel.texCreateBuild(id, snap.revision, rootFile, job.job_id)
+            send(res, 201, { build, job })
+            return
+          }
+          if (id !== undefined && sub === 'builds' && subId !== undefined && method === 'GET') {
+            ok(res, kernel.texGetBuild(subId))
             return
           }
           break

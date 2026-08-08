@@ -503,7 +503,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   // §3.2 / ADR-004: formal-class jobs must run in a container runtime.
   // Subprocess is only for trusted smoke fixtures and echoes — never for
   // baseline/pilot/formal/reproduce (design §1.2 "明确不做", §12.3).
-  const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+  const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
   if (SECURE_KINDS.includes(job.kind) && mode !== 'docker') {
     const rejected = await client.completeJob({
       job_id: job.job_id,
