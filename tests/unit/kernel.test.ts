@@ -124,6 +124,21 @@ describe('project state machine', () => {
     kernel.close()
   })
 
+  it('archives and restores a project (data kept, audited)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const archived = kernel.archiveProject(project.project_id)
+    expect(archived.status).toBe('ARCHIVED')
+    expect(archived.history.at(-1)).toContain('ARCHIVED')
+    const restored = kernel.unarchiveProject(project.project_id)
+    expect(restored.status).not.toBe('ARCHIVED')
+    expect(restored.history.at(-1)).toBe('ARCHIVED->restored')
+    // archive is idempotent
+    kernel.archiveProject(project.project_id)
+    expect(kernel.archiveProject(project.project_id).status).toBe('ARCHIVED')
+    kernel.close()
+  })
+
   it('v2 §6.2: generic transition cannot enter gate-controlled states', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })

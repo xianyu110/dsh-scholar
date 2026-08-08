@@ -108,6 +108,14 @@ export class ResearchClient {
     return this.request('PATCH', `/v1/projects/${projectId}`, { name })
   }
 
+  archiveProject(projectId: string): Promise<ResearchProject> {
+    return this.request('POST', `/v1/projects/${projectId}/archive`)
+  }
+
+  unarchiveProject(projectId: string): Promise<ResearchProject> {
+    return this.request('POST', `/v1/projects/${projectId}/unarchive`)
+  }
+
   projectProjection(projectId: string): Promise<{
     project: ResearchProject
     pending_gates: Gate[]

@@ -273,6 +273,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.renameProject(id, input.name))
               return
             }
+            if (method === 'POST' && sub === 'archive') {
+              ok(res, kernel.archiveProject(id))
+              return
+            }
+            if (method === 'POST' && sub === 'unarchive') {
+              ok(res, kernel.unarchiveProject(id))
+              return
+            }
             if (method === 'GET' && sub === 'projection') {
               ok(res, kernel.projectProjection(id))
               return

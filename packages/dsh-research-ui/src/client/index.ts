@@ -395,9 +395,10 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .ws-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; background:var(--tone-slate); }
 .ws-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:600 12px/1.3 system-ui,sans-serif; }
 .ws-status { font:600 8.5px/1 ui-monospace,Menlo,monospace; color:var(--text-3); letter-spacing:.3px; flex-shrink:0; }
-.ws-rename { display:none; color:var(--text-3); font-size:12px; padding:0 4px; cursor:pointer; flex-shrink:0; }
+.ws-rename { color:var(--text-3); font-size:12px; padding:0 4px; cursor:pointer; flex-shrink:0; }
 .ws-rename:hover { color:var(--accent); }
 .ws-item:hover .ws-rename { display:inline; }
+.ws-item:hover .ws-item > span[style*="display:none"] { display:flex; }
 .sidebar-foot { padding:10px 12px; border-top:1px solid var(--border); color:var(--text-3); font-size:10px; }
 .sidebar.collapsed { width:44px; }
 .sidebar.collapsed .sidebar-head { justify-content:center; padding:12px 6px; }
@@ -406,6 +407,13 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .sidebar.collapsed .ws-item { justify-content:center; padding:8px 0; }
 .sidebar.collapsed .ws-dot { width:10px; height:10px; }
 .main.expanded { flex:1; }
+/* dsh-web density: Compact tightens fonts and paddings. */
+.panel.density-compact { font-size:11px; }
+.panel.density-compact .body { padding:10px 12px 8px; }
+.panel.density-compact .card { padding:7px 9px; margin:4px 0; }
+.panel.density-compact .tab { padding:7px 2px 6px; }
+.panel.density-compact .section-label { margin:10px 0 4px; }
+.panel.density-compact .pstep .lbl { font-size:7px; }
 `
   root.appendChild(style)
 
@@ -465,9 +473,33 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     sidebarToggle.textContent = sidebarCollapsed ? '◨' : '◧'
     void render()
   }
+  // dsh-web density selector (the model dropdown's visual slot): Compact /
+  // Normal controls the panel font scale.
+  const DENSITY_KEY = 'dsh-scholar-ui-density'
+  let density: 'compact' | 'normal' = 'normal'
+  try {
+    density = localStorage.getItem(DENSITY_KEY) === 'compact' ? 'compact' : 'normal'
+  } catch { /* private mode */ }
+  const densitySelect = el('select', 'picker')
+  densitySelect.style.cssText = 'width:auto;margin:0;padding:3px 6px;font-size:10.5px;border-radius:7px'
+  const dOptCompact = el('option', '', 'Compact')
+  dOptCompact.value = 'compact'
+  const dOptNormal = el('option', '', 'Normal')
+  dOptNormal.value = 'normal'
+  densitySelect.append(dOptCompact, dOptNormal)
+  densitySelect.value = density
+  const applyDensity = (): void => {
+    panel.classList.toggle('density-compact', density === 'compact')
+    try { localStorage.setItem(DENSITY_KEY, density) } catch { /* private mode */ }
+  }
+  densitySelect.onchange = () => {
+    density = densitySelect.value === 'compact' ? 'compact' : 'normal'
+    applyDensity()
+  }
+  applyDensity()
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
-    header.append(sidebarToggle, modeBadge, commandsBtn, themeBtn, refresh)
+    header.append(sidebarToggle, modeBadge, commandsBtn, densitySelect, themeBtn, refresh)
   } else {
     header.append(themeBtn, refresh, close)
   }
@@ -1685,7 +1717,9 @@ function renderSidebar(
       item.appendChild(el('span', 'ws-name', p.name ?? p.project_id ?? ''))
       item.appendChild(el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''))
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
-      // dsh-web "session actions": rename (appears on hover via CSS).
+      // dsh-web "session actions": rename + archive/restore (hover only).
+      const actionsWrap = el('span')
+      actionsWrap.style.cssText = 'display:none;align-items:center;gap:2px;flex-shrink:0'
       const renameBtn = el('span', 'ws-rename', '✎')
       renameBtn.title = 'rename project'
       renameBtn.onclick = (event) => {
@@ -1694,7 +1728,23 @@ function renderSidebar(
         const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
         if (root !== null) openRenameModal(root, p.project_id, p.name ?? '', () => rerender())
       }
-      item.appendChild(renameBtn)
+      const archived = p.status === 'ARCHIVED'
+      const arcBtn = el('span', 'ws-rename', archived ? '↩' : '🗄')
+      arcBtn.title = archived ? 'restore project' : 'archive project (data kept)'
+      arcBtn.onclick = async (event) => {
+        event.stopPropagation()
+        if (p.project_id === undefined) return
+        if (!archived) {
+          const ok = await api(`/v1/projects/${encodeURIComponent(p.project_id)}/archive`, { method: 'POST' })
+          if (ok === null) { lastError = 'archive failed (bridge error)'; return }
+        } else {
+          const ok = await api(`/v1/projects/${encodeURIComponent(p.project_id)}/unarchive`, { method: 'POST' })
+          if (ok === null) { lastError = 'restore failed (bridge error)'; return }
+        }
+        rerender()
+      }
+      actionsWrap.append(renameBtn, arcBtn)
+      item.appendChild(actionsWrap)
       list.appendChild(item)
     }
   }
@@ -1739,6 +1789,22 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
     bubble.replaceChildren(...formatChatText(msg.text))
     stream.appendChild(bubble)
+    // dsh-web message actions: copy the raw text (assistant messages only).
+    if (msg.role === 'assistant' || msg.role === 'error') {
+      const actionsRow = el('div')
+      actionsRow.style.cssText = 'align-self:flex-start;display:flex;gap:6px;margin-top:2px'
+      const copy = el('button', 'hbtn', '⧉ copy')
+      copy.style.cssText = 'padding:0 6px;font-size:9px'
+      copy.onclick = () => {
+        void navigator.clipboard.writeText(msg.text).then(
+          () => { copy.textContent = '✓ copied' },
+          () => { copy.textContent = 'copy failed' },
+        )
+        setTimeout(() => { copy.textContent = '⧉ copy' }, 1600)
+      }
+      actionsRow.appendChild(copy)
+      stream.appendChild(actionsRow)
+    }
     const stamp = el('div')
     stamp.style.cssText = msg.role === 'user'
       ? 'align-self:flex-end;color:var(--text-3);font-size:9px;margin-top:-4px'
@@ -1746,6 +1812,8 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     stamp.textContent = msg.time
     stream.appendChild(stamp)
   }
+  // dsh-web behavior: always scroll to the newest message.
+  stream.scrollTop = stream.scrollHeight
   shell.appendChild(stream)
 
   // Composer (persists across refreshes via chatDraft) + session actions.
@@ -1753,15 +1821,21 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   composerRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:10px'
   const composer = el('div')
   composer.style.cssText = 'flex:1;display:flex;gap:8px'
-  const input = document.createElement('input')
-  input.type = 'text'
-  input.placeholder = '/research status — type a command'
+  // dsh-web composer: a multi-line textarea that auto-grows.
+  const input = document.createElement('textarea')
+  input.rows = 1
+  input.placeholder = '/research status — type a command (Enter sends, Shift+Enter newline)'
   input.value = chatDraft
-  input.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.4 ui-monospace,Menlo,monospace;outline:none'
+  input.style.cssText = 'flex:1;resize:none;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font:12px/1.5 ui-monospace,Menlo,monospace;outline:none;min-height:34px;max-height:120px;overflow-y:auto'
+  const autosize = (): void => {
+    input.style.height = 'auto'
+    input.style.height = `${Math.min(input.scrollHeight, 120)}px`
+  }
   input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
   input.onblur = () => { input.style.borderColor = 'var(--border)' }
   input.oninput = () => {
     chatDraft = input.value
+    autosize()
     renderCompletions()
   }
   // dsh-web "/" command completion: a small suggestion list under the
@@ -1830,7 +1904,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   send.onclick = () => { void run() }
   input.onkeydown = (event) => {
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       // Enter while a completion is open fills the highlighted row instead
       // of sending (first row default).

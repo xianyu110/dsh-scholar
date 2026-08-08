@@ -302,6 +302,36 @@ export class ResearchKernel {
     return updated
   }
 
+  /**
+   * Archive a project (dsh-web session actions): data is kept, the project
+   * leaves the Active group and all further gates/actions are blocked.
+   * Reversible via unarchiveProject.
+   */
+  archiveProject(projectId: string): ResearchProject {
+    const project = this.getProject(projectId)
+    if (project.status === 'ARCHIVED') return project
+    const now = nowIso()
+    this.db.prepare('UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
+      .run('ARCHIVED', now, JSON.stringify([...project.history, `${project.status}->ARCHIVED (archived)`]), projectId)
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.transitioned', { from: project.status, to: 'ARCHIVED', revision: updated.revision, reason: 'archived' })
+    return updated
+  }
+
+  /** Restore an archived project (back to RELEASE_READY when it was done,
+   * otherwise to its pre-archive phase). */
+  unarchiveProject(projectId: string): ResearchProject {
+    const project = this.getProject(projectId)
+    if (project.status !== 'ARCHIVED') return project
+    const restored = project.history.at(-1)?.startsWith('RELEASED') === true ? 'RELEASED' as ProjectStatus : 'RELEASE_READY' as ProjectStatus
+    const now = nowIso()
+    this.db.prepare('UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
+      .run(restored, now, JSON.stringify([...project.history, 'ARCHIVED->restored']), projectId)
+    const updated = this.getProject(projectId)
+    this.emit(projectId, 'project.transitioned', { from: 'ARCHIVED', to: restored, revision: updated.revision, reason: 'restored' })
+    return updated
+  }
+
   /** Link a DSH session to a project (design RSP-006). */
   linkSession(sessionId: string, projectId: string): SessionLink {
     this.getProject(projectId)
