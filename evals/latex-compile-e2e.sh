@@ -144,5 +144,24 @@ fi
 DIAGS=$(curl -sf "$API/v1/documents/$DOC/builds/$BUILD" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const b=JSON.parse(d);console.log((JSON.parse(b.diagnostics)||[]).length)})")
 ok "diagnostics entries: $DIAGS"
 
+# 6. §7 shell-escape negative: \\write18 must be inert (-no-shell-escape,
+# network none, read-only rootfs). If it executed, /outputs/PWNED would exist.
+DOC2=$(curl -sf -X POST "$API/v1/projects/$PROJ/manuscript-drafts" -H 'content-type: application/json' -d '{}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document_id))")
+V2=$(curl -sf "$API/v1/documents/$DOC2/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const t=JSON.parse(d);const f=t.files.find(x=>x.path==='paper.tex');console.log(f?f.version:'')})")
+node -e "console.log(JSON.stringify({path:'paper.tex',content:'\\\\documentclass{article}\\n\\\\immediate\\\\write18{touch /outputs/PWNED}\\n\\\\begin{document}hi\\\\end{document}\\n',expected_version:$V2}))" > "$WORK/pwn.json"
+curl -sf -X PUT "$API/v1/documents/$DOC2/file" -H 'content-type: application/json' -d "@$WORK/pwn.json" > /dev/null
+REV2=$(curl -sf "$API/v1/documents/$DOC2/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document.revision))")
+BUILD2=$(curl -sf -X POST "$API/v1/documents/$DOC2/builds" -H 'content-type: application/json' -d "{\"expected_document_revision\":$REV2,\"image_digest\":\"$IMAGE\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.build.build_id)})")
+S2=""
+for _ in $(seq 1 120); do
+  S2=$(curl -sf "$API/v1/documents/$DOC2/builds/$BUILD2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+  case "$S2" in succeeded|failed|cancelled) break ;; esac
+  sleep 1
+done
+echo "  escape build status: $S2"
+[ "$S2" = "succeeded" ] && ok "shell-escape paper compiled (\\write18 inert)" || fail "escape build status=$S2"
+PWN=$(curl -sf "$API/v1/documents/$DOC2/builds/$BUILD2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const b=JSON.parse(d);const diags=JSON.parse(b.diagnostics||'[]');console.log(diags.filter(x=>String(x.message).includes('write18')).length)})")
+[ "$PWN" = "0" ] && ok "no write18 execution diagnostics" || fail "write18 diagnostics present: $PWN"
+
 echo "== latex-compile e2e: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

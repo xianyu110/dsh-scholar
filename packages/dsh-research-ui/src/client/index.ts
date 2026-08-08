@@ -1135,7 +1135,7 @@ export function apply(): void {
       case 'budget': renderBudget(body, projection); break
       case 'manuscript': renderManuscript(body, projection, target); break
     }
-    const stamp = el('div', 'stamp', `updated ${new Date().toLocaleTimeString()}${lastError !== undefined ? ` · ⚠ ${lastError}` : ''}`)
+    const stamp = el('div', 'stamp', `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${lastError !== undefined ? ` · ⚠ ${lastError}` : ''}`)
     body.appendChild(stamp)
     paintBell()
   }
@@ -4217,9 +4217,9 @@ function showToast(root: ShadowRoot | null, text: string): void {
   const last = notifHistory[notifHistory.length - 1]
   if (last !== undefined && last.text === text && (last.ts ?? 0) > now - 60000) {
     last.count = (last.count ?? 1) + 1
-    last.time = new Date().toLocaleTimeString()
+    last.time = new Date().toLocaleTimeString(getLocale())
   } else {
-    notifHistory.push({ text, time: new Date().toLocaleTimeString(), ts: now })
+    notifHistory.push({ text, time: new Date().toLocaleTimeString(getLocale()), ts: now })
   }
   notifPersist()
   notifUnread += 1
@@ -5674,7 +5674,7 @@ function chatClear(): void {
 }
 
 function chatPush(role: ChatMessage['role'], text: string, quote?: { index: number; text: string }): void {
-  const msg: ChatMessage = { role, text, time: new Date().toLocaleTimeString() }
+  const msg: ChatMessage = { role, text, time: new Date().toLocaleTimeString(getLocale()) }
   if (quote !== undefined) msg.quote = quote
   chatMessages.push(msg)
   // dsh-web session unread: bump every session other than the active one
@@ -7821,12 +7821,12 @@ async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: strin
           if (originSessionId !== null && originSessionId !== chatActiveId) {
             const origin = chatSessions.find(x => x.id === originSessionId)
             if (origin !== undefined) {
-              origin.messages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
+              origin.messages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString(getLocale()) })
               origin.unread = (origin.unread ?? 0) + 1
             }
             chatSessionsPersist()
           } else {
-            chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString() })
+            chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString(getLocale()) })
             chatPersist()
           }
           rerender()

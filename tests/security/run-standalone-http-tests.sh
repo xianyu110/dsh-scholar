@@ -156,6 +156,24 @@ for _ in $(seq 1 15); do
 done
 ok "API-01: BFF instances cleaned up"
 
+# ── §9: legacy DSH bridge paths must 404 (no SPA/v1 fallback) ─────────────
+for PTH in /research-api /research-ui-api /research-api/anything /research-ui-api/x; do
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT$PTH")
+  [ "$R" = "404" ] && ok "SEC: $PTH -> 404" || fail "SEC: $PTH -> $R"
+done
+
+# ── §9.1: the standalone token must never reach the kernel argv ────────────
+KPID_BY_PORT=$(ss -ltnp 2>/dev/null | grep ":$KERNEL_PORT " | grep -oP 'pid=\K[0-9]+' | head -1)
+if [ -n "$KPID_BY_PORT" ]; then
+  if tr '\0' ' ' < "/proc/$KPID_BY_PORT/cmdline" 2>/dev/null | grep -q "$TOKEN"; then
+    fail "SEC: standalone token leaked into kernel argv"
+  else
+    ok "SEC: token absent from kernel argv"
+  fi
+else
+  fail "SEC: kernel pid not found for argv check"
+fi
+
 # ── OPS-01: clean shutdown frees both ports ────────────────────────────────
 kill "$SPID" 2>/dev/null || true
 for _ in $(seq 1 20); do
