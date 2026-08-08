@@ -3037,11 +3037,16 @@ function openCommandsModal(root: ShadowRoot): void {
     const matches = q === '' ? CHAT_COMMANDS : CHAT_COMMANDS.filter(([name, line, desc]) =>
       name.toLowerCase().includes(q) || line.toLowerCase().includes(q) || desc.toLowerCase().includes(q),
     )
-    if (matches.length === 0) {
+    // dsh-web favourites: ★ commands sort to the top of the palette.
+    const favsSet = favCommands()
+    const ordered = q === ''
+      ? [...matches].sort((a, b) => (favsSet.has(b[0]) ? 1 : 0) - (favsSet.has(a[0]) ? 1 : 0))
+      : matches
+    if (ordered.length === 0) {
       list.appendChild(el('div', 'empty', `No commands match "${paletteQuery.trim()}".`))
       return
     }
-    for (const [name, line, desc] of matches) {
+    for (const [name, line, desc] of ordered) {
       const row = el('button')
       row.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer'
       row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
@@ -3366,6 +3371,29 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   about.style.cssText = 'margin-top:16px;padding:3px 12px;align-self:flex-start'
   about.onclick = () => { openAboutModal(root) }
   modal.appendChild(about)
+
+  // dsh-web data management: clear every local preference/transcript.
+  modal.appendChild(section('Data'))
+  const resetRow = el('div', 'row')
+  resetRow.style.cssText = 'padding:4px 0'
+  const resetLabel = el('span', '', 'Local data')
+  resetLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const resetBtn = el('button', 'btn cancel', '🗑 Reset preferences')
+  resetBtn.style.cssText = 'padding:3px 10px;font-size:11px'
+  resetBtn.title = 'clear theme, tabs, sessions, history and notifications (reload to apply)'
+  resetBtn.onclick = () => {
+    const toRemove: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      // The access token survives a preference reset (no forced re-login).
+      if (k !== null && k.startsWith('dsh-scholar-ui-') && k !== 'dsh-scholar-ui-token') toRemove.push(k)
+    }
+    for (const k of toRemove) localStorage.removeItem(k)
+    overlay.remove()
+    showToast(rootHost(), '🗑 Local preferences cleared — reload the page to apply')
+  }
+  resetRow.append(resetLabel, resetBtn)
+  modal.appendChild(resetRow)
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
@@ -5082,6 +5110,9 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
 
   const stream = el('div')
   stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
+  // dsh-web a11y: announce assistant replies as they land.
+  stream.setAttribute('aria-live', 'polite')
+  stream.setAttribute('aria-label', 'conversation')
   if (chatMessages.length === 0) {
     chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
     // dsh-web starter chips: one-tap quick commands for a fresh session.
