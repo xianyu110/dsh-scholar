@@ -1135,6 +1135,12 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       id.style.cssText = 'font-size:9px'
       bodyEl.append(title, id)
       row.appendChild(bodyEl)
+      row.title = 'double-click for idea details'
+      row.ondblclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openIdeaDetailModal(root, idea)
+      }
       card.appendChild(row)
     }
     if (ideas.length > 5) card.appendChild(el('div', 'muted', `… and ${ideas.length - 5} more`))
@@ -1699,8 +1705,55 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
     const id = el('div', 'muted mono', fmtId(item.evidence_id))
     id.style.cssText = 'margin-top:3px;font-size:10px'
     card.appendChild(id)
+    card.title = 'double-click for evidence details'
+    card.ondblclick = (event) => {
+      event.stopPropagation()
+      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+      if (root !== null) openEvidenceDetailModal(root, item)
+    }
     body.appendChild(card)
   }
+}
+
+/** dsh-web evidence drawer: provenance + result of one evidence item. */
+function openEvidenceDetailModal(root: ShadowRoot, item: EvidenceRow): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:540px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Evidence details')
+  const header = el('div', 'modal-header', '📊 Evidence details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:110px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const r = item.result
+  modal.appendChild(el('div', 'section-label', 'Result'))
+  row('Metric', r?.primary_metric ?? '—')
+  row('Value', String(r?.value ?? '—'))
+  row('Effect', r?.effect_size !== undefined ? `Δ${r.effect_size >= 0 ? '+' : ''}${r.effect_size}` : '—')
+  row('CI', `[${r?.ci_low ?? '—'}, ${r?.ci_high ?? '—'}]`)
+  row('n seeds', String(r?.n_seeds ?? '—'))
+  modal.appendChild(el('div', 'section-label', 'Provenance'))
+  row('Evidence', String(item.evidence_id ?? '—'))
+  row('Method', item.analysis_method ?? '—')
+  row('Runs', Array.isArray(item.run_ids) ? item.run_ids.join(', ') : '—')
+  row('Artifacts', Array.isArray(item.artifact_refs) ? item.artifact_refs.map(a => fmtId(a, 18)).join(', ') : '—')
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  trapFocus(overlay, null)
 }
 
 function renderBudget(body: HTMLElement, p: Projection): void {
@@ -2228,6 +2281,73 @@ function openContractDetailModal(root: ShadowRoot, contract: Record<string, unkn
   trapFocus(overlay, null)
 }
 
+/* ─────────────────────────── idea detail modal ─────────────────────────── */
+
+/** dsh-web idea drawer: full record of an IdeaCard. */
+function openIdeaDetailModal(root: ShadowRoot, idea: Record<string, unknown>): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:540px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Idea details')
+  const header = el('div', 'modal-header', '💡 Idea details')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0;align-items:flex-start'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:110px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-word'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  const titleRow = el('div', 'row')
+  titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
+  titleRow.appendChild(el('span', 'pname', String(idea.title ?? 'untitled')))
+  titleRow.appendChild(el('span', 'grow'))
+  titleRow.appendChild(pill(String(idea.status ?? '')))
+  modal.appendChild(titleRow)
+
+  const mve = idea.minimum_viable_experiment as Record<string, unknown> | undefined
+  const fals = idea.falsification as Record<string, unknown> | undefined
+  const scores = idea.scores as Record<string, unknown> | undefined
+  modal.appendChild(el('div', 'section-label', 'Idea'))
+  row('Idea', String(idea.idea_id ?? '—'))
+  row('Status', String(idea.status ?? '—'))
+  if (typeof idea.hypothesis === 'string') row('Hypothesis', idea.hypothesis)
+  if (typeof idea.exact_delta === 'string') row('Delta', idea.exact_delta)
+  if (fals !== undefined) row('Falsification', String(fals.observation ?? '—'))
+  if (mve !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Minimum viable experiment'))
+    row('Dataset', String(mve.dataset ?? '—'))
+    row('Baseline', String(mve.baseline ?? '—'))
+    row('Metric', String(mve.primary_metric ?? '—'))
+    if (typeof mve.estimated_gpu_hours === 'number') row('GPU hours', String(mve.estimated_gpu_hours))
+  }
+  if (scores !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Scores'))
+    row('Feasibility', String(scores.feasibility ?? '—'))
+    row('Information', String(scores.information_gain ?? '—'))
+    row('Reproducibility', String(scores.reproducibility ?? '—'))
+    row('Cost', String(scores.cost ?? '—'))
+  }
+  const novelty = idea.novelty_audit as Record<string, unknown> | undefined
+  if (novelty !== undefined) {
+    modal.appendChild(el('div', 'section-label', 'Novelty audit'))
+    row('Result', String(novelty.result ?? '—'))
+    if (typeof novelty.unresolved_risk === 'string') row('Risk', novelty.unresolved_risk)
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  trapFocus(overlay, null)
+}
+
 /* ─────────────────────────── commands modal ─────────────────────────── */
 
 const FAV_CMDS_KEY = 'dsh-scholar-ui-favcmds'
@@ -2329,6 +2449,7 @@ function openCommandsModal(root: ShadowRoot): void {
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:560px;max-width:92vw'
+  modal.setAttribute('aria-describedby', 'cmd-desc')
   const header = el('div', 'modal-header', '⌘ Research Commands')
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
@@ -2336,6 +2457,7 @@ function openCommandsModal(root: ShadowRoot): void {
   modal.appendChild(header)
 
   const hint = el('div', 'muted', 'Click a command to run it in the Chat tab (or type it there directly).')
+  hint.id = 'cmd-desc'
   hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
   modal.appendChild(hint)
 
