@@ -3938,6 +3938,8 @@ function openNotificationsModal(root: ShadowRoot): void {
       openNotificationsModal(root)
     }
     row.append(text, time, del)
+    row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+    row.onmouseleave = () => { row.style.background = 'none' }
     list.appendChild(row)
   }
   modal.appendChild(list)
@@ -5532,6 +5534,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   restoreBtn.onclick = () => fileInput.click()
   document.body.appendChild(fileInput)
   sessionTabs.appendChild(restoreBtn)
+  // dsh-web session memory: keep the active chip visible when the tab row
+  // scrolls (many sessions).
+  requestAnimationFrame(() => {
+    const activeWrap = [...sessionTabs.querySelectorAll('span')].find(w => w.getAttribute('aria-current') === 'true')
+    activeWrap?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  })
   column.appendChild(sessionTabs)
 
   // Transcript search box (dsh-web "Search sessions" on the chat itself):
