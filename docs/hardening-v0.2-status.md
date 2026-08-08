@@ -29,7 +29,7 @@
 | STAT-01 | 单一正式分析实现 | 部分 | Analysis Worker 严格；Kernel computeAnalysis 仍是另一套较浅算法 |
 | RUN-01 | 正式 Docker/快照/fencing | 基本具备 | 默认 Runner CLI 仍 subprocess；签名 enforcement 默认兼容关闭；integrity require_signed_manifest Schema 未持久化 |
 | RUN-02 | 完整容器基线 | 部分 | 当前 flags 有 network/user/memory/cpu/tmpfs，但需 read-only、cap-drop、no-new-privileges、pids 等完整策略 |
-| TERM-01 | 实时有序终端 | 部分 | Terminal tab(运行选择、通道筛选、SSE 客户端、ANSI 白名单、实时状态栏、lastSeq 续传)已实现;Kernel frames 存储与 SSE 端点落地中 |
+| TERM-01 | 实时有序终端 | 基本具备 | terminal_frames/terminal_retention 表、kernel append/list(单调 seq、幂等、lease fencing、8 MiB 有界保留+dropped/truncated)、POST /v1/jobs/{id}/terminal-frames、GET /v1/jobs/{id}/terminal SSE(subscribed/chunk/gap/exit、心跳、gap 语义)、Terminal tab(运行选择/通道/ANSI 白名单/状态栏/lastSeq 续传)已实现并经 e2e 验证;待 runner-gateway onChunk 上报接线与 recovery/security 测试 |
 | TEX-01 | TeX workspace/editor/version | 未实现 | buildManuscript 只生成字符串和 Artifact，无文件树/保存/CAS version |
 | TEX-02 | latex-compile Job/诊断/PDF | 部分 | eval 脚本能 pdflatex/bibtex；产品接口和 UI 不存在；Job kind 不含 latex-compile |
 | UI-01 | standalone-only 单一 UI | 基本具备，待 CI 运行 | 根轻面板、两个 DSH HTTP bridge、UI Cordis host/patch 与 client floating 死分支已删除；manifest/files allowlist、docs verifier 和 standalone CI build 已接入，尚需 clean checkout 实跑 |
