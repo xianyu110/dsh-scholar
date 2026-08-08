@@ -1575,6 +1575,22 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       card.appendChild(actions)
       card.appendChild(reasonRow)
     }
+    // dsh-web context menu: copy the gate id (or the whole decision line).
+    card.oncontextmenu = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+      if (root === null) return
+      const items: ContextMenuItem[] = []
+      if (gate.gate_id !== undefined) {
+        items.push({ label: 'Copy gate ID', hint: gate.gate_id, onPick: () => copyText(gate.gate_id!) })
+      }
+      items.push({
+        label: 'Copy summary',
+        onPick: () => copyText(`${shortType(gate.type)} Gate${gate.title !== undefined && gate.title !== '' ? ` — ${gate.title}` : ''}${gate.gate_id !== undefined ? ` (${gate.gate_id})` : ''}`),
+      })
+      openContextMenu(root, event.clientX, event.clientY, items)
+    }
     listEl.appendChild(card)
   }
   if (dFiltered.length > 0) {
