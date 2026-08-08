@@ -4659,7 +4659,7 @@ const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 const CHAT_MAX = 200
 /** Multi-session chats (dsh-web session tabs), persisted. */
 const SESSIONS_KEY = 'dsh-scholar-ui-sessions'
-interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean; unread?: number }
+interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean; unread?: number; pinned?: boolean }
 let chatSessions: ChatSession[] = []
 let chatActiveId: string | null = null
 
@@ -4670,7 +4670,10 @@ function chatSyncActive(): void {
   chatMessages = active !== undefined ? active.messages : []
   if (active !== undefined) {
     active.lastActive = Date.now()
-    chatSessions.sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0))
+    // dsh-web pinned sessions stay at the top; the rest by recent activity.
+    chatSessions.sort((a, b) =>
+      ((b.pinned === true ? 1 : 0) - (a.pinned === true ? 1 : 0)) || ((b.lastActive ?? 0) - (a.lastActive ?? 0)),
+    )
   }
 }
 function chatSessionsPersist(): void {
@@ -5485,6 +5488,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const tab = el('button', 'hbtn')
     tab.textContent = s.name
     tab.style.cssText = 'padding:3px 10px;font-size:10.5px'
+    // dsh-web pinned sessions: ★ marker on the chip.
+    if (s.pinned === true) {
+      const pinStar = el('span', '', '★ ')
+      pinStar.style.cssText = 'color:var(--tone-amber);font-size:9px'
+      tab.prepend(pinStar)
+    }
     // dsh-web session depth: message count on the chip.
     if ((s.messages ?? []).length > 0) {
       const cnt = el('span', 'muted', ` ${s.messages.length}`)
@@ -5569,6 +5578,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       const ctxItems: ContextMenuItem[] = [
         { label: 'Open', onPick: () => chatSessionSelect(s.id) },
         { label: '✎ Rename', onPick: () => chatSessionRename(s.id) },
+        {
+          label: s.pinned === true ? '★ Unpin' : '☆ Pin',
+          onPick: () => {
+            s.pinned = !s.pinned
+            chatSessionsPersist()
+            chatSyncActive()
+            rerender()
+          },
+        },
         {
           label: '⧉ Duplicate',
           onPick: () => {
