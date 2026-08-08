@@ -589,6 +589,33 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     return { kernel, job, metrics, privateKey, keyId }
   }
 
+  it('RUN-01: require_signed_manifest project rejects unsigned manifests', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({
+      name: 't', workspace: '/w', brief: makeBrief(),
+      integrity: { require_signed_manifest: true },
+    })
+    expect(project.integrity.require_signed_manifest).toBe(true)
+    const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'run01', kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
+    kernel.claimJobs('runner-1', 60, 8)
+    // Unsigned manifest -> rejected with the enforcement code.
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: makeManifest(job, metrics.artifact_id) }),
+      422, 'manifest_signature_required',
+    )
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // A properly signed manifest is accepted.
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+    const keyId = 'run01-key'
+    kernel.registerRunnerKey({ key_id: keyId, public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() })
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
   it('manifest-signature-invalid-rejected: forged signature -> 422; valid signature -> succeeded', () => {
     const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
     const canonical = (m: Record<string, unknown>): string => JSON.stringify(m, Object.keys(m).sort())

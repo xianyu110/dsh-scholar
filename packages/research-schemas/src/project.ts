@@ -83,6 +83,8 @@ export const IntegrityConfig = z.object({
   require_claim_evidence_links: z.boolean().default(true),
   require_clean_room_rerun: z.boolean().default(false),
   allow_automatic_public_release: z.boolean().default(false),
+  /** §12.7: when true, run manifests MUST carry a valid runner signature. */
+  require_signed_manifest: z.boolean().default(false),
 })
 export type IntegrityConfig = z.infer<typeof IntegrityConfig>
 

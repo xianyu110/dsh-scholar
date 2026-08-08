@@ -47,6 +47,7 @@ export function fixtureProject(overrides: Partial<ResearchProject> = {}): Resear
       require_claim_evidence_links: true,
       require_clean_room_rerun: false,
       allow_automatic_public_release: false,
+      require_signed_manifest: false,
     },
     session_id: 'session_abc123',
     dsh_workspace_id: null,
