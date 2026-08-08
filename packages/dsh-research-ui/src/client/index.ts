@@ -5561,6 +5561,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     rerender()
   }
   searchRow.appendChild(commandsOnlyBtn)
+  // dsh-web match counter: how many messages the current filter shows.
+  const matchLabel = el('span', 'muted', '')
+  matchLabel.style.cssText = 'font-size:9.5px;flex-shrink:0'
+  searchRow.appendChild(matchLabel)
   // dsh-web command history panel: all executed commands in one view.
   const historyBtn = el('button', 'hbtn', '🕘 history')
   historyBtn.title = 'command execution history'
@@ -5713,10 +5717,12 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     }
     stream.appendChild(pinBox)
   }
+  let shownCount = 0
   for (let i = startIdx; i < chatMessages.length; i++) {
     const msg = chatMessages[i]!
     if (searchQ !== '' && !msg.text.toLowerCase().includes(searchQ)) continue
     if (chatCommandsOnly && msg.role !== 'user') continue
+    shownCount += 1
     // dsh-web quote-reply: quoted message preview above the bubble.
     if (msg.quote !== undefined) {
       const quoteBox = el('div')
@@ -6207,6 +6213,10 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       : 'align-self:flex-start;color:var(--text-3);font-size:9px;margin-top:-4px'
     stamp.textContent = msg.time
     stream.appendChild(stamp)
+  }
+  // dsh-web match counter: reflect the active filter.
+  if (searchQ !== '' || chatCommandsOnly) {
+    matchLabel.textContent = `${shownCount}/${chatMessages.length} shown`
   }
   if (stream.childElementCount === 0 && (searchQ !== '' || chatCommandsOnly)) {
     const empty = el('div', 'empty', chatCommandsOnly
