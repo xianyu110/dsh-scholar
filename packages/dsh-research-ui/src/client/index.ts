@@ -1412,6 +1412,34 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
 
 /* ─────────────────────────── commands modal ─────────────────────────── */
 
+const FAV_CMDS_KEY = 'dsh-scholar-ui-favcmds'
+
+/** Favourite command names (dsh-web quick commands), persisted. */
+function favCommands(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FAV_CMDS_KEY)
+    if (raw === null) return new Set()
+    const parsed = JSON.parse(raw) as unknown
+    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function favCommandToggle(name: string): void {
+  const favs = favCommands()
+  if (favs.has(name)) favs.delete(name)
+  else favs.add(name)
+  try { localStorage.setItem(FAV_CMDS_KEY, JSON.stringify([...favs])) } catch { /* private mode */ }
+}
+
+/** Execute a command line in the Chat tab (fill + run). */
+function runChatLine(line: string): void {
+  chatDraft = line
+  activeTab = 'chat'
+  rerender()
+}
+
 const CHAT_COMMANDS: Array<[string, string]> = [
   ['new', '/research new demo1', 'create a project + Scope Gate'],
   ['list', '/research list', 'list all projects'],
@@ -1465,7 +1493,16 @@ function openCommandsModal(root: ShadowRoot): void {
     const descEl = el('div', 'muted', desc)
     descEl.style.cssText = 'font-size:10.5px'
     bodyEl.append(lineEl, descEl)
-    row.append(nameEl, bodyEl)
+    const favBtn = el('span', 'artifact-kind', favCommands().has(name) ? '★' : '☆')
+    favBtn.title = favCommands().has(name) ? 'unfavourite command' : 'favourite command (quick run)'
+    favBtn.style.cssText += ';cursor:pointer;color:' + (favCommands().has(name) ? 'var(--tone-amber)' : 'var(--text-3)')
+    favBtn.onclick = (event) => {
+      event.stopPropagation()
+      favCommandToggle(name)
+      overlay.remove()
+      openCommandsModal(root)
+    }
+    row.append(nameEl, bodyEl, favBtn)
     row.onclick = () => {
       overlay.remove()
       chatDraft = line
@@ -2338,6 +2375,25 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     if (root !== null) openCommandHistoryModal(root)
   }
   searchRow.appendChild(historyBtn)
+  // dsh-web quick commands: favourite commands as one-tap chips.
+  const favs = favCommands()
+  for (const [name, line] of CHAT_COMMANDS) {
+    if (!favs.has(name)) continue
+    const chip = el('button', 'hbtn', `★ ${name}`)
+    chip.title = `quick run: ${line}`
+    chip.style.cssText = 'padding:0 8px;flex-shrink:0;color:var(--tone-amber)'
+    chip.onclick = () => {
+      chatDraft = line
+      activeTab = 'chat'
+      rerender()
+      setTimeout(() => {
+        const rootEl = rootHost()
+        const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+        ta?.focus()
+      }, 120)
+    }
+    searchRow.appendChild(chip)
+  }
   column.appendChild(searchRow)
 
   const stream = el('div')
@@ -2379,7 +2435,32 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       bubble.style.outline = '2px solid var(--accent)'
     }
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
-    bubble.replaceChildren(...formatChatText(msg.text, searchQ === '' ? undefined : searchQ))
+    // Long assistant replies collapse to a preview with a toggle (dsh-web
+    // long-message handling); the search view never collapses.
+    const lineCount = msg.text.split('\n').length
+    const collapsed = msg.role === 'assistant' && lineCount > 8 && searchQ === ''
+    const renderBubble = (): void => {
+      bubble.replaceChildren(...formatChatText(collapsed ? msg.text.split('\n').slice(0, 6).join('\n') + '\n…' : msg.text, searchQ === '' ? undefined : searchQ))
+    }
+    renderBubble()
+    if (collapsed) {
+      const toggle = el('button', 'hbtn', '⤵ show more')
+      toggle.style.cssText = 'padding:0 8px;font-size:9px;margin-top:4px;align-self:flex-start'
+      let expanded = false
+      toggle.onclick = (event) => {
+        event.stopPropagation()
+        expanded = !expanded
+        if (expanded) {
+          bubble.replaceChildren(...formatChatText(msg.text))
+          toggle.textContent = '⤴ show less'
+          bubble.appendChild(toggle)
+        } else {
+          renderBubble()
+          bubble.appendChild(toggle)
+        }
+      }
+      bubble.appendChild(toggle)
+    }
     // dsh-web "details": click a message to inspect it in the side panel.
     bubble.title = 'click for details'
     bubble.onclick = () => {
