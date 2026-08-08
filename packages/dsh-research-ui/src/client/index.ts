@@ -1313,6 +1313,8 @@ let gatesSelected = new Set<string>()
 
 /** Gates filter (dsh-web search-as-you-type), persisted per render. */
 let gatesQuery = ''
+/** Decided-gates section folded by default on busy projects. */
+let gatesDecidedOpen = true
 
 async function renderGates(body: HTMLElement, projectId: string): Promise<void> {
   const gates = (await api<GateRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/gates`)) ?? []
@@ -1512,30 +1514,38 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     listEl.appendChild(card)
   }
   if (dFiltered.length > 0) {
-    listEl.appendChild(el('div', 'section-label', `Decided (${dFiltered.length})`))
-    const card = el('div', 'card')
-    for (const gate of dFiltered) {
-      const row = el('div', 'gate-row')
-      const info = el('div', 'grow')
-      const name = el('div', 'pname', `${shortType(gate.type)} Gate`)
-      name.style.cssText = 'font-size:11.5px'
-      info.appendChild(name)
-      if (gate.title !== undefined && gate.title !== '') info.appendChild(el('div', 'muted', gate.title))
-      // dsh-web decision provenance: actor + timestamp (+ reason on hover).
-      const dec = decisions.find(d => d.gate_id === gate.gate_id)
-      if (dec !== undefined) {
-        const when = String(dec.decided_at ?? '').replace('T', ' ').slice(0, 16)
-        const meta = el('div', 'muted', `${String(dec.actor ?? '?')} · ${String(dec.decision ?? '?')}${when !== '' ? ` · ${when}` : ''}`)
-        meta.style.cssText = 'font-size:9.5px;margin-top:2px;color:var(--text-3)'
-        const reason = String(dec.reason ?? '')
-        if (reason !== '') meta.title = reason
-        info.appendChild(meta)
+    // dsh-web collapsible sections: the decided list can be folded away.
+    const decHeader = el('button')
+    decHeader.setAttribute('aria-expanded', gatesDecidedOpen ? 'true' : 'false')
+    decHeader.style.cssText = 'display:flex;align-items:center;gap:6px;border:0;background:none;cursor:pointer;color:var(--text);padding:2px 0'
+    decHeader.appendChild(el('span', 'section-label', `${gatesDecidedOpen ? '▾' : '▸'} Decided (${dFiltered.length})`))
+    decHeader.onclick = () => { gatesDecidedOpen = !gatesDecidedOpen; rerender() }
+    listEl.appendChild(decHeader)
+    if (gatesDecidedOpen) {
+      const card = el('div', 'card')
+      for (const gate of dFiltered) {
+        const row = el('div', 'gate-row')
+        const info = el('div', 'grow')
+        const name = el('div', 'pname', `${shortType(gate.type)} Gate`)
+        name.style.cssText = 'font-size:11.5px'
+        info.appendChild(name)
+        if (gate.title !== undefined && gate.title !== '') info.appendChild(el('div', 'muted', gate.title))
+        // dsh-web decision provenance: actor + timestamp (+ reason on hover).
+        const dec = decisions.find(d => d.gate_id === gate.gate_id)
+        if (dec !== undefined) {
+          const when = String(dec.decided_at ?? '').replace('T', ' ').slice(0, 16)
+          const meta = el('div', 'muted', `${String(dec.actor ?? '?')} · ${String(dec.decision ?? '?')}${when !== '' ? ` · ${when}` : ''}`)
+          meta.style.cssText = 'font-size:9.5px;margin-top:2px;color:var(--text-3)'
+          const reason = String(dec.reason ?? '')
+          if (reason !== '') meta.title = reason
+          info.appendChild(meta)
+        }
+        row.appendChild(info)
+        row.appendChild(pill(gate.status))
+        card.appendChild(row)
       }
-      row.appendChild(info)
-      row.appendChild(pill(gate.status))
-      card.appendChild(row)
+      listEl.appendChild(card)
     }
-    listEl.appendChild(card)
   }
   }
   searchInput.oninput = () => { gatesQuery = searchInput.value; renderList() }
@@ -5013,6 +5023,13 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
             a.remove()
             setTimeout(() => URL.revokeObjectURL(url), 4000)
             showToast(rootHost(), `⬇ Exported ${s.name}`)
+          },
+        },
+        {
+          label: '🗑 Clear conversation',
+          onPick: () => {
+            chatClear()
+            rerender()
           },
         },
         { label: '× Close', danger: true, onPick: () => chatSessionClose(s.id) },
