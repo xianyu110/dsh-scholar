@@ -1762,6 +1762,35 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
       if (root !== null) void openJobDetailModal(root, job.job_id)
     }
+    // dsh-web context menu: details / copy id / cancel.
+    card.oncontextmenu = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (job.job_id === undefined) return
+      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+      if (root === null) return
+      const jid = job.job_id
+      const items: ContextMenuItem[] = [
+        { label: '⧉ Details', onPick: () => { void openJobDetailModal(root, jid) } },
+        { label: 'Copy job ID', hint: jid, onPick: () => copyText(jid) },
+      ]
+      if (cancellable.has(job.status ?? '') && !runsSelecting) {
+        items.push({
+          label: '✕ Cancel',
+          danger: true,
+          onPick: () => {
+            void api(`/v1/jobs/${encodeURIComponent(jid)}/cancel`, {
+              method: 'POST',
+              body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from context menu' }),
+            }).then((ok) => {
+              showToast(rootHost(), ok === null ? '✕ cancel failed' : `✕ Cancelled run ${fmtId(jid, 18)}`)
+              rerender()
+            })
+          },
+        })
+      }
+      openContextMenu(root, event.clientX, event.clientY, items)
+    }
     if (job.error !== undefined && job.error !== '') {
       const err = el('div', 'muted', job.error)
       err.style.cssText = 'margin-top:4px;color:var(--tone-red);font-size:10.5px;word-break:break-all'
