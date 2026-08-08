@@ -98,13 +98,13 @@ const STATUS_META: Record<string, { label: string; tone: string }> = {
   none: { label: '—', tone: 'slate' },
 }
 
-const PHASE_PIPELINE = [
-  ['DRAFT', 'Draft'], ['SCOPED', 'Scoped'], ['SURVEYING', 'Survey'],
-  ['IDEATING', 'Ideas'], ['IDEA_APPROVED', 'Idea ✓'], ['BASELINE_REPRO', 'Baseline'],
-  ['CONTRACT_APPROVED', 'Contract'], ['EXPERIMENTING', 'Run'], ['EVIDENCE_READY', 'Analyze'],
-  ['WRITING', 'Write'], ['REVIEWING', 'Review'], ['RELEASE_READY', 'Package'],
-  ['RELEASED', 'Released'],
-] as const
+const PHASE_PIPELINE: Array<[string, string]> = [
+  ['DRAFT', t('overview', 'overview.pipeline.draft')], ['SCOPED', t('overview', 'overview.pipeline.scoped')], ['SURVEYING', t('overview', 'overview.pipeline.survey')],
+  ['IDEATING', t('overview', 'overview.pipeline.ideas')], ['IDEA_APPROVED', t('overview', 'overview.pipeline.ideaApproved')], ['BASELINE_REPRO', t('overview', 'overview.pipeline.baseline')],
+  ['CONTRACT_APPROVED', t('overview', 'overview.pipeline.contract')], ['EXPERIMENTING', t('overview', 'overview.pipeline.run')], ['EVIDENCE_READY', t('overview', 'overview.pipeline.analyze')],
+  ['WRITING', t('overview', 'overview.pipeline.write')], ['REVIEWING', t('overview', 'overview.pipeline.review')], ['RELEASE_READY', t('overview', 'overview.pipeline.package')],
+  ['RELEASED', t('overview', 'overview.pipeline.released')],
+]
 
 /* ─────────────────────────── theme (light default) ─────────────────────────── */
 
@@ -1342,7 +1342,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   const pct = Math.round((statusIdx2 / PHASE_PIPELINE.length) * 100)
   const pctRow = el('div', 'muted')
   pctRow.style.cssText = 'font-size:10px;margin-top:6px;text-align:right'
-  pctRow.textContent = `${pct}% complete`
+  pctRow.textContent = t('overview', 'overview.progress', { pct: String(pct) })
   pipeline.appendChild(pctRow)
   body.appendChild(pipeline)
 
@@ -1363,7 +1363,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   // next actions
   const next = (p.next_actions ?? []).filter(Boolean)
   if (next.length > 0) {
-    body.appendChild(el('div', 'section-label', 'Next actions'))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.nextActions')))
     for (const action of next) {
       const card = el('div', 'card')
       const row = el('div', 'row')
@@ -1374,8 +1374,8 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       body.appendChild(card)
     }
   } else {
-    body.appendChild(el('div', 'section-label', 'Next actions'))
-    body.appendChild(el('div', 'empty', 'No pending actions — waiting on human gate decision.'))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.nextActions')))
+    body.appendChild(el('div', 'empty', t('overview', 'overview.nextActions.none')))
   }
 
   // history (audit ledger: transitions, gate decisions, renames, archives)
@@ -1383,7 +1383,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   // dsh-web timeline: show the newest 10 entries; a toggle reveals the rest.
   const historyShown = phaseHistoryAll ? history : history.slice(-10)
   // dsh-web quick-nav: jump to the relevant panel from the pipeline view.
-  body.appendChild(el('div', 'section-label', 'Quick view'))
+  body.appendChild(el('div', 'section-label', t('overview', 'overview.quickView')))
   const quick = el('div', 'row')
   quick.style.cssText = 'gap:6px;flex-wrap:wrap'
   const jump = (label: string, tab: string): void => {
@@ -1396,19 +1396,19 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     }
     quick.appendChild(b)
   }
-  jump('Chat', 'chat')
-  jump('Approvals', 'gates')
-  jump('Runs', 'runs')
-  jump('Artifacts', 'artifacts')
-  jump('Evidence', 'evidence')
-  jump('Budget', 'budget')
+  jump(t('overview', 'overview.jump.chat'), 'chat')
+  jump(t('overview', 'overview.jump.approvals'), 'gates')
+  jump(t('overview', 'overview.jump.runs'), 'runs')
+  jump(t('overview', 'overview.jump.artifacts'), 'artifacts')
+  jump(t('overview', 'overview.jump.evidence'), 'evidence')
+  jump(t('overview', 'overview.jump.budget'), 'budget')
   body.appendChild(quick)
   // dsh-web data panel: budget usage of this project.
   const budget = p.budget
   const maxUsd = p.project?.constraints?.max_model_cost_usd
   const maxGpu = p.project?.constraints?.max_gpu_hours
   if (budget !== undefined) {
-    body.appendChild(el('div', 'section-label', 'Budget usage'))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.budgetUsage')))
     const bcard = el('div', 'card')
     const addBar = (label: string, used: number, max: number | undefined, unit: string): void => {
       const row = el('div', 'budget-row')
@@ -1439,7 +1439,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   // dsh-web data panel: IdeaCards of this project.
   if (projectId !== undefined && (p.counts?.ideas ?? 0) > 0) {
     const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/ideas`)) ?? []
-    body.appendChild(el('div', 'section-label', `IdeaCards (${ideas.length})`))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.ideaCards', { count: String(ideas.length) })))
     const card = el('div', 'card')
     for (const idea of ideas.slice(0, 5)) {
       const row = el('div', 'row')
@@ -1487,13 +1487,13 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     body.appendChild(card)
   } else if (projectId !== undefined) {
     // dsh-web empty state: no IdeaCards yet on this project.
-    body.appendChild(el('div', 'section-label', 'IdeaCards'))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.ideaCards', { count: '0' })))
     body.appendChild(el('div', 'empty', 'No IdeaCards yet — run /research ideas to list them, or create one via the kernel.'))
   }
   // dsh-web data panel: ExperimentContracts of this project.
   if (projectId !== undefined && (p.counts?.contracts ?? 0) > 0) {
     const contracts = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/contracts`)) ?? []
-    body.appendChild(el('div', 'section-label', `Contracts (${contracts.length})`))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.contracts', { count: String(contracts.length) })))
     const card = el('div', 'card')
     for (const c of contracts.slice(0, 5)) {
       const row = el('div', 'row')
@@ -1543,7 +1543,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     body.appendChild(card)
   }
   if (history.length > 0) {
-    body.appendChild(el('div', 'section-label', 'Audit history'))
+    body.appendChild(el('div', 'section-label', t('overview', 'overview.auditHistory')))
     for (const h of historyShown) {
       const row = el('div', 'row')
       row.style.cssText = 'padding:2px 0;align-items:flex-start'
@@ -1609,7 +1609,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     const dFiltered = decided.filter(matches)
     const labelRow = el('div', 'row')
     labelRow.style.cssText = 'justify-content:space-between;align-items:center'
-    labelRow.appendChild(el('div', 'section-label', `Awaiting your decision (${pFiltered.length})`))
+    labelRow.appendChild(el('div', 'section-label', t('overview', 'overview.awaiting', { count: String(pFiltered.length) })))
     if (pFiltered.length > 0) {
       const selBtn = el('button', 'hbtn', gatesSelecting ? '☑ Selecting…' : '☑ Select')
       selBtn.title = gatesSelecting ? 'exit multi-select' : 'multi-select gates (bulk decide)'
@@ -1840,8 +1840,8 @@ let runsSelected = new Set<string>()
 /** Runs status filter (dsh-web filter chips). */
 let runsFilter = 'all'
 const RUNS_FILTERS: Array<[string, string]> = [
-  ['all', 'All'], ['queued', 'Queued'], ['running', 'Running'],
-  ['succeeded', 'Succeeded'], ['failed', 'Failed'], ['cancelled', 'Cancelled'],
+  ['all', t('runs', 'runs.filter.all')], ['queued', t('runs', 'runs.filter.queued')], ['running', t('runs', 'runs.filter.running')],
+  ['succeeded', t('runs', 'runs.filter.succeeded')], ['failed', t('runs', 'runs.filter.failed')], ['cancelled', t('runs', 'runs.filter.cancelled')],
 ]
 
 function renderRuns(body: HTMLElement, p: Projection): void {
@@ -1850,10 +1850,10 @@ function renderRuns(body: HTMLElement, p: Projection): void {
   const cancellable = new Set(['queued', 'running', 'retryable'])
   const labelRow = el('div', 'row')
   labelRow.style.cssText = 'justify-content:space-between;align-items:center'
-  labelRow.appendChild(el('div', 'section-label', `Runs (${allJobs.length})`))
+  labelRow.appendChild(el('div', 'section-label', t('runs', 'runs.section', { count: String(allJobs.length) })))
   if (jobs.length > 0) {
-    const selBtn = el('button', 'hbtn', runsSelecting ? '☑ Selecting…' : '☑ Select')
-    selBtn.title = runsSelecting ? 'exit multi-select' : 'multi-select runs (bulk cancel)'
+    const selBtn = el('button', 'hbtn', runsSelecting ? t('runs', 'runs.selecting') : t('runs', 'runs.select'))
+    selBtn.title = runsSelecting ? t('runs', 'runs.selecting.title') : t('runs', 'runs.select.title')
     selBtn.setAttribute('aria-pressed', runsSelecting ? 'true' : 'false')
     selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
     selBtn.onclick = () => {
