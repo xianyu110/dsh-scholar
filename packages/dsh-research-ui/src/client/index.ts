@@ -357,6 +357,9 @@ let artifactsQuery = ''
 /** Claims & evidence filter on the Evidence tab (dsh-web search-as-you-type). */
 let evidenceQuery = ''
 
+/** Phase tab audit history: newest-10 by default, toggle reveals all. */
+let phaseHistoryAll = false
+
 /** Central a11y decorator for modal overlays (see apply). */
 let modalObserver: MutationObserver | null = null
 
@@ -1141,7 +1144,9 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   }
 
   // history (audit ledger: transitions, gate decisions, renames, archives)
-  const history = (p.project?.history ?? []).slice(-10)
+  const history = (p.project?.history ?? [])
+  // dsh-web timeline: show the newest 10 entries; a toggle reveals the rest.
+  const historyShown = phaseHistoryAll ? history : history.slice(-10)
   // dsh-web quick-nav: jump to the relevant panel from the pipeline view.
   body.appendChild(el('div', 'section-label', 'Quick view'))
   const quick = el('div', 'row')
@@ -1245,7 +1250,7 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   }
   if (history.length > 0) {
     body.appendChild(el('div', 'section-label', 'Audit history'))
-    for (const h of history) {
+    for (const h of historyShown) {
       const row = el('div', 'row')
       row.style.cssText = 'padding:2px 0;align-items:flex-start'
       // Pick an icon by the audit kind (dsh-web timeline feel).
@@ -1258,6 +1263,12 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       row.appendChild(el('span', 'muted', icon))
       row.appendChild(el('span', 'grow muted', h))
       body.appendChild(row)
+    }
+    if (history.length > 10) {
+      const toggleBtn = el('button', 'hbtn', phaseHistoryAll ? '⤴ show last 10' : `⤵ show all (${history.length})`)
+      toggleBtn.style.cssText = 'padding:1px 10px;margin-top:6px'
+      toggleBtn.onclick = () => { phaseHistoryAll = !phaseHistoryAll; rerender() }
+      body.appendChild(toggleBtn)
     }
   }
 }
@@ -3672,6 +3683,27 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
     for (const v of r.values) table.appendChild(cell(v))
   }
   modal.appendChild(table)
+  // dsh-web export: download the comparison as CSV.
+  const exportCsv = el('button', 'hbtn', '⬇ Export CSV')
+  exportCsv.title = 'download the comparison table as CSV'
+  exportCsv.style.cssText = 'margin-top:10px'
+  exportCsv.onclick = () => {
+    const lines = [
+      ['Label', ...labels],
+      ...rows.map(r => [r.label, ...r.values]),
+    ]
+    const csv = lines.map(line => line.map(cell => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = el('a', 'dl', 'download')
+    a.href = url
+    a.download = `compare-${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+  }
+  modal.appendChild(exportCsv)
 }
 
 /* ─────────────────────────── Chat (dialogue) tab ─────────────────────────── */
@@ -5370,6 +5402,35 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   }
   composerRow.append(composer, clear)
   column.appendChild(composerRow)
+  // dsh-web composer toolbar: markdown quick-inserts at the cursor.
+  const toolbar = el('div')
+  toolbar.style.cssText = 'display:flex;align-items:center;gap:4px;margin-top:6px'
+  const mkBtn = (label: string, title: string): HTMLButtonElement => {
+    const b = el('button', 'hbtn', label)
+    b.title = title
+    b.style.cssText = 'padding:1px 8px;font-size:10px'
+    return b
+  }
+  const insertMarkdown = (before: string, after: string, placeholder: string): void => {
+    const start = input.selectionStart ?? input.value.length
+    const end = input.selectionEnd ?? start
+    const selected = input.value.slice(start, end) || placeholder
+    input.value = input.value.slice(0, start) + before + selected + after + input.value.slice(end)
+    chatDraft = input.value
+    input.focus()
+    input.setSelectionRange(start + before.length, start + before.length + selected.length)
+    autosize()
+  }
+  const boldBtn = mkBtn('**B**', 'bold: wrap the selection in **…**')
+  boldBtn.onclick = () => insertMarkdown('**', '**', 'text')
+  const codeBtn = mkBtn('`<>`', 'inline code: wrap the selection in `…`')
+  codeBtn.onclick = () => insertMarkdown('`', '`', 'code')
+  const linkBtn = mkBtn('🔗', 'link: insert [text](url)')
+  linkBtn.onclick = () => insertMarkdown('[', '](https://)', 'text')
+  const listBtn = mkBtn('•', 'bullet list item')
+  listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
+  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn)
+  column.appendChild(toolbar)
   column.appendChild(completionBox)
 
   body.appendChild(shell)
