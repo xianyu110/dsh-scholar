@@ -1263,7 +1263,8 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
       row.appendChild(el('span', 'artifact-kind', String(c.status ?? '?')))
       const bodyEl = el('div', 'grow')
       bodyEl.style.cssText = 'min-width:0'
-      const title = el('div', '', `${String((c as Record<string, unknown>).methods?.baseline ?? '?')} vs ${String((c as Record<string, unknown>).methods?.treatment ?? '?')}`)
+      const cRecord = c as Record<string, unknown>
+      const title = el('div', '', `${String(cRecord.methods?.baseline ?? '?')} vs ${String(cRecord.methods?.treatment ?? '?')}${typeof cRecord.version === 'number' ? ` · v${cRecord.version}` : ''}`)
       title.style.cssText = 'font-size:11.5px;color:var(--text)'
       const id = el('div', 'muted mono', fmtId(String(c.contract_id ?? '')))
       id.style.cssText = 'font-size:9px'
@@ -4285,6 +4286,7 @@ let chatSessions: ChatSession[] = []
 let chatActiveId: string | null = null
 
 /** Current session's messages (chatMessages mirrors the active session). */
+let dragSessionId: string | null = null
 function chatSyncActive(): void {
   const active = chatSessions.find(s => s.id === chatActiveId)
   chatMessages = active !== undefined ? active.messages : []
@@ -5093,6 +5095,29 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     wrap.style.cssText = 'display:inline-flex;align-items:center;gap:2px;border:1px solid var(--border);border-radius:8px;padding:1px 4px'
     if (s.id === chatActiveId) wrap.style.cssText += ';border-color:var(--accent);background:var(--accent-soft)'
     if (s.archived === true) wrap.style.cssText += ';opacity:.45'
+    // dsh-web session tabs: drag to reorder the session list.
+    wrap.draggable = true
+    wrap.title = 'drag to reorder · right-click for actions'
+    wrap.addEventListener('dragstart', (event) => {
+      dragSessionId = s.id
+      event.dataTransfer?.setData('text/plain', s.id)
+      wrap.style.opacity = '0.4'
+    })
+    wrap.addEventListener('dragend', () => { wrap.style.opacity = '' })
+    wrap.addEventListener('dragover', (event) => { event.preventDefault() })
+    wrap.addEventListener('drop', (event) => {
+      event.preventDefault()
+      const from = dragSessionId
+      if (from === null || from === s.id) return
+      const fromIdx = chatSessions.findIndex(x => x.id === from)
+      const toIdx = chatSessions.findIndex(x => x.id === s.id)
+      if (fromIdx < 0 || toIdx < 0) return
+      const [moved] = chatSessions.splice(fromIdx, 1)
+      chatSessions.splice(toIdx, 0, moved!)
+      dragSessionId = null
+      chatSessionsPersist()
+      rerender()
+    })
     // dsh-web context menu: right-click on a session chip.
     wrap.oncontextmenu = (event) => {
       event.preventDefault()
@@ -5102,6 +5127,26 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       const ctxItems: ContextMenuItem[] = [
         { label: 'Open', onPick: () => chatSessionSelect(s.id) },
         { label: '✎ Rename', onPick: () => chatSessionRename(s.id) },
+        {
+          label: '⧉ Duplicate',
+          onPick: () => {
+            const copy: ChatSession = {
+              ...s,
+              id: `s${Date.now()}`,
+              name: `${s.name} copy`,
+              messages: s.messages.map(m => ({ ...m })),
+              unread: 0,
+              archived: false,
+            }
+            chatSessions.push(copy)
+            chatActiveId = copy.id
+            chatDraft = ''
+            chatSyncActive()
+            chatSessionsPersist()
+            rerender()
+            showToast(rootHost(), `⧉ Duplicated ${s.name}`)
+          },
+        },
         { label: s.archived === true ? '↩ Restore' : '🗄 Archive', onPick: () => chatSessionArchive(s.id) },
         { label: 'Copy session ID', hint: s.id, onPick: () => copyText(s.id) },
         {
