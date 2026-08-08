@@ -974,9 +974,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   }
 
   refresh.onclick = () => { void render() }
-  // dsh-web notification dot: unread count on the bell.
+  // dsh-web notification dot: unread count on the bell (99+ capped).
   const paintBell = (): void => {
-    bellBtn.textContent = notifUnread > 0 ? `🔔 ${notifUnread}` : '🔔'
+    bellBtn.textContent = notifUnread > 0 ? `🔔 ${notifUnread > 99 ? '99+' : notifUnread}` : '🔔'
     bellBtn.title = notifUnread > 0 ? `${notifUnread} unread notifications` : 'notifications'
   }
   paintBell()
@@ -3852,7 +3852,7 @@ function openNotificationsModal(root: ShadowRoot): void {
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:480px;max-width:92vw'
-  const header = el('div', 'modal-header', '🔔 Notifications')
+  const header = el('div', 'modal-header', `🔔 Notifications (${notifHistory.length})`)
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
   header.appendChild(closeBtn)
@@ -5250,7 +5250,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       tab.appendChild(cnt)
     }
     if (s.id !== chatActiveId && (s.unread ?? 0) > 0) {
-      const badge = el('span', 'artifact-kind', `${s.unread}`)
+      const badge = el('span', 'artifact-kind', `${s.unread}${(s.unread ?? 0) > 99 ? '+' : ''}`)
       badge.style.cssText += ';margin-left:4px;color:var(--tone-amber);font-weight:700'
       tab.appendChild(badge)
     }
