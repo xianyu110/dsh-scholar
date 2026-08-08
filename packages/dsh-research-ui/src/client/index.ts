@@ -597,6 +597,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   refresh.setAttribute('aria-label', 'Refresh')
   const close = el('button', 'hbtn ghost', '×')
   close.title = 'collapse'
+  close.setAttribute('aria-label', 'Collapse panel')
   close.onclick = () => { panel.style.display = 'none' }
   const commandsBtn = el('button', 'hbtn', '⌘ Commands')
   commandsBtn.title = 'browse /research commands'
@@ -1058,6 +1059,31 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
   jump('📊 Evidence', 'evidence')
   jump('💰 Budget', 'budget')
   body.appendChild(quick)
+  // dsh-web data panel: budget usage of this project.
+  const budget = p.budget
+  const maxUsd = p.project?.constraints?.max_model_cost_usd
+  const maxGpu = p.project?.constraints?.max_gpu_hours
+  if (budget !== undefined) {
+    body.appendChild(el('div', 'section-label', 'Budget usage'))
+    const bcard = el('div', 'card')
+    const addBar = (label: string, used: number, max: number | undefined, unit: string): void => {
+      const row = el('div', 'budget-row')
+      row.appendChild(el('span', 'blabel', label))
+      const track = el('div', 'budget-track')
+      const fill = el('div', 'budget-fill')
+      const ratio = max !== undefined && max > 0 ? Math.min(used / max, 1) : 0
+      const color = ratio >= 1 ? 'var(--tone-red)' : ratio >= 0.8 ? 'var(--tone-amber)' : 'var(--accent)'
+      fill.style.cssText = `width:${Math.max(ratio * 100, used > 0 ? 4 : 0)}%;background:${color};box-shadow:0 0 6px ${color}`
+      track.appendChild(fill)
+      row.appendChild(track)
+      const val = el('span', 'budget-val', `${used}${unit}${max !== undefined ? ` / ${max}${unit}` : ''}`)
+      row.appendChild(val)
+      bcard.appendChild(row)
+    }
+    addBar('Model', budget.model_cost_usd ?? 0, maxUsd, '$')
+    addBar('GPU', budget.gpu_hours ?? 0, maxGpu, 'h')
+    body.appendChild(bcard)
+  }
   // dsh-web data panel: IdeaCards of this project.
   if (projectId !== undefined && (p.counts?.ideas ?? 0) > 0) {
     const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/ideas`)) ?? []
@@ -1307,6 +1333,7 @@ function renderRuns(body: HTMLElement, p: Projection): void {
       rerender()
     }
     const doneSel = el('button', 'hbtn', 'Done')
+    doneSel.setAttribute('aria-label', 'Exit runs multi-select')
     doneSel.onclick = () => {
       runsSelecting = false
       runsSelected.clear()
@@ -2901,7 +2928,7 @@ const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 const CHAT_MAX = 200
 /** Multi-session chats (dsh-web session tabs), persisted. */
 const SESSIONS_KEY = 'dsh-scholar-ui-sessions'
-interface ChatSession { id: string; name: string; messages: ChatMessage[] }
+interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number }
 let chatSessions: ChatSession[] = []
 let chatActiveId: string | null = null
 
@@ -2909,6 +2936,10 @@ let chatActiveId: string | null = null
 function chatSyncActive(): void {
   const active = chatSessions.find(s => s.id === chatActiveId)
   chatMessages = active !== undefined ? active.messages : []
+  if (active !== undefined) {
+    active.lastActive = Date.now()
+    chatSessions.sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0))
+  }
 }
 function chatSessionsPersist(): void {
   try {
@@ -3306,6 +3337,7 @@ function renderSidebar(
   head.appendChild(el('span', 'sidebar-title', 'Projects'))
   const newBtn = el('button', 'sidebar-new', '＋')
   newBtn.title = 'new project'
+  newBtn.setAttribute('aria-label', 'New project')
   newBtn.onclick = () => {
     const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
     if (root !== null) openNewProjectModal(root)
@@ -4395,6 +4427,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   // dsh-web "session actions": clear this conversation.
   const clear = el('button', 'hbtn', '🗑')
   clear.title = 'clear conversation'
+  clear.setAttribute('aria-label', 'Clear conversation')
   clear.onclick = () => {
     chatClear()
     rerender()
