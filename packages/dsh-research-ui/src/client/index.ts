@@ -354,6 +354,9 @@ function densityApply(panel: HTMLElement): void {
 /** Artifact list filter (dsh-web search-as-you-type), persisted per render. */
 let artifactsQuery = ''
 
+/** Claims & evidence filter on the Evidence tab (dsh-web search-as-you-type). */
+let evidenceQuery = ''
+
 /** Central a11y decorator for modal overlays (see apply). */
 let modalObserver: MutationObserver | null = null
 
@@ -692,6 +695,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
   // ── tabs ──
   const tabs = el('div', 'tabs')
+  tabs.setAttribute('role', 'tablist')
+  tabs.setAttribute('aria-label', 'panel sections')
   const TAB_DEFS = [
     ['chat', '💬 Chat'], ['phase', 'Phase'], ['gates', 'Gates'], ['runs', 'Runs'],
     ['artifacts', 'Artifacts'], ['evidence', 'Evidence'], ['budget', 'Budget'],
@@ -703,6 +708,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     button.id = `tab-${key}`
     button.setAttribute('aria-controls', 'panel-body')
     button.setAttribute('aria-keyshortcuts', `Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`)
+    button.setAttribute('role', 'tab')
     button.setAttribute('role', 'tab')
     button.setAttribute('aria-selected', key === activeTab ? 'true' : 'false')
     // dsh-web "pin view": ★ marks a favourite tab (persisted).
@@ -754,6 +760,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       // once, so the pin class must be refreshed on every render).
       const pinned = tabPinned(key)
       button.classList.toggle('pinned', pinned)
+      button.setAttribute('aria-pressed', pinned ? 'true' : 'false')
       const hasStar = button.querySelector('span') !== null
       if (pinned && !hasStar) {
         const pin = el('span', '', '★ ')
@@ -920,9 +927,19 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   void render()
   const startTimer = (): number | null => {
     if (!autoRefreshEnabled()) return null
-    return window.setInterval(() => { void render() }, 8000)
+    return window.setInterval(() => {
+      // dsh-web behaviour: pause background refreshes while the tab is
+      // hidden (CPU/battery friendly); one refresh fires on return.
+      if (document.hidden) return
+      void render()
+    }, 8000)
   }
   let timer: number | null = startTimer()
+  // dsh-web behaviour: catch up immediately when the tab becomes visible
+  // again (the interval above skips while hidden).
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void render()
+  })
   // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
   // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme;
   // a bare "/" (not typing) focuses the chat composer.
@@ -1255,6 +1272,7 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
   if (pending.length > 0) {
     const selBtn = el('button', 'hbtn', gatesSelecting ? '☑ Selecting…' : '☑ Select')
     selBtn.title = gatesSelecting ? 'exit multi-select' : 'multi-select gates (bulk decide)'
+    selBtn.setAttribute('aria-pressed', gatesSelecting ? 'true' : 'false')
     selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
     selBtn.onclick = () => {
       gatesSelecting = !gatesSelecting
@@ -1504,6 +1522,7 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
   if (artifacts.length > 0) {
     const selBtn = el('button', 'hbtn', artifactsSelecting ? '☑ Selecting…' : '☑ Select')
     selBtn.title = artifactsSelecting ? 'exit multi-select' : 'multi-select artifacts (bulk download)'
+    selBtn.setAttribute('aria-pressed', artifactsSelecting ? 'true' : 'false')
     selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
     selBtn.onclick = () => {
       artifactsSelecting = !artifactsSelecting
@@ -1762,93 +1781,124 @@ async function previewArtifact(artifactId: string): Promise<void> {
 async function renderEvidence(body: HTMLElement, projectId: string): Promise<void> {
   const claims = (await api<ClaimRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/claims`)) ?? []
   const evidence = (await api<EvidenceRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/evidence`)) ?? []
-  body.appendChild(el('div', 'section-label', `Claims (${claims.length})`))
-  if (claims.length === 0) {
-    body.appendChild(el('div', 'empty', 'No claims yet.'))
-  }
-  if (claims.length > 8) {
-    const notice = el('div', 'muted', `Showing the newest 8 of ${claims.length} claims — use 🌐 global search for the rest.`)
-    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
-    body.appendChild(notice)
-  }
-  for (const claim of claims.slice(-8).reverse()) {
-    const card = el('div', 'evidence-card')
-    const top = el('div', 'row')
-    top.appendChild(pill(claim.status))
-    const conf = el('span', 'muted', claim.confidence !== undefined && claim.confidence !== '' ? claim.confidence : '')
-    top.appendChild(conf)
-    card.appendChild(top)
-    const stmt = el('div', 'grow', claim.statement ?? '')
-    stmt.style.cssText = 'margin-top:5px;color:var(--text);font-size:11.5px'
-    card.appendChild(stmt)
-    const id = el('div', 'muted mono', fmtId(claim.claim_id))
-    id.style.cssText = 'margin-top:4px;font-size:10px'
-    card.appendChild(id)
-    body.appendChild(card)
-  }
-  body.appendChild(el('div', 'section-label', `Evidence (${evidence.length})`))
-  if (evidence.length === 0) {
-    body.appendChild(el('div', 'empty', 'No verified evidence yet — only the Analysis Worker can create it.'))
-  }
-  if (evidence.length > 8) {
-    const notice = el('div', 'muted', `Showing the newest 8 of ${evidence.length} evidence items — use 🌐 global search for the rest.`)
-    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
-    body.appendChild(notice)
-  }
-  for (const item of evidence.slice(-8).reverse()) {
-    const r = item.result
-    const card = el('div', 'card')
-    const row = el('div', 'row')
-    const metric = el('span', 'evidence-metric', `${r?.primary_metric ?? '?'} = ${r?.value ?? '?'}`)
-    row.appendChild(metric)
-    const delta = el('span', 'evidence-delta')
-    const effect = r?.effect_size
-    if (effect !== undefined) {
-      delta.textContent = `Δ${effect >= 0 ? '+' : ''}${effect}`
-      delta.style.color = effect > 0 ? 'var(--tone-green)' : effect < 0 ? 'var(--tone-red)' : 'var(--tone-slate)'
+  // dsh-web search-as-you-type: filters both sections in place; only the
+  // list container is rebuilt so the input keeps focus.
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.placeholder = '🔍 Filter claims & evidence…'
+  searchInput.value = evidenceQuery
+  searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none;margin:2px 0 6px'
+  searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
+  searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
+  body.appendChild(searchInput)
+  const listEl = el('div')
+  body.appendChild(listEl)
+  const renderList = (): void => {
+    listEl.replaceChildren()
+    const q = evidenceQuery.trim().toLowerCase()
+    const cq = q === '' ? claims : claims.filter(c =>
+      (c.statement ?? '').toLowerCase().includes(q) ||
+      (c.claim_id ?? '').toLowerCase().includes(q) ||
+      (c.status ?? '').toLowerCase().includes(q) ||
+      (c.confidence ?? '').toLowerCase().includes(q),
+    )
+    const eq = q === '' ? evidence : evidence.filter(e =>
+      (e.result?.primary_metric ?? '').toLowerCase().includes(q) ||
+      String(e.result?.value ?? '').includes(q) ||
+      (e.evidence_id ?? '').toLowerCase().includes(q) ||
+      (e.analysis_method ?? '').toLowerCase().includes(q) ||
+      (Array.isArray(e.run_ids) ? e.run_ids.join(' ') : '').toLowerCase().includes(q),
+    )
+    listEl.appendChild(el('div', 'section-label', `Claims (${cq.length})`))
+    if (cq.length === 0) {
+      listEl.appendChild(el('div', 'empty', q === '' ? 'No claims yet.' : `No claims match "${evidenceQuery.trim()}".`))
     }
-    row.appendChild(delta)
-    row.appendChild(el('span', 'grow'))
-    row.appendChild(pill('verified'))
-    card.appendChild(row)
-    const refsCount = Array.isArray(item.artifact_refs) ? item.artifact_refs.length : 0
-    const runsCount = Array.isArray(item.run_ids) ? item.run_ids.length : 0
-    const meta = el('div', 'muted', `CI [${r?.ci_low ?? '?'}, ${r?.ci_high ?? '?'}] · n=${r?.n_seeds ?? '?'} · ${item.analysis_method ?? '?'} · ${runsCount} run(s) · ${refsCount} artifact ref(s)`)
-    meta.style.cssText = 'margin-top:4px'
-    card.appendChild(meta)
-    // dsh-web analysis depth: an effect-size bar (0-centred) per evidence.
-    if (r?.effect_size !== undefined && r.ci_low !== undefined && r.ci_high !== undefined) {
-      const bar = el('div')
-      bar.style.cssText = 'position:relative;height:14px;margin-top:6px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;overflow:hidden'
-      const lo = r.ci_low
-      const hi = r.ci_high
-      const eff = r.effect_size
-      const span = Math.max(Math.abs(hi - lo), 0.0001)
-      const zeroX = (0 - lo) / span * 100
-      const effX = (eff - lo) / span * 100
-      const width = Math.abs(effX - zeroX)
-      const fill = el('div')
-      fill.style.cssText = `position:absolute;top:0;bottom:0;left:${Math.min(zeroX, effX)}%;width:${width}%;background:${eff >= 0 ? 'var(--tone-green)' : 'var(--tone-red)'}`
-      bar.appendChild(fill)
-      const zero = el('div')
-      zero.style.cssText = `position:absolute;top:0;bottom:0;left:${zeroX}%;width:1px;background:var(--text-3)`
-      bar.appendChild(zero)
-      const label = el('div', 'muted', `effect ${eff >= 0 ? '+' : ''}${eff}  (0 ─────────── CI bounds)`)
-      label.style.cssText = 'font-size:9px;margin-top:2px;color:var(--text-3)'
-      card.appendChild(bar)
-      card.appendChild(label)
+    if (cq.length > 8) {
+      const notice = el('div', 'muted', `Showing the newest 8 of ${cq.length} claims — use 🌐 global search for the rest.`)
+      notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+      listEl.appendChild(notice)
     }
-    const id = el('div', 'muted mono', fmtId(item.evidence_id))
-    id.style.cssText = 'margin-top:3px;font-size:10px'
-    card.appendChild(id)
-    card.title = 'double-click for evidence details'
-    card.ondblclick = (event) => {
-      event.stopPropagation()
-      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-      if (root !== null) openEvidenceDetailModal(root, item)
+    for (const claim of cq.slice(-8).reverse()) {
+      const card = el('div', 'evidence-card')
+      const top = el('div', 'row')
+      top.appendChild(pill(claim.status))
+      const conf = el('span', 'muted', claim.confidence !== undefined && claim.confidence !== '' ? claim.confidence : '')
+      top.appendChild(conf)
+      card.appendChild(top)
+      const stmt = el('div', 'grow', claim.statement ?? '')
+      stmt.style.cssText = 'margin-top:5px;color:var(--text);font-size:11.5px'
+      card.appendChild(stmt)
+      const id = el('div', 'muted mono', fmtId(claim.claim_id))
+      id.style.cssText = 'margin-top:4px;font-size:10px'
+      card.appendChild(id)
+      listEl.appendChild(card)
     }
-    body.appendChild(card)
+    listEl.appendChild(el('div', 'section-label', `Evidence (${eq.length})`))
+    if (eq.length === 0) {
+      listEl.appendChild(el('div', 'empty', q === '' ? 'No verified evidence yet — only the Analysis Worker can create it.' : `No evidence matches "${evidenceQuery.trim()}".`))
+    }
+    if (eq.length > 8) {
+      const notice = el('div', 'muted', `Showing the newest 8 of ${eq.length} evidence items — use 🌐 global search for the rest.`)
+      notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+      listEl.appendChild(notice)
+    }
+    for (const item of eq.slice(-8).reverse()) {
+      const r = item.result
+      const card = el('div', 'card')
+      const row = el('div', 'row')
+      const metric = el('span', 'evidence-metric', `${r?.primary_metric ?? '?'} = ${r?.value ?? '?'}`)
+      row.appendChild(metric)
+      const delta = el('span', 'evidence-delta')
+      const effect = r?.effect_size
+      if (effect !== undefined) {
+        delta.textContent = `Δ${effect >= 0 ? '+' : ''}${effect}`
+        delta.style.color = effect > 0 ? 'var(--tone-green)' : effect < 0 ? 'var(--tone-red)' : 'var(--tone-slate)'
+      }
+      row.appendChild(delta)
+      row.appendChild(el('span', 'grow'))
+      row.appendChild(pill('verified'))
+      card.appendChild(row)
+      const refsCount = Array.isArray(item.artifact_refs) ? item.artifact_refs.length : 0
+      const runsCount = Array.isArray(item.run_ids) ? item.run_ids.length : 0
+      const meta = el('div', 'muted', `CI [${r?.ci_low ?? '?'}, ${r?.ci_high ?? '?'}] · n=${r?.n_seeds ?? '?'} · ${item.analysis_method ?? '?'} · ${runsCount} run(s) · ${refsCount} artifact ref(s)`)
+      meta.style.cssText = 'margin-top:4px'
+      card.appendChild(meta)
+      // dsh-web analysis depth: an effect-size bar (0-centred) per evidence.
+      if (r?.effect_size !== undefined && r.ci_low !== undefined && r.ci_high !== undefined) {
+        const bar = el('div')
+        bar.style.cssText = 'position:relative;height:14px;margin-top:6px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;overflow:hidden'
+        const lo = r.ci_low
+        const hi = r.ci_high
+        const eff = r.effect_size
+        const span = Math.max(Math.abs(hi - lo), 0.0001)
+        const zeroX = (0 - lo) / span * 100
+        const effX = (eff - lo) / span * 100
+        const width = Math.abs(effX - zeroX)
+        const fill = el('div')
+        fill.style.cssText = `position:absolute;top:0;bottom:0;left:${Math.min(zeroX, effX)}%;width:${width}%;background:${eff >= 0 ? 'var(--tone-green)' : 'var(--tone-red)'}`
+        bar.appendChild(fill)
+        const zero = el('div')
+        zero.style.cssText = `position:absolute;top:0;bottom:0;left:${zeroX}%;width:1px;background:var(--text-3)`
+        bar.appendChild(zero)
+        const label = el('div', 'muted', `effect ${eff >= 0 ? '+' : ''}${eff}  (0 ─────────── CI bounds)`)
+        label.style.cssText = 'font-size:9px;margin-top:2px;color:var(--text-3)'
+        card.appendChild(bar)
+        card.appendChild(label)
+      }
+      const id = el('div', 'muted mono', fmtId(item.evidence_id))
+      id.style.cssText = 'margin-top:3px;font-size:10px'
+      card.appendChild(id)
+      card.title = 'double-click for evidence details'
+      card.ondblclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openEvidenceDetailModal(root, item)
+      }
+      listEl.appendChild(card)
+    }
   }
+  searchInput.oninput = () => { evidenceQuery = searchInput.value; renderList() }
+  renderList()
 }
 
 /** dsh-web evidence drawer: provenance + result of one evidence item. */
@@ -4088,6 +4138,7 @@ function renderSidebar(
   if (!sidebarSelecting) {
     const selectBtn = el('button', 'hbtn', '☑ Select')
     selectBtn.title = 'multi-select projects (bulk actions)'
+    selectBtn.setAttribute('aria-pressed', 'false')
     selectBtn.onclick = () => {
       sidebarSelecting = true
       sidebarSelected.clear()
@@ -4254,6 +4305,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   // dsh-web "commands only" filter: a compact list of just the commands.
   const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? '⌘ commands on' : '⌘ commands')
   commandsOnlyBtn.title = 'show only command messages'
+  commandsOnlyBtn.setAttribute('aria-pressed', chatCommandsOnly ? 'true' : 'false')
   commandsOnlyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   commandsOnlyBtn.onclick = () => {
     chatCommandsOnly = !chatCommandsOnly
