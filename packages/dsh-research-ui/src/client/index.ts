@@ -3691,6 +3691,34 @@ function openGlobalSearchModal(root: ShadowRoot): void {
   input.onblur = () => { input.style.borderColor = 'var(--border)' }
   modal.appendChild(input)
 
+  // dsh-web filter chips: restrict hits by kind (All / Claims / Evidence).
+  const chipsRow = el('div')
+  chipsRow.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap'
+  const GS_KINDS: Array<['all' | 'claim' | 'evidence', string]> = [['all', 'All'], ['claim', 'Claims'], ['evidence', 'Evidence']]
+  for (const [key, label] of GS_KINDS) {
+    const chip = el('button', 'hbtn', label)
+    chip.style.cssText = 'padding:2px 10px;font-size:10px'
+    const paintChip = (): void => {
+      const active = gsKind === key
+      chip.setAttribute('aria-pressed', active ? 'true' : 'false')
+      chip.style.cssText = `padding:2px 10px;font-size:10px${active ? ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)' : ''}`
+    }
+    paintChip()
+    chip.onclick = () => {
+      gsKind = key
+      // Re-paint every chip so only the active one is highlighted.
+      chipsRow.querySelectorAll('button').forEach((b, i) => {
+        const gsKey = GS_KINDS[i]![0]
+        const active = gsKey === key
+        b.setAttribute('aria-pressed', active ? 'true' : 'false')
+        b.style.cssText = `padding:2px 10px;font-size:10px${active ? ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)' : ''}`
+      })
+      if (input.value.trim() !== '') void runSearch()
+    }
+    chipsRow.appendChild(chip)
+  }
+  modal.appendChild(chipsRow)
+
   const results = el('div')
   results.style.cssText = 'max-height:46vh;overflow-y:auto'
   results.setAttribute('role', 'listbox')
@@ -3732,19 +3760,22 @@ function openGlobalSearchModal(root: ShadowRoot): void {
         }
       }
     }
-    globalSearchResults = hits
+    const kindHits = gsKind === 'all' ? hits : hits.filter(h => h.kind === gsKind)
+    globalSearchResults = kindHits
     results.replaceChildren()
     rowEls.length = 0
     selIdx = -1
-    if (hits.length === 0) {
-      results.appendChild(el('div', 'empty', `No matches for "${input.value.trim()}" across projects.`))
+    if (kindHits.length === 0) {
+      results.appendChild(el('div', 'empty', gsKind === 'all'
+        ? `No matches for "${input.value.trim()}" across projects.`
+        : `No ${gsKind} matches for "${input.value.trim()}" across projects.`))
       return
     }
-    const count = el('div', 'muted', `${hits.length} hit(s) across ${projects.length} project(s) — ↑/↓ to select, Enter to open.`)
+    const count = el('div', 'muted', `${kindHits.length} hit(s) across ${projects.length} project(s) — ↑/↓ to select, Enter to open.`)
     count.style.cssText = 'margin-bottom:8px;font-size:11px'
     results.appendChild(count)
-    for (let i = 0; i < hits.length; i++) {
-      const h = hits[i]!
+    for (let i = 0; i < kindHits.length; i++) {
+      const h = kindHits[i]!
       const row = el('div')
       row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2);border-radius:6px;cursor:pointer'
       row.setAttribute('role', 'option')
@@ -3939,6 +3970,7 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
   addRow('Claims', p => String(p.counts?.claims ?? 0))
   addRow('Evidence', p => String(p.counts?.evidence ?? 0))
   addRow('Artifacts', p => String(p.counts?.artifacts ?? 0))
+  addRow('Runs', p => String((p.jobs ?? []).length))
   addRow('Pending gates', p => String((p.pending_gates ?? []).length))
 
   const table = el('div')
@@ -4721,6 +4753,8 @@ let chatCommandsOnly = false
 let globalSearchOpen = false
 let globalSearchQuery = ''
 let globalSearchResults: Array<{ project: string; kind: string; text: string }> = []
+/** Global search kind filter (dsh-web filter chips). */
+let gsKind: 'all' | 'claim' | 'evidence' = 'all'
 /** Multi-select mode for the sidebar (dsh-web bulk session actions). */
 let sidebarSelecting = false
 let sidebarSelected = new Set<string>()
