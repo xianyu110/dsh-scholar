@@ -1296,6 +1296,10 @@ async function renderPhase(body: HTMLElement, p: Projection, projectId?: string)
     }
     if (ideas.length > 5) card.appendChild(el('div', 'muted', `… and ${ideas.length - 5} more`))
     body.appendChild(card)
+  } else if (projectId !== undefined) {
+    // dsh-web empty state: no IdeaCards yet on this project.
+    body.appendChild(el('div', 'section-label', 'IdeaCards'))
+    body.appendChild(el('div', 'empty', 'No IdeaCards yet — run /research ideas to list them, or create one via the kernel.'))
   }
   // dsh-web data panel: ExperimentContracts of this project.
   if (projectId !== undefined && (p.counts?.contracts ?? 0) > 0) {
@@ -5382,6 +5386,25 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
           onPick: () => {
             chatClear()
             rerender()
+          },
+        },
+        {
+          label: '⬇ Export md',
+          onPick: () => {
+            const lines = [`# Research OS conversation — ${s.name}`, '', ...s.messages.map(m => {
+              const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**Research OS**'
+              return `## ${role} · ${m.time}\n\n${m.text}\n`
+            })]
+            const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+            const url = URL.createObjectURL(blob)
+            const a = el('a', 'dl', 'download')
+            a.href = url
+            a.download = `research-session-${s.name.replaceAll(' ', '-').slice(0, 24)}-${new Date().toISOString().slice(0, 10)}.md`
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            setTimeout(() => URL.revokeObjectURL(url), 4000)
+            showToast(rootHost(), `⬇ Exported ${s.name} as markdown`)
           },
         },
         { label: '× Close', danger: true, onPick: () => chatSessionClose(s.id) },
