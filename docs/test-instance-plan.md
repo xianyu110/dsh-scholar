@@ -1,13 +1,13 @@
 # 开发、测试与部署运行规范
 
-> 规范性文档。所有实例必须明确 DSH_HOME、Web port、Kernel endpoint 和 dataDir，禁止意外复用。
+> 规范性文档。所有实例必须明确 dataDir、Web port 和 Kernel endpoint；使用 DSH Agent adapter 时还必须明确 DSH_HOME。
 
 ## 1. 实例矩阵
 
 | 实例 | DSH_HOME / data | Web | Kernel | Self-mod | 用途 |
 |---|---|---:|---:|---|---|
 | 日常 DSH | 用户默认 | 3080 | 7412 | 禁止 | 非 Scholar 日常工作 |
-| Scholar test | ~/.dsh-scholar-test | 3081 | 17412 | 默认禁用 | DSH 嵌入集成 |
+| Scholar Agent dev | ~/.dsh-scholar-agent-dev | 3081 | 17412 | 默认禁用 | DSH tools/commands/Skills，无 Scholar Web UI |
 | Scholar standalone | ~/.dsh-scholar-standalone | 18610 | 17413 | 不支持 | 独立 UI |
 | Scholar selfmod dev | 临时独立目录 | 自选 | 自选 | 显式启用 | Cordis 运行时调试 |
 | CI | mktemp workspace | 随机 | 随机/Unix | 仅专门 case | 自动验收 |
@@ -18,7 +18,7 @@
 
 - Node.js 24；
 - pnpm 11；
-- DSH checkout，通过 DSH_SCHOLAR_DSH_ROOT 指定；
+- DSH Agent/plugin 集成开发才需要 DSH checkout，通过 DSH_SCHOLAR_DSH_ROOT 指定；
 - Docker，用于正式 Job、Terminal、Golden、TeX 和 clean-room；
 - 固定 TeX Live image；本机不要求安装 pdflatex；
 - Linux/macOS 文件权限语义；团队部署另需反代/SSO/PostgreSQL/K8s 设计。
@@ -27,13 +27,12 @@
 
 ~~~bash
 pnpm install --frozen-lockfile
-./scripts/link-dsh-deps.sh
-pnpm build
+pnpm -r --filter './packages/*' --filter './workers/*' run build
 pnpm typecheck
 pnpm test
 ~~~
 
-link-dsh-deps 只用于本地开发。发布验收必须在没有这些 symlink 的 package tarball 和全新 DSH profile 中运行。
+DSH Agent 插件需另行运行 `scripts/link-dsh-deps.sh` 和 `pnpm build:plugin`。standalone 的 clean build 不得依赖 DSH symlink。
 
 ## 4. 独立 UI
 
@@ -47,25 +46,24 @@ bash scripts/start-standalone-ui.sh
 - DSH_SCHOLAR_STANDALONE_KERNEL_PORT；
 - DSH_SCHOLAR_STANDALONE_DATA。
 
-目标 v2 独立 host 必须使用同源 BFF、正确流式 Artifact/SSE、locale 首屏和单一共享 UI。--no-token 只允许 loopback 明确开发，不作为默认文档路径。
+独立 host 是唯一浏览器 UI，必须使用同源 BFF、正确流式 Artifact/SSE、locale 首屏和单一 UI 实现。`--no-token` 只允许 loopback 明确开发，不作为默认文档路径；与 `0.0.0.0`、LAN 地址或外部 hostname 组合必须在监听前失败。
 
-## 5. DSH 嵌入测试实例
+## 5. DSH Agent 集成开发实例
 
 ~~~bash
-bash scripts/start-test-dsh.sh
+bash scripts/start-dsh-agent-dev.sh
 ~~~
 
-脚本设置独立 DSH_HOME、web profile、Web 3081、Kernel 17412 并安装根插件。DSH 的 web 命令实际使用 profile 名 web，因此隔离来自不同 DSH_HOME，不要创建名为 test-web 却期望 dsh web 自动使用。
+脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 只是 DSH 的会话入口；Scholar 页面、静态 client、`/research-api` 和 `/research-ui-api` 都不存在。
 
 当前仓库迁移期验证：
 
 ~~~bash
 curl http://127.0.0.1:3081/
 curl http://127.0.0.1:17412/v1/health
-curl http://127.0.0.1:3081/research-api/v1/health
 ~~~
 
-目标 v2 完成后，根插件与独立 UI 合并为同一个 /research-ui-api BFF，再把检查升级为 /v2/health；capabilities 必须含 terminal_stream、tex_workspace 和 locales。当前脚本只安装根 research-plugin，不应把 :7412 推断成第二个 research-ui Kernel。
+Agent 集成验收必须证明 tools、commands、subagents、四组 Skills 可用，且根 Agent 包 manifest 没有 `dshClient` 和 `./client` export。standalone UI 包可合法导出自己的 `./client`。浏览器 Golden Path 只在 standalone 18610 验收。
 
 ## 6. 开发模式启用 Cordis self-referential
 

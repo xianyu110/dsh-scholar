@@ -1,7 +1,7 @@
 # DSH Scholar 重建规范
 
-> 规范版本：2.1
-> 更新日期：2026-08-08
+> 规范版本：2.2
+> 更新日期：2026-08-09
 > 目标成熟度：Security Alpha，默认 gate-only
 > 用途：仅依赖本目录 Markdown，即可重新实现、测试和部署 DSH Scholar。
 
@@ -35,7 +35,7 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 | 4 | reconstruction-contracts.md | 固定 ABI、wire 类型、算法、limits 和可生成参数 |
 | 5 | storage-migrations.md | 如何持久化、迁移和恢复 |
 | 6 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
-| 7 | dsh-integration.md | 如何作为 DSH 插件、工具、命令、Skill 和 Web 模块运行 |
+| 7 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
 | 8 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
 | 9 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
 | 10 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
@@ -55,7 +55,8 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 - SQLite 为桌面默认实现，Artifact 内容使用 SHA-256 CAS；
 - 所有正式计算从不可变代码/数据快照物化，不能挂载 Agent 当前工作目录；
 - baseline、pilot、formal、reproduce、latex-compile 必须在受限容器中执行；
-- UI 同时支持 DSH 嵌入模式和独立模式，两者复用相同客户端模块与 BFF 接口；
+- 浏览器 UI 只支持独立模式，由独立 HTTP host 和同源 BFF 提供；不得发布 `dshClient`、DSH Web slot、`/research-api` 或 `/research-ui-api` 嵌入面；
+- DSH Adapter 只保留 Agent tools、commands、subagents、Skills、Session 和 headless 能力，不托管浏览器 UI；
 - Runs 必须显示实时终端；Manuscript 必须提供 TeX 文件树、编辑、编译日志、诊断和 PDF 预览；
 - 所有列表、流式日志和 Artifact 读取都执行 Project AuthZ；
 - Human Gate 使用认证 Principal，Agent 接口中不存在 Gate Decision；
@@ -71,6 +72,8 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 4. 增加或修改 acceptance-tests.md 中的验收场景；
 5. 在 hardening-v0.2-status.md 记录当前实现与目标的状态；
 6. 实现、测试、文档在同一个变更集内保持一致。
+
+当前 `scripts/verify-docs.mjs` 自动检查文档结构、链接、关键契约片段和旧嵌入面否定断言；它尚未根据 git diff 自动判断每个源码行为变更是否同步了规范、验收与 hardening。该 change-aware gate 记在 hardening 的 DOC-02，在实现前由主代理/评审按上述六项逐项确认，不能把 verifier 通过等同于 docs-first 完成。
 
 代码与 Markdown 冲突时，不得静默选择代码现状；必须先确认目标并修正文档或实现。只改代码不更新规范、只记录修复建议不落入规范，均视为未完成。
 

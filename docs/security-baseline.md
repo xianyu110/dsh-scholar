@@ -20,13 +20,14 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 
 ## 2. 身份、AuthZ 与 Gate
 
-- BFF 从 DSH session、SSO 或 standalone 本地身份解析 Principal；浏览器 actor 字段无效；
+- BFF 从 standalone 本地身份或 SSO 解析 Human Principal；DSH session 只用于 Agent 命令/工具关联，浏览器 actor 字段无效；
 - Gate Decision 只存在于 Human BFF，Agent Tool 和命令不注册该能力；
 - Project 角色至少为 owner/PI、researcher、operator、auditor、viewer；
 - 读 Terminal 原始日志是独立权限 job_log_read，不能假设查看 status 就可读 secret-bearing log；
 - 编辑 TeX 需要 document_write，编译需要 job_submit 和 document_read；
 - 项目无权限与不存在都返回 404；
 - Gate、target freeze、Decision、Project revision 和 Outbox 单事务提交。
+- 安全回归必须覆盖 forged actor 被忽略、非成员跨项目 404、PI/member 变更、CSRF token 注入/轮换和撤权后 SSE 关闭。
 
 ## 3. Web 安全
 
@@ -92,6 +93,15 @@ TeX source 同样不可信。latex-compile 必须 no-shell-escape、禁网、固
 - lease fencing 拒绝旧 Runner 注入 chunk；
 - 下载日志使用 text/plain 或 application/x-ndjson，不能当 HTML；
 - 搜索、复制、导出不得把隐藏的已过滤 secret 恢复出来。
+
+## 9.1 Standalone BFF 与本地监听
+
+- `--no-token` 只可绑定 `localhost`、`::1` 或 `127.0.0.0/8`；任何 wildcard、LAN 或外部 hostname 必须在 listen 前拒绝；
+- 开启 token 时，明文 token 只存在于 0600 token file/受控进程通道和浏览器当前会话，不进入 argv、服务日志、错误响应或 URL；
+- BFF 对 connector、Kernel 和文件错误只返回稳定错误码与通用消息，内部 URL、dataDir、环境变量和依赖路径不得回显；
+- package allowlist、clean pack 与 CI 负向检查共同保证已删除的 DSH host/bridge 不会由 ignored `lib` 重新发布；
+- readiness 脚本不得把启动失败报告为成功；超时或子进程退出必须非零结束。
+- sidecar 只在 protocol/schema/database identity、dataDir/config 均匹配时复用；port=0 必须由 0600 endpoint handshake 返回实际端口，超时或错配 fail closed。
 
 ## 10. Cordis self-referential 开发模式
 

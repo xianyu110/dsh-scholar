@@ -19,12 +19,12 @@ jobs:
           cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile
-      - name: Build standalone sub-packages
-        run: |
-          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
-      - name: Unit tests
-        run: |
-          pnpm exec vitest run --exclude tests/unit/security.test.ts
+      - name: Build standalone packages
+        run: pnpm -r --filter './packages/*' --filter './workers/*' run build
+      - name: Documentation and deleted-surface contract
+        run: pnpm run verify:docs
+      - name: Unit tests (standalone; DSH-host integration has a separate pending fixture)
+        run: pnpm exec vitest run --exclude tests/unit/security.test.ts
 
   security-blocking:
     needs: unit-and-build
@@ -43,7 +43,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build standalone sub-packages
         run: |
-          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+          pnpm -r --filter './packages/*' --filter './workers/*' run build
       - name: hardening tests
         run: bash tests/security/run-hardening-tests.sh
       - name: v2 blocking tests
@@ -72,7 +72,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build standalone sub-packages
         run: |
-          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+          pnpm -r --filter './packages/*' --filter './workers/*' run build
       - name: Install fixed LaTeX build image (texlive)
         run: sudo apt-get install -y texlive-latex-base texlive-latex-recommended
       - name: §14.3 / §19.2 latex-compiles blocking test
@@ -95,7 +95,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build standalone sub-packages
         run: |
-          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+          pnpm -r --filter './packages/*' --filter './workers/*' run build
       - name: Docker isolation eval (blocking)
         run: bash evals/docker-eval.sh
 
@@ -116,7 +116,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build standalone sub-packages
         run: |
-          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+          pnpm -r --filter './packages/*' --filter './workers/*' run build
       - name: Golden Path v2 real-execution eval (blocking)
         run: bash evals/golden-path-v2/run-golden-v2.sh
 
@@ -137,7 +137,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build standalone sub-packages
         run: |
-          pnpm -r --filter './packages/*' --filter './workers/*' --filter '!@dsh-scholar/research-ui' run build
+          pnpm -r --filter './packages/*' --filter './workers/*' run build
       - name: Clean-room rerun eval (blocking)
         run: bash evals/clean-room-rerun.sh
       - name: Golden-path e2e (docker)

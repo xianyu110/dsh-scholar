@@ -1,32 +1,41 @@
 /**
- * DSH Research OS — fully standalone web plugin server.
+ * DSH Scholar — standalone web application server.
  *
  * Serves the Research OS UI at its own origin, completely independent of
  * the `dsh web` host: it spawns (or reuses) the Research Kernel sidecar,
  * serves the built client bundle plus a minimal bootstrap page, proxies
  * `/v1/*` to the kernel and protects every state-changing call with a
- * loopback bearer token (the same posture as the DSH-hosted bridge,
- * design §15.2/§15.3).
+ * loopback bearer token (design §15.2/§15.3).
  *
  * Usage:
  *   node lib/standalone/server.js [--port 18610] [--kernel-port 17413]
  *     [--data-dir <dir>] [--token <secret>] [--host 127.0.0.1]
  *
- * On first start a token is generated and printed + persisted under the
- * data dir (`standalone-token`); the browser asks for it once and keeps it
+ * On first start a token is generated and persisted under the data dir
+ * (`standalone-token`); the browser asks for it once and keeps it
  * in localStorage. Token mode can be disabled with `--no-token` (loopback
  * only, not recommended).
  * @module @dsh-scholar/research-ui/standalone
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { Readable } from 'node:stream'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
-import { UiKernelSidecar } from '../host/sidecar.js'
+import { UiKernelSidecar } from './sidecar.js'
+import {
+  MAX_BODY_BYTES,
+  SlidingWindowRateLimiter,
+  constantTimeEqual,
+  isAllowedOrigin,
+  isLoopbackHost,
+  withinBodyLimit,
+} from './security.js'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 
 const DEFAULT_PORT = 18610
@@ -42,14 +51,16 @@ interface StandaloneOptions {
 
 /** Constant-time token comparison (values never appear in logs). */
 function tokenMatches(provided: string | undefined, expected: string): boolean {
-  if (provided === undefined || provided.length === 0) return false
-  const a = createHash('sha256').update(provided).digest()
-  const b = createHash('sha256').update(expected).digest()
-  return timingSafeEqual(a, b)
+  return constantTimeEqual(provided, expected)
 }
 
-/** 16 MiB request body cap (matches the DSH bridge, §15.2). */
-const MAX_BODY_BYTES = 16 * 1024 * 1024
+function secureExistingTokenFile(tokenFile: string): void {
+  const stat = lstatSync(tokenFile)
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error('standalone token path must be a regular file')
+  }
+  chmodSync(tokenFile, 0o600)
+}
 
 function readBody(req: IncomingMessage): Promise<{ body: string; tooLarge: boolean }> {
   return new Promise(resolve => {
@@ -64,7 +75,7 @@ function readBody(req: IncomingMessage): Promise<{ body: string; tooLarge: boole
     }
     req.on('data', (chunk: Buffer) => {
       total += chunk.length
-      if (total > MAX_BODY_BYTES) {
+      if (!withinBodyLimit(total)) {
         done({ body: '', tooLarge: true })
         req.destroy()
         return
@@ -85,23 +96,6 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
     'x-content-type-options': 'nosniff',
   })
   res.end(JSON.stringify(payload))
-}
-
-/** CSRF: non-GET same-origin writes must come from our own host/port. */
-function isAllowedOrigin(origin: string | undefined, hostHeader: string | undefined): boolean {
-  if (origin === undefined) return true
-  if (hostHeader === undefined) return false
-  try {
-    const o = new URL(origin)
-    if (o.protocol !== 'http:' && o.protocol !== 'https:') return false
-    if (o.hostname !== '127.0.0.1' && o.hostname !== 'localhost' && o.hostname !== '[::1]') return false
-    const oPort = o.port === '' ? (o.protocol === 'https:' ? '443' : '80') : o.port
-    const h = new URL(`http://${hostHeader}`)
-    const hPort = h.port === '' ? '80' : h.port
-    return oPort === hPort
-  } catch {
-    return false
-  }
 }
 
 const BOOTSTRAP_HTML = `<!doctype html>
@@ -156,9 +150,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
   </div>
 </div>
 <script>
-  // The client bundle registers itself via window.__ModuleLoader__.load
-  // (the same handoff the DSH host uses); the standalone page provides a
-  // minimal loader that captures the factory's exports.
+  // The client bundle registers through a small classic-script handoff.
   window.__ModuleLoader__ = {
     load: function (mod) {
       window.__DSH_SCHOLAR_UI__ = mod.factory(function (specifier) {
@@ -212,7 +204,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
           base: '',
           token: function () { return Promise.resolve(token); },
         });
-        window.__DSH_SCHOLAR_UI__.apply({ fullscreen: true });
+        window.__DSH_SCHOLAR_UI__.apply();
       } else {
         err.textContent = 'Client bundle failed to load';
         boot.style.display = 'flex';
@@ -240,24 +232,33 @@ export function loadOptions(argv: string[]): StandaloneOptions {
       'no-token': { type: 'boolean', default: false },
     },
   })
-  const dataDir = values['data-dir'] ?? join(process.env.DSH_HOME ?? process.cwd(), 'research-ui-standalone')
+  const host = values.host ?? '127.0.0.1'
+  if (values['no-token'] === true && !isLoopbackHost(host)) {
+    throw new Error('--no-token requires an explicit loopback --host (127.0.0.0/8, ::1, or localhost)')
+  }
+  const dataDir = values['data-dir'] ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh-scholar-standalone'), 'research-ui-standalone')
   let token: string | null = null
   if (values['no-token'] !== true) {
     const tokenFile = join(dataDir, 'standalone-token')
+    const tokenFileExists = existsSync(tokenFile)
+    if (tokenFileExists) secureExistingTokenFile(tokenFile)
     if (values.token !== undefined && values.token !== '') {
       token = values.token
       mkdirSync(dataDir, { recursive: true })
-      writeFileSync(tokenFile, token, { mode: 0o600 })
-    } else if (existsSync(tokenFile)) {
+      writeFileSync(tokenFile, token, { mode: 0o600, flag: tokenFileExists ? 'w' : 'wx' })
+      chmodSync(tokenFile, 0o600)
+    } else if (tokenFileExists) {
       token = readFileSync(tokenFile, 'utf8').trim()
+      if (token === '') throw new Error('standalone token file must not be empty')
     } else {
       token = `dsh-${randomBytes(18).toString('hex')}`
       mkdirSync(dataDir, { recursive: true })
-      writeFileSync(tokenFile, token, { mode: 0o600 })
+      writeFileSync(tokenFile, token, { mode: 0o600, flag: 'wx' })
+      chmodSync(tokenFile, 0o600)
     }
   }
   return {
-    host: values.host ?? '127.0.0.1',
+    host,
     port: Number(values.port ?? DEFAULT_PORT),
     kernelPort: Number(values['kernel-port'] ?? DEFAULT_KERNEL_PORT),
     dataDir,
@@ -272,14 +273,24 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     dataDir: options.dataDir,
     log: line => console.error(line),
   })
-  await sidecar.start()
+  try {
+    await sidecar.start()
+  } catch (error) {
+    await sidecar.stop()
+    throw error
+  }
   const endpoint = sidecar.endpoint
 
   // The client bundle ships from this package's lib/client.js.
   const bundlePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
 
+  const limiter = new SlidingWindowRateLimiter()
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
+      if (!limiter.allow(req.socket.remoteAddress ?? 'unknown')) {
+        sendJson(res, 429, { ok: false, error: 'rate limited' })
+        return
+      }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
       const method = (req.method ?? 'GET').toUpperCase()
 
@@ -295,8 +306,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         res.end()
         return
       }
-      // Client bundle (the same build the DSH host uses; standalone config
-      // is applied by the bootstrap script before apply()).
+      // Standalone client bundle.
       if (method === 'GET' && url.pathname === '/client.js') {
         const bundle = readFileSync(bundlePath)
         res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' })
@@ -305,7 +315,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
       }
       // Token verification for the unlock screen.
       if (method === 'POST' && url.pathname === '/api/token-check') {
-        const { body } = await readBody(req)
+        const { body, tooLarge } = await readBody(req)
+        if (tooLarge) {
+          sendJson(res, 413, { ok: false, error: 'payload too large' })
+          return
+        }
         if (options.token === null) {
           sendJson(res, 200, { ok: true, tokenless: true })
           return
@@ -327,7 +341,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
       // Chat /research survey: the browser client cannot run the scholar
       // connectors (OpenAlex/Crossref/arXiv fetchers), so the standalone
       // server performs the multi-source search + corpus snapshot on its
-      // behalf (same surface as the DSH-hosted /research survey command).
+      // behalf (same semantics as the DSH Agent /research survey command).
       if (method === 'POST' && url.pathname === '/api/chat/survey') {
         if (options.token !== null) {
           const auth = req.headers.authorization
@@ -336,6 +350,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             sendJson(res, 401, { ok: false, error: 'unauthorized' })
             return
           }
+        }
+        if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
+          return
         }
         const { body } = await readBody(req)
         let projectId = ''
@@ -374,8 +392,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             removed: result.dedup_removed,
             top: result.hits.slice(0, 5).map(h => ({ paper_id: h.paper.paper_id, title: h.paper.title, year: h.paper.year })),
           })
-        } catch (error) {
-          sendJson(res, 502, { ok: false, error: `survey failed: ${(error as Error).message}` })
+      } catch {
+        sendJson(res, 502, { ok: false, error: 'survey connector unavailable' })
         }
         return
       }
@@ -412,13 +430,42 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body,
         })
-        const text = await upstream.text()
-        res.writeHead(upstream.status, {
-          'content-type': upstream.headers.get('content-type') ?? 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
+        if (upstream.status >= 400) {
+          let code = upstream.status >= 500 ? 'kernel_error' : 'request_rejected'
+          if (upstream.status < 500) {
+            try {
+              const payload = await upstream.json() as { error?: { code?: unknown } }
+              const candidate = payload.error?.code
+              if (typeof candidate === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(candidate)) code = candidate
+            } catch { /* malformed upstream error stays generic */ }
+          }
+          sendJson(res, upstream.status, { error: { code, message: 'research request rejected' } })
+          return
+        }
+        const headers: Record<string, string> = {
+          'cache-control': upstream.headers.get('cache-control') ?? 'no-store',
           'x-content-type-options': 'nosniff',
-        })
-        res.end(text)
+        }
+        for (const name of ['content-type', 'content-length', 'content-disposition', 'etag', 'last-modified']) {
+          const value = upstream.headers.get(name)
+          if (value !== null) headers[name] = value
+        }
+        res.writeHead(upstream.status, headers)
+        if (upstream.body === null) {
+          res.end()
+        } else {
+          const source = Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0])
+          const abortSource = (): void => { source.destroy() }
+          req.once('aborted', abortSource)
+          res.once('error', abortSource)
+          res.once('close', () => {
+            if (!res.writableEnded) abortSource()
+          })
+          source.once('error', () => {
+            if (!res.destroyed) res.destroy()
+          })
+          source.pipe(res)
+        }
         return
       }
 
@@ -428,11 +475,23 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     }
   })
 
-  await new Promise<void>(resolve => server.listen(options.port, options.host, resolve))
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => reject(error)
+      server.once('error', onError)
+      server.listen(options.port, options.host, () => {
+        server.off('error', onError)
+        resolve()
+      })
+    })
+  } catch (error) {
+    await sidecar.stop()
+    throw error
+  }
   console.log(`[research-ui-standalone] serving at http://${options.host}:${options.port}`)
   console.log(`[research-ui-standalone] kernel at ${endpoint}`)
   if (options.token !== null) {
-    console.log(`[research-ui-standalone] access token: ${options.token}`)
+    console.log('[research-ui-standalone] token auth enabled; read the 0600 standalone-token file')
   } else {
     console.log(`[research-ui-standalone] token auth DISABLED (loopback only)`)
   }

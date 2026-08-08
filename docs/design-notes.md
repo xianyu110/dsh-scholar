@@ -47,7 +47,7 @@ flowchart TB
 | Research Kernel | create/read/transition/gate/job/artifact/evidence/document | Schema、状态机、事务、AuthZ、Revision、Outbox | 所有科研业务状态 |
 | Artifact CAS | put/read/has | SHA-256、原子写、去重、路径布局 | Blob 字节内容 |
 | Research Client | 类型化请求方法和流订阅 | Token、超时、重试、错误解码、二进制与 SSE | 无，仅协议 adapter |
-| DSH Adapter | Cordis apply、工具、命令、Skill、client module | 角色 ACL、会话关联、生命周期、宿主兼容 | 无 |
+| DSH Adapter | Cordis apply、工具、命令、Skill | 角色 ACL、会话关联、生命周期、宿主兼容 | 无 |
 | Research BFF | 同源项目接口 | Principal、Project AuthZ、CSRF、代理、限流、错误脱敏 | Web 身份上下文 |
 | Runner Gateway | claim、execute、cancel、complete | 快照物化、容器、心跳、日志、签名、清理 | 活动进程或容器 |
 | Analysis Worker | analyze(plan, runSets) | 校验、配对、bootstrap、方向、多重检验 | 分析结果 |
@@ -94,9 +94,9 @@ Caller -> Adapter -> ResearchClient -> Kernel HTTP Interface
 
 ### 6.1 DSH 插件
 
-1. Cordis Loader 注入 tools、commands、subagents；Web 配置可额外注入 httpServer。
+1. Cordis Loader 注入 tools、commands、subagents；DSH Adapter 不注入 httpServer 或 browser services。
 2. apply 创建 ResearchClient、RoleRegistry、Connector cache；只在配置要求时启动 Kernel sidecar。
-3. 注册工具、ACL waterfall、命令、BFF 路由、Skill provider 和 client module。
+3. 注册工具、ACL waterfall、命令和 Skill provider；独立 BFF 路由与 browser client module 只由 standalone app/BFF 组装。
 4. 所有注册通过 effect disposer 管理。
 5. 插件停止时先停止接收新请求，再断开流，最后停止自己启动的 sidecar；复用的 sidecar不得被错误终止。
 
@@ -167,11 +167,11 @@ Open file(version N)
 | 006 | Runner 日志是有序持久流，最终日志仍进 CAS | 终端实时、可重连、可审计 |
 | 007 | TeX 源文件使用版本化 workspace，编译是 Job | 编辑、执行和产物共用安全链路 |
 | 008 | accepted Evidence 只能由 Analysis Worker 生成 | Agent note 永远 draft_unverified |
-| 009 | UI 使用认证 BFF；独立和 DSH 模式共用客户端 | 避免两套功能分叉 |
-| 010 | UI 全面 i18n，DSH 模式接 LocaleFace，独立模式提供兼容实现 | 页面无硬编码文案，zh/en 一致 |
+| 009 | 浏览器 UI 只使用独立同源 BFF；DSH Adapter 仅保留 Agent 能力 | 删除双 Host、双 bridge 和客户端分叉 |
+| 010 | UI 全面 i18n，独立模式提供 locale adapter | 页面无硬编码文案，zh/en 一致 |
 | 011 | Release Bundle 自包含并 clean-room 验证 | “可复现”成为可验证结论 |
 | 012 | DSH SessionEvent 可扩展，但 Kernel Outbox 是业务权威 | 会话展示不替代业务账本 |
 
 ## 9. 当前实现迁移说明
 
-当前仓库已有 Kernel、CAS、Runner、Analysis Worker、Orchestrator、Connectors、DSH 插件和完整原生 DOM UI，但存在目标差距：v1 路由、Web Human Principal 不真实、Evidence provenance 可绕过、两个 UI bundle、技能打包路径、最终式日志、无 TeX workspace、无 i18n。迁移顺序和证据见 hardening-v0.2-status.md；新代码不得把现状缺陷提升为规范。
+当前仓库已有 Kernel、CAS、Runner、Analysis Worker、Orchestrator、Connectors、DSH Agent 插件和独立原生 DOM UI。DSH 浏览器嵌入面已从目标和交付面删除；其余 v1 路由、Human Principal、Evidence provenance、最终式日志、TeX workspace 和 i18n 差距见 hardening-v0.2-status.md。

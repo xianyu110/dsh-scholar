@@ -4,7 +4,7 @@
 
 ## 1. 版本与 ABI
 
-规范版本 2.1，Kernel protocol v2，初始数据库 schema v2。
+规范版本 2.2，Kernel protocol v2，初始数据库 schema v2。
 
 DSH 兼容基线：
 
@@ -18,7 +18,7 @@ DSH 兼容基线：
 | required host modules | @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-local |
 | optional dev module | @deepseek-ai/dsh-tool-cordis |
 
-构建仓库必须生成 packages/dsh-host-compat：只暴露本项目使用的 Context、Tool、Command、HttpServer、Slot、LocaleFace 和 Session 类型。contract test 同时对本地固定 commit 的真实包和最小 fake host 运行。升级 DSH commit 时先更新本文件和兼容测试。
+构建仓库必须生成 packages/dsh-host-compat：只暴露本项目使用的 Context、Tool、Command 和 Session 类型。该模块不暴露 HttpServer、Slot、LocaleFace 或 ThemeFace。contract test 同时对本地固定 commit 的真实包和最小 fake host 运行。升级 DSH commit 时先更新本文件和兼容测试。
 
 ## 2. 固定 ID 与 canonical JSON
 
@@ -195,11 +195,10 @@ Route policy：所有 /v2/projects/{id} GET 需要 project_read；project mutati
 
 | 形态 | 浏览器 base | 转发 |
 |---|---|---|
-| DSH embedded | /research-ui-api | 去前缀后保留 /v2 或 /bff/research |
 | standalone | 空字符串 | 同源直接提供 /v2 和 /bff/research |
 | internal worker | http://127.0.0.1:<kernel> | 直接 /internal/v2；浏览器不可达 |
 
-/research-api 是 v1 legacy。目标客户端只使用 /research-ui-api。
+`/research-api` 和 `/research-ui-api` 是已删除的 DSH 嵌入面，必须返回 404。目标客户端只使用 standalone 同源逻辑路由。
 
 ## 9. Internal Artifact staging
 

@@ -19,7 +19,7 @@ DSH Scholar 的目标是辅助研究，而不是代替研究者承担决策和�
 
 项目仍处于 **Security Alpha / Architecture Prototype** 阶段，适合开发、评测和人工监督下的私有实验，不应作为无人值守的正式科研系统使用。
 
-当前仓库已经具备 Research Kernel、DSH 插件、Web UI、Runner、统计分析、学术连接器、持久编排、Claim–Evidence、LaTeX 输出、发布包和测试基础。以下 v2 能力仍在开发：
+当前仓库已经具备 Research Kernel、DSH Agent 插件、独立 Web UI、Runner、统计分析、学术连接器、持久编排、Claim–Evidence、LaTeX 输出基础、发布包和测试基础。浏览器 UI 只支持独立模式，不再注入 DSH Web。以下 v2 能力仍在开发：
 
 - 实时 Terminal：查看命令、stdout/stderr、退出状态和可恢复日志流；
 - TeX Workbench：编辑 `.tex`/`.bib`、编译、查看诊断和 PDF；
@@ -32,24 +32,14 @@ DSH Scholar 的目标是辅助研究，而不是代替研究者承担决策和�
 
 ### 1. 准备环境
 
-需要 Node.js 24、pnpm 11 和一个可用的 DSH 源码 checkout。正式 Runner 和完整测试还需要 Docker。
+需要 Node.js 24 和 pnpm 11。正式 Runner 和完整测试还需要 Docker。
 
 ```bash
-export DSH_SCHOLAR_DSH_ROOT=/absolute/path/to/dsh
 pnpm install --frozen-lockfile
-bash scripts/link-dsh-deps.sh
-pnpm build
+pnpm -r --filter './packages/*' --filter './workers/*' run build
 ```
 
-### 2. 启动 DSH 嵌入模式
-
-```bash
-bash scripts/start-test-dsh.sh
-```
-
-启动后访问 <http://127.0.0.1:3081>。默认使用隔离目录 `~/.dsh-scholar-test`，Research Kernel 监听 `127.0.0.1:17412`。
-
-### 3. 启动独立 UI
+### 2. 启动独立 UI
 
 ```bash
 bash scripts/start-standalone-ui.sh
@@ -61,9 +51,9 @@ bash scripts/start-standalone-ui.sh
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
 ```
 
-### 4. 使用研究命令
+### 3. 使用研究命令
 
-在 DSH 中通过 `/research` 推进研究流程：
+在独立 UI 的 Chat 中通过 `/research` 推进研究流程：
 
 ```text
 /research new <name> [brief-json]
@@ -81,6 +71,17 @@ bash scripts/start-standalone-ui.sh
 ```
 
 正式 `run` 必须绑定已经批准的 Experiment Contract 和真实 Code Snapshot。完整流程、Gate 停点和参数说明见 [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)。
+
+### 4. 可选：启用 DSH Agent 开发集成
+
+DSH 仍可以加载 Scholar 的 tools、`/research` commands、subagents、Skills、Session 关联和 headless 能力，但不会注入任何 Scholar 浏览器页面：
+
+```bash
+export DSH_SCHOLAR_DSH_ROOT=/absolute/path/to/dsh
+bash scripts/link-dsh-deps.sh
+pnpm build:plugin
+bash scripts/start-dsh-agent-dev.sh
+```
 
 ### 5. 启用开发期 Cordis self-modification
 

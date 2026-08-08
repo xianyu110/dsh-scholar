@@ -8,7 +8,7 @@
 |---|---|---|
 | Unit | Schema、状态、统计、path、diagnostic parser、i18n | 纯函数和稳定错误 |
 | Module contract | Kernel、Client、Runner、BFF、UI state | 通过模块接口，用真实 SQLite/CAS |
-| Integration | DSH composition、sidecar、BFF、SSE、TeX | 多模块真实协议 |
+| Integration | DSH Agent composition、standalone sidecar/BFF、SSE、TeX | 多模块真实协议 |
 | Security | AuthZ、CSRF、路径、容器、日志、self-mod | 阻断发布 |
 | Recovery | kill -9、lease、stream reconnect、DB/CAS | 不丢状态、不重复执行 |
 | UI | 两种 locale、keyboard、a11y、responsive | 用户可完成核心任务 |
@@ -95,30 +95,48 @@
 ## 8. UI 与 i18n
 
 - zh/en 字典 key 完全一致，静态检查阻止硬编码 chrome；
+- browser client 源码必须纳入 strict `tsc --noEmit`，不得只由 tsdown 跳过类型后转译；
 - persisted locale > browser regional locale > zh；
 - setLocale 后已开 modal、tabs、aria、Terminal status、TeX chrome 更新；
 - Intl 显式使用 active locale，不能出现中英文日期混用；
 - unknown enum 和 wire/model/Terminal/TeX raw text 原样显示；
 - standalone 首屏和 token error 双语，html lang 正确；
-- DSH LocaleFace 与 standalone adapter 行为一致；
+- 页面不依赖 DSH LocaleFace/ThemeFace/slots，locale/theme 只由 standalone adapter 管理；
 - 所有核心动作仅键盘可完成；focus trap、aria-live、contrast、reduced motion 通过；
 - 640/720/1024 px 无不可达控件；
 - 关闭页面后 SSE、interval、Blob URL、listener 清理；
-- DSH 和 standalone 对同一 fixture 产生等价页面和操作结果。
+- 同一 fixture 在 standalone 重启前后产生等价页面和操作结果。
 
 ## 9. DSH 集成与 Skills
 
-- clean DSH_HOME 安装 bundle 并自动发现 client；
+- clean DSH_HOME 安装 Agent bundle，tools/commands/subagents/Skills 可发现；
+- 根包无 `dshClient`、`./client` export 和 browser bundle；
+- DSH 组装不注册 `/research-api`、`/research-ui-api` 或 Scholar Web slot；
+- standalone HTTP 对 `/research-api/*` 和 `/research-ui-api/*` 必须真实返回 404，不能 fallback 到 SPA 或 `/v1`；
+- `@dsh-scholar/research-ui` 无 Cordis host export、`dsh.bundle.patch` 和 host bridge 源码；
 - headless 无 httpServer 仍可使用工具；
 - unknown Agent 的研究写工具全部 deny；
 - Human Decision 工具不存在；
 - Session link 在重启后恢复；
 - research-core、两个 domain 和 venue skill 都可发现；
 - npm pack 包含 runtime skill assets；source/prepared copy hash 一致；
+- Skill provider 从发布包根目录解析四组 skill，不得解析到不存在的 `lib/skills`；
 - domain/venue 根据 Brief 确定性选择；
-- 插件停止清理 route/tool/listener/sidecar ownership。
+- 插件停止清理 tool/listener/sidecar ownership，standalone 停止清理 BFF/listener/sidecar。
+- port=0 时 sidecar 只使用 0600 `runtime/endpoint.json` 返回的实际端口；10 秒无握手、protocol/schema/database/config 不匹配均失败；
+- 同一端口已有其他 dataDir/database identity 的 Kernel 时拒绝复用，且不得终止非本实例进程；
 - /research help/list/status/gates/jobs/claims 等文档和 UI starter 命令均有真实 handler，不落入 generic help；
 - Tool catalog 与 reconstruction-contracts.md canonical 名一致，旧 claim_verify/analysis_build/release_bundle 别名返回 deprecation metadata 而非 unknown tool；
+
+## 9.1 Standalone 负向安全与运维验收
+
+- `--no-token` 只接受 `localhost`、`::1` 或 `127.0.0.0/8`；与 `0.0.0.0`、LAN 地址或其他 hostname 组合时必须在 listen 前失败；
+- token 模式不得把 token 写入服务日志或 Kernel argv；目标态改用 0600 token file/匿名通道，迁移期环境传递也不得回显；
+- `/api/chat/survey`、Kernel proxy 和启动错误只返回稳定错误码/通用消息，不向浏览器回显 connector URL、内部路径或环境细节；
+- `start-standalone-ui.sh` 只有在当前实例 token-check readiness 成功后才退出 0，不能把同端口旧服务的根页 200 当成功；子进程提前退出或 40 秒未就绪必须清理进程组、非零并指出日志；
+- Preferences 的 Auto refresh、Accent 和 Auth 文案在 standalone 中可操作，不引用 apply 局部变量或已删除的 DSH boot token；
+- `@dsh-scholar/research-ui` 的 clean build 与旧工作树 npm pack 都不得包含 `src/host`、`lib/host` 或 UI Cordis patch；package `files` 使用 standalone allowlist；根 Agent 包仍保留只插入 Agent row 的 `cordis.patch.yml`；
+- CI 必须构建全部 standalone packages 并执行 docs verifier、standalone unit/security 与删除面负向断言；根 Agent plugin 的 clean build/full unit 必须在显式 DSH host fixture job 中执行，不得依赖开发机 symlink。
 
 ## 10. Cordis self-referential 开发模式
 
@@ -137,6 +155,8 @@
 ## 11. Web 与 Security
 
 - token/cookie、Origin、CSRF、SameSite、rate limit、body cap；
+- standalone `/v2`/`/bff/research` 忽略浏览器伪造 actor，从认证 Principal 建立身份；无 membership 的跨项目读写统一 404；
+- mutation 缺失/错误 CSRF token、foreign Origin 或撤权后的 SSE 均拒绝，且不会只依赖 bearer 持有者自报 project/actor；
 - Browser 不见 Kernel token，进程 argv/log 不见 secret；
 - upstream 5xx/path/stack 脱敏；
 - SSE 和 binary 不经 text() 缓冲；

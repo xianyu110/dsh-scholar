@@ -20,9 +20,7 @@
   },
   "scripts": {
     "build": "pnpm run build:plugin && pnpm -r --filter './packages/*' --filter './workers/*' run build",
-    "build:plugin": "tsc -p tsconfig.json && pnpm run bundle:client",
-    "bundle:client": "tsdown --config tsdown.client.config.ts && pnpm run verify:client-bundle",
-    "verify:client-bundle": "node scripts/verify-client-bundle.mjs",
+    "build:plugin": "tsc -p tsconfig.json",
     "verify:docs": "node scripts/verify-docs.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -60,13 +58,6 @@
       "import": "./lib/index.js",
       "default": "./lib/index.js"
     },
-    "./client": {
-      "default": "./lib/client.js"
-    },
     "./package.json": "./package.json"
-  },
-  "dshClient": {
-    "inject": [],
-    "platform": "web"
   }
 }

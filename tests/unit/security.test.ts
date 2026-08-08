@@ -145,10 +145,7 @@ describe('runner isolation surface (design §4.6.1)', () => {
   })
 })
 
-// ─── Web bridge hardening (design §15.2/§15.3, SCH-WEB-001/002) ─────────────
-// The bridge pure functions live in src/plugin/web-bridge.ts (the
-// standalone /research-ui-api bridge in packages/dsh-research-ui/src/host
-// mirrors the same logic).
+// ─── Standalone BFF hardening (design §15.2/§15.3, SCH-WEB-001/002) ──────
 import {
   MAX_BODY_BYTES,
   SlidingWindowRateLimiter,
@@ -157,11 +154,12 @@ import {
   isJsonContentType,
   verifyBridgeToken,
   withinBodyLimit,
-} from '../../src/plugin/web-bridge'
+} from '../../packages/dsh-research-ui/src/standalone/security.js'
 
-describe('web bridge CSRF origin check (design §15.2)', () => {
+describe('standalone BFF CSRF origin check (design §15.2)', () => {
   it('accepts same-host origins on the request port', () => {
     expect(isAllowedOrigin('http://127.0.0.1:3080', '127.0.0.1:3080')).toBe(true)
+    expect(isAllowedOrigin('http://127.0.0.2:3080', '127.0.0.2:3080')).toBe(true)
     expect(isAllowedOrigin('http://localhost:3080', '127.0.0.1:3080')).toBe(true)
     expect(isAllowedOrigin('http://127.0.0.1:3080', 'localhost:3080')).toBe(true)
   })
@@ -189,7 +187,7 @@ describe('web bridge CSRF origin check (design §15.2)', () => {
   })
 })
 
-describe('web bridge body size limit (design §15.2)', () => {
+describe('standalone BFF body size limit (design §15.2)', () => {
   it('accepts bodies up to the 16 MiB cap', () => {
     expect(withinBodyLimit(0)).toBe(true)
     expect(withinBodyLimit(1024)).toBe(true)
@@ -208,7 +206,7 @@ describe('web bridge body size limit (design §15.2)', () => {
   })
 })
 
-describe('web bridge content-type routing', () => {
+describe('standalone BFF content-type routing', () => {
   it('routes JSON upstream responses through the text path', () => {
     expect(isJsonContentType('application/json')).toBe(true)
     expect(isJsonContentType('application/json; charset=utf-8')).toBe(true)
@@ -224,7 +222,7 @@ describe('web bridge content-type routing', () => {
   })
 })
 
-describe('web bridge token mode (design §15.3, SCH-SEC-002)', () => {
+describe('standalone BFF token mode (design §15.3, SCH-SEC-002)', () => {
   it('is disabled (allow all) when no token is configured', () => {
     expect(verifyBridgeToken(undefined, undefined)).toBe(true)
     expect(verifyBridgeToken('anything', undefined)).toBe(true)
@@ -245,7 +243,7 @@ describe('web bridge token mode (design §15.3, SCH-SEC-002)', () => {
   })
 })
 
-describe('web bridge rate limit (design §15.2)', () => {
+describe('standalone BFF rate limit (design §15.2)', () => {
   it('allows up to max requests per sliding window, then 429s', () => {
     const limiter = new SlidingWindowRateLimiter({ windowMs: 60_000, max: 3 })
     const now = 1_000_000

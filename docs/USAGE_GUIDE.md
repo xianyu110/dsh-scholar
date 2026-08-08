@@ -1,22 +1,14 @@
 # DSH Scholar 使用指南
 
-> 目标版本 2.1。当前仓库尚未实现实时 Terminal、完整 TeX Workbench 和 i18n；实际差距见 hardening-v0.2-status.md。
+> 目标版本 2.2。浏览器 UI 仅支持 standalone。当前仓库尚未实现实时 Terminal、完整 TeX Workbench 和 i18n；实际差距见 hardening-v0.2-status.md。
 
 ## 1. 启动
-
-独立 UI：
 
 ~~~bash
 bash scripts/start-standalone-ui.sh
 ~~~
 
-DSH 嵌入测试实例：
-
-~~~bash
-bash scripts/start-test-dsh.sh
-~~~
-
-打开页面后可以在 Settings → Language 选择中文或 English。没有手动选择时，系统先读 dsh.locale，再匹配浏览器语言，最后使用中文。切换语言不会翻译项目名、论文、命令输出和 TeX 原始错误。
+访问 http://127.0.0.1:18610，输入启动脚本打印的 Token。DSH Web 不再注入 Scholar 页面。打开页面后可以在 Settings → Language 选择中文或 English。没有手动选择时，系统先读 dsh.locale，再匹配浏览器语言，最后使用中文。切换语言不会翻译项目名、论文、命令输出和 TeX 原始错误。
 
 ## 2. 创建项目与 Scope Gate
 

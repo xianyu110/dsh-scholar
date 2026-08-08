@@ -20,10 +20,10 @@ case "$DEV_HOME" in
     ;;
 esac
 
-export DSH_SCHOLAR_TEST_HOME="$DEV_HOME"
-export DSH_SCHOLAR_TEST_PORT="${DSH_SCHOLAR_SELFMOD_PORT:-3082}"
-export DSH_SCHOLAR_TEST_KERNEL_PORT="${DSH_SCHOLAR_SELFMOD_KERNEL_PORT:-17414}"
+export DSH_SCHOLAR_AGENT_HOME="$DEV_HOME"
+export DSH_SCHOLAR_AGENT_PORT="${DSH_SCHOLAR_SELFMOD_PORT:-3082}"
+export DSH_SCHOLAR_AGENT_KERNEL_PORT="${DSH_SCHOLAR_SELFMOD_KERNEL_PORT:-17414}"
 export DSH_SCHOLAR_EXTRA_PATCH="$REPO/configs/research-dev-selfmod.cordis.yml"
 
 echo "WARNING: enabling bash-equivalent Cordis self-mod tools in isolated dev home $DEV_HOME"
-exec bash "$REPO/scripts/start-test-dsh.sh"
+exec bash "$REPO/scripts/start-dsh-agent-dev.sh"

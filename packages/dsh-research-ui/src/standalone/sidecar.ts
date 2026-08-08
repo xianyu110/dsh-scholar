@@ -1,8 +1,7 @@
 /**
- * Kernel sidecar for the standalone UI plugin (design §9.1). Spawns the
- * Research Kernel as a child process; reuses a healthy kernel already on the
- * configured port (e.g. the main plugin's on 7412) when present.
- * @module @dsh-scholar/research-ui/host/sidecar
+ * Research Kernel lifecycle owned by the standalone DSH Scholar server.
+ * The browser never talks to this loopback endpoint directly; all access
+ * crosses the standalone BFF.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'

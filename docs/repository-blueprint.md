@@ -7,8 +7,8 @@
 - Node.js 24、TypeScript 5.9、pnpm 11、ESM；
 - workspace：packages/*、workers/*、apps/*；
 - Zod 3、Vitest、node:sqlite、原生 fetch/http；
-- 浏览器 UI 可以使用 React + DSH slots，或保持轻量 DOM，但必须满足同一接口、i18n 和测试；
-- browser bundle 使用 tsdown 输出 DSH ClientModuleLoader classic handoff；
+- 浏览器 UI 只使用 standalone 全屏形态，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；
+- browser bundle 使用 tsdown 输出 standalone classic-script handoff，不声明 `dshClient`；
 - 所有包 strict TypeScript，不使用 skipLibCheck 掩盖本项目错误。
 
 ## 2. 目标文件树
@@ -79,16 +79,16 @@ dsh-scholar/
 | evidence-engine | Metric/RunSet/Analysis/Claim verify | schemas |
 | manuscript-builder | Ledger→TeX workspace、review、diagnostics parser | schemas |
 | release-bundle | 自包含 bundle layout/verify | schemas |
-| dsh-research-plugin | DSH 工具/命令/Skill/BFF mount | client、connectors、authz |
-| dsh-research-ui | 客户端、i18n、Terminal、TeX UI | browser-safe schemas/client types |
+| dsh-research-plugin | DSH Agent 工具/命令/Skill、Session 关联 | client、connectors、authz |
+| dsh-research-ui | standalone client/BFF/sidecar、i18n、Terminal、TeX UI | browser-safe schemas/client types、kernel executable |
 | runner-gateway | snapshot materialize、Docker、terminal、sign | client、schemas |
 | analysis-worker | evidence-engine CLI/internal adapter | evidence-engine、client |
 | orchestrator | durable actions/state planning | client、connectors |
 | clean-room | bundle verify and rerun | client、release-bundle |
-| apps/research-bff | 组装 Kernel client、AuthZ、HTTP routes、UI host | plugin host adapters、client、authz、UI static assets |
+| apps/research-bff | 组装 Kernel client、AuthZ、standalone HTTP routes | client、authz、UI static assets |
 | apps/research-standalone | loopback server、local Principal、sidecar、共享 UI | research-bff、UI、kernel executable |
 
-Kernel 不依赖 DSH、UI、Runner 或 Connector。UI 不导入 Node-only 模块。Worker 不导入 Kernel Store。dsh-research-plugin 不导入 browser implementation，只声明/托管 dsh-research-ui 的构建产物；两个 app 负责运行时组装，不拥有业务逻辑。
+Kernel 不依赖 DSH、UI、Runner 或 Connector。browser client 不导入 Node-only 模块。Worker 不导入 Kernel Store。dsh-research-plugin 不导入或托管 browser implementation；standalone app/BFF 负责唯一的浏览器运行时组装，不拥有业务逻辑。
 
 ## 4. 关键实现文件
 
@@ -116,8 +116,7 @@ Kernel 不依赖 DSH、UI、Runner 或 Connector。UI 不导入 Node-only 模块
 - client/components/{TerminalBlock,TexEditor,PdfPreview,Diagnostics,Modal,Toast}；
 - client/i18n/{service,format,locales/*}；
 - client/state/{api,preferences,streams}；
-- host/bff.ts、host/sidecar.ts；
-- standalone/server.ts、standalone/bootstrap.ts；
+- standalone/server.ts、standalone/security.ts、standalone/sidecar.ts、standalone/bootstrap.ts；
 - client.tsdown.config.ts。
 
 不得再次形成单个 7,000+ 行 client 文件；页面模块只通过共享 state/interface 交互。
@@ -152,9 +151,9 @@ build 先 schemas/cas，再 kernel/client/connectors/evidence/manuscript，后 w
 6. 实现 Analysis/Evidence/Claim；
 7. 实现 TeX document/build；
 8. 实现 Orchestrator、Connectors 和 Release；
-9. 实现 DSH adapter、Skills 和 BFF；
-10. 实现共享 UI、i18n、Terminal 和 Manuscript Workbench；
-11. 实现 standalone adapter；
+9. 实现不含浏览器面的 DSH Agent adapter 和 Skills；
+10. 实现 standalone BFF、UI、i18n、Terminal 和 Manuscript Workbench；
+11. 验证包 manifest 和路由不存在任何 DSH embedded UI 面；
 12. 跑 security、recovery、Docker、TeX、Golden、clean-room。
 
 每步先写对应接口验收，再实现。旧浅模块的测试在新深接口测试覆盖后删除，避免同时维护两套行为。
@@ -201,5 +200,6 @@ configs/research-dev-selfmod.cordis.yml 只插入 @deepseek-ai/dsh-tool-cordis�
 - 全新 DSH_HOME 安装成功，不依赖开发 symlink；
 - production composition 无 tool-cordis；开发 overlay 可用且隔离；
 - zh/en 资源完整，无 UI 硬编码；
-- Terminal、TeX、PDF、binary proxy 和 SSE 在 DSH 与 standalone 两种模式一致；
+- Terminal、TeX、PDF、binary proxy 和 SSE 在 standalone 模式完整验收；
+- 根插件无 browser export/dshClient/HTTP bridge，UI 包无 Cordis host/patch；
 - docs/README.md 的所有文档链接和规范条目可达。

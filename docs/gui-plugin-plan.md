@@ -4,12 +4,9 @@
 
 ## 1. 运行形态
 
-同一个客户端核心支持：
+浏览器 UI 只有独立模式：本地 HTTP host、同源 BFF、全屏 UI、独立 Token 解锁，并内置 locale/theme adapter。DSH Agent 插件可以继续提供 tools、commands 和 Skills，但不发布 `dshClient`、不注册 Web slot、不代理浏览器 BFF、不渲染浮动面板。
 
-1. DSH 嵌入模式：通过 dshClient 和 ctx.slots 注册到 DSH Web；使用宿主 LocaleFace、主题和会话能力。
-2. 独立模式：本地 HTTP host、同源 BFF、全屏 UI、独立 Token 解锁；内置 locale/theme adapter。
-
-两种模式使用相同页面、状态模型、翻译 key、ResearchClient 和组件。不得维护“主插件轻面板”和“独立完整面板”两套逻辑。Shadow DOM 可以用于样式隔离，但不能阻止 DSH slots、locale 和主题注入。
+所有页面、状态模型、翻译 key、ResearchClient 和 UI 实现都只有一份。Shadow DOM 可以用于隔离独立 bootstrap 与工作区样式，不得再引入 DSH Web 宿主适配分支。
 
 ## 2. 布局
 
@@ -195,7 +192,7 @@ packages/dsh-research-ui/src/client/i18n/locales/
 
 选择顺序：有效 localStorage dsh.locale、navigator.languages、navigator.language、zh。支持 zh-CN/zh-Hans 映射 zh、en-US/en-GB 映射 en。设置中可手动切换；setLocale 持久化并增加 revision，所有已挂载页面、modal、aria 和通知 chrome 立即重渲染。
 
-DSH 模式使用宿主 LocaleFace；独立模式实现 bind、getSnapshot、subscribe、setLocale 的兼容 adapter。二次安装 locale face 是 assembly error。
+独立 UI 实现 bind、getSnapshot、subscribe、setLocale 的本地 locale adapter。同一应用实例二次安装 locale adapter 是 assembly error。
 
 ### 13.3 插值、复数和格式
 
@@ -215,7 +212,7 @@ DSH 模式使用宿主 LocaleFace；独立模式实现 bind、getSnapshot、subs
 
 ## 14. 主题与偏好
 
-支持 light/dark/system、accent、radius、texture、density、sidebar collapsed、favorite tabs/projects、auto refresh、locale。DSH 模式跟随宿主 ThemeFace 和 LocaleFace，独立模式使用兼容 adapter。Token 与普通偏好分开存储；Reset preferences 不删除认证 Token，除非用户明确选择 Sign out。
+支持 light/dark/system、accent、radius、texture、density、sidebar collapsed、favorite tabs/projects、auto refresh、locale，全部由独立 adapter 管理。Token 与普通偏好分开存储；Reset preferences 不删除认证 Token，除非用户明确选择 Sign out。
 
 ## 15. 可访问性
 

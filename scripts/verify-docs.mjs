@@ -43,12 +43,12 @@ for (const relative of requiredDocs) {
 }
 
 const requiredFragments = new Map([
-  ['docs/README.md', ['需求与修复的文档先行规则', 'subagent']],
+  ['docs/README.md', ['需求与修复的文档先行规则', 'subagent', '浏览器 UI 只支持独立模式']],
   ['docs/product-spec.md', ['全页面 i18n', 'Manuscript Workbench']],
   ['docs/api-contracts.md', ['Terminal SSE', '/v2/documents/{id}/moves']],
   ['docs/gui-plugin-plan.md', ['实时终端', 'i18n 硬约束']],
   ['docs/security-baseline.md', ['Cordis self-referential', 'Terminal 安全']],
-  ['docs/acceptance-tests.md', ['docs-contract-sync', 'TeX Workbench']],
+  ['docs/acceptance-tests.md', ['docs-contract-sync', 'TeX Workbench', '根包无 `dshClient`']],
   ['docs/hardening-v0.2-status.md', ['TERM-01', 'TEX-01', 'UI-02']],
   ['configs/research-dev-selfmod.cordis.yml', ['@deepseek-ai/dsh-tool-cordis']],
 ])
@@ -63,6 +63,42 @@ for (const [relative, fragments] of requiredFragments) {
   for (const fragment of fragments) {
     if (!text.includes(fragment)) errors.push('missing contract fragment in ' + relative + ': ' + fragment)
   }
+}
+
+const forbiddenEmbeddedPaths = [
+  'src/client-panel.ts',
+  'src/plugin/web-bridge.ts',
+  'tsdown.client.config.ts',
+  'scripts/start-test-dsh.sh',
+  'scripts/verify-client-bundle.mjs',
+  'packages/dsh-research-ui/cordis.patch.yml',
+  'packages/dsh-research-ui/src/host/index.ts',
+  'packages/dsh-research-ui/src/host/bridge.ts',
+  'packages/dsh-research-ui/src/host/sidecar.ts',
+  'packages/dsh-research-ui/src/host',
+  'packages/dsh-research-ui/lib/host',
+]
+
+for (const relative of forbiddenEmbeddedPaths) {
+  if (existsSync(resolve(root, relative))) errors.push('DSH embedded UI surface must not exist: ' + relative)
+}
+
+const rootPackage = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+if (rootPackage.dshClient !== undefined) errors.push('root package must not declare dshClient')
+if (rootPackage.exports?.['./client'] !== undefined) errors.push('root package must not export ./client')
+
+const uiPackage = JSON.parse(readFileSync(resolve(root, 'packages/dsh-research-ui/package.json'), 'utf8'))
+if (uiPackage.dshClient !== undefined) errors.push('research-ui package must not declare dshClient')
+if (uiPackage.dsh !== undefined) errors.push('research-ui package must not declare a DSH bundle')
+if (uiPackage.peerDependencies?.cordis !== undefined) errors.push('research-ui package must not depend on Cordis')
+if (String(uiPackage.main ?? '').includes('/host/')) errors.push('research-ui main export must be standalone')
+if (!Array.isArray(uiPackage.files) || uiPackage.files.some(path => String(path).includes('host'))) {
+  errors.push('research-ui package files must explicitly exclude the deleted Cordis host surface')
+}
+
+const uiClientSource = readFileSync(resolve(root, 'packages/dsh-research-ui/src/client/index.ts'), 'utf8')
+if (/\bfullscreen\b/.test(uiClientSource) || /position:fixed;right:12px;bottom:64px/.test(uiClientSource)) {
+  errors.push('research-ui client must not retain floating/embedded mode branches')
 }
 
 if (errors.length > 0) {

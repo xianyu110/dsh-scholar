@@ -73,7 +73,7 @@ capabilities 至少包含 terminal_stream、tex_workspace、latex_compile、sign
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
 
-成员接口为 GET/POST/PATCH/DELETE /bff/research/projects/{id}/members；角色和最后一个 PI 约束见 reconstruction-contracts.md。standalone 解锁、DSH session 和 service identity 的 Principal 解析也以该文档为准。
+成员接口为 GET/POST/PATCH/DELETE /bff/research/projects/{id}/members；角色和最后一个 PI 约束见 reconstruction-contracts.md。standalone 解锁、SSO、DSH Agent session 关联和 service identity 的 Principal 解析也以该文档为准。
 
 POST /v2/projects 的 Idempotency scope 是 tenant_id + principal_id + route + key；同请求 hash 重放返回同一 project/gate/budget/membership，hash 不同 409。其余 project mutation 使用 project_id + route + key；Gate Decision 和 cancel 的业务对象本身也提供终态幂等。
 
@@ -236,14 +236,14 @@ POST /v2/projects/{id}/release-bundle-requests 创建 bundle/clean-room Job；GE
 
 ## 13. BFF 规则
 
-- 同源 Cookie 或 DSH Session 用于人类身份；mutation 强制 Origin 和 CSRF token；
-- standalone 模式可用 0600 文件生成的本地 bearer 解锁，但仍映射为本地 Principal；
+- standalone 使用同源 Cookie/SSO，或使用 0600 文件生成的本地 bearer 解锁，并映射为本地 Human Principal；mutation 强制 Origin 和 CSRF token；
+- DSH Session 只用于 Agent tool/command 的会话关联，不作为浏览器 Human Principal；
 - BFF route 是 target-aware adapter，不能做无身份透明转发；
 - 二进制和 SSE 必须真正流式传输，不能先调用 text() 或完整缓冲；
 - 默认每 IP 60 请求每分钟，Terminal 长连接单独限制每用户和项目连接数；
 - 浏览器永远看不到 Kernel 内部 Token。
 
-DSH 浏览器 base 是 /research-ui-api，去前缀后保留逻辑 /v2 或 /bff/research；standalone 同源直接暴露这些逻辑路由。/research-api 仅是 v1 legacy。完整改写表见 reconstruction-contracts.md。
+standalone 同源直接暴露 `/v2` 和 `/bff/research`。`/research-api` 与 `/research-ui-api` 不存在，不得作为兼容别名恢复。
 
 ## 14. v1 兼容
 

@@ -81,11 +81,16 @@ export class KernelSidecar {
     const dbPath = join(this.dataDir, 'kernel.db')
     const casRoot = join(this.dataDir, 'cas')
     const args = [bin, '--db', dbPath, '--cas', casRoot, '--host', this.host, '--port', String(this.port)]
-    if (this.token !== undefined) args.push('--token', this.token)
     this.log(`[research-plugin] spawning research kernel: node ${args.join(' ')}`)
+    const childEnv = { ...process.env }
+    delete childEnv.DSH_SCHOLAR_KERNEL_TOKEN
+    if (this.token !== undefined) childEnv.DSH_SCHOLAR_KERNEL_TOKEN = this.token
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, DSH_SCHOLAR_KERNEL: '1' },
+      env: {
+        ...childEnv,
+        DSH_SCHOLAR_KERNEL: '1',
+      },
     })
     this.child = child
     child.stdout?.on('data', (chunk: Buffer) => this.log(`[research-kernel] ${chunk.toString().trimEnd()}`))

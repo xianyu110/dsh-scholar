@@ -2,81 +2,37 @@
  * DSH Research OS — standalone GUI panel (browser half). Tabbed panels:
  * Phase (with a visual pipeline), Gates (approve/reject), Runs (cancel),
  * Artifacts (preview), Evidence, Budget. Polls the same-origin
- * `/research-ui-api` bridge; every decision goes through the Kernel's
+ * standalone same-origin BFF; every decision goes through the Kernel's
  * CAS-protected decideGate.
  *
- * Rendering lives inside a Shadow DOM so the host page styles never leak in
- * and the panel's design system stays consistent. All interactive handlers
+ * Rendering lives inside a Shadow DOM so bootstrap styles never leak in and
+ * the workspace design system stays consistent. All interactive handlers
  * are attached via addEventListener — no HTML-string sinks (design §15.4).
  * @module @dsh-scholar/research-ui/client
  */
 
-const API = '/research-ui-api'
-
-/**
- * Standalone-mode overrides: when running outside the DSH host (the
- * standalone web plugin), the API base is the same-origin `/v1` proxy and
- * the bridge token comes from a local login instead of the DSH boot
- * manifest. Both default to the DSH-hosted values.
- */
-let apiBase: string | undefined
+/** Standalone BFF configuration supplied by the bootstrap page. */
+let apiBase = ''
 let tokenProvider: (() => Promise<string | undefined>) | undefined
 let overlayRoot: ShadowRoot | null = null
 
 export function setStandaloneBridge(options: {
   base: string
   token: () => Promise<string | undefined>
-  overlay: ShadowRoot
+  overlay?: ShadowRoot
 }): void {
   apiBase = options.base
   tokenProvider = options.token
-  overlayRoot = options.overlay
-}
-
-/**
- * Bridge token bootstrap (design §15.3). Resolution order:
- * 1. `window.__DSH_BOOT__.researchUi.token` if the host injected one, else
- * 2. GET /research-ui-api/session-token (same-origin only; 404 when token
- *    mode is disabled on the host).
- * The token is attached as `Authorization: Bearer <token>` to every request.
- */
-let tokenPromise: Promise<string | undefined> | null = null
-
-function bootToken(): string | undefined {
-  const boot = (window as unknown as { __DSH_BOOT__?: { researchUi?: { token?: string } } }).__DSH_BOOT__
-  return boot?.researchUi?.token
-}
-
-async function fetchSessionToken(): Promise<string | undefined> {
-  try {
-    const response = await fetch(`${API}/session-token`, { headers: { accept: 'application/json' }, cache: 'no-store' })
-    if (!response.ok) return undefined
-    const data = (await response.json()) as { token?: string }
-    return typeof data.token === 'string' && data.token.length > 0 ? data.token : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** Resolve the bridge token once and cache it (invalidated on 401). */
-function resolveBridgeToken(): Promise<string | undefined> {
-  if (tokenPromise === null) {
-    tokenPromise = (async () => bootToken() ?? (await fetchSessionToken()))()
-  }
-  return tokenPromise
+  overlayRoot = options.overlay ?? null
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
-  if (tokenProvider !== undefined) {
-    const token = await tokenProvider()
-    return token !== undefined && token !== '' ? { authorization: `Bearer ${token}` } : {}
-  }
-  const token = await resolveBridgeToken()
-  return token !== undefined ? { authorization: `Bearer ${token}` } : {}
+  const token = await tokenProvider?.()
+  return token !== undefined && token !== '' ? { authorization: `Bearer ${token}` } : {}
 }
 
 function base(): string {
-  return apiBase ?? API
+  return apiBase
 }
 
 interface Projection {
@@ -217,11 +173,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
           ...(await authHeaders()),
         },
       })
-      if (response.status === 401 && attempt === 0) {
-        // Token may have rotated: re-resolve once, then retry.
-        tokenPromise = null
-        continue
-      }
+      if (response.status === 401) return null
       if (!response.ok) return null
       return (await response.json()) as T
     } catch {
@@ -262,6 +214,9 @@ function autoRefreshSet(on: boolean): void {
 const ACCENT_KEY = 'dsh-scholar-ui-accent'
 const ACCENTS: Record<string, string> = {
   blue: '#4176e6', violet: '#7c3aed', green: '#16a34a', amber: '#b45309',
+}
+const ACCENT_DARK: Record<string, string> = {
+  blue: '#679efe', violet: '#a78bfa', green: '#34d399', amber: '#fbbf24',
 }
 
 /** Custom accent colour (dsh-web theming), persisted. */
@@ -332,12 +287,8 @@ let booting = true
  * immediately — the per-apply `render` local is not in their scope.
  */
 let rerender: () => void = () => {}
-
-export interface ApplyOptions {
-  /** Standalone full-page mode (the independent web plugin): the panel
-   * fills the viewport instead of floating over the DSH host page. */
-  fullscreen?: boolean
-}
+let refreshTimer: number | null = null
+let startRefreshTimer: () => number | null = () => null
 
 /** Density preference (dsh-web density selector), shared across UI. */
 const DENSITY_KEY = 'dsh-scholar-ui-density'
@@ -384,13 +335,10 @@ let phaseHistoryAll = false
 /** Central a11y decorator for modal overlays (see apply). */
 let modalObserver: MutationObserver | null = null
 
-export function apply(options: ApplyOptions = {}): void {
-  const fullscreen = options.fullscreen === true
+export function apply(): void {
   const host = document.createElement('div')
   host.id = 'dsh-scholar-ui'
-  host.style.cssText = fullscreen
-    ? 'position:fixed;inset:0;z-index:9999;font:14px/1.5 system-ui,sans-serif'
-    : 'position:fixed;right:12px;bottom:64px;width:430px;max-height:min(76vh,760px);z-index:9999;font:12px/1.5 system-ui,sans-serif'
+  host.style.cssText = 'position:fixed;inset:0;z-index:9999;font:14px/1.5 system-ui,sans-serif'
   const root = host.attachShadow({ mode: 'open' })
   // Theme: LIGHT is the default; persisted per browser. Accent: custom.
   host.dataset.theme = readTheme()
@@ -398,9 +346,6 @@ export function apply(options: ApplyOptions = {}): void {
   host.dataset.texture = textureValue()
   // Custom accent (dsh-web theming): override the CSS variable directly.
   // Dark-theme accent variants (dsh-web theming): brighter in dark mode.
-  const ACCENT_DARK: Record<string, string> = {
-    blue: '#679efe', violet: '#a78bfa', green: '#34d399', amber: '#fbbf24',
-  }
   const applyAccent = (): void => {
     const name = (Object.entries(ACCENTS).find(([, v]) => v === accentColor())?.[0] ?? 'blue')
     const c = host.dataset.theme === 'dark' ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
@@ -473,27 +418,26 @@ export function apply(options: ApplyOptions = {}): void {
 }
 
 * { box-sizing: border-box; margin: 0; }
-.panel { display:flex; flex-direction:column; height:100%; max-height:inherit; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:${fullscreen ? 0 : 'var(--panel-radius)'}; overflow:hidden; box-shadow:${fullscreen ? 'none' : 'var(--shadow)'}; font:12px/1.5 system-ui,sans-serif; }
-${fullscreen ? '.panel { font-size:13px; }' : ''}
-.header { display:flex; align-items:center; gap:8px; padding:${fullscreen ? '14px 20px' : '11px 14px'}; background:var(--header-grad); border-bottom:1px solid var(--border); }
-.header .logo { font-size:${fullscreen ? 18 : 14}px; filter:drop-shadow(0 0 6px var(--accent)); }
-.header .title { font:700 ${fullscreen ? 15 : 13}px/1 system-ui,sans-serif; color:var(--text); letter-spacing:.2px; }
+.panel { display:flex; flex-direction:column; height:100%; max-height:inherit; background:var(--bg); color:var(--text); border:0; border-radius:0; overflow:hidden; box-shadow:none; font:13px/1.5 system-ui,sans-serif; }
+.header { display:flex; align-items:center; gap:8px; padding:14px 20px; background:var(--header-grad); border-bottom:1px solid var(--border); }
+.header .logo { font-size:18px; filter:drop-shadow(0 0 6px var(--accent)); }
+.header .title { font:700 15px/1 system-ui,sans-serif; color:var(--text); letter-spacing:.2px; }
 .header .spacer { flex:1; }
 .hbtn { border:1px solid var(--border); background:var(--bg-2); color:var(--text-2); border-radius:8px; padding:3px 9px; cursor:pointer; font:600 11px/1.6 system-ui,sans-serif; }
 .hbtn:hover { background:var(--bg-hover); color:var(--text); border-color:var(--border-strong); }
 .hbtn:active { transform:translateY(1px); }
 .hbtn.ghost { border:0; background:none; color:var(--text-3); font-size:15px; padding:2px 6px; }
 .hbtn.ghost:hover { color:var(--text); background:var(--bg-hover); }
-.tabs { display:flex; gap:2px; padding:0 ${fullscreen ? 20 : 10}px; background:var(--bg-3); border-bottom:1px solid var(--border); }
-.tab { flex:1; border:0; background:none; color:var(--text-2); padding:${fullscreen ? '12px 2px 11px' : '9px 2px 8px'}; cursor:pointer; font:600 ${fullscreen ? 12 : 11}px/1 system-ui,sans-serif; border-bottom:2px solid transparent; letter-spacing:.3px; }
+.tabs { display:flex; gap:2px; padding:0 20px; background:var(--bg-3); border-bottom:1px solid var(--border); }
+.tab { flex:1; border:0; background:none; color:var(--text-2); padding:12px 2px 11px; cursor:pointer; font:600 12px/1 system-ui,sans-serif; border-bottom:2px solid transparent; letter-spacing:.3px; }
 .tab:hover { color:var(--text-2); }
 .tab.active { color:var(--text); border-bottom-color:var(--accent); }
 .tab.pinned { color:var(--tone-amber); }
 .tab.pinned.active { color:var(--tone-amber); border-bottom-color:var(--tone-amber); }
-.body { flex:1; overflow-y:auto; padding:${fullscreen ? '18px 22px 14px' : '12px 14px 10px'}; scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
+.body { flex:1; overflow-y:auto; padding:18px 22px 14px; scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
 .body::-webkit-scrollbar { width:8px; }
 .body::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
-.picker { width:100%; margin-bottom:11px; background:var(--bg-input); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:${fullscreen ? '8px 11px' : '6px 9px'}; font:600 ${fullscreen ? 12 : 11}px/1.4 system-ui,sans-serif; outline:none; }
+.picker { width:100%; margin-bottom:11px; background:var(--bg-input); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:8px 11px; font:600 12px/1.4 system-ui,sans-serif; outline:none; }
 .picker:focus { border-color:var(--accent); }
 .section-label { font:700 10px/1.4 system-ui,sans-serif; color:var(--text-3); text-transform:uppercase; letter-spacing:1px; margin:14px 0 6px; }
 .section-label:first-child { margin-top:0; }
@@ -620,14 +564,14 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 }
 
 /* DSH Web visual baseline: the same surfaces, type rhythm and conversation chrome. */
-.panel { ${fullscreen ? 'border:0;' : ''} letter-spacing:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Helvetica Neue',Helvetica,Arial,sans-serif; }
+.panel { border:0; letter-spacing:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Helvetica Neue',Helvetica,Arial,sans-serif; }
 .mono,.project-title .pid,.stamp,.modal pre { font-family:'SF Mono','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,Courier,'PingFang SC','Microsoft YaHei'; }
 .body input[type="text"] { border-radius:22px !important; padding:8px 14px !important; font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif !important; }
-.header { flex:none; min-height:${fullscreen ? '48px' : '46px'}; gap:10px; padding:${fullscreen ? '8px 28px 4px 20px' : '7px 12px 3px'}; border-bottom:0; box-shadow:none; position:sticky; top:0; z-index:6; }
+.header { flex:none; min-height:48px; gap:10px; padding:8px 28px 4px 20px; border-bottom:0; box-shadow:none; position:sticky; top:0; z-index:6; }
 .brand { display:flex; align-items:center; gap:8px; min-width:0; }
 .brand-mark { width:auto; height:auto; display:inline; flex:0 0 auto; border-radius:0; background:none; color:var(--text); box-shadow:none; font:700 17px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:-.05em; }
 .brand-copy { display:flex; align-items:baseline; flex-direction:row; gap:6px; min-width:0; }
-.header .title { font:500 ${fullscreen ? 14 : 13}px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
+.header .title { font:500 14px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
 .brand-subtitle { color:var(--text-3); font:400 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; white-space:nowrap; }
 .header-actions { display:flex; align-items:center; justify-content:flex-end; gap:4px; min-width:0; }
 .kernel-dot { width:7px; height:7px; border-radius:50%; display:inline-block; flex:0 0 auto; box-shadow:none; }
@@ -638,16 +582,16 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .hbtn:active { transform:none; }
 .hbtn.icon-btn { min-width:28px; padding:3px 6px; font-size:15px; }
 .density-select { width:auto; min-height:28px; margin:0; padding:3px 22px 3px 8px; border:0; border-radius:8px; background-color:transparent; font-size:12px; line-height:18px; }
-.tabs { flex:none; min-height:44px; align-items:stretch; gap:0; padding:${fullscreen ? '0 28px' : '0 10px'}; overflow-x:auto; overflow-y:hidden; background:var(--bg); border-bottom:1px solid var(--border); scrollbar-width:none; }
+.tabs { flex:none; min-height:44px; align-items:stretch; gap:0; padding:0 28px; overflow-x:auto; overflow-y:hidden; background:var(--bg); border-bottom:1px solid var(--border); scrollbar-width:none; }
 .tabs::-webkit-scrollbar { display:none; }
 .tab-group { display:flex; align-items:stretch; gap:12px; flex:0 0 auto; }
 .tab-group + .tab-group { margin-left:20px; padding-left:20px; border-left:1px solid var(--border-2); }
 .tab-group-label { align-self:center; color:var(--text-3); font:500 10px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:uppercase; letter-spacing:.06em; }
-.tab-group-tabs { display:flex; align-items:flex-end; gap:${fullscreen ? '20px' : '12px'}; }
-.tab { position:relative; flex:0 0 auto; min-height:35px; padding:8px 0 11px; border:0; border-radius:0; color:var(--text-3); background:transparent; font:500 ${fullscreen ? 13 : 11}px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; transition:color .1s cubic-bezier(.4,0,.2,1); }
+.tab-group-tabs { display:flex; align-items:flex-end; gap:20px; }
+.tab { position:relative; flex:0 0 auto; min-height:35px; padding:8px 0 11px; border:0; border-radius:0; color:var(--text-3); background:transparent; font:500 13px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; transition:color .1s cubic-bezier(.4,0,.2,1); }
 .tab:hover { color:var(--text); background:transparent; }
 .tab.active { color:var(--accent-text); background:transparent; border-bottom:3px solid var(--accent); }
-.body { min-height:0; background:var(--bg); padding:${fullscreen ? '20px 24px 16px' : '12px 14px 10px'}; scrollbar-gutter:stable; }
+.body { min-height:0; background:var(--bg); padding:20px 24px 16px; scrollbar-gutter:stable; }
 .body.chat-active { display:flex; flex-direction:column; overflow:hidden; padding-bottom:0; }
 .body.chat-active > .project-title,
 .body.chat-active > .view-intro { flex:none; }
@@ -656,7 +600,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .body.chat-active > .stamp { display:none; }
 .body.chat-active > .welcome,
 .body.chat-active > .skeleton { flex:1; min-height:0; overflow-y:auto; }
-.project-title { position:sticky; top:${fullscreen ? '-20px' : '-12px'}; z-index:2; margin:${fullscreen ? '-20px -24px 20px' : '-12px -14px 14px'}; padding:${fullscreen ? '8px 24px' : '7px 14px'}; min-height:44px; background:var(--bg); border-bottom:1px solid var(--border-2); backdrop-filter:none; }
+.project-title { position:sticky; top:-20px; z-index:2; margin:-20px -24px 20px; padding:8px 24px; min-height:44px; background:var(--bg); border-bottom:1px solid var(--border-2); backdrop-filter:none; }
 .project-heading { display:flex; align-items:center; flex-direction:row; gap:5px; min-width:0; }
 .project-kicker { color:var(--text-3); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; }
 .project-kicker::after { content:' /'; color:var(--text-3); }
@@ -727,7 +671,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .sidebar.collapsed .sidebar-list { padding:0; }
 .sidebar.collapsed .ws-item { width:36px; min-height:36px; justify-content:center; padding:0; }
 .sidebar.collapsed .ws-item > :not(.ws-dot) { display:none; }
-.welcome { min-height:${fullscreen ? 'calc(100vh - 132px)' : '340px'}; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:40px 24px; text-align:center; }
+.welcome { min-height:calc(100vh - 132px); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:40px 24px; text-align:center; }
 .welcome-mark { width:auto; height:auto; display:inline; border-radius:0; background:none; color:var(--accent); box-shadow:none; font:500 24px/32px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
 .welcome-eyebrow { color:var(--text-3); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:none; letter-spacing:0; }
 .welcome h1 { margin:0; color:var(--text); font:500 26px/32px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; }
@@ -747,7 +691,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .chat-message.error { align-self:center; width:min(840px,100%); padding:8px 12px; border:0; border-radius:8px; background:var(--tone-red-bg); color:var(--tone-red); }
 .chat-message.selected { outline:2px solid var(--accent); outline-offset:4px; }
 .chat-running { align-self:center; width:min(840px,100%); display:flex; align-items:center; gap:8px; color:var(--text-2); font:400 14px/22px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
-.chat-dock { flex:none; position:relative; z-index:4; width:100%; padding:${fullscreen ? '8px 24px 12px' : '8px 14px 10px'}; border-top:1px solid var(--border-2); background:var(--bg); }
+.chat-dock { flex:none; position:relative; z-index:4; width:100%; padding:8px 24px 12px; border-top:1px solid var(--border-2); background:var(--bg); }
 .chat-dock[hidden] { display:none; }
 .chat-quote { width:100%; max-width:840px; margin-left:auto; margin-right:auto; }
 .chat-composer-row { flex:none; display:flex; align-items:flex-end; gap:8px; width:100%; max-width:840px; margin:0 auto; padding:0; }
@@ -791,19 +735,14 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const panel = el('div', 'panel')
   root.appendChild(panel)
 
-  // Fullscreen (standalone) mode uses a dsh-web-style layout: a left
-  // workspace sidebar (project list) + a main column (header, top tabs,
-  // body). The floating mode keeps the compact picker + tabs column.
-  const main = fullscreen ? el('div', 'main') : panel
-  let sidebar: HTMLElement | null = null
-  if (fullscreen) {
-    panel.classList.add('row')
-    sidebar = el('div', 'sidebar')
-    sidebar.setAttribute('role', 'navigation')
-    sidebar.setAttribute('aria-label', 'projects')
-    panel.appendChild(sidebar)
-    panel.appendChild(main)
-  }
+  // The standalone workspace uses a left project sidebar and a main column.
+  const main = el('div', 'main')
+  const sidebar = el('div', 'sidebar')
+  panel.classList.add('row')
+  sidebar.setAttribute('role', 'navigation')
+  sidebar.setAttribute('aria-label', 'projects')
+  panel.appendChild(sidebar)
+  panel.appendChild(main)
 
   // ── header ──
   const header = el('div', 'header')
@@ -844,10 +783,6 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   refresh.append(el('span', '', '↻'), el('span', 'long-label', ' Refresh'))
   refresh.title = 'refresh now'
   refresh.setAttribute('aria-label', 'Refresh')
-  const close = el('button', 'hbtn ghost', '×')
-  close.title = 'collapse'
-  close.setAttribute('aria-label', 'Collapse panel')
-  close.onclick = () => { panel.style.display = 'none' }
   const commandsBtn = el('button', 'hbtn header-command')
   commandsBtn.append(el('span', '', '⌘K'), el('span', 'long-label', ' Commands'))
   commandsBtn.title = 'browse /research commands (Ctrl/Cmd+K)'
@@ -900,12 +835,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   }
   densityApply(panel)
   const headerActions = el('div', 'header-actions')
-  if (fullscreen) {
-    // Standalone mode: project creation lives in the sidebar.
-    headerActions.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, themeBtn, refresh)
-  } else {
-    headerActions.append(themeBtn, refresh, close)
-  }
+  headerActions.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, themeBtn, refresh)
   header.appendChild(headerActions)
   main.appendChild(header)
 
@@ -1002,11 +932,6 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   const chatDock = el('div', 'chat-dock')
   chatDock.hidden = true
   main.appendChild(chatDock)
-  const picker = el('select', 'picker')
-  picker.style.cssText = 'margin:10px 12px 0;width:calc(100% - 24px)'
-  picker.onchange = () => { projectId = picker.value || undefined; void render() }
-  if (!fullscreen) main.insertBefore(picker, body)
-
   const styleTabs = (): void => {
     body.classList.toggle('chat-active', activeTab === 'chat')
     for (const [key, button] of tabButtons) {
@@ -1071,7 +996,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       kernelDot.style.background = kernelOnline ? 'var(--tone-green)' : 'var(--tone-red)'
       kernelDot.title = kernelOnline ? `kernel connected · ${health.instance ?? ''} — click for settings` : 'kernel unreachable — click for settings'
     }
-    // Project list: drives the sidebar (fullscreen) or the picker (float).
+    // Project list drives the standalone workspace sidebar.
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
     // dsh-web session ordering: most recently active first (by updated_at).
     projects.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
@@ -1099,27 +1024,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     }
     if (projection !== null && booting) booting = false
     syncTitle(projection?.project?.name)
-    if (fullscreen && sidebar !== null) {
-      // dsh-web sidebar stats: counts of the active project under its row.
-      renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() })
-    } else {
-      // Rebuild when empty, when there is no active project, or when the
-      // active project id is not among the options (chat /research new
-      // creates projects outside the picker's own onchange).
-      const hasActive = projectId !== undefined && [...picker.options].some(o => o.value === projectId)
-      if (picker.options.length === 0 || projectId === undefined || !hasActive) {
-        picker.replaceChildren()
-        const placeholder = el('option', '', projectId === undefined ? '— select project —' : '— session-linked —')
-        placeholder.value = ''
-        picker.appendChild(placeholder)
-        for (const p of projects) {
-          const option = el('option', '', `${p.name ?? p.project_id} · ${p.status ?? ''}`)
-          option.value = p.project_id ?? ''
-          picker.appendChild(option)
-        }
-        picker.value = projectId ?? ''
-      }
-    }
+    renderSidebar(sidebar, projects, projectId, (id) => { projectId = id; void render() })
     if (target === undefined) {
       syncTitle(undefined)
       // dsh-web hero: a guided empty state instead of a bare message.
@@ -1176,11 +1081,6 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       chatDock.replaceChildren()
       body.replaceChildren(el('div', 'error-banner', `Research kernel unreachable (project ${target}).`))
       return
-    }
-    if (!fullscreen) {
-      // Keep the picker in sync with the active project (the chat /research
-      // new command switches it outside the picker's own onchange).
-      picker.value = projectId ?? ''
     }
     body.replaceChildren()
 
@@ -1239,7 +1139,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   favProjectsLoad()
   sidebarSortLoad()
   void render()
-  const startTimer = (): number | null => {
+  startRefreshTimer = (): number | null => {
     if (!autoRefreshEnabled()) return null
     return window.setInterval(() => {
       // dsh-web behaviour: pause background refreshes while the tab is
@@ -1248,7 +1148,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       void render()
     }, 8000)
   }
-  let timer: number | null = startTimer()
+  refreshTimer = startRefreshTimer()
   // dsh-web behaviour: catch up immediately when the tab becomes visible
   // again (the interval above skips while hidden).
   document.addEventListener('visibilitychange', () => {
@@ -1328,7 +1228,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
     }
     // dsh-web behavior: typing "/" anywhere (not already typing) jumps to
     // the chat composer with a leading slash.
-    if (event.key === '/' && !typing && fullscreen) {
+    if (event.key === '/' && !typing) {
       event.preventDefault()
       activeTab = 'chat'
       tabSave()
@@ -1375,7 +1275,6 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   window.addEventListener('keydown', onKey)
   // Responsive: narrow viewports auto-collapse the sidebar (dsh-web shell).
   const onResize = (): void => {
-    if (!fullscreen || sidebar === null) return
     const narrow = window.innerWidth < 920
     // Narrow viewports force-collapse; wide ones keep the user's choice
     // (persisted layout memory).
@@ -1394,7 +1293,8 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   onResize()
   window.addEventListener('resize', onResize)
   window.addEventListener('beforeunload', () => {
-    if (timer !== null) window.clearInterval(timer)
+    if (refreshTimer !== null) window.clearInterval(refreshTimer)
+    refreshTimer = null
     window.removeEventListener('keydown', onKey)
     window.removeEventListener('resize', onResize)
   }, { once: true })
@@ -3751,7 +3651,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
     healthValue.style.color = 'var(--tone-green)'
   }
   row('Bridge', 'same-origin /v1 proxy')
-  row('Auth', tokenProvider !== undefined ? 'bearer token (session)' : 'DSH boot token')
+  row('Auth', tokenProvider !== undefined ? 'standalone access token' : 'not configured')
   // dsh-web connection details: the exact bridge endpoint, copyable.
   const bridgeEnd = `${location.origin}${base()}/v1`
   const bridgeRow = el('div', 'row')
@@ -3848,10 +3748,10 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   refreshToggle.onclick = () => {
     const next = !autoRefreshEnabled()
     autoRefreshSet(next)
-    if (next && timer === null) timer = startTimer()
-    if (!next && timer !== null) {
-      window.clearInterval(timer)
-      timer = null
+    if (next && refreshTimer === null) refreshTimer = startRefreshTimer()
+    if (!next && refreshTimer !== null) {
+      window.clearInterval(refreshTimer)
+      refreshTimer = null
     }
     refreshValue.textContent = next ? '8s polling' : 'off'
   }

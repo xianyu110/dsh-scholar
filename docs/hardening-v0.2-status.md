@@ -1,6 +1,6 @@
 # 当前实现与目标规范差距
 
-> 信息性文档，更新于 2026-08-08。它描述当前仓库，不覆盖规范性文档。状态必须以源码和当次 CI 复核，历史测试计数不能自动继承。
+> 信息性文档，更新于 2026-08-09。它描述当前仓库，不覆盖规范性文档。状态必须以源码和当次 CI 复核，历史测试计数不能自动继承。
 
 ## 1. 当前可复用基础
 
@@ -9,7 +9,7 @@
 | Kernel | TypeScript + node:sqlite；Project/Gate/Job/Artifact/Evidence/Claim/Budget/Outbox |
 | CAS | SHA-256、临时文件 + rename、项目级 Artifact record |
 | HTTP | /v1 JSON 接口、可选 bearer、32 MiB、Zod 422 |
-| Plugin | Cordis tools/commands/subagents、角色 ACL、Sidecar、/research-api bridge |
+| Plugin | Cordis Agent tools/commands/subagents、角色 ACL、Skills、Sidecar；无 browser client/bridge |
 | UI | 完整原生 DOM Workspace UI；Chat/Overview/Approvals/Runs/Artifacts/Evidence/Budget |
 | Runner | Docker/subprocess、真实 snapshot materialize、lease、heartbeat、cancel、Ed25519 Manifest |
 | Analysis | MetricSpec/RunSet/AnalysisPlan、paired bootstrap、Holm、fixed metrics parser |
@@ -32,18 +32,24 @@
 | TERM-01 | 实时有序终端 | 未实现 | Runner 结束后才返回 stdout/stderr，Kernel 无 frames/SSE，UI 无 Terminal tab |
 | TEX-01 | TeX workspace/editor/version | 未实现 | buildManuscript 只生成字符串和 Artifact，无文件树/保存/CAS version |
 | TEX-02 | latex-compile Job/诊断/PDF | 部分 | eval 脚本能 pdflatex/bibtex；产品接口和 UI 不存在；Job kind 不含 latex-compile |
-| UI-01 | 单一共享 UI | 未达成 | 主插件轻面板与 dsh-research-ui 完整 UI 两个 client bundle；UI 包可启动第二 Kernel |
+| UI-01 | standalone-only 单一 UI | 基本具备，待 CI 运行 | 根轻面板、两个 DSH HTTP bridge、UI Cordis host/patch 与 client floating 死分支已删除；manifest/files allowlist、docs verifier 和 standalone CI build 已接入，尚需 clean checkout 实跑 |
 | UI-02 | i18n zh/en | 未实现 | 单个约 7,500 行 client 含大量硬编码英文；standalone 首屏固定 lang=en |
-| UI-03 | DSH slots/locale/theme | 未达成 | 当前 Shadow DOM 私有主题与 localStorage，不接宿主 slots/LocaleFace |
-| ART-01 | binary in all modes | 部分 | DSH bridge 流式；standalone proxy 对 upstream.text() 会破坏图片/PDF |
+| UI-03 | standalone locale/theme adapter | 部分 | 已去除 DSH slots/LocaleFace 目标；当前仍是硬编码文案和局部 localStorage |
+| UI-04 | browser client strict typecheck | 未达成 | UI tsconfig 当前只覆盖 standalone Node 文件；将 client 纳入 `tsc` 会暴露状态 tuple、nullability、ShadowRoot 和作用域错误，必须在拆分巨型 client 时全部清零 |
+| UI-05 | standalone settings runtime | 代码已修，待 UI 验收 | Auto refresh timer 与暗色 Accent 移到可达作用域，删除 DSH boot token 文案；需补浏览器交互测试 |
+| ART-01 | standalone binary/SSE 流式 | 代码已修，待验收 | proxy 已改为 Web stream 转发、保留 media headers 并处理 source/client 中断；需补真实 PDF/image/SSE round-trip CI |
 | ART-02 | media type | 部分 | Kernel Artifact GET 常用 application/octet-stream，PDF preview 依赖猜测 |
 | STORE-01 | 显式迁移版本 | 未达成 | SCHEMA_VERSION 仍为 1，同时启动代码隐式 ensure/rebuild v2 字段 |
 | STORE-02 | CodeSnapshot durable model | 部分 | archive/manifest 是 Artifact，但没有 code_snapshots 权威表；snapshot_id 与可执行 artifact id 容易混淆 |
 | EVENT-01 | 正确 DSH event assumption | 文档已修 | DSH SessionEventMap 实际可扩展；业务仍选择 Kernel Outbox 权威 |
-| SKILL-01 | 所有 Skill 可安装发现 | 未达成 | runtime path 可能解析 lib/skills 而 build 不复制；静态 plugin 仅打包 core；domain/venue 不自动选择 |
+| SKILL-01 | 所有 Skill 可安装发现 | 代码已修，待安装验收 | provider 已从包根挂载 core、两个 domain 和 venue；仍需 clean tarball 安装、自动选择和 source/prepared hash 测试 |
 | PACK-01 | clean remote install | 未证实 | .dsh-plugin prepare 依赖未声明，generated assets 被 ignore；需要 tarball/install 测试 |
 | SELFMOD-01 | dev-only Cordis self tools | 配置与隔离 wrapper 已新增，尚未自动验收 | shipped production composition 无 tool-cordis；需补 CI inspect/mount/unmount 与否定测试 |
+| SEC-UI-01 | standalone token/loopback | 代码已修，待 HTTP 验收 | 非 loopback + `--no-token` 已拒绝；旧 token 强制 0600 且拒绝 symlink/空文件；Origin 支持同一 127/8 host；仍需真实 bind/request 负向测试 |
+| OPS-01 | standalone 启动可靠报错 | 代码已修，待脚本验收 | 脚本解析 CLI host/port/dataDir 覆盖，用实际 URL + 当前 token-check readiness；失败清理进程组、非零并输出日志尾部 |
+| CI-01 | clean DSH Agent fixture | 未达成 | 根 plugin 编译依赖 DSH host packages/cordis，目前仅开发机 symlink；CI 先阻断 standalone+docs，需新增可复现 DSH checkout/fixture job 后再启用 root build/full security unit |
 | DOC-01 | Markdown 是生成权威 | 本轮建立 | 后续每个需求/修复必须同步规范、验收和本状态 |
+| DOC-02 | change-aware docs sync | 未达成 | verify-docs 校验结构、必需片段和删除面，但尚未根据 git diff 强制源码行为变化同步规范+acceptance+hardening |
 
 ## 3. 当前代码中的具体不一致
 
@@ -56,10 +62,16 @@
 - public evidence route 可声明 verified；
 - lower-is-better 的 Claim 语义未在 Kernel 简单验证中完整实现；
 - UI Job detail 先请求不存在的 /v1/jobs?job_id=... 再做昂贵 fallback；
-- standalone binary proxy 以 text() 缓冲；
-- main plugin runtime Skill path 与发布 files 布局不一致；
-- cordis.patch 注释允许 port=0，但 sidecar/client 没有 endpoint handshake；
+- standalone auth、旧 `/research-*` 404、binary/SSE 仍缺自动化真实 HTTP contract test；本轮仅完成手工 smoke；
+- standalone BFF 仍只有 `/v1` bearer/Origin，尚无 v2 Principal、Project AuthZ 和 CSRF token 注入；
+- sidecar 的 port=0 没有 endpoint handshake；配置示例已撤掉 0 的可用承诺，但目标能力仍未实现；
+- Agent/standalone sidecar 只凭端口 health 复用实例，没有核对 dataDir/database identity，存在跨实例误复用风险；
+- Agent Kernel token 已从 argv/日志移到显式清理父级污染后的子进程环境，最终目标仍是 0600 token file 或匿名通道；
+- research-ui `tsc` 不覆盖 browser client；已修两个可达 settings 作用域错误，但其余严格类型错误仍未清零；
+- survey connector 与 Kernel 4xx/5xx 已改成稳定 code/通用消息，其他外部错误响应仍需自动化泄露扫描；
+- UI package 已加发布 files allowlist，verifier 已禁止 source/ignored `host`，仍需 clean/升级工作树 pack 测试；
 - 当前 hardening shell 脚本头部宣称的部分 case 没有真正执行对应断言；
+- CI 已接入 standalone packages、standalone unit 和 docs verifier；根 plugin build/full DSH security unit 等待 clean host fixture，Docker/TeX/Golden 等 job 仍需在 GitHub 实跑后才能宣称通过；
 - CI/评测 README 的历史通过数量需每次重新验证。
 
 ## 4. 新增需求的落地状态
@@ -74,7 +86,11 @@
 
 ### i18n
 
-已定义 zh/en、LocaleFace/standalone adapter、资源完整性、fallback、Intl 和 UI 测试。当前没有 locale 模块，需先拆分巨型 client，再迁移全部 chrome；动态研究内容保持原文。
+已定义 zh/en、standalone locale adapter、资源完整性、fallback、Intl 和 UI 测试。当前没有 locale 模块，需先拆分巨型 client，再迁移全部 chrome；动态研究内容保持原文。
+
+### 删除 DSH 浏览器嵌入模式
+
+规范已改为 standalone-only UI。代码已删除根 `client-panel`、`/research-api` bridge、UI Cordis host/`/research-ui-api` bridge、两个 `dshClient` manifest 面与嵌入 patch。DSH 仍保留 Agent tools、commands、subagents、Skills、Session 和 dev-only Cordis selfmod。standalone server 是唯一浏览器入口。
 
 ### Cordis self-referential 开发模式
 
@@ -89,7 +105,7 @@ docs/README.md 与 repository-blueprint.md 已把文档同步和积极 subagent 
 1. P0 Governance：Principal/AuthZ/BFF、Decision migration、Evidence provenance；
 2. P0 Execution observation：Terminal Schema/DB/Runner/SSE/UI；
 3. P0 Manuscript：TeX workspace/save/compile/diagnostics/PDF；
-4. P0 UI foundation：拆分 client、共享 embedded/standalone、i18n/slots/theme；
+4. P0 UI foundation：拆分 standalone client、实现 i18n/locale/theme adapter；
 5. P1 Storage/API：显式 migrations、v2、media type、binary fix；
 6. P1 Skills/package：runtime assets、domain/venue selection、clean install；
 7. P1 Full validation：security/recovery/Golden/clean-room 与文档校准。

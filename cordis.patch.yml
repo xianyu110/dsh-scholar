@@ -17,7 +17,8 @@
       config:
         kernel:
           host: 127.0.0.1
-          # 7412 is the Local Desktop Kernel port (design §9.1); set 0 to
-          # auto-pick a free port and read the actual one from logs/events.
+          # 7412 is the Local Desktop Kernel port (design §9.1). The current
+          # sidecar requires a positive fixed port until endpoint handshake
+          # support is implemented; do not configure 0 here.
           port: 7412
         defaultMode: gate-only

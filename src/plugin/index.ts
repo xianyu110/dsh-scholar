@@ -5,7 +5,7 @@
  * 1. Spawns (or reuses) the Research Kernel sidecar (design §9.1).
  * 2. Registers the research tool surface with per-role ACL (§4.1).
  * 3. Registers the /research command family (附录 A).
- * 4. Mounts the research-core skill pack (§4.2 Skills / Domain Packs).
+ * 4. Mounts the research-core, domain and venue skill packs (§4.2).
  * 5. Exposes `ctx.research` (client + role registry) for other plugins.
  *
  * Security stance (§1.2, §4.9): no danger-full-access, no web_fetch, no MCP,
@@ -27,7 +27,6 @@ import { DiskCache } from '@dsh-scholar/scholar-connectors'
 import { KernelSidecar, resolveDshHome } from './sidecar.js'
 import { registerResearchTools } from './tools.js'
 import { registerResearchCommands } from './commands.js'
-import { registerResearchApiBridge } from './web-bridge.js'
 import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
 
 export const name = 'research-plugin'
@@ -113,16 +112,17 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
   // /research command family (design 附录 A).
   registerResearchCommands(ctx, { client, cache, unattended })
 
-  // Web-only data plane: /research-api/* -> kernel (E7 panels).
-  registerResearchApiBridge(ctx, sidecar)
-
-  // Skill pack mount: research-core methodology (design §4.2).
+  // Skill pack mount: methodology plus deterministic domain/venue packs.
+  // `import.meta.url` is lib/plugin/index.js after compilation, so two parent
+  // traversals are required to reach the package-root skills/ directory.
   const ownDir = dirname(fileURLToPath(import.meta.url))
-  const skillDir = join(ownDir, '..', 'skills', 'research-core')
+  const skillRoot = join(ownDir, '..', '..', 'skills')
+  const skillDirs = ['research-core', 'domain-machine-learning', 'domain-data-science', 'venue-templates']
+    .map(name => join(skillRoot, name))
   void ctx.plugin(SkillLocal, {
-    providerName: 'dsh-scholar:research-core',
+    providerName: 'dsh-scholar:research-skills',
     includeDefaultRoots: false,
-    customSkillDirs: [skillDir],
+    customSkillDirs: skillDirs,
     watch: false,
   }).then(undefined, error => {
     ctx.logger('research').warn(`skill mount failed: ${(error as Error).message}`)

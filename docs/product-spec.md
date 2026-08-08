@@ -80,7 +80,7 @@ DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研�
 ### 5.5 全页面 i18n
 
 - 所有页面 chrome、弹窗、aria、通知、Terminal 状态和 TeX Workbench 控件首发支持简体中文与英文；
-- DSH 嵌入模式使用宿主 LocaleFace，独立模式使用兼容 locale adapter；
+- 浏览器 UI 仅以独立模式交付，使用本地 locale adapter；DSH Agent 插件不注入 Web UI；
 - 语言选择、fallback、插值、复数和 Intl 格式遵循 gui-plugin-plan.md；
 - 项目名、论文、模型文本、Terminal 输出、TeX 源码和原始编译消息保持原文。
 

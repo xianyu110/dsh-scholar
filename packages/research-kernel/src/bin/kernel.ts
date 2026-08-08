@@ -25,7 +25,9 @@ const dbPath = values.db ?? join(mkdtempSync(join(tmpdir(), 'research-kernel-'))
 const casRoot = values.cas ?? join(process.cwd(), '.research-cas')
 const port = Number(values.port ?? 7412)
 const host = values.host ?? '127.0.0.1'
-const token = values.token
+// Sidecars pass the token out-of-band from argv so it is not exposed by
+// process listings. The CLI flag remains for explicit backwards compatibility.
+const token = values.token ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
 
 const kernel = new ResearchKernel({ dbPath, casRoot })
 
