@@ -1282,6 +1282,8 @@ let gatesQuery = ''
 
 async function renderGates(body: HTMLElement, projectId: string): Promise<void> {
   const gates = (await api<GateRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/gates`)) ?? []
+  // dsh-web decision provenance: who decided each gate, when, and why.
+  const decisions = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/decisions`)) ?? []
   const pending = gates.filter(g => g.status === 'pending')
   const decided = gates.filter(g => g.status !== 'pending')
   // dsh-web search-as-you-type: filters both sections; only the list
@@ -1453,6 +1455,16 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       name.style.cssText = 'font-size:11.5px'
       info.appendChild(name)
       if (gate.title !== undefined && gate.title !== '') info.appendChild(el('div', 'muted', gate.title))
+      // dsh-web decision provenance: actor + timestamp (+ reason on hover).
+      const dec = decisions.find(d => d.gate_id === gate.gate_id)
+      if (dec !== undefined) {
+        const when = String(dec.decided_at ?? '').replace('T', ' ').slice(0, 16)
+        const meta = el('div', 'muted', `${String(dec.actor ?? '?')} · ${String(dec.decision ?? '?')}${when !== '' ? ` · ${when}` : ''}`)
+        meta.style.cssText = 'font-size:9.5px;margin-top:2px;color:var(--text-3)'
+        const reason = String(dec.reason ?? '')
+        if (reason !== '') meta.title = reason
+        info.appendChild(meta)
+      }
       row.appendChild(info)
       row.appendChild(pill(gate.status))
       card.appendChild(row)
@@ -1847,6 +1859,7 @@ async function previewArtifact(artifactId: string): Promise<void> {
       img.src = url
       img.alt = artifactId
       modal.appendChild(img)
+      modal.appendChild(downloadLink(blob, artifactId))
     } else if (isHtml) {
       // HTML is untrusted markup: never rendered via HTML strings, download only (§15.4).
       modal.appendChild(el('div', 'warn', '⚠️ HTML preview is disabled for security (design §15.4) — download the file instead.'))
@@ -1858,6 +1871,7 @@ async function previewArtifact(artifactId: string): Promise<void> {
       img.src = url
       img.alt = artifactId
       modal.appendChild(img)
+      modal.appendChild(downloadLink(blob, artifactId))
     } else if (contentType === 'application/pdf') {
       const url = URL.createObjectURL(blob)
       blobUrls.push(url)
@@ -1872,6 +1886,7 @@ async function previewArtifact(artifactId: string): Promise<void> {
       const pre = el('pre', '', content.length > 6000 ? content.slice(0, 6000) + String.fromCharCode(10) + '… (truncated)' : content)
       pre.className = 'pre'
       modal.appendChild(pre)
+      modal.appendChild(downloadLink(blob, artifactId))
     }
     overlay.appendChild(modal)
     root.appendChild(overlay)
