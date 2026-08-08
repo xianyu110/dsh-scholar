@@ -280,6 +280,17 @@ function radiusSet(name: string): void {
   try { localStorage.setItem(RADIUS_KEY, name in RADII ? name : 'normal') } catch { /* private mode */ }
 }
 
+const TEXTURE_KEY = 'dsh-scholar-ui-texture'
+const TEXTURES: Record<string, string> = { plain: 'plain', grid: 'grid', dots: 'dots' }
+
+/** Panel background texture (dsh-web appearance), persisted. */
+function textureValue(): string {
+  try { return TEXTURES[localStorage.getItem(TEXTURE_KEY) ?? 'plain'] ?? 'plain' } catch { return 'plain' }
+}
+function textureSet(name: string): void {
+  try { localStorage.setItem(TEXTURE_KEY, name in TEXTURES ? name : 'plain') } catch { /* private mode */ }
+}
+
 const FAV_KEY = 'dsh-scholar-ui-favs'
 
 function tabFavs(): Set<string> {
@@ -349,6 +360,7 @@ export function apply(options: ApplyOptions = {}): void {
   // Theme: LIGHT is the default; persisted per browser. Accent: custom.
   host.dataset.theme = readTheme()
   host.style.setProperty('--panel-radius', radiusValue())
+  host.dataset.texture = textureValue()
   // Custom accent (dsh-web theming): override the CSS variable directly.
   // Dark-theme accent variants (dsh-web theming): brighter in dark mode.
   const ACCENT_DARK: Record<string, string> = {
@@ -526,6 +538,9 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 .panel.density-compact .tab { padding:7px 2px 6px; }
 .panel.density-compact .section-label { margin:10px 0 4px; }
 .panel.density-compact .pstep .lbl { font-size:7px; }
+/* dsh-web background texture preferences. */
+:host([data-texture="grid"]) .panel { background-image: linear-gradient(var(--border-2) 1px, transparent 1px), linear-gradient(90deg, var(--border-2) 1px, transparent 1px); background-size: 22px 22px; }
+:host([data-texture="dots"]) .panel { background-image: radial-gradient(var(--border-2) 1px, transparent 1px); background-size: 18px 18px; }
 /* dsh-web mobile: full-viewport panel, scrollable tabs, compact chrome. */
 @media (max-width: 640px) {
   :host { position: fixed; inset: 0; }
@@ -2359,6 +2374,29 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   radiusRow.append(radiusLabel, radiusSelect)
   modal.appendChild(radiusRow)
 
+  // Background texture (dsh-web appearance).
+  const textureRow = el('div', 'row')
+  textureRow.style.cssText = 'padding:4px 0'
+  const textureLabel = el('span', '', 'Texture')
+  textureLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const textureSelect = el('select', 'picker')
+  textureSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+  const currentTexture = textureValue()
+  for (const name of Object.keys(TEXTURES)) {
+    const opt = el('option', '', name)
+    opt.value = name
+    textureSelect.appendChild(opt)
+  }
+  textureSelect.value = currentTexture
+  textureSelect.onchange = () => {
+    textureSet(textureSelect.value)
+    const hostEl = document.querySelector('#dsh-scholar-ui')
+    if (hostEl !== null) hostEl.dataset.texture = textureValue()
+    rerender()
+  }
+  textureRow.append(textureLabel, textureSelect)
+  modal.appendChild(textureRow)
+
   // Conversation.
   modal.appendChild(section('Conversation'))
   const convRow = el('div', 'row')
@@ -3523,6 +3561,30 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
   stream.style.cssText = 'flex:1;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px'
   if (chatMessages.length === 0) {
     chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
+    // dsh-web starter chips: one-tap quick commands for a fresh session.
+    const starters = el('div')
+    starters.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding:2px'
+    const starterDefs: Array<[string, string]> = [
+      ['🆕 new project', '/research new demo1'],
+      ['📋 list projects', '/research list'],
+      ['📌 status', '/research status'],
+      ['🧾 claims', '/research claims'],
+    ]
+    for (const [label, line] of starterDefs) {
+      const chip = el('button', 'hbtn', label)
+      chip.style.cssText = 'padding:3px 10px;font-size:10.5px'
+      chip.onclick = () => {
+        chatDraft = line
+        rerender()
+        setTimeout(() => {
+          const rootEl = rootHost()
+          const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+          ta?.focus()
+        }, 120)
+      }
+      starters.appendChild(chip)
+    }
+    stream.appendChild(starters)
   }
   const searchQ = chatSearchQuery.trim().toLowerCase()
   // dsh-web virtualized feel: window the transcript to the newest 80
