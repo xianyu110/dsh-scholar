@@ -256,6 +256,19 @@ function autoRefreshSet(on: boolean): void {
   try { localStorage.setItem(REFRESH_KEY, on ? 'on' : 'off') } catch { /* private mode */ }
 }
 
+const ACCENT_KEY = 'dsh-scholar-ui-accent'
+const ACCENTS: Record<string, string> = {
+  blue: '#2563eb', violet: '#7c3aed', green: '#16a34a', amber: '#b45309',
+}
+
+/** Custom accent colour (dsh-web theming), persisted. */
+function accentColor(): string {
+  try { return ACCENTS[localStorage.getItem(ACCENT_KEY) ?? 'blue'] ?? ACCENTS.blue! } catch { return ACCENTS.blue! }
+}
+function accentSet(name: string): void {
+  try { localStorage.setItem(ACCENT_KEY, name in ACCENTS ? name : 'blue') } catch { /* private mode */ }
+}
+
 const FAV_KEY = 'dsh-scholar-ui-favs'
 
 function tabFavs(): Set<string> {
@@ -322,8 +335,17 @@ export function apply(options: ApplyOptions = {}): void {
     ? 'position:fixed;inset:0;z-index:9999;font:14px/1.5 system-ui,sans-serif'
     : 'position:fixed;right:12px;bottom:64px;width:430px;max-height:min(76vh,760px);z-index:9999;font:12px/1.5 system-ui,sans-serif'
   const root = host.attachShadow({ mode: 'open' })
-  // Theme: LIGHT is the default; persisted per browser.
+  // Theme: LIGHT is the default; persisted per browser. Accent: custom.
   host.dataset.theme = readTheme()
+  // Custom accent (dsh-web theming): override the CSS variable directly.
+  const applyAccent = (): void => {
+    const c = accentColor()
+    // Custom properties live on the host element (ShadowRoot has no .style).
+    host.style.setProperty('--accent', c)
+    host.style.setProperty('--accent-soft', `${c}1f`)
+    host.style.setProperty('--accent-text', c)
+  }
+  applyAccent()
 
   const style = el('style')
   style.textContent = `
@@ -1854,6 +1876,32 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   refreshRow.append(refreshLabel, refreshValue, refreshToggle)
   modal.appendChild(refreshRow)
 
+  // Accent colour (dsh-web theming).
+  const accentRow = el('div', 'row')
+  accentRow.style.cssText = 'padding:4px 0'
+  const accentLabel = el('span', '', 'Accent')
+  accentLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const accentSelect = el('select', 'picker')
+  accentSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+  const currentAccent = (Object.entries(ACCENTS).find(([, v]) => v === accentColor())?.[0] ?? 'blue')
+  for (const [name, color] of Object.entries(ACCENTS)) {
+    const opt = el('option', '', `${name} (${color})`)
+    opt.value = name
+    accentSelect.appendChild(opt)
+  }
+  accentSelect.value = currentAccent
+  accentSelect.onchange = () => {
+    accentSet(accentSelect.value)
+    const hostEl = document.querySelector('#dsh-scholar-ui')
+    const c = accentColor()
+    hostEl?.style.setProperty('--accent', c)
+    hostEl?.style.setProperty('--accent-soft', `${c}1f`)
+    hostEl?.style.setProperty('--accent-text', c)
+    rerender()
+  }
+  accentRow.append(accentLabel, accentSelect)
+  modal.appendChild(accentRow)
+
   // Conversation.
   modal.appendChild(section('Conversation'))
   const convRow = el('div', 'row')
@@ -2848,6 +2896,26 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     if (root !== null) openCommandHistoryModal(root)
   }
   searchRow.appendChild(historyBtn)
+  // dsh-web share: export the whole transcript as markdown.
+  const exportChatBtn = el('button', 'hbtn', '⬇ md')
+  exportChatBtn.title = 'export conversation as markdown'
+  exportChatBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
+  exportChatBtn.onclick = () => {
+    const lines = ['# Research OS conversation', '', ...chatMessages.map(m => {
+      const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**Research OS**'
+      return `## ${role} · ${m.time}\n\n${m.text}\n`
+    })]
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = el('a', 'dl', 'download')
+    a.href = url
+    a.download = `research-conversation-${new Date().toISOString().slice(0, 10)}.md`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+  }
+  searchRow.appendChild(exportChatBtn)
   // dsh-web quick commands: favourite commands as one-tap chips.
   const favs = favCommands()
   for (const [name, line] of CHAT_COMMANDS) {
