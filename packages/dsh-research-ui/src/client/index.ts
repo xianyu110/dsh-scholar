@@ -246,6 +246,16 @@ function tabSave(): void {
   try { localStorage.setItem(TAB_KEY, activeTab) } catch { /* private mode */ }
 }
 
+const REFRESH_KEY = 'dsh-scholar-ui-refresh'
+
+/** Auto-refresh toggle (8s polling), persisted. */
+function autoRefreshEnabled(): boolean {
+  try { return localStorage.getItem(REFRESH_KEY) !== 'off' } catch { return true }
+}
+function autoRefreshSet(on: boolean): void {
+  try { localStorage.setItem(REFRESH_KEY, on ? 'on' : 'off') } catch { /* private mode */ }
+}
+
 const FAV_KEY = 'dsh-scholar-ui-favs'
 
 function tabFavs(): Set<string> {
@@ -284,6 +294,19 @@ export interface ApplyOptions {
   /** Standalone full-page mode (the independent web plugin): the panel
    * fills the viewport instead of floating over the DSH host page. */
   fullscreen?: boolean
+}
+
+/** Density preference (dsh-web density selector), shared across UI. */
+const DENSITY_KEY = 'dsh-scholar-ui-density'
+let density: 'compact' | 'normal' = 'normal'
+function densityLoad(): void {
+  try {
+    density = localStorage.getItem(DENSITY_KEY) === 'compact' ? 'compact' : 'normal'
+  } catch { /* private mode */ }
+}
+function densityApply(panel: HTMLElement): void {
+  panel.classList.toggle('density-compact', density === 'compact')
+  try { localStorage.setItem(DENSITY_KEY, density) } catch { /* private mode */ }
 }
 
 export function apply(options: ApplyOptions = {}): void {
@@ -518,11 +541,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   }
   // dsh-web density selector (the model dropdown's visual slot): Compact /
   // Normal controls the panel font scale.
-  const DENSITY_KEY = 'dsh-scholar-ui-density'
-  let density: 'compact' | 'normal' = 'normal'
-  try {
-    density = localStorage.getItem(DENSITY_KEY) === 'compact' ? 'compact' : 'normal'
-  } catch { /* private mode */ }
+  densityLoad()
   const densitySelect = el('select', 'picker')
   densitySelect.style.cssText = 'width:auto;margin:0;padding:3px 6px;font-size:10.5px;border-radius:7px'
   const dOptCompact = el('option', '', 'Compact')
@@ -531,15 +550,11 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   dOptNormal.value = 'normal'
   densitySelect.append(dOptCompact, dOptNormal)
   densitySelect.value = density
-  const applyDensity = (): void => {
-    panel.classList.toggle('density-compact', density === 'compact')
-    try { localStorage.setItem(DENSITY_KEY, density) } catch { /* private mode */ }
-  }
   densitySelect.onchange = () => {
     density = densitySelect.value === 'compact' ? 'compact' : 'normal'
-    applyDensity()
+    densityApply(panel)
   }
-  applyDensity()
+  densityApply(panel)
   if (fullscreen) {
     // Standalone mode: project creation lives in the sidebar.
     header.append(sidebarToggle, modeBadge, commandsBtn, densitySelect, themeBtn, refresh)
@@ -697,7 +712,11 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   historyLoad()
   tabLoad()
   void render()
-  const timer = window.setInterval(() => { void render() }, 8000)
+  const startTimer = (): number | null => {
+    if (!autoRefreshEnabled()) return null
+    return window.setInterval(() => { void render() }, 8000)
+  }
+  let timer: number | null = startTimer()
   // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
   // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme;
   // a bare "/" (not typing) focuses the chat composer.
@@ -771,7 +790,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   onResize()
   window.addEventListener('resize', onResize)
   window.addEventListener('beforeunload', () => {
-    window.clearInterval(timer)
+    if (timer !== null) window.clearInterval(timer)
     window.removeEventListener('keydown', onKey)
     window.removeEventListener('resize', onResize)
   }, { once: true })
@@ -1081,6 +1100,28 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
     const meta = el('div', 'muted', `CI [${r?.ci_low ?? '?'}, ${r?.ci_high ?? '?'}] · n=${r?.n_seeds ?? '?'} · ${item.analysis_method ?? '?'}`)
     meta.style.cssText = 'margin-top:4px'
     card.appendChild(meta)
+    // dsh-web analysis depth: an effect-size bar (0-centred) per evidence.
+    if (r?.effect_size !== undefined && r.ci_low !== undefined && r.ci_high !== undefined) {
+      const bar = el('div')
+      bar.style.cssText = 'position:relative;height:14px;margin-top:6px;background:var(--bg-3);border:1px solid var(--border);border-radius:6px;overflow:hidden'
+      const lo = r.ci_low
+      const hi = r.ci_high
+      const eff = r.effect_size
+      const span = Math.max(Math.abs(hi - lo), 0.0001)
+      const zeroX = (0 - lo) / span * 100
+      const effX = (eff - lo) / span * 100
+      const width = Math.abs(effX - zeroX)
+      const fill = el('div')
+      fill.style.cssText = `position:absolute;top:0;bottom:0;left:${Math.min(zeroX, effX)}%;width:${width}%;background:${eff >= 0 ? 'var(--tone-green)' : 'var(--tone-red)'}`
+      bar.appendChild(fill)
+      const zero = el('div')
+      zero.style.cssText = `position:absolute;top:0;bottom:0;left:${zeroX}%;width:1px;background:var(--text-3)`
+      bar.appendChild(zero)
+      const label = el('div', 'muted', `effect ${eff >= 0 ? '+' : ''}${eff}  (0 ─────────── CI bounds)`)
+      label.style.cssText = 'font-size:9px;margin-top:2px;color:var(--text-3)'
+      card.appendChild(bar)
+      card.appendChild(label)
+    }
     const id = el('div', 'muted mono', fmtId(item.evidence_id))
     id.style.cssText = 'margin-top:3px;font-size:10px'
     card.appendChild(id)
@@ -1613,6 +1654,48 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   themeRow.append(themeLabel, themeValue, themeToggle)
   modal.appendChild(themeRow)
 
+  // Preferences: density, auto-refresh (dsh-web settings feel).
+  modal.appendChild(section('Preferences'))
+  const densRow = el('div', 'row')
+  densRow.style.cssText = 'padding:4px 0'
+  const densLabel = el('span', '', 'Density')
+  densLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const densValue = el('span', 'mono', density === 'compact' ? 'compact' : 'normal')
+  densValue.style.cssText = 'font-size:11px'
+  const densToggle = el('button', 'hbtn', 'Toggle')
+  densToggle.style.cssText = 'padding:1px 8px'
+  densToggle.onclick = () => {
+    density = density === 'compact' ? 'normal' : 'compact'
+    const hostEl = document.querySelector('#dsh-scholar-ui')
+    const panelEl = hostEl !== null ? hostEl.shadowRoot?.querySelector('.panel') as HTMLElement | null : null
+    if (panelEl !== null) densityApply(panelEl)
+    densValue.textContent = density
+    rerender()
+  }
+  densRow.append(densLabel, densValue, densToggle)
+  modal.appendChild(densRow)
+
+  const refreshRow = el('div', 'row')
+  refreshRow.style.cssText = 'padding:4px 0'
+  const refreshLabel = el('span', '', 'Auto refresh')
+  refreshLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+  const refreshValue = el('span', 'mono', autoRefreshEnabled() ? '8s polling' : 'off')
+  refreshValue.style.cssText = 'font-size:11px'
+  const refreshToggle = el('button', 'hbtn', 'Toggle')
+  refreshToggle.style.cssText = 'padding:1px 8px'
+  refreshToggle.onclick = () => {
+    const next = !autoRefreshEnabled()
+    autoRefreshSet(next)
+    if (next && timer === null) timer = startTimer()
+    if (!next && timer !== null) {
+      window.clearInterval(timer)
+      timer = null
+    }
+    refreshValue.textContent = next ? '8s polling' : 'off'
+  }
+  refreshRow.append(refreshLabel, refreshValue, refreshToggle)
+  modal.appendChild(refreshRow)
+
   // Conversation.
   modal.appendChild(section('Conversation'))
   const convRow = el('div', 'row')
@@ -1792,6 +1875,91 @@ function openCommandHistoryModal(root: ShadowRoot): void {
     list.appendChild(row)
   }
   modal.appendChild(list)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+}
+
+/* ─────────────────────────── global search modal ─────────────────────────── */
+
+/**
+ * dsh-web cross-session search: queries every project's claims and
+ * evidence for a keyword and lists the hits.
+ */
+function openGlobalSearchModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:560px;max-width:92vw'
+  const header = el('div', 'modal-header', '🌐 Global Search')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.placeholder = 'Search claims & evidence across all projects…'
+  input.value = globalSearchQuery
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none;margin-bottom:10px'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  modal.appendChild(input)
+
+  const results = el('div')
+  results.style.cssText = 'max-height:46vh;overflow-y:auto'
+  results.appendChild(el('div', 'muted', 'Type a query and press Enter.'))
+  modal.appendChild(results)
+
+  const runSearch = async (): Promise<void> => {
+    const q = input.value.trim().toLowerCase()
+    if (q === '') return
+    globalSearchQuery = q
+    results.replaceChildren(el('div', 'muted', 'Searching…'))
+    const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
+    const hits: Array<{ project: string; kind: string; text: string }> = []
+    for (const p of projects) {
+      if (p.project_id === undefined) continue
+      const claims = (await api<ClaimRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/claims`)) ?? []
+      for (const c of claims) {
+        if ((c.statement ?? '').toLowerCase().includes(q)) {
+          hits.push({ project: p.name ?? p.project_id, kind: 'claim', text: c.statement ?? '' })
+        }
+      }
+      const evidence = (await api<EvidenceRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/evidence`)) ?? []
+      for (const e of evidence) {
+        const label = `${e.result?.primary_metric ?? 'metric'} = ${e.result?.value ?? '?'} (Δ${e.result?.effect_size ?? '?'})`
+        if (label.toLowerCase().includes(q)) {
+          hits.push({ project: p.name ?? p.project_id, kind: 'evidence', text: label })
+        }
+      }
+    }
+    globalSearchResults = hits
+    results.replaceChildren()
+    if (hits.length === 0) {
+      results.appendChild(el('div', 'empty', `No matches for "${input.value.trim()}" across projects.`))
+      return
+    }
+    const count = el('div', 'muted', `${hits.length} hit(s) across ${projects.length} project(s)`)
+    count.style.cssText = 'margin-bottom:8px;font-size:11px'
+    results.appendChild(count)
+    for (const h of hits) {
+      const row = el('div')
+      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2)'
+      row.appendChild(el('span', 'artifact-kind', h.kind.toUpperCase()))
+      const bodyEl = el('div', 'grow')
+      bodyEl.style.cssText = 'min-width:0'
+      const projEl = el('div', 'muted', h.project)
+      projEl.style.cssText = 'font-size:10px'
+      const textEl = el('div', '', h.text)
+      textEl.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
+      bodyEl.append(projEl, textEl)
+      row.appendChild(bodyEl)
+      results.appendChild(row)
+    }
+  }
+  input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); void runSearch() } }
+  input.focus()
+
   overlay.appendChild(modal)
   root.appendChild(overlay)
 }
@@ -2326,6 +2494,10 @@ let chatSearchQuery = ''
 let chatQuoteTarget: { index: number; text: string } | null = null
 /** Commands-only view: show just the user command messages. */
 let chatCommandsOnly = false
+/** Global search state (dsh-web cross-session search). */
+let globalSearchOpen = false
+let globalSearchQuery = ''
+let globalSearchResults: Array<{ project: string; kind: string; text: string }> = []
 /** Multi-select mode for the sidebar (dsh-web bulk session actions). */
 let sidebarSelecting = false
 let sidebarSelected = new Set<string>()
@@ -2357,6 +2529,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     rerender()
   }
   searchRow.append(searchInput, clearSearch)
+  // dsh-web cross-session search: search claims/evidence across projects.
+  const globalBtn = el('button', 'hbtn', '🌐 global')
+  globalBtn.title = 'search across all projects'
+  globalBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
+  globalBtn.onclick = () => {
+    const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+    if (root !== null) openGlobalSearchModal(root)
+  }
+  searchRow.appendChild(globalBtn)
   // dsh-web "commands only" filter: a compact list of just the commands.
   const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? '⌘ commands on' : '⌘ commands')
   commandsOnlyBtn.title = 'show only command messages'
