@@ -853,35 +853,35 @@ export function apply(): void {
   type TabDef = readonly [key: string, label: string, description: string]
   const TAB_GROUPS: Array<{ label: string; tabs: TabDef[] }> = [
     {
-      label: 'Research',
+      label: t('shell', 'shell.tabs.group.research'),
       tabs: [
-        ['chat', 'Chat', 'Plan and drive the project through research commands.'],
-        ['phase', 'Overview', 'See the current phase, next actions, ideas, contracts, and audit trail.'],
+        ['chat', t('shell', 'shell.tab.chat'), t('shell', 'shell.tab.chat.desc')],
+        ['phase', t('shell', 'shell.tab.phase'), t('shell', 'shell.tab.phase.desc')],
       ],
     },
     {
-      label: 'Execution',
+      label: t('shell', 'shell.tabs.group.execution'),
       tabs: [
-        ['gates', 'Approvals', 'Make human gate decisions and record their rationale.'],
-        ['runs', 'Runs', 'Track durable jobs, execution state, retries, and cancellation.'],
-        ['terminal', 'Terminal', 'Stream stdout/stderr of a run in real time.'],
+        ['gates', t('shell', 'shell.tab.gates'), t('shell', 'shell.tab.gates.desc')],
+        ['runs', t('shell', 'shell.tab.runs'), t('shell', 'shell.tab.runs.desc')],
+        ['terminal', t('shell', 'shell.tab.terminal'), t('shell', 'shell.tab.terminal.desc')],
       ],
     },
     {
-      label: 'Review',
+      label: t('shell', 'shell.tabs.group.review'),
       tabs: [
-        ['artifacts', 'Artifacts', 'Inspect snapshots, manifests, bundles, and generated outputs.'],
-        ['evidence', 'Evidence', 'Review claims, verified results, confidence, and provenance.'],
-        ['manuscript', 'Manuscript', 'Edit the TeX workspace, compile, and review diagnostics and PDF.'],
+        ['artifacts', t('shell', 'shell.tab.artifacts'), t('shell', 'shell.tab.artifacts.desc')],
+        ['evidence', t('shell', 'shell.tab.evidence'), t('shell', 'shell.tab.evidence.desc')],
+        ['manuscript', t('shell', 'shell.tab.manuscript'), t('shell', 'shell.tab.manuscript.desc')],
       ],
     },
     {
-      label: 'Operations',
+      label: t('shell', 'shell.tabs.group.operations'),
       tabs: [
-        ['budget', 'Budget', 'Monitor usage limits, execution policy, and integrity constraints.'],
+        ['budget', t('shell', 'shell.tab.budget'), t('shell', 'shell.tab.budget.desc')],
       ],
     },
-  ] as const
+  ]
   const TAB_DEFS = TAB_GROUPS.flatMap(group => group.tabs)
   const tabButtons = new Map<string, HTMLElement>()
   for (const group of TAB_GROUPS) {

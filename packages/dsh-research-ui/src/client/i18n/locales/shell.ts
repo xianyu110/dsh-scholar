@@ -1,6 +1,6 @@
 /**
  * shell namespace (gui-plugin-plan §13.1): top-level chrome — settings,
- * shortcuts, about and global labels.
+ * shortcuts, about, global labels and tab chrome.
  */
 export const zh = {
   'shell.settings.title': '⚙ 设置',
@@ -19,6 +19,29 @@ export const zh = {
   'shell.theme.light': '浅色',
   'shell.theme.dark': '深色',
   'shell.theme.toggle': '切换主题',
+  // Tab chrome (gui-plugin-plan §13.1): group labels, tab titles/descriptions.
+  'shell.tabs.group.research': '研究',
+  'shell.tabs.group.execution': '执行',
+  'shell.tabs.group.review': '评审',
+  'shell.tabs.group.operations': '运维',
+  'shell.tab.chat': '对话',
+  'shell.tab.chat.desc': '通过研究命令规划并推进项目。',
+  'shell.tab.phase': '总览',
+  'shell.tab.phase.desc': '查看当前阶段、下一步行动、想法、合同与审计轨迹。',
+  'shell.tab.gates': '审批',
+  'shell.tab.gates.desc': '做出人类门控决策并记录理由。',
+  'shell.tab.runs': '运行',
+  'shell.tab.runs.desc': '跟踪持久作业、执行状态、重试与取消。',
+  'shell.tab.terminal': '终端',
+  'shell.tab.terminal.desc': '实时查看运行的标准输出与错误流。',
+  'shell.tab.artifacts': '产物',
+  'shell.tab.artifacts.desc': '检查快照、清单、发布包与生成输出。',
+  'shell.tab.evidence': '证据',
+  'shell.tab.evidence.desc': '评审主张、已验证结果、置信度与来源。',
+  'shell.tab.manuscript': '手稿',
+  'shell.tab.manuscript.desc': '编辑 TeX 工作区、编译并查看诊断与 PDF。',
+  'shell.tab.budget': '预算',
+  'shell.tab.budget.desc': '监控使用限额、执行策略与完整性约束。',
 } as const
 
 export type ShellKey = keyof typeof zh
@@ -40,4 +63,27 @@ export const en: Record<ShellKey, string> = {
   'shell.theme.light': 'Light',
   'shell.theme.dark': 'Dark',
   'shell.theme.toggle': 'Toggle theme',
+  // Tab chrome (gui-plugin-plan §13.1): group labels, tab titles/descriptions.
+  'shell.tabs.group.research': 'Research',
+  'shell.tabs.group.execution': 'Execution',
+  'shell.tabs.group.review': 'Review',
+  'shell.tabs.group.operations': 'Operations',
+  'shell.tab.chat': 'Chat',
+  'shell.tab.chat.desc': 'Plan and drive the project through research commands.',
+  'shell.tab.phase': 'Overview',
+  'shell.tab.phase.desc': 'See the current phase, next actions, ideas, contracts, and audit trail.',
+  'shell.tab.gates': 'Approvals',
+  'shell.tab.gates.desc': 'Make human gate decisions and record their rationale.',
+  'shell.tab.runs': 'Runs',
+  'shell.tab.runs.desc': 'Track durable jobs, execution state, retries, and cancellation.',
+  'shell.tab.terminal': 'Terminal',
+  'shell.tab.terminal.desc': 'Stream stdout/stderr of a run in real time.',
+  'shell.tab.artifacts': 'Artifacts',
+  'shell.tab.artifacts.desc': 'Inspect snapshots, manifests, bundles, and generated outputs.',
+  'shell.tab.evidence': 'Evidence',
+  'shell.tab.evidence.desc': 'Review claims, verified results, confidence, and provenance.',
+  'shell.tab.manuscript': 'Manuscript',
+  'shell.tab.manuscript.desc': 'Edit the TeX workspace, compile, and review diagnostics and PDF.',
+  'shell.tab.budget': 'Budget',
+  'shell.tab.budget.desc': 'Monitor usage limits, execution policy, and integrity constraints.',
 }
