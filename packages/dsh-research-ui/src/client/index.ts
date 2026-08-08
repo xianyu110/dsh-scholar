@@ -836,7 +836,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
     switch (activeTab) {
       case 'chat': await renderChat(body, target); break
-      case 'phase': renderPhase(body, projection); break
+      case 'phase': await renderPhase(body, projection, target); break
       case 'gates': await renderGates(body, target); break
       case 'runs': renderRuns(body, projection); break
       case 'artifacts': await renderArtifacts(body, target); break
@@ -1001,7 +1001,7 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
 
 /* ─────────────────────────── tab renderers ─────────────────────────── */
 
-function renderPhase(body: HTMLElement, p: Projection): void {
+async function renderPhase(body: HTMLElement, p: Projection, projectId?: string): Promise<void> {
   const status = p.project?.status ?? ''
   const statusIdx = PHASE_PIPELINE.findIndex(([k]) => k === status)
   const pipeline = el('div', 'pipeline-wrap')
@@ -1058,6 +1058,28 @@ function renderPhase(body: HTMLElement, p: Projection): void {
   jump('📊 Evidence', 'evidence')
   jump('💰 Budget', 'budget')
   body.appendChild(quick)
+  // dsh-web data panel: IdeaCards of this project.
+  if (projectId !== undefined && (p.counts?.ideas ?? 0) > 0) {
+    const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/ideas`)) ?? []
+    body.appendChild(el('div', 'section-label', `IdeaCards (${ideas.length})`))
+    const card = el('div', 'card')
+    for (const idea of ideas.slice(0, 5)) {
+      const row = el('div', 'row')
+      row.style.cssText = 'padding:4px 0;align-items:flex-start'
+      row.appendChild(el('span', 'artifact-kind', String(idea.status ?? '?')))
+      const bodyEl = el('div', 'grow')
+      bodyEl.style.cssText = 'min-width:0'
+      const title = el('div', '', String(idea.title ?? ''))
+      title.style.cssText = 'font-size:11.5px;color:var(--text)'
+      const id = el('div', 'muted mono', fmtId(String(idea.idea_id ?? '')))
+      id.style.cssText = 'font-size:9px'
+      bodyEl.append(title, id)
+      row.appendChild(bodyEl)
+      card.appendChild(row)
+    }
+    if (ideas.length > 5) card.appendChild(el('div', 'muted', `… and ${ideas.length - 5} more`))
+    body.appendChild(card)
+  }
   if (history.length > 0) {
     body.appendChild(el('div', 'section-label', 'Audit history'))
     for (const h of history) {
@@ -1738,6 +1760,7 @@ function openNewProjectModal(root: ShadowRoot): void {
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  trapFocus(overlay, nameInput)
   nameInput.focus()
 }
 
@@ -2182,6 +2205,7 @@ function openCommandsModal(root: ShadowRoot): void {
   modal.appendChild(list)
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  trapFocus(overlay, null)
 }
 
 /* ─────────────────────────── settings modal ─────────────────────────── */
@@ -2458,6 +2482,7 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  trapFocus(overlay, null)
 }
 
 /* ─────────────────────────── about modal ─────────────────────────── */
@@ -2550,6 +2575,30 @@ function notifClear(): void {
 function notifMarkRead(): void {
   notifUnread = 0
   try { localStorage.setItem(NOTIF_READ_KEY, String(notifHistory.length)) } catch { /* private mode */ }
+}
+
+/** dsh-web a11y: trap Tab focus inside a modal; Escape already handled
+ * globally. Returns a cleanup that restores focus to the trigger. */
+function trapFocus(overlay: HTMLElement, trigger: HTMLElement | null): () => void {
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Tab') return
+    const focusables = [...overlay.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')] as HTMLElement[]
+    if (focusables.length === 0) return
+    const first = focusables[0]!
+    const last = focusables[focusables.length - 1]!
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+  overlay.addEventListener('keydown', onKey)
+  return () => {
+    overlay.removeEventListener('keydown', onKey)
+    trigger?.focus()
+  }
 }
 
 /** dsh-web toast: a transient status pill bottom-center (2.4s), recorded. */
@@ -2879,6 +2928,19 @@ function chatSessionSelect(id: string): void {
     chatSyncActive()
     rerender()
   }
+}
+
+/** Rename a chat session (dsh-web session actions), persisted. */
+function chatSessionRename(id: string): void {
+  const session = chatSessions.find(s => s.id === id)
+  if (session === undefined) return
+  const name = window.prompt('Rename session', session.name)
+  if (name === null) return
+  const clean = name.trim()
+  if (clean === '') return
+  session.name = clean.slice(0, 40)
+  chatSessionsPersist()
+  rerender()
 }
 /** Command history for ↑/↓ navigation (dsh-web shell feel), persisted. */
 const HISTORY_KEY = 'dsh-scholar-ui-history'
@@ -3447,6 +3509,11 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       tab.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
     }
     tab.onclick = () => { chatSessionSelect(s.id) }
+    tab.ondblclick = (event) => {
+      event.stopPropagation()
+      chatSessionRename(s.id)
+    }
+    tab.title = `${s.name} · double-click to rename`
     sessionTabs.appendChild(tab)
     const close = el('button', 'hbtn ghost', '×')
     close.style.cssText = 'padding:0 4px;font-size:10px'
