@@ -315,19 +315,22 @@ describe('analysis pipeline (E5)', () => {
   it('aggregates multi-seed metrics into mean/CI/effect size with baseline', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    // baseline run with a metrics artifact
-    const baselineMetrics = JSON.stringify({ metrics: [{ metric: 'f1', value: 0.8, seed: 0 }] })
-    const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: baselineMetrics })
     const code = codeArtifact(kernel, project.project_id)
-    const baselineJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'b1', kind: 'baseline', payload: {}, code_snapshot_id: code.artifact_id })
-    kernel.claimJobs('r1', 60, 8)
-    kernel.completeJob({ job_id: baselineJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id, run_id: 'run_base' } })
-    // five formal runs with metrics
+    // §13.6 matched-seed design: five baseline runs + five formal runs with
+    // the SAME seeds — the analysis engine pairs them by seed.
     const values = [0.81, 0.83, 0.79, 0.85, 0.82]
     for (let i = 0; i < values.length; i++) {
+      const seed = 10 + i
+      const baseArt = kernel.registerArtifact({
+        project_id: project.project_id, kind: 'analysis',
+        content: JSON.stringify({ metrics: [{ metric: 'f1', value: 0.8, seed }] }),
+      })
+      const baseJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: `b${i}`, kind: 'baseline', payload: {}, code_snapshot_id: code.artifact_id })
+      kernel.claimJobs('r1', 60, 8)
+      kernel.completeJob({ job_id: baseJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseArt.artifact_id, run_id: `run_base_${i}` } })
       const art = kernel.registerArtifact({
         project_id: project.project_id, kind: 'analysis',
-        content: JSON.stringify({ metrics: [{ metric: 'f1', value: values[i], seed: 10 + i }] }),
+        content: JSON.stringify({ metrics: [{ metric: 'f1', value: values[i], seed }] }),
       })
       const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
       kernel.claimJobs('r1', 60, 8)
@@ -888,13 +891,14 @@ describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
       schema_version: 1, run_id: `run-${seed}`, contract_id: 'expc_x', seed,
       metrics: [{ name: 'f1', value, unit: 'ratio' }],
     })
-    const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(0, 0.8) })
-    const bJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'fb', kind: 'baseline', code_snapshot_id: code.artifact_id })
-    kernel.claimJobs('r1', 60, 8)
-    kernel.completeJob({ job_id: bJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id } })
     const values = [0.81, 0.83, 0.85]
     for (let i = 0; i < values.length; i++) {
-      const art = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(11 + i, values[i]!) })
+      const seed = 11 + i
+      const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(seed, 0.8) })
+      const bJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: `fb${i}`, kind: 'baseline', code_snapshot_id: code.artifact_id })
+      kernel.claimJobs('r1', 60, 8)
+      kernel.completeJob({ job_id: bJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id } })
+      const art = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(seed, values[i]!) })
       const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ff${i}`, kind: 'formal', code_snapshot_id: code.artifact_id })
       kernel.claimJobs('r1', 60, 8)
       kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id } })

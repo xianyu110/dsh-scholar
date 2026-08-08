@@ -1,7 +1,7 @@
 {
   "name": "@dsh-scholar/research-kernel",
   "version": "0.1.0",
-  "description": "DSH Research OS — Research Kernel: authoritative project state machine, gates, research ledger, artifact CAS, durable job store. Runs as a sidecar process (ADR-002).",
+  "description": "DSH Research OS \u2014 Research Kernel: authoritative project state machine, gates, research ledger, artifact CAS, durable job store. Runs as a sidecar process (ADR-002).",
   "type": "module",
   "license": "BSD-3-Clause",
   "main": "lib/index.js",
@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "@dsh-scholar/research-schemas": "file:../research-schemas",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "@dsh-scholar/analysis-worker": "file:../../workers/analysis-worker"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

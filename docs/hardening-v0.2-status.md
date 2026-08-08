@@ -26,7 +26,7 @@
 | GOV-02 | Gate target freeze | 部分 | Gate transaction 有状态 CAS，但 target/version 和 Contract freeze 需要统一事务 |
 | API-01 | v2 + BFF AuthZ | 未达成 | 当前 /v1 loopback bridge 主要是 token/CSRF，不是 membership-aware BFF |
 | EVID-01 | accepted Evidence only from Worker | 已实现 | 公共 POST evidence 拒绝 verified(evidenceSchema 仅 draft/legacy);新增内部 POST /evidence/verified(ingestVerifiedEvidence);provenance_status 随 body 存储;verifyClaim 只读 verified 证据,无 verified 时返回 inconclusive(带原因);demo/standalone 脚本切换 verified 路径,14/14 绿 |
-| STAT-01 | 单一正式分析实现 | 部分 | Analysis Worker 严格；Kernel computeAnalysis 仍是另一套较浅算法 |
+| STAT-01 | 单一正式分析实现 | 已实现 | kernel.computeAnalysis 不再自带统计:收集 baseline+treatment 运行、按 seed 配对(§13.6 matched-seed),全部数学委托 @dsh-scholar/analysis-worker computePairedAnalysis(seeded percentile bootstrap CI、holm 校正 p 值、direction_ok);无配对种子→422 matched_seeds_required;kernel 内 bootstrapCi95/mulberry32 私有实现移除;单测改为配对设计(44/44),全量 209/209,demo 14/14 |
 | RUN-01 | 正式 Docker/快照/fencing | 基本具备 | 默认 Runner CLI 仍 subprocess；签名 enforcement 默认兼容关闭；integrity require_signed_manifest Schema 未持久化 |
 | RUN-02 | 完整容器基线 | 已实现 | runDocker 补齐 --read-only(根文件系统只读)+--cap-drop ALL+--security-opt no-new-privileges+--pids-limit 256;/outputs 为唯一 rw 挂载、/tmp tmpfs;latex-compile e2e 10/10 与 docker-eval 18/18 在加固 flags 下全绿(含 texlive 容器与 cancel/清理) |
 | TERM-01 | 实时有序终端 | 已实现 | 全链路已落地并 e2e 验证:terminal_frames/terminal_retention 表、kernel append/list(单调 seq、幂等、lease fencing、8 MiB 有界保留+dropped/truncated)、POST /v1/jobs/{id}/terminal-frames、GET /v1/jobs/{id}/terminal SSE(subscribed/chunk/gap/exit、心跳、gap 语义)、runner-gateway onChunk 实时批量上报(200ms/64 帧、job 身份 run、exit 帧)、Terminal tab(运行选择/通道/ANSI 白名单/状态栏/lastSeq 续传);单测 4 项+Playwright e2e;验收测试与 CI 待跑 |

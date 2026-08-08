@@ -19,6 +19,7 @@ import {
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
+import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
 
 export interface KernelOptions {
@@ -1773,17 +1774,14 @@ export class ResearchKernel {
         const metricName = entry.name ?? entry.metric
         if (entry.value === undefined || metricName === undefined) continue
         if (metric !== undefined && metricName !== metric) continue
-        if (job.kind === 'baseline') {
-          baselineValue = entry.value
-        } else {
-          metricValues.push({
-            run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id,
-            job_id: job.job_id,
-            kind: job.kind,
-            value: entry.value,
-            seed: entry.seed ?? parsed.seed,
-          })
-        }
+        metricValues.push({
+          run_id: typeof job.run_manifest?.run_id === 'string' ? job.run_manifest.run_id : job.job_id,
+          job_id: job.job_id,
+          kind: job.kind,
+          value: entry.value,
+          seed: entry.seed ?? parsed.seed,
+        })
+        if (job.kind === 'baseline' && baselineValue === null) baselineValue = entry.value
       }
     }
     // v2 §13.6: never mix job kinds. Prefer formal runs; only when a contract
@@ -1791,40 +1789,75 @@ export class ResearchKernel {
     let allowedKinds = options.kinds ?? ['formal']
     const hasFormal = formalSeen
     if (options.kinds === undefined && !hasFormal) allowedKinds = ['pilot', 'smoke', 'analysis', 'reproduce']
-    const kindFiltered = metricValues.filter(v => allowedKinds.includes(v.kind))
+    // Baseline runs always stay in the set: they are the pairing side.
+    const kindFiltered = metricValues.filter(v => v.kind === 'baseline' || allowedKinds.includes(v.kind))
     metricValues.length = 0
     metricValues.push(...kindFiltered)
-    const usedKinds = [...new Set(kindFiltered.map(v => v.kind))]
+    const usedKinds = [...new Set(kindFiltered.map(v => v.kind).filter(k => k !== 'baseline'))]
     if (metricValues.length === 0) {
       throw new KernelError(422, 'no_metrics', 'no succeeded runs with metrics artifacts found for analysis')
     }
-    // Seed uniqueness (v2 §13.6): duplicate seeds within one analysis are
-    // rejected — mixing seeds across runs would bias the paired statistics.
-    const seeds = metricValues.filter(v => v.seed !== undefined).map(v => v.seed!)
-    if (new Set(seeds).size !== seeds.length) {
-      throw new KernelError(422, 'duplicate_seeds', `duplicate seeds in analysis run set: ${seeds.join(', ')}`)
-    }
+    // §13.6 / STAT-01: THE analysis engine is the Analysis Worker's paired
+    // mean-difference (matched-seed design, seeded percentile bootstrap).
+    // The kernel never re-implements statistics — it collects baseline and
+    // treatment runs, pairs them by seed, and delegates the math.
     const minimumN = options.minimum_n ?? 1
-    if (metricValues.length < minimumN) {
-      throw new KernelError(422, 'minimum_seeds_not_met', `analysis requires >= ${minimumN} runs, got ${metricValues.length}`)
+    const baselineRuns: Array<{ seed?: number; value: number }> = []
+    const treatmentRuns: Array<{ seed?: number; value: number }> = []
+    for (const v of metricValues) {
+      if (v.kind === 'baseline') baselineRuns.push({ seed: v.seed, value: v.value })
+      else treatmentRuns.push({ seed: v.seed, value: v.value })
     }
-    const values = metricValues.map(v => v.value)
-    const mean = values.reduce((a, b) => a + b, 0) / values.length
-    const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / Math.max(values.length - 1, 1)
+    const baselineBySeed = new Map<number, number>()
+    for (const b of baselineRuns) {
+      if (b.seed !== undefined) baselineBySeed.set(b.seed, b.value)
+    }
+    const pairedSeeds = treatmentRuns
+      .filter(t => t.seed !== undefined && baselineBySeed.has(t.seed!))
+      .map(t => t.seed!)
+    const uniquePaired = [...new Set(pairedSeeds)]
+    if (uniquePaired.length < minimumN) {
+      throw new KernelError(422, 'matched_seeds_required',
+        `analysis requires >= ${minimumN} baseline/treatment runs with MATCHED seeds (paired design, §13.6); got ${uniquePaired.length}`)
+    }
+    const paired = uniquePaired.sort()
+    const baselineValues = paired.map(s => baselineBySeed.get(s)!)
+    const treatmentValues = paired.map(s => {
+      const hit = treatmentRuns.find(t => t.seed === s)!
+      return hit.value
+    })
+    const worker = computePairedAnalysis(
+      {
+        contract_id: contractId ?? 'auto',
+        metric: { name: metric ?? 'auto', direction: 'higher_is_better', aggregation: 'mean' },
+        paired_by: 'seed',
+        baseline_run_set_id: 'kernel-baseline',
+        treatment_run_set_id: 'kernel-treatment',
+        method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 1000 },
+        multiple_testing: 'holm',
+        minimum_n: minimumN,
+      },
+      paired.map((s, i) => ({ run_id: `baseline-${s}`, seed: s, metric_value: baselineValues[i]! })),
+      paired.map((s, i) => ({ run_id: `treatment-${s}`, seed: s, metric_value: treatmentValues[i]! })),
+    )
+    const mean = worker.treatment_mean
+    const variance = treatmentValues.reduce((acc, v) => acc + (v - mean) ** 2, 0) / Math.max(treatmentValues.length - 1, 1)
     const sd = Math.sqrt(variance)
-    const [ciLow, ciHigh] = bootstrapCi95(values, 1000)
-    const effectSize = baselineValue !== null ? mean - baselineValue : null
     const result = {
       contract_id: contractId ?? null,
       metric: metric ?? 'auto',
-      runs: metricValues.map(({ kind: _kind, ...rest }) => rest),
-      mean: round(mean),
+      runs: metricValues
+        .filter(v => v.kind !== 'baseline' && v.seed !== undefined && paired.includes(v.seed!))
+        .map(({ kind: _kind, ...rest }) => rest),
+      mean: round(worker.treatment_mean),
       sd: round(sd),
-      n: values.length,
-      ci_low: round(ciLow),
-      ci_high: round(ciHigh),
-      baseline_value: baselineValue !== null ? round(baselineValue) : null,
-      effect_size: effectSize !== null ? round(effectSize) : null,
+      n: worker.n_pairs,
+      ci_low: round(worker.ci_low),
+      ci_high: round(worker.ci_high),
+      baseline_value: round(worker.baseline_mean),
+      effect_size: round(worker.effect_size),
+      adjusted_p_value: round(worker.adjusted_p_value),
+      direction_ok: worker.direction_ok,
     }
     const artifact = this.registerArtifact({
       project_id: projectId,

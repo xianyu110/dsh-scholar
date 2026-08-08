@@ -35,6 +35,7 @@ async function packAll(): Promise<Packed> {
     [join(REPO, 'packages/research-schemas'), 'research-schemas'],
     [join(REPO, 'packages/scholar-connectors'), 'scholar-connectors'],
     [join(REPO, 'workers/runner-gateway'), 'runner-gateway'],
+    [join(REPO, 'workers/analysis-worker'), 'analysis-worker'],
   ]
   for (const [cwd, name] of targets) {
     run('pnpm', ['pack', '--pack-destination', dir], cwd)
@@ -61,7 +62,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
   }, 240_000)
 
   it('packs every publishable package', () => {
-    for (const name of ['research-plugin', 'research-client', 'research-kernel', 'research-schemas', 'scholar-connectors', 'runner-gateway']) {
+    for (const name of ['research-plugin', 'research-client', 'research-kernel', 'research-schemas', 'scholar-connectors', 'runner-gateway', 'analysis-worker']) {
       expect(packed.tarballs[name], `tarball for ${name}`).toBeTruthy()
     }
   })
@@ -75,7 +76,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
   })
 
   it('every package tarball ships its compiled lib entry', () => {
-    for (const name of ['research-client', 'research-kernel', 'research-schemas', 'scholar-connectors', 'runner-gateway']) {
+    for (const name of ['research-client', 'research-kernel', 'research-schemas', 'scholar-connectors', 'runner-gateway', 'analysis-worker']) {
       const files = tarList(packed.tarballs[name]!)
       expect(files.some(f => f.startsWith('package/lib/') && f.endsWith('.js')), `${name} has lib`).toBe(true)
       expect(files).toContain('package/package.json')
@@ -108,6 +109,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
       `  '@dsh-scholar/research-schemas': file:${tgz('research-schemas')}`,
       `  '@dsh-scholar/scholar-connectors': file:${tgz('scholar-connectors')}`,
       `  '@dsh-scholar/runner-gateway': file:${tgz('runner-gateway')}`,
+      `  '@dsh-scholar/analysis-worker': file:${tgz('analysis-worker')}`,
       '',
     ].join('\n'))
     writeFileSync(join(consumer, 'package.json'), JSON.stringify({
