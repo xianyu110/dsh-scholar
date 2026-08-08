@@ -3498,6 +3498,7 @@ function openShortcutsModal(root: ShadowRoot): void {
 }
 
 const CHAT_COMMANDS: Array<[string, string]> = [
+  ['help', '/research help', 'list every command with usage'],
   ['new', '/research new demo1', 'create a project + Scope Gate'],
   ['list', '/research list', 'list all projects'],
   ['status', '/research status', 'phase, gates, jobs, budget of the active project'],
