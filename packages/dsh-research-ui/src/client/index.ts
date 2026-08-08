@@ -911,6 +911,20 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         const stat = el('div', 'muted', `${projects.length} project(s) on this kernel — pick one in the sidebar, or switch with Ctrl/Cmd+P.`)
         stat.style.cssText = 'font-size:11px;margin-top:10px'
         hero.appendChild(stat)
+        // dsh-web quick open: the most recently active projects as chips.
+        const chipRow = el('div', 'row')
+        chipRow.style.cssText = 'gap:6px;flex-wrap:wrap;justify-content:center;margin-top:6px'
+        for (const rp of projects.slice(0, 4)) {
+          if (rp.project_id === undefined) continue
+          const chip = el('button', 'hbtn', `📁 ${rp.name ?? rp.project_id}`)
+          chip.style.cssText = 'padding:4px 12px;font-size:10.5px'
+          chip.onclick = () => {
+            projectId = rp.project_id!
+            void render()
+          }
+          chipRow.appendChild(chip)
+        }
+        hero.appendChild(chipRow)
       }
       const go = el('button', 'btn approve', '＋ Create your first project')
       go.style.cssText = 'padding:9px 20px;margin-top:6px'
@@ -2727,6 +2741,15 @@ async function openProjectDetailModal(root: ShadowRoot, projectId: string): Prom
   }
   for (const j of jobs) {
     modal.appendChild(el('div', '', `- \`${j.job_id}\` [${j.kind}] ${j.status}`))
+  }
+
+  // dsh-web guidance: next actions of the kernel for this project.
+  const nextActions = (p.next_actions ?? []).filter(Boolean)
+  if (nextActions.length > 0) {
+    modal.appendChild(el('div', 'section-label', 'Next actions'))
+    for (const a of nextActions) {
+      modal.appendChild(el('div', '', `➡️ ${a}`))
+    }
   }
 
   const history = (proj.history ?? []).slice(-6)
