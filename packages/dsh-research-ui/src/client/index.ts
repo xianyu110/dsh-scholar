@@ -5215,6 +5215,11 @@ function renderSidebar(
 
   const foot = el('div', 'sidebar-foot')
   foot.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between'
+  // dsh-web overview: activity snapshot under the project list.
+  const activeCount = projects.filter(p => isProjectActive(p.status)).length
+  const blockedCount = projects.filter(p => p.status === 'BLOCKED_GATE').length
+  const footStats = el('span', 'muted', `${activeCount} active · ${blockedCount} blocked`)
+  footStats.style.cssText = 'font-size:9.5px;flex-shrink:0'
   const settingsBtn = el('button', 'hbtn', '⚙ Settings')
   settingsBtn.title = 'connection, token and appearance settings'
   settingsBtn.onclick = () => {
@@ -5230,7 +5235,7 @@ function renderSidebar(
       sidebarSelected.clear()
       renderSidebar(sidebar, projects, activeId, onPick, activeCounts)
     }
-    foot.append(footLabel, selectBtn, settingsBtn)
+    foot.append(footLabel, footStats, selectBtn, settingsBtn)
   } else {
     const doneBtn = el('button', 'hbtn', 'Done')
     doneBtn.onclick = () => {
@@ -5259,7 +5264,7 @@ function renderSidebar(
         void openCompareModal(root, [...sidebarSelected])
       }
     }
-    foot.append(countLabel, archiveSel, compareBtn, doneBtn)
+    foot.append(countLabel, footStats, archiveSel, compareBtn, doneBtn)
   }
   sidebar.appendChild(foot)
 }
