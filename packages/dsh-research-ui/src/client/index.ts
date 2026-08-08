@@ -245,6 +245,31 @@ function tabLoad(): void {
 function tabSave(): void {
   try { localStorage.setItem(TAB_KEY, activeTab) } catch { /* private mode */ }
 }
+
+const FAV_KEY = 'dsh-scholar-ui-favs'
+
+function tabFavs(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FAV_KEY)
+    if (raw === null) return new Set()
+    const parsed = JSON.parse(raw) as unknown
+    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function tabPinned(key: string): boolean {
+  return tabFavs().has(key)
+}
+
+function tabTogglePin(key: string): void {
+  const favs = tabFavs()
+  if (favs.has(key)) favs.delete(key)
+  else favs.add(key)
+  try { localStorage.setItem(FAV_KEY, JSON.stringify([...favs])) } catch { /* private mode */ }
+  rerender()
+}
 let projectId: string | undefined
 let lastError: string | undefined
 
@@ -533,7 +558,29 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
   for (const [key, label] of TAB_DEFS) {
     const button = el('button', 'tab', label)
     button.dataset.tab = key
-    button.onclick = () => { activeTab = key; tabSave(); void render() }
+    // dsh-web "pin view": ★ marks a favourite tab (persisted).
+    const pinned = tabPinned(key)
+    if (pinned) {
+      const pin = el('span', '', '★ ')
+      pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
+      button.prepend(pin)
+    }
+    button.title = pinned ? `${label} (pinned · click ☆ to unpin)` : `${label} · Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`
+    button.onclick = (event) => {
+      // A click on the pin glyph toggles the favourite instead of switching.
+      const target = event.target as HTMLElement
+      if (target.textContent === '★ ' || target.textContent === '☆ ') {
+        tabTogglePin(key)
+        return
+      }
+      activeTab = key
+      tabSave()
+      void render()
+    }
+    button.oncontextmenu = (event) => {
+      event.preventDefault()
+      tabTogglePin(key)
+    }
     tabButtons.set(key, button)
     tabs.appendChild(button)
   }
@@ -1491,10 +1538,112 @@ async function openSettingsModal(root: ShadowRoot): Promise<void> {
   projRow.append(projLabel, summaryBtn)
   modal.appendChild(projRow)
 
-  const about = el('div', 'muted', 'DSH Scholar · Research OS standalone web plugin · v0.2 hardening')
-  about.style.cssText = 'margin-top:16px;font-size:10.5px'
+  const about = el('button', 'hbtn', 'ℹ About this plugin')
+  about.style.cssText = 'margin-top:16px;padding:3px 12px;align-self:flex-start'
+  about.onclick = () => { openAboutModal(root) }
   modal.appendChild(about)
 
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+}
+
+/* ─────────────────────────── about modal ─────────────────────────── */
+
+/** dsh-web "About": version, architecture and feature-surface summary. */
+function openAboutModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+  const header = el('div', 'modal-header', 'ℹ About Research OS')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const intro = el('div', 'muted', 'DSH Scholar — Research OS standalone web plugin. A fully self-contained research workspace: plan, run and review experiments with human-gated decisions.')
+  intro.style.cssText = 'font-size:12px;line-height:1.6'
+  modal.appendChild(intro)
+
+  const row = (label: string, value: string): void => {
+    const r = el('div', 'row')
+    r.style.cssText = 'padding:4px 0'
+    const l = el('span', '', label)
+    l.style.cssText = 'width:150px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
+    const v = el('span', 'mono', value)
+    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-all'
+    r.append(l, v)
+    modal.appendChild(r)
+  }
+  modal.appendChild(el('div', 'section-label', 'Version'))
+  row('Plugin', 'v0.2 (hardening branch)')
+  row('Surface', 'Chat · Phase · Gates · Runs · Artifacts · Evidence · Budget')
+  row('Kernel', 'Research Kernel (SQLite + CAS)')
+  row('Runner', 'docker isolation (baseline/pilot/formal/reproduce)')
+
+  modal.appendChild(el('div', 'section-label', 'Architecture'))
+  const arch = el('div', 'muted', 'The plugin serves its own origin with a bundled kernel sidecar. The browser talks to a same-origin /v1 proxy protected by a bearer token and CSRF origin checks (design §15.2/§15.3). Every gate decision is recorded in the kernel ledger with the operator identity; experiment jobs run in disposable containers with Ed25519-signed run manifests.')
+  arch.style.cssText = 'font-size:11.5px;line-height:1.6'
+  modal.appendChild(arch)
+
+  modal.appendChild(el('div', 'section-label', 'Safety model'))
+  const safety = el('div', 'muted', 'gate-only mode: scope / idea / contract / release gates always require a human decision (Approve/Reject in the Gates tab or the sidebar). Budget overruns park the project as BLOCKED_GATE until a human Budget Gate approves.')
+  safety.style.cssText = 'font-size:11.5px;line-height:1.6'
+  modal.appendChild(safety)
+
+  const footer = el('div', 'muted', 'DSH Scholar · standalone Research OS · BSD-3-Clause')
+  footer.style.cssText = 'margin-top:16px;font-size:10.5px'
+  modal.appendChild(footer)
+
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+}
+
+/* ─────────────────────────── command history modal ─────────────────────────── */
+
+/**
+ * dsh-web command history: every executed command (from the persisted
+ * history) in a compact list; clicking one re-fills the composer.
+ */
+function openCommandHistoryModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+  const header = el('div', 'modal-header', '🕘 Command History')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const hint = el('div', 'muted', `${chatHistory.length} commands · click one to re-run it in Chat (↑/↓ also walk this list in the composer).`)
+  hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
+  modal.appendChild(hint)
+
+  const list = el('div')
+  list.style.cssText = 'max-height:46vh;overflow-y:auto'
+  if (chatHistory.length === 0) {
+    list.appendChild(el('div', 'empty', 'No commands executed yet.'))
+  }
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const line = chatHistory[i]!
+    const row = el('button')
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:7px 10px;border-radius:8px;cursor:pointer'
+    row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+    row.onmouseleave = () => { row.style.background = 'none' }
+    const idx = el('span', 'artifact-kind', `#${i + 1}`)
+    const text = el('span', 'grow mono', line)
+    text.style.cssText = 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+    row.append(idx, text)
+    row.onclick = () => {
+      overlay.remove()
+      chatDraft = line
+      activeTab = 'chat'
+      rerender()
+    }
+    list.appendChild(row)
+  }
+  modal.appendChild(list)
   overlay.appendChild(modal)
   root.appendChild(overlay)
 }
@@ -2062,6 +2211,15 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     rerender()
   }
   searchRow.appendChild(commandsOnlyBtn)
+  // dsh-web command history panel: all executed commands in one view.
+  const historyBtn = el('button', 'hbtn', '🕘 history')
+  historyBtn.title = 'command execution history'
+  historyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
+  historyBtn.onclick = () => {
+    const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+    if (root !== null) openCommandHistoryModal(root)
+  }
+  searchRow.appendChild(historyBtn)
   column.appendChild(searchRow)
 
   const stream = el('div')
