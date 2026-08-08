@@ -754,14 +754,21 @@ function renderPhase(body: HTMLElement, p: Projection): void {
     body.appendChild(el('div', 'empty', 'No pending actions — waiting on human gate decision.'))
   }
 
-  // history
-  const history = (p.project?.history ?? []).slice(-8)
+  // history (audit ledger: transitions, gate decisions, renames, archives)
+  const history = (p.project?.history ?? []).slice(-10)
   if (history.length > 0) {
-    body.appendChild(el('div', 'section-label', 'History'))
+    body.appendChild(el('div', 'section-label', 'Audit history'))
     for (const h of history) {
       const row = el('div', 'row')
-      row.style.cssText = 'padding:2px 0'
-      row.appendChild(el('span', 'muted', '·'))
+      row.style.cssText = 'padding:2px 0;align-items:flex-start'
+      // Pick an icon by the audit kind (dsh-web timeline feel).
+      let icon = '·'
+      if (h.includes('->')) icon = '➡️'
+      else if (h.includes('renamed')) icon = '✎'
+      else if (h.includes('archived')) icon = '🗄'
+      else if (h.includes('approved')) icon = '✅'
+      else if (h.includes('rejected')) icon = '⛔'
+      row.appendChild(el('span', 'muted', icon))
       row.appendChild(el('span', 'grow muted', h))
       body.appendChild(row)
     }
@@ -2339,6 +2346,27 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       chatDraft = input.value
       autosize()
       input.setSelectionRange(input.value.length, input.value.length)
+    } else if (event.key === 'Tab') {
+      // dsh-web keyboard navigation: Tab completes the command name.
+      const draft = input.value.trim()
+      const match = /^\/(?:research\s+)?([a-z]*)$/i.exec(draft)
+      if (match !== null) {
+        event.preventDefault()
+        const prefix = (match[1] ?? '').toLowerCase()
+        // 'research' itself is a valid completion (→ /research <sub>).
+        if (prefix !== '' && 'research'.startsWith(prefix) && prefix.length < 8) {
+          input.value = draft.replace(/[a-z]*$/i, 'research ')
+          chatDraft = input.value
+          autosize()
+        } else {
+          const hit = CHAT_COMMANDS.find(([name]) => name.startsWith(prefix))
+          if (hit !== undefined && prefix !== hit[0]) {
+            input.value = draft.replace(/[a-z]*$/i, hit[0] + ' ')
+            chatDraft = input.value
+            autosize()
+          }
+        }
+      }
     }
   }
   composer.append(input, send)
@@ -2366,11 +2394,15 @@ function formatChatText(text: string): HTMLElement[] {
   const lines = text.split('\n')
   let inFence = false
   let fence: HTMLElement | null = null
+  let fenceText = ''
+  /** Copy the current fence's code content (text nodes only). */
+  const fenceCodeText = (): string => fenceText
   const flushFence = (): void => {
     if (fence !== null) {
       nodes.push(fence)
       fence = null
     }
+    fenceText = ''
     inFence = false
   }
   for (const raw of lines) {
@@ -2381,18 +2413,30 @@ function formatChatText(text: string): HTMLElement[] {
       } else {
         inFence = true
         fence = el('pre')
-        fence.style.cssText = 'background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:10.5px/1.5 ui-monospace,Menlo,monospace;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:4px 0'
+        fence.style.cssText = 'position:relative;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:10.5px/1.5 ui-monospace,Menlo,monospace;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:4px 0'
         const lang = line.slice(3).trim()
         if (lang !== '') {
-          const langTag = el('div', 'artifact-kind', lang.toUpperCase())
-          langTag.style.cssText += ';display:inline-block;margin-bottom:4px'
-          fence.appendChild(langTag)
+          const head = el('div')
+          head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:4px'
+          const langTag = el('span', 'artifact-kind', lang.toUpperCase())
+          const copyCode = el('button', 'hbtn', '⧉ copy')
+          copyCode.style.cssText = 'padding:0 6px;font-size:9px'
+          copyCode.onclick = () => {
+            void navigator.clipboard.writeText(fenceCodeText()).then(
+              () => { copyCode.textContent = '✓' },
+              () => { copyCode.textContent = '✗' },
+            )
+            setTimeout(() => { copyCode.textContent = '⧉ copy' }, 1600)
+          }
+          head.append(langTag, copyCode)
+          fence.appendChild(head)
         }
       }
       continue
     }
     if (inFence && fence !== null) {
       fence.appendChild(document.createTextNode(line + '\n'))
+      fenceText += line + '\n'
       continue
     }
     if (/^#{1,3}\s/.test(line)) {
