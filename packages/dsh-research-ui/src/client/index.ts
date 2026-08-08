@@ -855,6 +855,17 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         writeTheme(host.dataset.theme)
         paintTheme()
         applyAccent()
+      } else if (event.key === 'Tab' && !typing && activeTab === 'chat' && chatSessions.length > 1) {
+        // dsh-web session navigation: Ctrl+Tab cycles chat sessions.
+        event.preventDefault()
+        const idx = chatSessions.findIndex(s => s.id === chatActiveId)
+        const next = chatSessions[(idx + 1) % chatSessions.length]
+        if (next !== undefined) {
+          chatActiveId = next.id
+          chatDraft = ''
+          chatSyncActive()
+          rerender()
+        }
       } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !typing && activeTab === 'chat' && chatMessages.length > 0) {
         // dsh-web keyboard navigation: Ctrl+ArrowUp/Down walks messages
         // and selects them into the details panel.
@@ -995,17 +1006,90 @@ function renderPhase(body: HTMLElement, p: Projection): void {
   }
 }
 
+/** Gates multi-select (dsh-web bulk decisions). */
+let gatesSelecting = false
+let gatesSelected = new Set<string>()
+
 async function renderGates(body: HTMLElement, projectId: string): Promise<void> {
   const gates = (await api<GateRow[]>(`/v1/projects/${encodeURIComponent(projectId)}/gates`)) ?? []
   const pending = gates.filter(g => g.status === 'pending')
   const decided = gates.filter(g => g.status !== 'pending')
-  body.appendChild(el('div', 'section-label', `Awaiting your decision (${pending.length})`))
+  const labelRow = el('div', 'row')
+  labelRow.style.cssText = 'justify-content:space-between;align-items:center'
+  labelRow.appendChild(el('div', 'section-label', `Awaiting your decision (${pending.length})`))
+  if (pending.length > 0) {
+    const selBtn = el('button', 'hbtn', gatesSelecting ? '☑ Selecting…' : '☑ Select')
+    selBtn.title = gatesSelecting ? 'exit multi-select' : 'multi-select gates (bulk decide)'
+    selBtn.style.cssText = 'padding:1px 10px;margin-bottom:2px'
+    selBtn.onclick = () => {
+      gatesSelecting = !gatesSelecting
+      gatesSelected.clear()
+      rerender()
+    }
+    labelRow.appendChild(selBtn)
+  }
+  body.appendChild(labelRow)
   if (pending.length === 0) {
     body.appendChild(el('div', 'empty', 'No pending gates. All decisions are made — or nothing was requested yet.'))
+  }
+  // Bulk decide bar.
+  if (gatesSelecting && pending.length > 0) {
+    const bar = el('div', 'card border-amber')
+    bar.style.cssText = 'padding:8px 10px;margin:4px 0;display:flex;align-items:center;gap:10px'
+    const count = el('span', 'mono', `${gatesSelected.size} selected`)
+    count.style.cssText = 'font-size:11px;color:var(--text)'
+    const approveSel = el('button', 'btn approve', '✓ Approve selected')
+    approveSel.disabled = gatesSelected.size === 0
+    approveSel.onclick = async () => {
+      for (const id of gatesSelected) {
+        await api(`/v1/gates/${encodeURIComponent(id)}/decisions`, {
+          method: 'POST',
+          body: JSON.stringify({ actor: 'web-user', decision: 'approved', reason: 'bulk approved from Research OS panel' }),
+        })
+      }
+      gatesSelecting = false
+      gatesSelected.clear()
+      rerender()
+    }
+    const rejectSel = el('button', 'btn reject', '✕ Reject selected')
+    rejectSel.disabled = gatesSelected.size === 0
+    rejectSel.onclick = async () => {
+      for (const id of gatesSelected) {
+        await api(`/v1/gates/${encodeURIComponent(id)}/decisions`, {
+          method: 'POST',
+          body: JSON.stringify({ actor: 'web-user', decision: 'rejected', reason: 'bulk rejected from Research OS panel' }),
+        })
+      }
+      gatesSelecting = false
+      gatesSelected.clear()
+      rerender()
+    }
+    const doneSel = el('button', 'hbtn', 'Done')
+    doneSel.onclick = () => {
+      gatesSelecting = false
+      gatesSelected.clear()
+      rerender()
+    }
+    bar.append(count, approveSel, rejectSel, doneSel)
+    body.appendChild(bar)
   }
   for (const gate of pending) {
     const card = el('div', 'card border-amber')
     const top = el('div', 'row')
+    // Multi-select checkbox (pending gates only).
+    if (gatesSelecting && gate.gate_id !== undefined) {
+      const box = el('span', 'ws-check', gatesSelected.has(gate.gate_id) ? '☑' : '☐')
+      box.style.cssText += ';cursor:pointer'
+      box.onclick = (event) => {
+        event.stopPropagation()
+        if (gate.gate_id === undefined) return
+        if (gatesSelected.has(gate.gate_id)) gatesSelected.delete(gate.gate_id)
+        else gatesSelected.add(gate.gate_id)
+        rerender()
+      }
+      top.prepend(box)
+      if (gatesSelected.has(gate.gate_id)) card.style.outline = '1px solid var(--tone-amber)'
+    }
     top.appendChild(el('span', 'pname', `${shortType(gate.type)} Gate`))
     top.appendChild(pill('pending'))
     card.appendChild(top)
@@ -1033,8 +1117,10 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
     }
     approve.onclick = () => { void act('approved', 'approved') }
     reject.onclick = () => { void act('rejected', 'rejected') }
-    actions.append(approve, reject)
-    card.appendChild(actions)
+    if (!gatesSelecting) {
+      actions.append(approve, reject)
+      card.appendChild(actions)
+    }
     body.appendChild(card)
   }
   if (decided.length > 0) {
@@ -1367,6 +1453,11 @@ async function renderEvidence(body: HTMLElement, projectId: string): Promise<voi
   body.appendChild(el('div', 'section-label', `Evidence (${evidence.length})`))
   if (evidence.length === 0) {
     body.appendChild(el('div', 'empty', 'No verified evidence yet — only the Analysis Worker can create it.'))
+  }
+  if (evidence.length > 8) {
+    const notice = el('div', 'muted', `Showing the newest 8 of ${evidence.length} evidence items — use 🌐 global search for the rest.`)
+    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+    body.appendChild(notice)
   }
   for (const item of evidence.slice(-8).reverse()) {
     const r = item.result
