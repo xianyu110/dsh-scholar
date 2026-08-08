@@ -157,6 +157,43 @@ CREATE TABLE IF NOT EXISTS manuscripts (
   body TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+-- Terminal frames (execution-runtime.md §6): append-only per (job, run),
+-- monotonic seq, channel split, bounded retention. The runs table does not
+-- exist yet in this schema, so the run identity is carried as an attribute
+-- and frames are scoped by job_id (FK).
+CREATE TABLE IF NOT EXISTS terminal_frames (
+  job_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  stream_seq INTEGER,
+  channel TEXT,
+  text TEXT,
+  byte_offset INTEGER,
+  byte_length INTEGER,
+  frame_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  lease_generation INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, run_id, seq),
+  FOREIGN KEY (job_id) REFERENCES jobs(job_id),
+  CHECK (frame_kind IN ('chunk','gap','exit')),
+  CHECK (channel IS NULL OR channel IN ('stdout','stderr')),
+  CHECK (
+    (frame_kind = 'chunk' AND channel IS NOT NULL AND stream_seq IS NOT NULL AND text IS NOT NULL AND byte_offset IS NOT NULL AND byte_length IS NOT NULL)
+    OR
+    (frame_kind IN ('gap','exit') AND channel IS NULL AND stream_seq IS NULL AND text IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_terminal_job_seq ON terminal_frames(job_id, seq);
+CREATE TABLE IF NOT EXISTS terminal_retention (
+  job_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  retained_from_seq INTEGER NOT NULL DEFAULT 1,
+  total_bytes INTEGER NOT NULL DEFAULT 0,
+  dropped_bytes INTEGER NOT NULL DEFAULT 0,
+  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  PRIMARY KEY (job_id, run_id)
+);
 CREATE INDEX IF NOT EXISTS idx_gates_project ON gates(project_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
 -- v2 §3.4 invariant 2: idempotency_key is unique per (project_id, idempotency_key).

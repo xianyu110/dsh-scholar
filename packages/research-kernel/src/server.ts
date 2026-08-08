@@ -20,6 +20,22 @@ export interface KernelServerOptions {
 
 const idSchema = z.string().min(1)
 
+const terminalFramesSchema = z.object({
+  run_id: z.string().min(1),
+  frames: z.array(z.object({
+    seq: z.number().int().nonnegative(),
+    stream_seq: z.number().int().nonnegative().nullable().optional(),
+    channel: z.enum(['stdout', 'stderr']).nullable().optional(),
+    text: z.string().nullable().optional(),
+    byte_offset: z.number().int().nonnegative().nullable().optional(),
+    byte_length: z.number().int().nonnegative().nullable().optional(),
+    frame_kind: z.enum(['chunk', 'gap', 'exit']),
+    payload_json: z.string().optional(),
+    lease_generation: z.number().int().nonnegative().optional(),
+  })).min(1).max(256),
+  max_log_bytes: z.number().int().positive().optional(),
+}).strict()
+
 const createProjectSchema = z.object({
   name: z.string().min(1),
   workspace: z.string().min(1),
@@ -480,7 +496,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           break
         }
         case 'jobs': {
-          if (id !== undefined && method === 'GET') {
+          if (id !== undefined && sub === undefined && method === 'GET') {
             ok(res, kernel.getJob(id))
             return
           }
@@ -505,6 +521,30 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           if (id !== undefined && sub === 'cancel' && method === 'POST') {
             const input = z.object({ actor: z.string().min(1), reason: z.string().optional() }).parse(body)
             ok(res, kernel.cancelJob(id, input.actor, input.reason))
+            return
+          }
+          if (id !== undefined && sub === 'terminal' && method === 'GET') {
+            void handleTerminalSse(req, res, kernel, id, url)
+            return
+          }
+          if (id !== undefined && sub === 'terminal-frames' && method === 'POST') {
+            const input = terminalFramesSchema.parse(body)
+            ok(res, kernel.appendTerminalFrames({
+              jobId: id,
+              runId: input.run_id,
+              frames: input.frames.map(f => ({
+                seq: f.seq,
+                stream_seq: f.stream_seq ?? null,
+                channel: f.channel ?? null,
+                text: f.text ?? null,
+                byte_offset: f.byte_offset ?? null,
+                byte_length: f.byte_length ?? null,
+                frame_kind: f.frame_kind,
+                payload_json: f.payload_json,
+                lease_generation: f.lease_generation,
+              })),
+              maxLogBytes: input.max_log_bytes,
+            }))
             return
           }
           break
@@ -569,9 +609,137 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   }).catch((error: unknown) => fail(res, error))
 }
 
+/**
+ * Terminal SSE (api-contracts.md §9): text/event-stream replay + live
+ * tail of a run's terminal frames. Polls the kernel's frame store with a
+ * bounded cursor; gap frames are emitted before evicted sequences; comment
+ * frames act as heartbeats; the exit frame ends the stream (replayable via
+ * after_seq on reconnect).
+ */
+function handleTerminalSse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  kernel: ResearchKernel,
+  jobId: string,
+  url: URL,
+): void {
+  const runId = url.searchParams.get('run_id') ?? jobId
+  const afterSeq = Math.max(0, Number(url.searchParams.get('after_seq') ?? 0) || 0)
+  const writeEvent = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  // Initial snapshot before the headers: a missing job propagates to the
+  // router's error handler (404 JSON) instead of half-open SSE.
+  const initial = kernel.listTerminalFrames(jobId, runId, 0)
+  const initialLastSeq = initial.frames.length > 0 ? initial.frames[initial.frames.length - 1]!.seq : 0
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-store',
+    'x-accel-buffering': 'no',
+    connection: 'keep-alive',
+  })
+  writeEvent('subscribed', {
+    run_id: runId,
+    last_seq: initialLastSeq,
+    retained_from_seq: initial.retention.retained_from_seq,
+  })
+  let cursor = afterSeq
+  let gapSent = false
+  let heartbeat: NodeJS.Timeout | undefined
+  let poll: NodeJS.Timeout | undefined
+  let closed = false
+  const cleanup = (): void => {
+    if (closed) return
+    closed = true
+    if (heartbeat !== undefined) clearInterval(heartbeat)
+    if (poll !== undefined) clearInterval(poll)
+  }
+  req.on('close', cleanup)
+  req.on('error', cleanup)
+  res.on('error', cleanup)
+
+  const sendBatch = (): void => {
+    if (closed) return
+    let data
+    try {
+      data = kernel.listTerminalFrames(jobId, runId, cursor)
+    } catch {
+      cleanup()
+      res.end()
+      return
+    }
+    const retention = data.retention
+    // Gap: requested sequences were already evicted.
+    if (!gapSent && cursor + 1 < retention.retained_from_seq) {
+      writeEvent('gap', {
+        kind: 'gap',
+        job_id: jobId,
+        run_id: runId,
+        seq: cursor + 1,
+        requested_after: cursor,
+        retained_from_seq: retention.retained_from_seq,
+        dropped_bytes: retention.dropped_bytes,
+        lease_generation: 0,
+        time: new Date().toISOString(),
+      })
+      gapSent = true
+      cursor = retention.retained_from_seq - 1
+    }
+    for (const frame of data.frames) {
+      const base = {
+        kind: frame.frame_kind,
+        job_id: jobId,
+        run_id: runId,
+        seq: frame.seq,
+        lease_generation: frame.lease_generation,
+        time: frame.created_at,
+      }
+      if (frame.frame_kind === 'chunk') {
+        writeEvent('chunk', {
+          ...base,
+          stream_seq: frame.stream_seq,
+          channel: frame.channel,
+          text: frame.text,
+          byte_offset: frame.byte_offset,
+          byte_length: frame.byte_length,
+        })
+      } else if (frame.frame_kind === 'exit') {
+        // The exit frame carries the terminal-side facts; business terminal
+        // state remains authoritative in the job record.
+        let exitPayload: Record<string, unknown> = {}
+        try { exitPayload = JSON.parse(frame.payload_json) as Record<string, unknown> } catch { /* opaque */ }
+        writeEvent('exit', {
+          ...base,
+          exit_code: exitPayload.exit_code ?? null,
+          signal: exitPayload.signal ?? null,
+          cancelled: exitPayload.cancelled ?? false,
+          timed_out: exitPayload.timed_out ?? false,
+          truncated: retention.truncated,
+          total_bytes: retention.total_bytes,
+          dropped_bytes: retention.dropped_bytes,
+        })
+      } else {
+        writeEvent(frame.frame_kind, base)
+      }
+      cursor = frame.seq
+      if (frame.frame_kind === 'exit') {
+        // Exit is authoritative; the client replays via after_seq if needed.
+        cleanup()
+        res.end()
+        return
+      }
+    }
+    void data
+  }
+
+  // Initial snapshot + live tail.
+  sendBatch()
+  poll = setInterval(sendBatch, 500)
+  heartbeat = setInterval(() => { if (!closed) res.write(`: heartbeat ${Date.now()}\n\n`) }, 15000)
+}
+
 /** Start the kernel API server; returns the listening server. */
-export function startKernelServer(options: KernelServerOptions): Promise<{ server: Server; url: string; port: number }> {
-  const { kernel, host = '127.0.0.1', port = 7412, token } = options
+export function startKernelServer(options: KernelServerOptions): Promise<{ server: Server; url: string; port: number }> {  const { kernel, host = '127.0.0.1', port = 7412, token } = options
   // §12.7 server-level startup parameter (see also KernelOptions.requireSignedManifest).
   if (options.requireSignedManifest !== undefined) kernel.requireSignedManifest = options.requireSignedManifest
   const server = createServer((req, res) => route(req, res, kernel, token))

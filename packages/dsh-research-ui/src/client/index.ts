@@ -5139,9 +5139,11 @@ function terminalPaintStatus(): void {
 function terminalHandleData(event: string, payload: Record<string, unknown>, runId: string): void {
   const seq = Number(payload.seq ?? 0)
   if (event === 'subscribed') {
+    // dsh-web: last_seq tells how far the server has; the client cursor
+    // must NOT jump there, or the catch-up chunks would be dropped as
+    // replay. Only the client's own processed seq is authoritative.
     terminalStatus = 'live'
     terminalAttempt = 0
-    terminalLastSeq = Math.max(terminalLastSeq, Number(payload.last_seq ?? 0))
     terminalRetainedSeq = Number(payload.retained_from_seq ?? 1)
     terminalSaveSeq()
   } else if (event === 'chunk') {
@@ -5208,7 +5210,7 @@ async function terminalConnect(projectId: string, jobId: string): Promise<void> 
   terminalStatus = 'connecting'
   terminalAttempt = 0
   const readLoop = async (): Promise<void> => {
-    const url = `${base()}/v1/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/terminal?after_seq=${terminalLastSeq}&channel=${terminalChannel}`
+    const url = `${base()}/v1/jobs/${encodeURIComponent(jobId)}/terminal?after_seq=${terminalLastSeq}&channel=${terminalChannel}&run_id=${encodeURIComponent(runId)}`
     try {
       const response = await fetch(url, { headers: { accept: 'text/event-stream', ...(await authHeaders()) }, signal: controller.signal })
       if (!response.ok || response.body === null) throw new Error(`terminal http ${response.status}`)

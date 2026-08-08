@@ -1258,7 +1258,171 @@ export class ResearchKernel {
     }
     this.db.prepare('UPDATE jobs SET status = ?, error = ?, lease_owner = NULL, updated_at = ? WHERE job_id = ?')
       .run('cancelled', reason ? `cancelled by ${actor}: ${reason}` : `cancelled by ${actor}`, nowIso(), jobId)
+    // dsh-web parity: unify the job.updated event with the other mutations.
+    this.emit(job.project_id, 'job.updated', { job_id: jobId, status: 'cancelled', actor })
     return this.getJob(jobId)
+  }
+
+  // ── terminal frames (execution-runtime.md §6) ────────────────────────────
+
+  /** Default hot-log retention per run (8 MiB, execution-runtime.md §6). */
+  static readonly TERMINAL_DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+
+  /**
+   * Append a batch of terminal frames for a run. Validation: the job must
+   * exist; frames from a stale lease generation are rejected (fencing); seq
+   * must be monotonic within the run (duplicate/older seq is an idempotent
+   * skip); chunk frames must carry channel/stream_seq/text/byte_offset/
+   * byte_length. Retention: when total_bytes exceeds maxLogBytes, the OLDEST
+   * chunk frames are evicted, dropped_bytes accumulate and truncated is set;
+   * gap/exit frames are never evicted.
+   */
+  appendTerminalFrames(input: {
+    jobId: string
+    runId: string
+    frames: Array<{
+      seq: number
+      stream_seq?: number | null
+      channel?: 'stdout' | 'stderr' | null
+      text?: string | null
+      byte_offset?: number | null
+      byte_length?: number | null
+      frame_kind: 'chunk' | 'gap' | 'exit'
+      payload_json?: string
+      lease_generation?: number
+    }>
+    maxLogBytes?: number
+  }): { appended: number; last_seq: number; truncated: boolean; total_bytes: number; dropped_bytes: number } {
+    const job = this.getJob(input.jobId)
+    if (input.frames.length === 0) {
+      throw new KernelError(422, 'empty_frames', 'at least one frame is required')
+    }
+    const maxBytes = input.maxLogBytes ?? ResearchKernel.TERMINAL_DEFAULT_MAX_BYTES
+    let appended = 0
+    let lastSeq = 0
+    const inserted: Array<Record<string, unknown>> = []
+    return withTransaction(this.db, () => {
+      const lastRow = this.db.prepare('SELECT seq FROM terminal_frames WHERE job_id = ? AND run_id = ? ORDER BY seq DESC LIMIT 1')
+        .get(input.jobId, input.runId) as { seq?: number } | undefined
+      let cursor = lastRow?.seq ?? 0
+      const insert = this.db.prepare(`INSERT OR IGNORE INTO terminal_frames
+        (job_id, run_id, seq, stream_seq, channel, text, byte_offset, byte_length, frame_kind, payload_json, lease_generation, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      for (const frame of input.frames) {
+        if (frame.seq <= cursor) continue // idempotent replay / out-of-order skip
+        const generation = frame.lease_generation ?? job.lease_generation ?? 0
+        if (job.lease_generation !== null && job.lease_generation !== undefined && generation < job.lease_generation) {
+          throw new KernelError(409, 'lease_stale', `frame lease_generation ${generation} < job generation ${job.lease_generation}`)
+        }
+        if (frame.frame_kind === 'chunk' && (frame.channel === null || frame.channel === undefined || frame.text === null || frame.text === undefined)) {
+          throw new KernelError(422, 'invalid_chunk_frame', 'chunk frames require channel + text')
+        }
+        insert.run(
+          input.jobId, input.runId, frame.seq,
+          frame.stream_seq ?? null, frame.channel ?? null, frame.text ?? null,
+          frame.byte_offset ?? null, frame.byte_length ?? null,
+          frame.frame_kind, frame.payload_json ?? '{}', generation, nowIso(),
+        )
+        cursor = frame.seq
+        appended += 1
+        lastSeq = frame.seq
+        inserted.push({ run_id: input.runId, seq: frame.seq, frame_kind: frame.frame_kind })
+      }
+      if (appended === 0) {
+        const ret = this.getTerminalRetention(input.jobId, input.runId)
+        return { appended: 0, last_seq: cursor, truncated: ret.truncated, total_bytes: ret.total_bytes, dropped_bytes: ret.dropped_bytes }
+      }
+      // Retention accounting.
+      let totalBytes = 0
+      let droppedBytes = 0
+      let truncated = 0
+      const byteSum = this.db.prepare(
+        'SELECT COALESCE(SUM(byte_length), 0) AS bytes FROM terminal_frames WHERE job_id = ? AND run_id = ?',
+      ).get(input.jobId, input.runId) as { bytes: number }
+      totalBytes = Number(byteSum.bytes)
+      if (totalBytes > maxBytes) {
+        const evict = this.db.prepare(`DELETE FROM terminal_frames
+          WHERE job_id = ? AND run_id = ? AND frame_kind = 'chunk'
+          AND seq IN (SELECT seq FROM terminal_frames WHERE job_id = ? AND run_id = ? AND frame_kind = 'chunk' ORDER BY seq ASC LIMIT ?)`)
+        let guard = 0
+        while (totalBytes > maxBytes && guard < 10000) {
+          const victims = this.db.prepare(
+            'SELECT seq, byte_length FROM terminal_frames WHERE job_id = ? AND run_id = ? AND frame_kind = ? ORDER BY seq ASC LIMIT 64',
+          ).all(input.jobId, input.runId, 'chunk') as Array<{ seq: number; byte_length: number | null }>
+          if (victims.length === 0) break
+          evict.run(input.jobId, input.runId, input.jobId, input.runId, victims.length)
+          for (const v of victims) droppedBytes += Number(v.byte_length ?? 0)
+          const next = this.db.prepare('SELECT COALESCE(SUM(byte_length), 0) AS bytes FROM terminal_frames WHERE job_id = ? AND run_id = ?')
+            .get(input.jobId, input.runId) as { bytes: number }
+          totalBytes = Number(next.bytes)
+          guard += 1
+        }
+        truncated = 1
+      }
+      const retainedRow = this.db.prepare('SELECT COALESCE(MIN(seq), 1) AS min_seq FROM terminal_frames WHERE job_id = ? AND run_id = ?')
+        .get(input.jobId, input.runId) as { min_seq: number }
+      this.db.prepare(`INSERT INTO terminal_retention (job_id, run_id, retained_from_seq, total_bytes, dropped_bytes, truncated)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, run_id) DO UPDATE SET
+          retained_from_seq = excluded.retained_from_seq,
+          total_bytes = excluded.total_bytes,
+          dropped_bytes = terminal_retention.dropped_bytes + excluded.dropped_bytes,
+          truncated = MAX(terminal_retention.truncated, excluded.truncated)`)
+        .run(input.jobId, input.runId, Number(retainedRow.min_seq), totalBytes, droppedBytes, truncated)
+      const retention = this.getTerminalRetention(input.jobId, input.runId)
+      for (const frame of inserted) {
+        this.emit(job.project_id, 'terminal.frame', frame)
+      }
+      return {
+        appended,
+        last_seq: lastSeq,
+        truncated: retention.truncated,
+        total_bytes: retention.total_bytes,
+        dropped_bytes: retention.dropped_bytes,
+      }
+    })
+  }
+
+  /** Frames after `afterSeq` (ordered by seq) plus the retention summary. */
+  listTerminalFrames(jobId: string, runId: string, afterSeq = 0): {
+    frames: Array<{
+      seq: number; stream_seq: number | null; channel: 'stdout' | 'stderr' | null
+      text: string | null; byte_offset: number | null; byte_length: number | null
+      frame_kind: 'chunk' | 'gap' | 'exit'; payload_json: string; lease_generation: number; created_at: string
+    }>
+    retention: { retained_from_seq: number; total_bytes: number; dropped_bytes: number; truncated: boolean }
+  } {
+    this.getJob(jobId)
+    const rows = this.db.prepare('SELECT seq, stream_seq, channel, text, byte_offset, byte_length, frame_kind, payload_json, lease_generation, created_at FROM terminal_frames WHERE job_id = ? AND run_id = ? AND seq > ? ORDER BY seq ASC')
+      .all(jobId, runId, afterSeq) as unknown as Array<Record<string, unknown>>
+    return {
+      frames: rows.map(r => ({
+        seq: Number(r.seq),
+        stream_seq: r.stream_seq === null ? null : Number(r.stream_seq),
+        channel: (r.channel as 'stdout' | 'stderr' | null) ?? null,
+        text: r.text as string | null,
+        byte_offset: r.byte_offset === null ? null : Number(r.byte_offset),
+        byte_length: r.byte_length === null ? null : Number(r.byte_length),
+        frame_kind: r.frame_kind as 'chunk' | 'gap' | 'exit',
+        payload_json: String(r.payload_json ?? '{}'),
+        lease_generation: Number(r.lease_generation ?? 0),
+        created_at: String(r.created_at ?? ''),
+      })),
+      retention: this.getTerminalRetention(jobId, runId),
+    }
+  }
+
+  getTerminalRetention(jobId: string, runId: string): {
+    retained_from_seq: number; total_bytes: number; dropped_bytes: number; truncated: boolean
+  } {
+    const row = this.db.prepare('SELECT retained_from_seq, total_bytes, dropped_bytes, truncated FROM terminal_retention WHERE job_id = ? AND run_id = ?')
+      .get(jobId, runId) as { retained_from_seq?: number; total_bytes?: number; dropped_bytes?: number; truncated?: number } | undefined
+    return {
+      retained_from_seq: Number(row?.retained_from_seq ?? 1),
+      total_bytes: Number(row?.total_bytes ?? 0),
+      dropped_bytes: Number(row?.dropped_bytes ?? 0),
+      truncated: row?.truncated === 1,
+    }
   }
 
   // ── evidence & claims (design §4.7) ──────────────────────────────────────

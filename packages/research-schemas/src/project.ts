@@ -53,6 +53,7 @@ export const KernelEventKind = z.enum([
   'session.linked',
   'budget.updated',
   'policy.violation',
+  'terminal.frame',
 ])
 export type KernelEventKind = z.infer<typeof KernelEventKind>
 
