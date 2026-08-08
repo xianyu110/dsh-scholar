@@ -3438,9 +3438,24 @@ function openCommandHistoryModal(root: ShadowRoot): void {
   header.appendChild(closeBtn)
   modal.appendChild(header)
 
+  const hintRow = el('div', 'row')
+  hintRow.style.cssText = 'justify-content:space-between;align-items:center;margin-bottom:10px'
   const hint = el('div', 'muted', `${chatHistory.length} commands · click one to re-run it in Chat (↑/↓ also walk this list in the composer).`)
-  hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
-  modal.appendChild(hint)
+  hint.style.cssText = 'font-size:11.5px'
+  hintRow.appendChild(hint)
+  // dsh-web history management: clear the persisted command list.
+  const clearBtn = el('button', 'hbtn', '🗑 Clear')
+  clearBtn.title = 'clear command history'
+  clearBtn.style.cssText = 'padding:1px 10px;flex-shrink:0'
+  clearBtn.onclick = () => {
+    chatHistory = []
+    historyIndex = -1
+    try { localStorage.setItem(HISTORY_KEY, '[]') } catch { /* private mode */ }
+    overlay.remove()
+    openCommandHistoryModal(root)
+  }
+  hintRow.appendChild(clearBtn)
+  modal.appendChild(hintRow)
 
   const list = el('div')
   list.style.cssText = 'max-height:46vh;overflow-y:auto'
@@ -3498,8 +3513,21 @@ function openGlobalSearchModal(root: ShadowRoot): void {
 
   const results = el('div')
   results.style.cssText = 'max-height:46vh;overflow-y:auto'
+  results.setAttribute('role', 'listbox')
+  results.setAttribute('aria-label', 'search results')
   results.appendChild(el('div', 'muted', 'Type a query and press Enter.'))
   modal.appendChild(results)
+
+  // dsh-web keyboard nav: ↑/↓ walk the hits, Enter opens the selected one.
+  let selIdx = -1
+  const rowEls: HTMLElement[] = []
+  const paintSelection = (): void => {
+    for (let i = 0; i < rowEls.length; i++) {
+      rowEls[i]!.style.background = i === selIdx ? 'var(--bg-hover)' : 'none'
+      rowEls[i]!.setAttribute('aria-selected', i === selIdx ? 'true' : 'false')
+    }
+    rowEls[selIdx]?.scrollIntoView({ block: 'nearest' })
+  }
 
   const runSearch = async (): Promise<void> => {
     const q = input.value.trim().toLowerCase()
@@ -3507,35 +3535,40 @@ function openGlobalSearchModal(root: ShadowRoot): void {
     globalSearchQuery = q
     results.replaceChildren(el('div', 'muted', 'Searching…'))
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
-    const hits: Array<{ project: string; kind: string; text: string }> = []
+    const hits: Array<{ projectId: string; project: string; kind: string; text: string }> = []
     for (const p of projects) {
       if (p.project_id === undefined) continue
       const claims = (await api<ClaimRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/claims`)) ?? []
       for (const c of claims) {
         if ((c.statement ?? '').toLowerCase().includes(q)) {
-          hits.push({ project: p.name ?? p.project_id, kind: 'claim', text: c.statement ?? '' })
+          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'claim', text: c.statement ?? '' })
         }
       }
       const evidence = (await api<EvidenceRow[]>(`/v1/projects/${encodeURIComponent(p.project_id)}/evidence`)) ?? []
       for (const e of evidence) {
         const label = `${e.result?.primary_metric ?? 'metric'} = ${e.result?.value ?? '?'} (Δ${e.result?.effect_size ?? '?'})`
         if (label.toLowerCase().includes(q)) {
-          hits.push({ project: p.name ?? p.project_id, kind: 'evidence', text: label })
+          hits.push({ projectId: p.project_id, project: p.name ?? p.project_id, kind: 'evidence', text: label })
         }
       }
     }
     globalSearchResults = hits
     results.replaceChildren()
+    rowEls.length = 0
+    selIdx = -1
     if (hits.length === 0) {
       results.appendChild(el('div', 'empty', `No matches for "${input.value.trim()}" across projects.`))
       return
     }
-    const count = el('div', 'muted', `${hits.length} hit(s) across ${projects.length} project(s)`)
+    const count = el('div', 'muted', `${hits.length} hit(s) across ${projects.length} project(s) — ↑/↓ to select, Enter to open.`)
     count.style.cssText = 'margin-bottom:8px;font-size:11px'
     results.appendChild(count)
-    for (const h of hits) {
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i]!
       const row = el('div')
-      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2)'
+      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2);border-radius:6px;cursor:pointer'
+      row.setAttribute('role', 'option')
+      row.setAttribute('aria-selected', 'false')
       row.appendChild(el('span', 'artifact-kind', h.kind.toUpperCase()))
       const bodyEl = el('div', 'grow')
       bodyEl.style.cssText = 'min-width:0'
@@ -3545,10 +3578,34 @@ function openGlobalSearchModal(root: ShadowRoot): void {
       textEl.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
       bodyEl.append(projEl, textEl)
       row.appendChild(bodyEl)
+      row.onmouseenter = () => { selIdx = i; paintSelection() }
+      row.onclick = () => {
+        overlay.remove()
+        projectId = h.projectId
+        activeTab = 'evidence'
+        tabSave()
+        rerender()
+      }
+      rowEls.push(row)
       results.appendChild(row)
     }
   }
-  input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); void runSearch() } }
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (selIdx >= 0 && rowEls[selIdx] !== undefined) {
+        // dsh-web jump: open the selected hit's project on the Evidence tab.
+        rowEls[selIdx]!.click()
+      } else {
+        void runSearch()
+      }
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (rowEls.length === 0) return
+      event.preventDefault()
+      selIdx = (selIdx + (event.key === 'ArrowDown' ? 1 : -1) + rowEls.length) % rowEls.length
+      paintSelection()
+    }
+  }
   overlay.appendChild(modal)
   root.appendChild(overlay)
   input.focus()
@@ -3700,17 +3757,64 @@ function chatSessionSelect(id: string): void {
   }
 }
 
-/** Rename a chat session (dsh-web session actions), persisted. */
+/** Rename a chat session via an in-app dialog (dsh-web dialogs — no
+ * browser prompts), persisted. */
 function chatSessionRename(id: string): void {
   const session = chatSessions.find(s => s.id === id)
   if (session === undefined) return
-  const name = window.prompt('Rename session', session.name)
-  if (name === null) return
-  const clean = name.trim()
-  if (clean === '') return
-  session.name = clean.slice(0, 40)
-  chatSessionsPersist()
-  rerender()
+  const root = rootHost()
+  if (root === null) return
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:440px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-label', 'Rename session')
+  const header = el('div', 'modal-header', '✎ Rename Session')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+  const hint = el('div', 'muted', `Rename "${session.name}" — session messages are kept.`)
+  hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
+  modal.appendChild(hint)
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.value = session.name
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  modal.appendChild(input)
+  const err = el('div', 'error-banner')
+  err.style.cssText = 'display:none;margin-top:10px'
+  modal.appendChild(err)
+  const actions = el('div', 'row')
+  actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
+  const cancel = el('button', 'hbtn', 'Cancel')
+  cancel.onclick = () => overlay.remove()
+  const save = el('button', 'btn approve', 'Save')
+  save.style.cssText = 'padding:7px 18px'
+  const saveName = (): void => {
+    const clean = input.value.trim()
+    if (clean === '') {
+      err.textContent = 'Name must not be empty.'
+      err.style.display = 'block'
+      return
+    }
+    session.name = clean.slice(0, 40)
+    chatSessionsPersist()
+    overlay.remove()
+    rerender()
+  }
+  save.onclick = saveName
+  input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); saveName() } }
+  actions.append(cancel, save)
+  modal.appendChild(actions)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  input.focus()
+  input.select()
+  trapFocus(overlay, null)
 }
 
 /** Archive a chat session (dsh-web session actions); messages are kept. */
