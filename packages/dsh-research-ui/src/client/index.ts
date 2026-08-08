@@ -957,6 +957,10 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
       if (event.key.toLowerCase() === 'k' && !typing) {
         event.preventDefault()
         openCommandsModal(root)
+      } else if (event.key.toLowerCase() === 'p' && !typing) {
+        // dsh-web quick project switcher: Ctrl/Cmd+P.
+        event.preventDefault()
+        openProjectSwitcherModal(root)
       } else if (event.key.toLowerCase() === 't' && event.shiftKey && !typing) {
         event.preventDefault()
         host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
@@ -2749,6 +2753,7 @@ function runChatLine(line: string): void {
 const SHORTCUTS: Array<[string, string]> = [
   ['Alt+1..7', 'switch tab (Chat, Phase, Gates, Runs, Artifacts, Evidence, Budget)'],
   ['Ctrl/Cmd+K', 'open the command palette'],
+  ['Ctrl/Cmd+P', 'quick project switcher'],
   ['Ctrl/Cmd+Shift+T', 'toggle light/dark theme'],
   ['Ctrl+1..9', 'select the Nth chat session'],
   ['Ctrl+Tab', 'cycle chat sessions'],
@@ -3655,6 +3660,105 @@ function openGlobalSearchModal(root: ShadowRoot): void {
   input.focus()
 }
 
+/* ─────────────────────────── project switcher modal ─────────────────────────── */
+
+/** Quick project switcher (dsh-web Ctrl/Cmd+P): filter + ↑/↓ + Enter. */
+let projectSwitchQuery = ''
+
+function openProjectSwitcherModal(root: ShadowRoot): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:520px;max-width:92vw'
+  const header = el('div', 'modal-header', '⇥ Switch Project')
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.placeholder = 'Search projects…'
+  input.value = projectSwitchQuery
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none;margin-bottom:10px'
+  input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
+  input.onblur = () => { input.style.borderColor = 'var(--border)' }
+  modal.appendChild(input)
+
+  const list = el('div')
+  list.style.cssText = 'max-height:46vh;overflow-y:auto'
+  list.setAttribute('role', 'listbox')
+  list.setAttribute('aria-label', 'projects')
+  modal.appendChild(list)
+
+  let selIdx = -1
+  const rows: HTMLElement[] = []
+  const paint = (): void => {
+    for (let i = 0; i < rows.length; i++) {
+      rows[i]!.style.background = i === selIdx ? 'var(--bg-hover)' : 'none'
+      rows[i]!.setAttribute('aria-selected', i === selIdx ? 'true' : 'false')
+    }
+    rows[selIdx]?.scrollIntoView({ block: 'nearest' })
+  }
+
+  const renderList = (projects: ProjectRow[]): void => {
+    list.replaceChildren()
+    rows.length = 0
+    selIdx = -1
+    const q = projectSwitchQuery.trim().toLowerCase()
+    const filtered = q === '' ? projects : projects.filter(p =>
+      (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q),
+    )
+    if (filtered.length === 0) {
+      list.appendChild(el('div', 'empty', `No projects match "${projectSwitchQuery.trim()}".`))
+      return
+    }
+    for (const p of filtered) {
+      if (p.project_id === undefined) continue
+      const row = el('div')
+      row.setAttribute('role', 'option')
+      row.setAttribute('aria-selected', 'false')
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer'
+      const tone = STATUS_META[p.status ?? '']?.tone ?? 'slate'
+      const dot = el('span')
+      dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:var(--tone-${tone});flex-shrink:0`
+      const name = el('span', 'grow', p.name ?? p.project_id)
+      name.style.cssText = 'font-size:11.5px;color:var(--text)'
+      const meta = el('span', 'muted mono', `${STATUS_META[p.status ?? '']?.label ?? p.status ?? ''} · ${p.project_id.slice(0, 14)}`)
+      meta.style.cssText = 'font-size:9.5px'
+      row.append(dot, name, meta)
+      row.onmouseenter = () => { selIdx = rows.indexOf(row); paint() }
+      row.onclick = () => {
+        overlay.remove()
+        projectId = p.project_id
+        rerender()
+        showToast(rootHost(), `⇥ Switched to ${p.name ?? p.project_id}`)
+      }
+      rows.push(row)
+      list.appendChild(row)
+    }
+  }
+  input.oninput = () => {
+    projectSwitchQuery = input.value
+    void api<ProjectRow[]>('/v1/projects').then((projects) => { renderList(projects ?? []) })
+  }
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (selIdx >= 0 && rows[selIdx] !== undefined) rows[selIdx]!.click()
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (rows.length === 0) return
+      event.preventDefault()
+      selIdx = (selIdx + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
+      paint()
+    }
+  }
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  input.focus()
+  void api<ProjectRow[]>('/v1/projects').then((projects) => { renderList(projects ?? []) })
+}
+
 /* ─────────────────────────── compare modal ─────────────────────────── */
 
 /**
@@ -4510,6 +4614,13 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       tab.style.cssText += ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)'
     }
     tab.onclick = () => { chatSessionSelect(s.id) }
+    // dsh-web session tabs: middle-click closes the session.
+    tab.onmousedown = (event) => {
+      if (event.button === 1) {
+        event.preventDefault()
+        chatSessionClose(s.id)
+      }
+    }
     tab.ondblclick = (event) => {
       event.stopPropagation()
       chatSessionRename(s.id)
