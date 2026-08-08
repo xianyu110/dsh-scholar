@@ -351,6 +351,12 @@ function densityApply(panel: HTMLElement): void {
   try { localStorage.setItem(DENSITY_KEY, density) } catch { /* private mode */ }
 }
 
+/** Artifact list filter (dsh-web search-as-you-type), persisted per render. */
+let artifactsQuery = ''
+
+/** Central a11y decorator for modal overlays (see apply). */
+let modalObserver: MutationObserver | null = null
+
 export function apply(options: ApplyOptions = {}): void {
   const fullscreen = options.fullscreen === true
   const host = document.createElement('div')
@@ -377,6 +383,27 @@ export function apply(options: ApplyOptions = {}): void {
     host.style.setProperty('--accent-text', c)
   }
   applyAccent()
+
+  // dsh-web a11y: every modal overlay gets role=dialog + aria-modal + a
+  // label derived from its header. One central observer keeps new modals
+  // compliant automatically (Escape already closes .overlay globally).
+  if (modalObserver !== null) modalObserver.disconnect()
+  modalObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (!(node instanceof HTMLElement)) continue
+        const overlays = node.classList.contains('overlay') ? [node] : [...node.querySelectorAll('.overlay')]
+        for (const overlay of overlays) {
+          overlay.setAttribute('role', 'dialog')
+          overlay.setAttribute('aria-modal', 'true')
+          const header = overlay.querySelector('.modal-header')
+          const label = header?.textContent?.replace('×', '').trim()
+          overlay.setAttribute('aria-label', label !== undefined && label !== '' ? label : 'dialog')
+        }
+      }
+    }
+  })
+  modalObserver.observe(root, { childList: true, subtree: true })
 
   const style = el('style')
   style.textContent = `
@@ -1490,85 +1517,115 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
     body.appendChild(el('div', 'empty', 'No artifacts yet — runs and analysis produce them.'))
     return
   }
-  // Bulk download bar.
-  if (artifactsSelecting) {
-    const bar = el('div', 'card')
-    bar.style.cssText = 'padding:8px 10px;margin:4px 0;display:flex;align-items:center;gap:10px;border-color:var(--accent)'
-    const count = el('span', 'mono', `${artifactsSelected.size} selected`)
-    count.style.cssText = 'font-size:11px;color:var(--text)'
-    const downloadSel = el('button', 'btn approve', '⬇ Download selected')
-    downloadSel.disabled = artifactsSelected.size === 0
-    downloadSel.onclick = async () => {
-      for (const id of artifactsSelected) {
-        const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
-          headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
-        })
-        if (!response.ok) continue
-        const blob = await response.blob()
-        const url = URL.createObjectURL(blob)
-        const a = el('a', 'dl', 'download')
-        a.href = url
-        a.download = `${id.slice(0, 24)}.bin`
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        setTimeout(() => URL.revokeObjectURL(url), 4000)
-      }
-      artifactsSelecting = false
-      artifactsSelected.clear()
-      rerender()
-    }
-    const doneSel = el('button', 'hbtn', 'Done')
-    doneSel.onclick = () => {
-      artifactsSelecting = false
-      artifactsSelected.clear()
-      rerender()
-    }
-    bar.append(count, downloadSel, doneSel)
-    body.appendChild(bar)
-  }
-  // dsh-web virtualized feel: window artifacts to the newest 15.
-  const shownArtifacts = artifacts.slice(-15).reverse()
-  if (artifacts.length > 15) {
-    const notice = el('div', 'muted', `Showing the newest 15 of ${artifacts.length} artifacts — use the global search or export for the rest.`)
-    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
-    body.appendChild(notice)
-  }
-  for (const artifact of shownArtifacts) {
-    const row = el('div', 'artifact-row')
-    if (artifactsSelecting && artifact.artifact_id !== undefined) {
-      const box = el('span', 'ws-check', artifactsSelected.has(artifact.artifact_id) ? '☑' : '☐')
-      box.style.cssText += ';cursor:pointer'
-      box.onclick = (event) => {
-        event.stopPropagation()
-        if (artifact.artifact_id === undefined) return
-        if (artifactsSelected.has(artifact.artifact_id)) artifactsSelected.delete(artifact.artifact_id)
-        else artifactsSelected.add(artifact.artifact_id)
+  // dsh-web search-as-you-type: filter the artifact list in place. Only
+  // the list below is rebuilt, so the input keeps focus while typing.
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.placeholder = '🔍 Filter artifacts…'
+  searchInput.value = artifactsQuery
+  searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none;margin:2px 0 4px'
+  searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
+  searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
+  body.appendChild(searchInput)
+
+  const listEl = el('div')
+  body.appendChild(listEl)
+
+  const renderList = (): void => {
+    listEl.replaceChildren()
+    // Bulk download bar.
+    if (artifactsSelecting) {
+      const bar = el('div', 'card')
+      bar.style.cssText = 'padding:8px 10px;margin:4px 0;display:flex;align-items:center;gap:10px;border-color:var(--accent)'
+      const count = el('span', 'mono', `${artifactsSelected.size} selected`)
+      count.style.cssText = 'font-size:11px;color:var(--text)'
+      const downloadSel = el('button', 'btn approve', '⬇ Download selected')
+      downloadSel.disabled = artifactsSelected.size === 0
+      downloadSel.onclick = async () => {
+        for (const id of artifactsSelected) {
+          const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
+            headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
+          })
+          if (!response.ok) continue
+          const blob = await response.blob()
+          const url = URL.createObjectURL(blob)
+          const a = el('a', 'dl', 'download')
+          a.href = url
+          a.download = `${id.slice(0, 24)}.bin`
+          document.body.appendChild(a)
+          a.click()
+          a.remove()
+          setTimeout(() => URL.revokeObjectURL(url), 4000)
+        }
+        artifactsSelecting = false
+        artifactsSelected.clear()
         rerender()
       }
-      row.prepend(box)
-      if (artifactsSelected.has(artifact.artifact_id)) row.style.outline = '1px solid var(--accent)'
+      const doneSel = el('button', 'hbtn', 'Done')
+      doneSel.onclick = () => {
+        artifactsSelecting = false
+        artifactsSelected.clear()
+        rerender()
+      }
+      bar.append(count, downloadSel, doneSel)
+      listEl.appendChild(bar)
     }
-    row.appendChild(el('span', 'artifact-kind', (artifact.kind ?? '?').toUpperCase()))
-    const name = el('span', 'grow mono', fmtId(artifact.artifact_id, 22))
-    row.appendChild(name)
-    // dsh-web metadata: show the artifact kind detail (e.g. code-snapshot-archive).
-    const metaKind = typeof artifact.metadata?.kind === 'string' && artifact.metadata.kind !== artifact.kind ? artifact.metadata.kind : ''
-    if (metaKind !== '') {
-      const chip = el('span', 'artifact-kind', metaKind.slice(0, 22))
-      chip.style.cssText += ';color:var(--text-3)'
-      row.appendChild(chip)
+    // dsh-web virtualized feel: window artifacts to the newest 15.
+    const shownArtifacts = artifacts.slice(-15).reverse()
+    if (artifacts.length > 15) {
+      const notice = el('div', 'muted', `Showing the newest 15 of ${artifacts.length} artifacts — use the global search or export for the rest.`)
+      notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+      listEl.appendChild(notice)
     }
-    row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
-    row.title = 'click to preview · double-click for details'
-    row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
-    row.ondblclick = (event) => {
-      event.stopPropagation()
-      const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-      if (root !== null) openArtifactDetailModal(root, artifact)
+    const q = artifactsQuery.trim().toLowerCase()
+    const filtered = q === '' ? shownArtifacts : shownArtifacts.filter(a =>
+      (a.kind ?? '').toLowerCase().includes(q) ||
+      (a.artifact_id ?? '').toLowerCase().includes(q) ||
+      String(a.metadata?.kind ?? '').toLowerCase().includes(q) ||
+      String(a.metadata?.name ?? '').toLowerCase().includes(q),
+    )
+    if (filtered.length === 0) {
+      listEl.appendChild(el('div', 'empty', `No artifacts match "${artifactsQuery.trim()}".`))
+      return
     }
-    body.appendChild(row)
+    for (const artifact of filtered) {
+      const row = el('div', 'artifact-row')
+      if (artifactsSelecting && artifact.artifact_id !== undefined) {
+        const box = el('span', 'ws-check', artifactsSelected.has(artifact.artifact_id) ? '☑' : '☐')
+        box.style.cssText += ';cursor:pointer'
+        box.onclick = (event) => {
+          event.stopPropagation()
+          if (artifact.artifact_id === undefined) return
+          if (artifactsSelected.has(artifact.artifact_id)) artifactsSelected.delete(artifact.artifact_id)
+          else artifactsSelected.add(artifact.artifact_id)
+          renderList()
+        }
+        row.prepend(box)
+        if (artifactsSelected.has(artifact.artifact_id)) row.style.outline = '1px solid var(--accent)'
+      }
+      row.appendChild(el('span', 'artifact-kind', (artifact.kind ?? '?').toUpperCase()))
+      const name = el('span', 'grow mono', fmtId(artifact.artifact_id, 22))
+      row.appendChild(name)
+      // dsh-web metadata: show the artifact kind detail (e.g. code-snapshot-archive).
+      const metaKind = typeof artifact.metadata?.kind === 'string' && artifact.metadata.kind !== artifact.kind ? artifact.metadata.kind : ''
+      if (metaKind !== '') {
+        const chip = el('span', 'artifact-kind', metaKind.slice(0, 22))
+        chip.style.cssText += ';color:var(--text-3)'
+        row.appendChild(chip)
+      }
+      row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
+      row.title = 'click to preview · double-click for details'
+      row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
+      row.ondblclick = (event) => {
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root !== null) openArtifactDetailModal(root, artifact)
+      }
+      listEl.appendChild(row)
+    }
   }
+  searchInput.oninput = () => { artifactsQuery = searchInput.value; renderList() }
+  renderList()
 }
 
 /** dsh-web artifact drawer: metadata of one CAS artifact. */
@@ -2984,7 +3041,8 @@ function rootHost(): ShadowRoot | null {
 /** dsh-web notification centre: toast history (persisted, 30 max). */
 const NOTIF_KEY = 'dsh-scholar-ui-notifs'
 const NOTIF_READ_KEY = 'dsh-scholar-ui-notifs-read'
-let notifHistory: Array<{ text: string; time: string }> = []
+interface NotifEntry { text: string; time: string; ts?: number; count?: number }
+let notifHistory: Array<NotifEntry> = []
 /** Unread badge count (dsh-web notification dot). */
 let notifUnread = 0
 function notifLoad(): void {
@@ -2993,7 +3051,7 @@ function notifLoad(): void {
     if (raw === null) return
     const parsed = JSON.parse(raw) as unknown
     if (Array.isArray(parsed)) {
-      notifHistory = parsed.filter((n): n is { text: string; time: string } => typeof n === 'object' && n !== null && typeof (n as { text?: unknown }).text === 'string').slice(-30)
+      notifHistory = parsed.filter((n): n is NotifEntry => typeof n === 'object' && n !== null && typeof (n as { text?: unknown }).text === 'string').slice(-30)
     }
     const readRaw = localStorage.getItem(NOTIF_READ_KEY)
     notifUnread = readRaw === null ? 0 : Math.max(0, notifHistory.length - Number(readRaw))
@@ -3120,9 +3178,18 @@ function copyText(text: string): void {
   }
 }
 
-/** dsh-web toast: a transient status pill bottom-center (2.4s), recorded. */
+/** dsh-web toast: a transient status pill bottom-center (2.4s), recorded.
+ * Identical toasts inside a 60s window aggregate into a ×N counter (dsh-web
+ * notification aggregation) instead of flooding the history. */
 function showToast(root: ShadowRoot | null, text: string): void {
-  notifHistory.push({ text, time: new Date().toLocaleTimeString() })
+  const now = Date.now()
+  const last = notifHistory[notifHistory.length - 1]
+  if (last !== undefined && last.text === text && (last.ts ?? 0) > now - 60000) {
+    last.count = (last.count ?? 1) + 1
+    last.time = new Date().toLocaleTimeString()
+  } else {
+    notifHistory.push({ text, time: new Date().toLocaleTimeString(), ts: now })
+  }
   notifPersist()
   notifUnread += 1
   if (root === null) return
@@ -3165,7 +3232,9 @@ function openNotificationsModal(root: ShadowRoot): void {
     const n = notifHistory[i]!
     const row = el('div')
     row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px dashed var(--border-2)'
-    const text = el('div', 'grow', n.text)
+    const count = n.count ?? 1
+    const text = el('div', 'grow', count > 1 ? `${n.text} ×${count}` : n.text)
+    if (count > 1) text.style.cssText += ';font-weight:600'
     text.style.cssText = 'font-size:11.5px;color:var(--text);word-break:break-word'
     const time = el('span', 'muted', n.time)
     time.style.cssText = 'font-size:9px;flex-shrink:0'
