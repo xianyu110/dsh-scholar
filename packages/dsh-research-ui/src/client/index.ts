@@ -1445,6 +1445,12 @@ async function renderGates(body: HTMLElement, projectId: string): Promise<void> 
       s.style.cssText = 'margin-top:3px'
       card.appendChild(s)
     }
+    // dsh-web traceability: the gate id (support / ledger lookups).
+    if (gate.gate_id !== undefined && gate.gate_id !== '') {
+      const gid = el('div', 'muted mono', fmtId(gate.gate_id, 26))
+      gid.style.cssText = 'margin-top:3px;font-size:9px'
+      card.appendChild(gid)
+    }
     const actions = el('div', 'gate-actions')
     actions.style.cssText = 'margin-top:10px;display:flex;gap:8px'
     const approve = el('button', 'btn approve', '✓ Approve')
@@ -1620,6 +1626,13 @@ function renderRuns(body: HTMLElement, p: Projection): void {
     const kind = el('span', 'artifact-kind', job.kind ?? '?')
     kind.style.cssText += ';text-transform:uppercase'
     row.appendChild(kind)
+    // dsh-web depth: the pre-registered contract this run executed under.
+    if (typeof job.contract_id === 'string' && job.contract_id !== '') {
+      const chip = el('span', 'artifact-kind', `ctr ${fmtId(job.contract_id, 12)}`)
+      chip.title = `contract ${job.contract_id}`
+      chip.style.cssText += ';color:var(--text-3)'
+      row.appendChild(chip)
+    }
     // Multi-select checkbox.
     if (runsSelecting && job.job_id !== undefined && cancellable.has(job.status ?? '')) {
       const box = el('span', 'ws-check', runsSelected.has(job.job_id) ? '☑' : '☐')
@@ -4895,6 +4908,27 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
         { label: '✎ Rename', onPick: () => chatSessionRename(s.id) },
         { label: s.archived === true ? '↩ Restore' : '🗄 Archive', onPick: () => chatSessionArchive(s.id) },
         { label: 'Copy session ID', hint: s.id, onPick: () => copyText(s.id) },
+        {
+          label: '⬇ Export JSON',
+          onPick: () => {
+            const payload = JSON.stringify({
+              name: s.name,
+              session_id: s.id,
+              exported_at: new Date().toISOString(),
+              messages: s.messages,
+            }, null, 2)
+            const blob = new Blob([payload], { type: 'application/json' })
+            const url = URL.createObjectURL(blob)
+            const a = el('a', 'dl', 'download')
+            a.href = url
+            a.download = `research-session-${new Date().toISOString().slice(0, 10)}.json`
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            setTimeout(() => URL.revokeObjectURL(url), 4000)
+            showToast(rootHost(), `⬇ Exported ${s.name}`)
+          },
+        },
         { label: '× Close', danger: true, onPick: () => chatSessionClose(s.id) },
       ]
       openContextMenu(root, event.clientX, event.clientY, ctxItems)
