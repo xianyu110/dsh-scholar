@@ -856,6 +856,7 @@ export function apply(): void {
       tabs: [
         ['gates', 'Approvals', 'Make human gate decisions and record their rationale.'],
         ['runs', 'Runs', 'Track durable jobs, execution state, retries, and cancellation.'],
+        ['terminal', 'Terminal', 'Stream stdout/stderr of a run in real time.'],
       ],
     },
     {
@@ -1082,6 +1083,9 @@ export function apply(): void {
       body.replaceChildren(el('div', 'error-banner', `Research kernel unreachable (project ${target}).`))
       return
     }
+    // dsh-web terminal hygiene: leaving the Terminal tab closes the stream
+    // (state stays for the return; a new visit reconnects from lastSeq).
+    if (activeTab !== 'terminal' && terminalStatus !== 'idle') terminalDisconnect()
     body.replaceChildren()
 
     const title = el('div', 'project-title')
@@ -1112,6 +1116,7 @@ export function apply(): void {
       case 'phase': await renderPhase(body, projection, target); break
       case 'gates': await renderGates(body, target); break
       case 'runs': renderRuns(body, projection); break
+      case 'terminal': renderTerminal(body, projection, target); break
       case 'artifacts': await renderArtifacts(body, target); break
       case 'evidence': await renderEvidence(body, target); break
       case 'budget': renderBudget(body, projection); break
@@ -1260,8 +1265,8 @@ export function apply(): void {
       }
       return
     }
-    // dsh-web keyboard navigation: Alt+1..7 switches tabs.
-    if (event.altKey && /^[1-7]$/.test(event.key) && !typing) {
+    // dsh-web keyboard navigation: Alt+1..9 switches tabs.
+    if (event.altKey && /^[1-9]$/.test(event.key) && !typing) {
       event.preventDefault()
       const idx = Number(event.key) - 1
       const tab = TAB_DEFS[idx]
@@ -4950,7 +4955,398 @@ async function openCompareModal(root: ShadowRoot, projectIds: string[]): Promise
   modal.appendChild(exportRow)
 }
 
-/* ─────────────────────────── Chat (dialogue) tab ─────────────────────────── */
+/* ─────────────────────────── Terminal tab ─────────────────────────── */
+
+/**
+ * dsh-web real-time terminal (gui-plugin-plan §8): stdout/stderr of a run
+ * streamed over SSE. Frames are appended as text nodes with a minimal ANSI
+ * colour whitelist — never innerHTML. The stream survives the 8s panel
+ * refresh (module state + direct DOM append); leaving the tab closes it and
+ * the next visit resumes from the persisted lastSeq.
+ */
+interface TerminalLine { seq: number; channel: 'stdout' | 'stderr'; text: string }
+let terminalRunId: string | null = null
+let terminalChannel: 'all' | 'stdout' | 'stderr' = 'all'
+let terminalLines: TerminalLine[] = []
+let terminalLastSeq = 0
+let terminalRetainedSeq = 1
+let terminalTotalBytes = 0
+let terminalDroppedBytes = 0
+let terminalTruncated = false
+let terminalStatus: 'idle' | 'connecting' | 'live' | 'reconnecting' | 'exited' = 'idle'
+let terminalExitCode: number | null = null
+let terminalExitSignal: string | null = null
+let terminalAbort: AbortController | null = null
+let terminalAutoScroll = true
+let terminalSearch = ''
+let terminalAttempt = 0
+let terminalStreamEl: HTMLElement | null = null
+let terminalStatusEl: HTMLElement | null = null
+let terminalMetaEl: HTMLElement | null = null
+let terminalSaveTimer: number | undefined
+const TERMINAL_MAX_LINES = 10000
+const TERMINAL_SEQ_KEY = 'dsh-scholar-ui-terminal-seq'
+const TERMINAL_ANSI: Record<number, string> = {
+  30: '#5b6472', 31: '#e5484d', 32: '#30a46c', 33: '#f5a524', 34: '#3b82f6',
+  35: '#d6409f', 36: '#12a594', 37: '#dbe2ee',
+  90: '#9aa4b2', 91: '#ff6369', 92: '#46a758', 93: '#f5a524', 94: '#60a5fa',
+  95: '#e93d82', 96: '#5eead4', 97: '#ffffff',
+}
+
+function terminalLoadSeq(): void {
+  try {
+    const raw = localStorage.getItem(TERMINAL_SEQ_KEY)
+    if (raw === null || terminalRunId === null) return
+    const map = JSON.parse(raw) as Record<string, number>
+    if (typeof map[terminalRunId] === 'number') terminalLastSeq = map[terminalRunId]!
+  } catch { /* private mode */ }
+}
+function terminalSaveSeq(): void {
+  if (terminalRunId === null) return
+  try {
+    const raw = localStorage.getItem(TERMINAL_SEQ_KEY)
+    const map = raw !== null ? JSON.parse(raw) as Record<string, number> : {}
+    map[terminalRunId] = terminalLastSeq
+    localStorage.setItem(TERMINAL_SEQ_KEY, JSON.stringify(map))
+  } catch { /* private mode */ }
+}
+
+function terminalDisconnect(): void {
+  terminalAbort?.abort()
+  terminalAbort = null
+  terminalStatus = 'idle'
+  terminalStreamEl = null
+}
+
+/** Strip/whitelist ANSI SGR codes; output via text nodes only. */
+function terminalAppendText(target: HTMLElement, text: string): void {
+  const re = /\x1b\[([0-9;]*)m/g
+  let last = 0
+  let match: RegExpExecArray | null
+  let color = ''
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) {
+      const seg = text.slice(last, match.index)
+      if (color !== '') {
+        const span = el('span')
+        span.style.color = color
+        span.textContent = seg
+        target.appendChild(span)
+      } else {
+        target.appendChild(document.createTextNode(seg))
+      }
+    }
+    const codes = match[1]!.split(';').map(Number)
+    color = ''
+    for (const c of codes) {
+      if (c === 0) color = ''
+      else if (TERMINAL_ANSI[c] !== undefined) color = TERMINAL_ANSI[c]!
+    }
+    last = match.index + match[0].length
+  }
+  if (last < text.length) {
+    const seg = text.slice(last)
+    if (color !== '') {
+      const span = el('span')
+      span.style.color = color
+      span.textContent = seg
+      target.appendChild(span)
+    } else {
+      target.appendChild(document.createTextNode(seg))
+    }
+  }
+}
+
+/** Live status bar paint (async status changes update the DOM directly). */
+function terminalPaintStatus(): void {
+  if (terminalStatusEl === null) return
+  const statusMap: Record<string, string> = {
+    idle: 'idle', connecting: 'connecting…', live: 'live', reconnecting: 'reconnecting…', exited: 'exited',
+  }
+  terminalStatusEl.textContent = statusMap[terminalStatus] ?? terminalStatus
+  terminalStatusEl.style.color = terminalStatus === 'live'
+    ? 'var(--tone-green)'
+    : (terminalStatus === 'reconnecting' || terminalStatus === 'connecting' ? 'var(--tone-amber)' : 'var(--text-3)')
+  if (terminalMetaEl !== null) {
+    const parts = [
+      `seq ${terminalLastSeq}`,
+      `${terminalLines.length}/${TERMINAL_MAX_LINES} lines`,
+      `${terminalTotalBytes} byte(s)`,
+    ]
+    if (terminalDroppedBytes > 0) parts.push(`${terminalDroppedBytes} dropped`)
+    if (terminalTruncated) parts.push('truncated')
+    if (terminalExitCode !== null || terminalExitSignal !== null) parts.push(`exit ${terminalExitCode ?? terminalExitSignal}`)
+    terminalMetaEl.textContent = parts.join(' · ')
+  }
+}
+
+function terminalHandleData(event: string, payload: Record<string, unknown>, runId: string): void {
+  const seq = Number(payload.seq ?? 0)
+  if (event === 'subscribed') {
+    terminalStatus = 'live'
+    terminalAttempt = 0
+    terminalLastSeq = Math.max(terminalLastSeq, Number(payload.last_seq ?? 0))
+    terminalRetainedSeq = Number(payload.retained_from_seq ?? 1)
+    terminalSaveSeq()
+  } else if (event === 'chunk') {
+    const channel = payload.channel === 'stderr' ? 'stderr' : 'stdout'
+    if (seq <= terminalLastSeq) return // idempotent replay
+    terminalLastSeq = seq
+    terminalTotalBytes = Number(payload.byte_offset ?? 0) + Number(payload.byte_length ?? 0)
+    const text = String(payload.text ?? '')
+    terminalLines.push({ seq, channel, text })
+    if (terminalLines.length > TERMINAL_MAX_LINES) terminalLines = terminalLines.slice(-TERMINAL_MAX_LINES)
+    if (terminalStreamEl !== null && terminalSearch === '') {
+      const row = el('div')
+      row.style.cssText = channel === 'stderr'
+        ? 'color:var(--tone-red);white-space:pre'
+        : 'white-space:pre'
+      terminalAppendText(row, text)
+      terminalStreamEl.appendChild(row)
+      if (terminalAutoScroll) terminalStreamEl.scrollTop = terminalStreamEl.scrollHeight
+    }
+    if (terminalSaveTimer !== undefined) window.clearTimeout(terminalSaveTimer)
+    terminalSaveTimer = window.setTimeout(() => terminalSaveSeq(), 1500)
+  } else if (event === 'gap') {
+    terminalDroppedBytes += Number(payload.dropped_bytes ?? 0)
+    terminalRetainedSeq = Number(payload.retained_from_seq ?? terminalRetainedSeq)
+    terminalLastSeq = Math.max(terminalLastSeq, seq)
+    if (terminalStreamEl !== null && terminalSearch === '') {
+      const warn = el('div', 'term-gap')
+      warn.style.cssText = 'color:var(--tone-amber);white-space:pre;font-weight:700'
+      warn.textContent = `— gap: ${terminalDroppedBytes} byte(s) dropped; retained from seq ${terminalRetainedSeq} —`
+      terminalStreamEl.appendChild(warn)
+    }
+    void runId
+  } else if (event === 'exit') {
+    terminalStatus = 'exited'
+    terminalExitCode = payload.exit_code !== null && payload.exit_code !== undefined ? Number(payload.exit_code) : null
+    terminalExitSignal = typeof payload.signal === 'string' && payload.signal !== '' ? payload.signal : null
+    terminalTruncated = payload.truncated === true
+    terminalTotalBytes = Number(payload.total_bytes ?? terminalTotalBytes)
+    terminalDroppedBytes = Number(payload.dropped_bytes ?? terminalDroppedBytes)
+    terminalLastSeq = Math.max(terminalLastSeq, seq)
+    terminalSaveSeq()
+    terminalAbort?.abort()
+    terminalAbort = null
+    terminalPaintStatus()
+    if (terminalStreamEl !== null && terminalSearch === '') {
+      const end = el('div', 'term-exit')
+      end.style.cssText = 'color:var(--text-3);white-space:pre;font-weight:700'
+      const parts = [`exit${terminalExitCode !== null ? ` code ${terminalExitCode}` : ''}${terminalExitSignal !== null ? ` (${terminalExitSignal})` : ''}`]
+      if (terminalTruncated) parts.push('truncated')
+      parts.push(`${terminalTotalBytes} byte(s)${terminalDroppedBytes > 0 ? ` · ${terminalDroppedBytes} dropped` : ''}`)
+      end.textContent = `— ${parts.join(' · ')} —`
+      terminalStreamEl.appendChild(end)
+      terminalStreamEl.scrollTop = terminalStreamEl.scrollHeight
+    }
+  }
+  terminalPaintStatus()
+}
+
+async function terminalConnect(projectId: string, jobId: string): Promise<void> {
+  terminalAbort?.abort()
+  terminalAbort = new AbortController()
+  const controller = terminalAbort
+  const runId = terminalRunId ?? ''
+  terminalStatus = 'connecting'
+  terminalAttempt = 0
+  const readLoop = async (): Promise<void> => {
+    const url = `${base()}/v1/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/terminal?after_seq=${terminalLastSeq}&channel=${terminalChannel}`
+    try {
+      const response = await fetch(url, { headers: { accept: 'text/event-stream', ...(await authHeaders()) }, signal: controller.signal })
+      if (!response.ok || response.body === null) throw new Error(`terminal http ${response.status}`)
+      terminalStatus = 'live'
+      terminalAttempt = 0
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let pendingEvent = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let idx: number
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx).replace(/\r$/, '')
+          buffer = buffer.slice(idx + 1)
+          if (line.startsWith(':')) continue // SSE heartbeat comment
+          if (line.startsWith('event: ')) { pendingEvent = line.slice(7).trim(); continue }
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim()
+            if (data === '') continue
+            try {
+              terminalHandleData(pendingEvent, JSON.parse(data) as Record<string, unknown>, runId)
+            } catch { /* malformed frame: skip */ }
+            pendingEvent = ''
+            continue
+          }
+          if (line === '') { pendingEvent = '' }
+        }
+        if (controller.signal.aborted) return
+      }
+      if (!controller.signal.aborted) throw new Error('stream ended')
+    } catch {
+      if (controller.signal.aborted) return
+      terminalStatus = 'reconnecting'
+      terminalAttempt += 1
+      terminalPaintStatus()
+      const delay = Math.min(10000, 500 * 2 ** Math.min(terminalAttempt - 1, 5))
+      window.setTimeout(() => { if (!controller.signal.aborted) void readLoop() }, delay)
+    }
+  }
+  void readLoop()
+}
+
+/** dsh-web Terminal page: run selector, channels, live output, status bar. */
+function renderTerminal(body: HTMLElement, p: Projection, projectId: string): void {
+  const jobs = p.jobs ?? []
+  const selected = jobs.find(j => j.job_id === terminalRunId) ?? jobs[0]
+  const selectedId = selected?.job_id ?? null
+  if (selectedId !== null && terminalRunId !== selectedId) {
+    terminalRunId = selectedId
+    terminalLines = []
+    terminalLastSeq = 0
+    terminalTotalBytes = 0
+    terminalDroppedBytes = 0
+    terminalTruncated = false
+    terminalExitCode = null
+    terminalExitSignal = null
+    terminalStatus = 'idle'
+    terminalLoadSeq()
+  }
+  if (jobs.length === 0) {
+    body.appendChild(el('div', 'empty', 'No runs yet — jobs appear here with their live output.'))
+    return
+  }
+
+  const toolbar = el('div')
+  toolbar.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px'
+
+  // Run selector (dsh-web "Run" list).
+  const runSelect = el('select', 'picker')
+  runSelect.style.cssText = 'flex:1;min-width:180px;padding:5px 8px;font-size:11px'
+  runSelect.setAttribute('aria-label', 'select run')
+  for (const j of jobs) {
+    const opt = el('option', '', `${j.kind ?? '?'} · ${j.status ?? '?'} · ${fmtId(j.job_id ?? '', 18)}`)
+    opt.value = j.job_id ?? ''
+    runSelect.appendChild(opt)
+  }
+  runSelect.value = selectedId ?? ''
+  runSelect.onchange = () => {
+    terminalDisconnect()
+    terminalRunId = runSelect.value || null
+    terminalLines = []
+    terminalLastSeq = 0
+    terminalTotalBytes = 0
+    terminalDroppedBytes = 0
+    terminalTruncated = false
+    terminalExitCode = null
+    terminalExitSignal = null
+    terminalLoadSeq()
+    rerender()
+  }
+  toolbar.appendChild(runSelect)
+
+  // Channel filter (dsh-web All/stdout/stderr).
+  const channelChips = el('div')
+  channelChips.style.cssText = 'display:flex;gap:4px'
+  const CHANNELS: Array<['all' | 'stdout' | 'stderr', string]> = [['all', 'All'], ['stdout', 'stdout'], ['stderr', 'stderr']]
+  for (const [key, label] of CHANNELS) {
+    const chip = el('button', 'hbtn', label)
+    const active = terminalChannel === key
+    chip.style.cssText = `padding:2px 10px;font-size:10px${active ? ';border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)' : ''}`
+    chip.setAttribute('aria-pressed', active ? 'true' : 'false')
+    chip.onclick = () => {
+      terminalChannel = key
+      terminalLines = []
+      terminalLastSeq = 0
+      terminalLoadSeq()
+      terminalDisconnect()
+      rerender()
+    }
+    channelChips.appendChild(chip)
+  }
+  toolbar.appendChild(channelChips)
+
+  // Search within retained output.
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.placeholder = '🔍 filter output…'
+  searchInput.value = terminalSearch
+  searchInput.style.cssText = 'flex:1;min-width:140px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 8px;font:11px/1.4 system-ui,sans-serif;outline:none'
+  searchInput.oninput = () => { terminalSearch = searchInput.value; rerender() }
+  toolbar.appendChild(searchInput)
+
+  // Actions (dsh-web copy / download).
+  const copyAll = el('button', 'hbtn', '⧉ copy')
+  copyAll.title = 'copy visible output'
+  copyAll.onclick = () => copyText(terminalLines.map(l => l.text).join(''))
+  const download = el('button', 'hbtn', '⬇ log')
+  download.title = 'download the full retained log'
+  download.onclick = () => {
+    const blob = new Blob([terminalLines.map(l => l.text).join('')], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = el('a', 'dl', 'download')
+    a.href = url
+    a.download = `run-${(selectedId ?? 'run').slice(0, 18)}.log`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+  }
+  toolbar.append(copyAll, download)
+  body.appendChild(toolbar)
+
+  // Output viewport.
+  const wrap = el('div')
+  wrap.style.cssText = 'position:relative;flex:1;min-height:320px;display:flex;flex-direction:column'
+  const stream = el('div')
+  stream.style.cssText = 'flex:1;overflow:auto;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:11px/1.5 ui-monospace,Menlo,monospace;white-space:pre'
+  stream.setAttribute('aria-label', 'run terminal output')
+  stream.setAttribute('aria-live', 'polite')
+  const renderLines = (): void => {
+    stream.replaceChildren()
+    const q = terminalSearch.trim().toLowerCase()
+    for (const line of terminalLines) {
+      if (terminalChannel !== 'all' && line.channel !== terminalChannel) continue
+      if (q !== '' && !line.text.toLowerCase().includes(q)) continue
+      const row = el('div')
+      row.style.cssText = line.channel === 'stderr' ? 'color:var(--tone-red)' : ''
+      terminalAppendText(row, line.text)
+      stream.appendChild(row)
+    }
+  }
+  renderLines()
+  terminalStreamEl = stream
+  stream.onscroll = () => {
+    const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 120
+    terminalAutoScroll = nearBottom
+    jumpBtn.style.display = nearBottom ? 'none' : 'inline-block'
+  }
+  const jumpBtn = el('button', 'hbtn', '↓ latest')
+  jumpBtn.title = 'jump to the newest output'
+  jumpBtn.style.cssText = 'position:absolute;right:12px;bottom:12px;display:none'
+  jumpBtn.onclick = () => { stream.scrollTop = stream.scrollHeight; terminalAutoScroll = true; jumpBtn.style.display = 'none' }
+  wrap.append(stream, jumpBtn)
+  body.appendChild(wrap)
+
+  // Status bar (dsh-web connecting/live/reconnecting/exited + bytes).
+  const statusRow = el('div', 'row')
+  statusRow.style.cssText = 'margin-top:8px;gap:10px;font-size:10px;color:var(--text-3);flex-wrap:wrap'
+  terminalStatusEl = el('span', 'artifact-kind', '')
+  const metaEl = el('span', '')
+  terminalMetaEl = metaEl
+  statusRow.append(terminalStatusEl, metaEl)
+  body.appendChild(statusRow)
+
+  // (Re)connect: idle terminal with a run selected (exit frames are
+  // replayable via after_seq, but an exited run is not re-streamed).
+  if (selectedId !== null && terminalStatus === 'idle' && terminalAbort === null) {
+    void terminalConnect(projectId, selectedId)
+  }
+  terminalPaintStatus()
+}
 
 /**
  * Chat transcript + built-in /research command executor. Mirrors the dsh web
