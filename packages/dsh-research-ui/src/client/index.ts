@@ -855,6 +855,17 @@ ${fullscreen ? '.panel { font-size:13px; }' : ''}
         writeTheme(host.dataset.theme)
         paintTheme()
         applyAccent()
+      } else if (/^[1-9]$/.test(event.key) && !typing && activeTab === 'chat') {
+        // dsh-web session navigation: Ctrl+1..9 selects the Nth session.
+        event.preventDefault()
+        const idx = Number(event.key) - 1
+        const target = chatSessions[idx]
+        if (target !== undefined) {
+          chatActiveId = target.id
+          chatDraft = ''
+          chatSyncActive()
+          rerender()
+        }
       } else if (event.key === 'Tab' && !typing && activeTab === 'chat' && chatSessions.length > 1) {
         // dsh-web session navigation: Ctrl+Tab cycles chat sessions.
         event.preventDefault()
@@ -1166,6 +1177,11 @@ function renderRuns(body: HTMLElement, p: Projection): void {
   if (jobs.length === 0) {
     body.appendChild(el('div', 'empty', 'No experiment runs yet.'))
     return
+  }
+  if ((p.jobs ?? []).length > 12) {
+    const notice = el('div', 'muted', `Showing the newest 12 of ${(p.jobs ?? []).length} runs.`)
+    notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
+    body.appendChild(notice)
   }
   // Bulk cancel bar when selecting.
   if (runsSelecting) {
@@ -3493,6 +3509,7 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
     const isWrite = msg.role === 'assistant' && /Manuscript \*\*[^*]+\*\* built/.test(msg.text)
     const isReview = msg.role === 'assistant' && msg.text.startsWith('Reviewer:')
     const isExport = msg.role === 'assistant' && /Release bundle \*\*[^*]+\*\* generated/.test(msg.text)
+    const isIdeas = msg.role === 'assistant' && /^IdeaCards:/m.test(msg.text)
     const isClaims = msg.role === 'assistant' && /^Claims:/m.test(msg.text)
     let structured: HTMLElement | null = null
     if (isStatus && searchQ === '') {
@@ -3698,6 +3715,29 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('exported'))
       card.appendChild(head)
+      const goPhase = el('button', 'hbtn', '→ open Phase tab')
+      goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
+      goPhase.onclick = () => {
+        activeTab = 'phase'
+        tabSave()
+        rerender()
+      }
+      card.appendChild(goPhase)
+      structured = card
+    } else if (isIdeas && searchQ === '') {
+      // dsh-web ideas card: count + jump to Phase (Idea panel).
+      const ideaLines = msg.text.split('\n').filter(l => /^- /.test(l.trim()))
+      const card = el('div')
+      card.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin:4px 0'
+      const head = el('div', 'row')
+      head.style.cssText = 'align-items:center;gap:8px'
+      head.appendChild(el('span', '', '💡'))
+      head.appendChild(el('span', 'pname', `${ideaLines.length} IdeaCard(s)`))
+      head.appendChild(el('span', 'grow'))
+      card.appendChild(head)
+      for (const l of ideaLines.slice(0, 4)) {
+        card.appendChild(el('div', 'muted', l.trim()))
+      }
       const goPhase = el('button', 'hbtn', '→ open Phase tab')
       goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
       goPhase.onclick = () => {
