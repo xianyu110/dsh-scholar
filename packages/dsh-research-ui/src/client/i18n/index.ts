@@ -8,6 +8,7 @@
 import { zh as commonZh, en as commonEn } from './locales/common'
 import { zh as standaloneZh, en as standaloneEn } from './locales/standalone'
 import { zh as shellZh, en as shellEn } from './locales/shell'
+import { zh as terminalZh, en as terminalEn } from './locales/terminal'
 
 export type Locale = 'zh' | 'en'
 
@@ -19,11 +20,13 @@ const DICTS: AllDicts = {
     common: commonZh as unknown as Record<string, string>,
     standalone: standaloneZh as unknown as Record<string, string>,
     shell: shellZh as unknown as Record<string, string>,
+    terminal: terminalZh as unknown as Record<string, string>,
   },
   en: {
     common: commonEn as unknown as Record<string, string>,
     standalone: standaloneEn as unknown as Record<string, string>,
     shell: shellEn as unknown as Record<string, string>,
+    terminal: terminalEn as unknown as Record<string, string>,
   },
 }
 

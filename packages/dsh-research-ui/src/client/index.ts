@@ -5117,7 +5117,7 @@ function terminalAppendText(target: HTMLElement, text: string): void {
 function terminalPaintStatus(): void {
   if (terminalStatusEl === null) return
   const statusMap: Record<string, string> = {
-    idle: 'idle', connecting: 'connecting…', live: 'live', reconnecting: 'reconnecting…', exited: 'exited',
+    idle: t('terminal', 'terminal.status.idle'), connecting: t('terminal', 'terminal.status.connecting'), live: t('terminal', 'terminal.status.live'), reconnecting: t('terminal', 'terminal.status.reconnecting'), exited: t('terminal', 'terminal.status.exited'),
   }
   terminalStatusEl.textContent = statusMap[terminalStatus] ?? terminalStatus
   terminalStatusEl.style.color = terminalStatus === 'live'
@@ -5126,7 +5126,7 @@ function terminalPaintStatus(): void {
   if (terminalMetaEl !== null) {
     const parts = [
       `seq ${terminalLastSeq}`,
-      `${terminalLines.length}/${TERMINAL_MAX_LINES} lines`,
+      t('terminal', 'terminal.lines', { shown: String(terminalLines.length), max: String(TERMINAL_MAX_LINES) }),
       `${terminalTotalBytes} byte(s)`,
     ]
     if (terminalDroppedBytes > 0) parts.push(`${terminalDroppedBytes} dropped`)
@@ -5170,7 +5170,7 @@ function terminalHandleData(event: string, payload: Record<string, unknown>, run
     if (terminalStreamEl !== null && terminalSearch === '') {
       const warn = el('div', 'term-gap')
       warn.style.cssText = 'color:var(--tone-amber);white-space:pre;font-weight:700'
-      warn.textContent = `— gap: ${terminalDroppedBytes} byte(s) dropped; retained from seq ${terminalRetainedSeq} —`
+      warn.textContent = t('terminal', 'terminal.gapWarning', { dropped: String(terminalDroppedBytes), retained: String(terminalRetainedSeq) })
       terminalStreamEl.appendChild(warn)
     }
     void runId
@@ -5272,7 +5272,7 @@ function renderTerminal(body: HTMLElement, p: Projection, projectId: string): vo
     terminalLoadSeq()
   }
   if (jobs.length === 0) {
-    body.appendChild(el('div', 'empty', 'No runs yet — jobs appear here with their live output.'))
+    body.appendChild(el('div', 'empty', t('terminal', 'terminal.empty')))
     return
   }
 
@@ -5282,7 +5282,7 @@ function renderTerminal(body: HTMLElement, p: Projection, projectId: string): vo
   // Run selector (dsh-web "Run" list).
   const runSelect = el('select', 'picker')
   runSelect.style.cssText = 'flex:1;min-width:180px;padding:5px 8px;font-size:11px'
-  runSelect.setAttribute('aria-label', 'select run')
+  runSelect.setAttribute('aria-label', t('terminal', 'terminal.selectRun'))
   for (const j of jobs) {
     const opt = el('option', '', `${j.kind ?? '?'} · ${j.status ?? '?'} · ${fmtId(j.job_id ?? '', 18)}`)
     opt.value = j.job_id ?? ''
@@ -5307,7 +5307,7 @@ function renderTerminal(body: HTMLElement, p: Projection, projectId: string): vo
   // Channel filter (dsh-web All/stdout/stderr).
   const channelChips = el('div')
   channelChips.style.cssText = 'display:flex;gap:4px'
-  const CHANNELS: Array<['all' | 'stdout' | 'stderr', string]> = [['all', 'All'], ['stdout', 'stdout'], ['stderr', 'stderr']]
+  const CHANNELS: Array<['all' | 'stdout' | 'stderr', string]> = [['all', t('terminal', 'terminal.channel.all')], ['stdout', t('terminal', 'terminal.channel.stdout')], ['stderr', t('terminal', 'terminal.channel.stderr')]]
   for (const [key, label] of CHANNELS) {
     const chip = el('button', 'hbtn', label)
     const active = terminalChannel === key
@@ -5328,18 +5328,18 @@ function renderTerminal(body: HTMLElement, p: Projection, projectId: string): vo
   // Search within retained output.
   const searchInput = document.createElement('input')
   searchInput.type = 'text'
-  searchInput.placeholder = '🔍 filter output…'
+  searchInput.placeholder = t('terminal', 'terminal.filterPlaceholder')
   searchInput.value = terminalSearch
   searchInput.style.cssText = 'flex:1;min-width:140px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 8px;font:11px/1.4 system-ui,sans-serif;outline:none'
   searchInput.oninput = () => { terminalSearch = searchInput.value; rerender() }
   toolbar.appendChild(searchInput)
 
   // Actions (dsh-web copy / download).
-  const copyAll = el('button', 'hbtn', '⧉ copy')
-  copyAll.title = 'copy visible output'
+  const copyAll = el('button', 'hbtn', `⧉ ${t('terminal', 'terminal.action.copyVisible')}`)
+  copyAll.title = t('terminal', 'terminal.action.copyVisible')
   copyAll.onclick = () => copyText(terminalLines.map(l => l.text).join(''))
-  const download = el('button', 'hbtn', '⬇ log')
-  download.title = 'download the full retained log'
+  const download = el('button', 'hbtn', `⬇ ${t('terminal', 'terminal.action.downloadLog')}`)
+  download.title = t('terminal', 'terminal.action.downloadLog')
   download.onclick = () => {
     const blob = new Blob([terminalLines.map(l => l.text).join('')], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
@@ -5380,7 +5380,7 @@ function renderTerminal(body: HTMLElement, p: Projection, projectId: string): vo
     terminalAutoScroll = nearBottom
     jumpBtn.style.display = nearBottom ? 'none' : 'inline-block'
   }
-  const jumpBtn = el('button', 'hbtn', '↓ latest')
+  const jumpBtn = el('button', 'hbtn', t('terminal', 'terminal.action.jumpLatest'))
   jumpBtn.title = 'jump to the newest output'
   jumpBtn.style.cssText = 'position:absolute;right:12px;bottom:12px;display:none'
   jumpBtn.onclick = () => { stream.scrollTop = stream.scrollHeight; terminalAutoScroll = true; jumpBtn.style.display = 'none' }
