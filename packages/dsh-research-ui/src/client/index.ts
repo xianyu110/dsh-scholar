@@ -1969,6 +1969,19 @@ async function renderArtifacts(body: HTMLElement, projectId: string): Promise<vo
       row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
       row.title = 'click to preview · double-click for details'
       row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
+      // dsh-web context menu: preview / details / copy id.
+      row.oncontextmenu = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
+        if (root === null || artifact.artifact_id === undefined) return
+        const aid = artifact.artifact_id
+        openContextMenu(root, event.clientX, event.clientY, [
+          { label: '⧉ Preview', onPick: () => { void previewArtifact(aid) } },
+          { label: '⧉ Details', onPick: () => openArtifactDetailModal(root, artifact) },
+          { label: 'Copy artifact ID', hint: aid, onPick: () => copyText(aid) },
+        ])
+      }
       row.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
@@ -5139,6 +5152,7 @@ function renderSidebar(
         const ctxItems: ContextMenuItem[] = [
           { label: 'Open', hint: p.status ?? '', onPick: () => onPick(id) },
           { label: '✎ Rename', onPick: () => openRenameModal(root, id, p.name ?? '', () => rerender()) },
+          { label: 'Copy name', hint: p.name ?? '', onPick: () => copyText(p.name ?? id) },
         ]
         if (isArchived) {
           ctxItems.push({
