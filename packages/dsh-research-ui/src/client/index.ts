@@ -5891,6 +5891,17 @@ async function renderChat(body: HTMLElement, projectId: string): Promise<void> {
       if (budgetMatch !== null) {
         grid.appendChild(chatFieldCell('Budget', `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
       }
+      // dsh-web depth: pending gates get a one-click jump to the Gates tab.
+      if (pending !== 'none') {
+        const goGates = el('button', 'hbtn', '⛩️ open Gates tab')
+        goGates.style.cssText = 'grid-column:1 / -1;align-self:flex-start'
+        goGates.onclick = () => {
+          activeTab = 'gates'
+          tabSave()
+          rerender()
+        }
+        grid.appendChild(goGates)
+      }
       structured = grid
     } else if (isSurvey && searchQ === '') {
       // dsh-web survey result card: snapshot + dedup + top hits.
