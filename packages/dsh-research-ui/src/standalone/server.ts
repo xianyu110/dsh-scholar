@@ -41,6 +41,31 @@ import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 const DEFAULT_PORT = 18610
 const DEFAULT_KERNEL_PORT = 17413
 
+/** Models this Scholar surface may route the research agent onto. Mirrors the
+ * DSH harness advisory catalog (llm-deepseek): ''/auto = agent default. */
+const MODEL_CATALOG = ['deepseek-v4-flash', 'deepseek-v4-pro']
+
+const MODEL_FILE = 'model.json'
+
+/** Current model preference ('' = agent default / no override). */
+function readModelPreference(dataDir: string): string {
+  try {
+    const raw = readFileSync(join(dataDir, MODEL_FILE), 'utf8')
+    const parsed = JSON.parse(raw) as { model?: unknown }
+    return typeof parsed.model === 'string' ? parsed.model : ''
+  } catch {
+    return ''
+  }
+}
+
+/** Persist the model preference (0600, never logged). */
+function writeModelPreference(dataDir: string, model: string): void {
+  mkdirSync(dataDir, { recursive: true })
+  const file = join(dataDir, MODEL_FILE)
+  writeFileSync(file, JSON.stringify({ model, updated_at: new Date().toISOString() }, null, 2), { mode: 0o600 })
+  chmodSync(file, 0o600)
+}
+
 interface StandaloneOptions {
   host: string
   port: number
@@ -458,6 +483,66 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           sendJson(res, 200, { ok: true })
         } else {
           sendJson(res, 401, { ok: false, error: 'invalid token' })
+        }
+        return
+      }
+
+      // Model preference: the research agent's model seat. The standalone
+      // persists the choice under the data dir (`model.json`, 0600) and
+      // exposes it to the DSH-side plugin via the same file, so a selection
+      // made in this UI is what the research agent uses for the primary role.
+      // 'auto' (or empty) means the agent default — no override.
+      if (method === 'GET' && url.pathname === '/api/model') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            return
+          }
+        }
+        sendJson(res, 200, {
+          ok: true,
+          model: readModelPreference(options.dataDir),
+          models: MODEL_CATALOG,
+        })
+        return
+      }
+      if (method === 'PUT' && url.pathname === '/api/model') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            return
+          }
+        }
+        if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
+          return
+        }
+        const { body, tooLarge } = await readBody(req)
+        if (tooLarge) {
+          sendJson(res, 413, { ok: false, error: 'payload too large' })
+          return
+        }
+        let model = ''
+        try {
+          const parsed = JSON.parse(body) as { model?: unknown }
+          model = typeof parsed.model === 'string' ? parsed.model.trim() : ''
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad request' })
+          return
+        }
+        if (model !== '' && model !== 'auto' && !MODEL_CATALOG.includes(model)) {
+          sendJson(res, 422, { ok: false, error: `unknown model '${model}'` })
+          return
+        }
+        try {
+          writeModelPreference(options.dataDir, model === 'auto' ? '' : model)
+          sendJson(res, 200, { ok: true, model: model === 'auto' ? '' : model })
+        } catch {
+          sendJson(res, 500, { ok: false, error: 'model preference write failed' })
         }
         return
       }

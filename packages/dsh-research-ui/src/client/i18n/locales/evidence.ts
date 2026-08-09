@@ -23,6 +23,15 @@ export const zh = {
   'evidence.budget.constraints': '约束',
   'evidence.budget.execution': '执行',
   'evidence.budget.integrity': '完整性',
+  'evidence.showingNewestClaims': '显示最新 8 个(共 {count} 个主张)— 其余请使用 🌐 全局搜索。',
+  'evidence.showingNewestEvidence': '显示最新 8 条(共 {count} 条证据)— 其余请使用 🌐 全局搜索。',
+  'evidence.claimRowTitle': '双击查看主张详情',
+  'evidence.evidenceRowTitle': '双击查看证据详情',
+  'evidence.ciLine': 'CI [{lo}, {hi}] · n={n} · {method} · {runs} 个运行 · {refs} 个产物引用',
+  'evidence.effectLine': '效应 {eff}  (0 ─────────── CI 区间)',
+  'evidence.apiRequests': 'API 请求',
+  'evidence.budgetExceeded': '⚠️ 预算限额已超出 — 项目处于 BLOCKED_GATE,直到人工 Budget Gate 批准。',
+  'evidence.detailsModal': '📊 证据详情',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -45,4 +54,13 @@ export const en: Record<keyof typeof zh, string> = {
   'evidence.budget.constraints': 'Constraints',
   'evidence.budget.execution': 'Execution',
   'evidence.budget.integrity': 'Integrity',
+  'evidence.showingNewestClaims': 'Showing the newest 8 of {count} claims — use 🌐 global search for the rest.',
+  'evidence.showingNewestEvidence': 'Showing the newest 8 of {count} evidence items — use 🌐 global search for the rest.',
+  'evidence.claimRowTitle': 'double-click for claim details',
+  'evidence.evidenceRowTitle': 'double-click for evidence details',
+  'evidence.ciLine': 'CI [{lo}, {hi}] · n={n} · {method} · {runs} run(s) · {refs} artifact ref(s)',
+  'evidence.effectLine': 'effect {eff}  (0 ─────────── CI bounds)',
+  'evidence.apiRequests': 'API requests',
+  'evidence.budgetExceeded': '⚠️ Budget limit exceeded — project is BLOCKED_GATE until a human Budget Gate approves.',
+  'evidence.detailsModal': '📊 Evidence details',
 }

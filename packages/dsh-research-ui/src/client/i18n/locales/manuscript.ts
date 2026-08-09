@@ -24,6 +24,7 @@ export const zh = {
   'manuscript.builds.more': '… 还有 {count} 条',
   'manuscript.pdf.title': 'PDF 预览',
   'manuscript.pdf.download': '⬇ 下载 PDF',
+  'manuscript.buildMeta': 'rev {rev} · {build}',
 }
 
 export const en = {
@@ -47,4 +48,5 @@ export const en = {
   'manuscript.builds.more': '… and {count} more',
   'manuscript.pdf.title': 'PDF preview',
   'manuscript.pdf.download': '⬇ Download PDF',
+  'manuscript.buildMeta': 'rev {rev} · {build}',
 }

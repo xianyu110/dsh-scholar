@@ -10,6 +10,7 @@ import { defineTool, type InferArgs, type InferValue, type ObjectValueSchemaSpec
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
+import { selectSkillPacks, selectedSkillNames } from './skills.js'
 
 /** Render a canonical tool value as text blocks. */
 export function renderText(value: unknown): ContentBlock[] {
@@ -57,6 +58,32 @@ interface ResearchToolDef {
   output: ObjectValueSchemaSpec
   /** Args are the validated parameter values; returns the canonical tool value. */
   execute(args: Record<string, any>, ctx: ResearchToolContext, sessionId: string | undefined, exec: { agent?: { id: string }; signal: AbortSignal }): Promise<Record<string, unknown>>
+}
+
+/**
+ * Build a one-version deprecation alias for a canonical tool
+ * (reconstruction-contracts.md §17): the alias keeps the old user-facing
+ * name registered — never "unknown tool" — but its catalog description marks
+ * it DEPRECATED with the canonical name and every response carries
+ * deprecation metadata. Execution proxies to the canonical implementation so
+ * behavior (and ACL, see acl.ts `TOOL_ALIASES`) stays identical.
+ */
+export function deprecatedAlias(canonical: ResearchToolDef, alias: string): ResearchToolDef {
+  return {
+    name: alias,
+    description: `DEPRECATED — use \`${canonical.name}\` instead (canonical name, reconstruction-contracts.md §17). Same parameters and behavior; responses carry deprecation metadata.`,
+    parameters: canonical.parameters,
+    output: canonical.output,
+    execute: async (args, ctx_, sessionId, exec) => {
+      const result = await canonical.execute(args, ctx_, sessionId, exec)
+      return {
+        ...result,
+        deprecated: true,
+        canonical: canonical.name,
+        notice: `tool ${alias} is deprecated; use ${canonical.name} instead`,
+      }
+    },
+  }
 }
 
 /** Build one research tool bound to the shared tool context. */
@@ -147,7 +174,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
             mode: args.mode,
             session_id: sessionId ?? null,
           })
-          return { project }
+          // §9: deterministic domain/venue -> skill pack selection from the Brief.
+          const selection = selectSkillPacks(project.brief)
+          return { project, skills: { selected: selectedSkillNames(selection), note: 'deterministic skill pack selection from the Research Brief (reconstruction §9)' } }
         }
         case 'get': {
           const projectId = await resolveProjectId(client, sessionId, args.project_id)
@@ -897,8 +926,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }))
 
-  ctx.tools.register(researchTool({
-    name: 'claim_verify',
+  const claimVerifyDef: ResearchToolDef = {
+    name: 'claim_verify_request',
     description: 'Verify a Claim against EvidenceItems (deterministic rules: supported when all CIs exclude zero, contradicted on negative effects, else inconclusive). Status history is append-only.',
     parameters: {
       claim_id: { type: 'string', required: true },
@@ -918,10 +947,14 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, claim }
     },
-  }))
+  }
+  ctx.tools.register(researchTool(claimVerifyDef))
+  // §17: one-version deprecation alias — old name stays callable, never
+  // "unknown tool"; responses and catalog carry deprecation metadata.
+  ctx.tools.register(researchTool(deprecatedAlias(claimVerifyDef, 'claim_verify')))
 
-  ctx.tools.register(researchTool({
-    name: 'analysis_build',
+  const analysisRequestDef: ResearchToolDef = {
+    name: 'analysis_request',
     description: 'Deterministic statistical analysis over succeeded formal runs (design §4.7, §11.3): aggregates metrics from RunManifest artifacts in CAS, computes mean/sd, percentile bootstrap 95% CI and effect size vs baseline, and registers the analysis artifact. Manuscript numbers must come from these artifacts.',
     parameters: {
       project_id: OPT_STRING,
@@ -935,7 +968,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const analysis = await client.computeAnalysis(projectId, args.contract_id, args.metric)
       return { ok: true, analysis }
     },
-  }))
+  }
+  ctx.tools.register(researchTool(analysisRequestDef))
+  // §17: one-version deprecation alias (see claim_verify above).
+  ctx.tools.register(researchTool(deprecatedAlias(analysisRequestDef, 'analysis_build')))
 
   // ── manuscript (Writer / Reviewer) ───────────────────────────────────────
 
@@ -969,8 +1005,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }))
 
-  ctx.tools.register(researchTool({
-    name: 'release_bundle',
+  const releaseBundleRequestDef: ResearchToolDef = {
+    name: 'release_bundle_request',
     description: 'Generate a private Release Bundle (manifest, artifacts inventory, reproducibility notes). This is NOT publication: the Release Gate remains human and defaults to unapproved.',
     parameters: { project_id: OPT_STRING },
     output: okSchema,
@@ -980,7 +1016,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const bundle = await client.releaseBundle(projectId)
       return { ok: true, bundle }
     },
-  }))
+  }
+  ctx.tools.register(researchTool(releaseBundleRequestDef))
+  // §17: one-version deprecation alias (see claim_verify above).
+  ctx.tools.register(researchTool(deprecatedAlias(releaseBundleRequestDef, 'release_bundle')))
 }
 
 

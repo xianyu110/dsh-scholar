@@ -20,6 +20,9 @@ export const zh = {
   'terminal.gapWarning': '— 缺口:已丢弃 {dropped} 字节;保留自 seq {retained} —',
   'terminal.exitLine': '— 退出{code}{signal}{truncated} · {bytes} 字节{dropped} —',
   'terminal.lines': '{shown}/{max} 行',
+  'terminal.meta': 'seq {seq} · {lines} · {bytes} 字节{dropped}{truncated}{exit}',
+  'terminal.streamAria': '运行终端输出',
+  'terminal.jumpLatestTitle': '跳到最新输出',
 } as const
 
 export type TerminalKey = keyof typeof zh
@@ -42,4 +45,7 @@ export const en: Record<TerminalKey, string> = {
   'terminal.gapWarning': '— gap: {dropped} byte(s) dropped; retained from seq {retained} —',
   'terminal.exitLine': '— exit{code}{signal}{truncated} · {bytes} byte(s){dropped} —',
   'terminal.lines': '{shown}/{max} lines',
+  'terminal.meta': 'seq {seq} · {lines} · {bytes} byte(s){dropped}{truncated}{exit}',
+  'terminal.streamAria': 'run terminal output',
+  'terminal.jumpLatestTitle': 'jump to the newest output',
 }

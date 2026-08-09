@@ -3,8 +3,9 @@
 # runner materialization (hash-verified) → texlive container (pdflatex×3 +
 # bibtex) → PDF/log/diagnostics artifacts → tex_builds row finalized.
 #
-# Needs: docker, the fixed TeX image (texlive/texlive:latest), a built
-# repo (packages/*/lib), and a kernel + docker runner on random ports.
+# Needs: docker, the fixed TeX image pinned in configs/runner-profiles/
+# images.lock.json (texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4),
+# a built repo (packages/*/lib), and a kernel + docker runner on random ports.
 # SKIPs with exit 0 when docker or the image is unavailable so the CI job
 # stays cheap on machines without the image.
 set -eu
@@ -146,12 +147,22 @@ ok "diagnostics entries: $DIAGS"
 
 # 6. §7 shell-escape negative: \\write18 must be inert (-no-shell-escape,
 # network none, read-only rootfs). If it executed, /outputs/PWNED would exist.
+# This build deliberately OMITS image_digest so the kernel must inject the
+# locked texlive digest from images.lock (never a tag / `latest`); the runner
+# then pulls exactly that pinned image.
 DOC2=$(curl -sf -X POST "$API/v1/projects/$PROJ/manuscript-drafts" -H 'content-type: application/json' -d '{}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document_id))")
 V2=$(curl -sf "$API/v1/documents/$DOC2/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const t=JSON.parse(d);const f=t.files.find(x=>x.path==='paper.tex');console.log(f?f.version:'')})")
 node -e "console.log(JSON.stringify({path:'paper.tex',content:'\\\\documentclass{article}\\n\\\\immediate\\\\write18{touch /outputs/PWNED}\\n\\\\begin{document}hi\\\\end{document}\\n',expected_version:$V2}))" > "$WORK/pwn.json"
 curl -sf -X PUT "$API/v1/documents/$DOC2/file" -H 'content-type: application/json' -d "@$WORK/pwn.json" > /dev/null
 REV2=$(curl -sf "$API/v1/documents/$DOC2/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document.revision))")
-BUILD2=$(curl -sf -X POST "$API/v1/documents/$DOC2/builds" -H 'content-type: application/json' -d "{\"expected_document_revision\":$REV2,\"image_digest\":\"$IMAGE\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.build.build_id)})")
+BUILD2_RESP=$(curl -sf -X POST "$API/v1/documents/$DOC2/builds" -H 'content-type: application/json' -d "{\"expected_document_revision\":$REV2}")
+BUILD2=$(printf '%s' "$BUILD2_RESP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.build.build_id)})")
+INJECTED=$(printf '%s' "$BUILD2_RESP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.job.payload||{}).image_digest||'')})")
+if [ "$INJECTED" = "$IMAGE" ]; then
+  ok "no image_digest submitted -> kernel injected the locked texlive digest ($INJECTED)"
+else
+  fail "kernel must inject the images.lock texlive digest (got '$INJECTED', expected '$IMAGE')"
+fi
 S2=""
 for _ in $(seq 1 120); do
   S2=$(curl -sf "$API/v1/documents/$DOC2/builds/$BUILD2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")

@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
+import { selectedSkillNames } from './skills.js'
 
 export interface CommandContext {
   client: ResearchClient
@@ -26,10 +27,13 @@ function parseSub(rawInput: string): { sub: string; rest: string } {
   return { sub: trimmed.slice(0, space), rest: trimmed.slice(space + 1).trim() }
 }
 
+/** Extract a JSON object literal from anywhere in the remainder: the JSON
+ * may be leading (`/research contract {...}`), trailing (`/research new
+ * name {...}`) or absent. Non-JSON words stay in `positional`. */
 function jsonArg(rest: string): { json: string; positional: string } {
-  const match = /^(\{.*\})\s*(.*)$/s.exec(rest)
+  const match = /^([^{]*)(\{.*\})\s*(.*)$/s.exec(rest)
   if (match === null) return { json: '', positional: rest }
-  return { json: match[1] ?? '', positional: match[2] ?? '' }
+  return { json: match[2] ?? '', positional: `${match[1] ?? ''}${match[3] ?? ''}`.trim() }
 }
 
 function briefFromJson(json: string): Record<string, unknown> | null {
@@ -46,6 +50,28 @@ function briefFromJson(json: string): Record<string, unknown> | null {
 function fmt(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
+
+/** §9: every /research subcommand below has a REAL handler — this text is
+ * only the help/documentation payload, never a catch-all for unimplemented
+ * subcommands (help|list|status|gates|jobs|claims are all implemented). */
+const RESEARCH_HELP = 'DSH Research OS — /research subcommands:\n'
+  + '  help                  this help text\n'
+  + '  new <name> [json]     create project + Scope Gate\n'
+  + '  list                  list all research projects (kernel data)\n'
+  + '  status [project_id]   phase, gates, jobs, budget, next actions\n'
+  + '  gates [project_id]    pending/decided gates of the project\n'
+  + '  jobs [project_id]     durable runner jobs of the project\n'
+  + '  claims [project_id]   claim ledger state (counts + claim events)\n'
+  + '  survey <query>        multi-source search + frozen CorpusSnapshot\n'
+  + '  ideas                 list IdeaCards (generate via idea_create tool)\n'
+  + '  reproduce [json]      prepare + run Baseline reproduction (isolated)\n'
+  + '  contract <json>       pre-register an ExperimentContract\n'
+  + '  run [kind] [json]     submit a durable runner job\n'
+  + '  evidence <json>       ingest a statistical EvidenceItem\n'
+  + '  write                 build manuscript from the read-only ledger\n'
+  + '  review                deterministic reviewer checks + Release Gate status\n'
+  + '  export                private Release Bundle (not publication)\n'
+  + '  release               create the human Release Gate'
 
 /** Register the `/research` command family. */
 export function registerResearchCommands(ctx: Context, commandCtx: CommandContext): void {
@@ -92,9 +118,12 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               summary: 'Approve the research scope, data policy, budget and target venue.',
               session_id: sessionId,
             })
+            // §9: deterministic domain/venue -> skill packs from the Brief.
+            const skills = selectedSkillNames(brief)
             const text = `Research project created: **${project.project_id}** (${project.name})\n\n`
               + `Status: ${project.status}. Pending **Scope Gate** ${gate.gate_id}.\n\n`
-              + `Approve it (human) via the research_gate tool: action=decide gate_id=${gate.gate_id} decision=approved.`
+              + `Skills: ${skills.join(', ')} (deterministic selection from the Brief, §9).\n\n`
+              + `Humans approve gates in the authenticated Web panel; agents only REQUEST gates via the research_gate_request tool (action=create). There is no agent gate-decision tool.`
             if (unattended) {
               return { kind: 'success' as const, text: `${text}\n\n[unattended] project parked at Scope Gate (BLOCKED_GATE on timeout); no blocking question asked.` }
             }
@@ -235,7 +264,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               result: (data.result ?? {}) as Record<string, unknown>,
               uncertainty: String(data.uncertainty ?? ''),
             })
-            return { kind: 'success' as const, text: `EvidenceItem **${item.evidence_id}** ingested.\n\nNext: bind claims with claim_verify.` }
+            return { kind: 'success' as const, text: `EvidenceItem **${item.evidence_id}** ingested.\n\nNext: bind claims with claim_verify_request.` }
           }
 
           case 'write': {
@@ -285,23 +314,48 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             return { kind: 'success' as const, text: `Release Gate **${gate.gate_id}** created and left **pending** (human only). Nothing is published automatically.` }
           }
 
+          case 'help':
+            return { kind: 'success' as const, text: RESEARCH_HELP }
+
+          case 'list': {
+            const projects = await client.listProjects()
+            const text = projects.length === 0
+              ? 'No research projects yet. Create one with /research new <name>.'
+              : `Research projects (${projects.length}):\n${projects.map(p => `  - ${p.project_id} [${p.status}] ${p.name}`).join('\n')}`
+            return { kind: 'success' as const, text }
+          }
+
+          case 'gates': {
+            const project = await requireProject(client, sessionId, rest.trim() || undefined)
+            const gates = await client.listGates(project.project_id)
+            const text = gates.length === 0
+              ? `No gates for ${project.project_id}. Request one with the research_gate_request tool (agents cannot decide gates).`
+              : `Gates for ${project.project_id}:\n${gates.map(g => `  - ${g.gate_id} [${g.type}] ${g.status} — ${g.title}`).join('\n')}\n\nDecisions are human-only (authenticated Web panel).`
+            return { kind: 'success' as const, text }
+          }
+
+          case 'jobs': {
+            const project = await requireProject(client, sessionId, rest.trim() || undefined)
+            const jobs = await client.listJobs(project.project_id)
+            const text = jobs.length === 0
+              ? `No jobs for ${project.project_id} yet. Submit one with /research run or the experiment_submit tool.`
+              : `Jobs for ${project.project_id} (${jobs.length}):\n${jobs.map(j => `  - ${j.job_id} [${j.kind}] ${j.status}${j.contract_id !== null ? ` contract=${j.contract_id}` : ''}`).join('\n')}`
+            return { kind: 'success' as const, text }
+          }
+
+          case 'claims': {
+            const project = await requireProject(client, sessionId, rest.trim() || undefined)
+            const projection = await client.projectProjection(project.project_id)
+            const events = await client.listEvents(project.project_id)
+            const claimEvents = events.filter(e => String(e.kind ?? '').startsWith('claim.'))
+            const text = `Claims ledger for ${project.project_id}: ${projection.counts.claims} claim(s) recorded\n\n`
+              + `Claim verification events:\n${claimEvents.length === 0 ? '  none yet' : claimEvents.map(e => `  - ${e.event_id} ${e.kind} ${fmt(e.payload ?? {})}`).join('\n')}\n\n`
+              + 'Claim details are read via the claim ledger in the Web UI; agents create drafts with claim_create and verify via claim_verify_request.'
+            return { kind: 'success' as const, text }
+          }
+
           default:
-            return {
-              kind: 'success' as const,
-              text: 'DSH Research OS — /research subcommands:\n'
-                + '  new <name> [json]     create project + Scope Gate\n'
-                + '  status [project_id]   phase, gates, jobs, budget, next actions\n'
-                + '  survey <query>        multi-source search + frozen CorpusSnapshot\n'
-                + '  ideas                 list IdeaCards (generate via idea_create tool)\n'
-                + '  reproduce [json]      prepare + run Baseline reproduction (isolated)\n'
-                + '  contract <json>       pre-register an ExperimentContract\n'
-                + '  run [kind] [json]     submit a durable runner job\n'
-                + '  evidence <json>       ingest a statistical EvidenceItem\n'
-                + '  write                 build manuscript from the read-only ledger\n'
-                + '  review                deterministic reviewer checks + Release Gate status\n'
-                + '  export                private Release Bundle (not publication)\n'
-                + '  release               create the human Release Gate',
-            }
+            return { kind: 'success' as const, text: RESEARCH_HELP }
         }
       } catch (error) {
         return { kind: 'error' as const, text: `research: ${(error as Error).message}` }

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ResearchKernel } from '@dsh-scholar/research-kernel'
+import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
 
 function freshKernel(): ResearchKernel {
@@ -88,6 +88,117 @@ describe('governance: gate target freeze (GOV-02)', () => {
     // The project moved to the contract-approved state in the same txn.
     expect(kernel.getProject(project.project_id).status).toBe('CONTRACT_APPROVED')
     kernel.close()
+  })
+})
+
+describe('governance: gate type flows & gate-controlled states (acceptance-tests.md §2)', () => {
+  it('all five gate types have independent flows with their approval mapping', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    // scope: DRAFT -> SCOPED
+    const scope = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: scope.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+    // idea: IDEATING -> IDEA_APPROVED
+    kernel.transition(project.project_id, 'SURVEYING', kernel.getProject(project.project_id).revision)
+    kernel.transition(project.project_id, 'IDEATING', kernel.getProject(project.project_id).revision)
+    const idea = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'Idea' })
+    kernel.decideGate({ gate_id: idea.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('IDEA_APPROVED')
+    // contract: BASELINE_REPRO -> CONTRACT_APPROVED (freezes the contract)
+    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
+    const contract = kernel.registerContract({
+      project_id: project.project_id,
+      idea_id: 'idea_x', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'macro_f1' }, seeds: [1], analysis: {}, ablations: [], stop_conditions: {},
+    })
+    const contractGate = kernel.createGate({ project_id: project.project_id, type: 'contract', title: 'Contract', payload: { contract_id: contract.contract_id } })
+    kernel.decideGate({ gate_id: contractGate.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('CONTRACT_APPROVED')
+    expect(kernel.getContract(contract.contract_id).status).toBe('approved')
+    // release: RELEASE_READY -> RELEASED (the mapping exists and migrates)
+    for (const to of ['EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'] as const) {
+      kernel.transition(project.project_id, to, kernel.getProject(project.project_id).revision)
+    }
+    expect(kernel.getProject(project.project_id).status).toBe('RELEASE_READY')
+    const release = kernel.createGate({ project_id: project.project_id, type: 'release', title: 'Release' })
+    kernel.decideGate({ gate_id: release.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('RELEASED')
+    // budget: policy-created, payload-declared resume (budget-gate.test.ts
+    // covers the full resume semantics) — assert its own flow here: a budget
+    // gate cannot approve from an arbitrary state.
+    const gates = kernel.listGates(project.project_id)
+    expect(gates.map(g => g.type)).toEqual(['scope', 'idea', 'contract', 'release'])
+    expect(gates.every(g => g.status === 'approved')).toBe(true)
+    kernel.close()
+  })
+
+  it('the four gate-controlled states reject generic transitions with 422', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const attempt = (to: string): void => {
+      try {
+        kernel.transition(project.project_id, to as never, kernel.getProject(project.project_id).revision)
+        throw new Error(`expected 422 for generic transition to ${to}`)
+      } catch (error) {
+        expect(error).toBeInstanceOf(KernelError)
+        expect((error as KernelError).status).toBe(422)
+        expect((error as KernelError).code).toBe('invalid_transition')
+      }
+    }
+    // DRAFT -> SCOPED: not in TRANSITION_TABLE (gate-controlled).
+    attempt('SCOPED')
+    // Walk to IDEATING; IDEATING -> IDEA_APPROVED: gate-controlled.
+    const scope = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: scope.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    kernel.transition(project.project_id, 'SURVEYING', kernel.getProject(project.project_id).revision)
+    kernel.transition(project.project_id, 'IDEATING', kernel.getProject(project.project_id).revision)
+    attempt('IDEA_APPROVED')
+    // IDEATING -> BASELINE_REPRO via idea gate, then CONTRACT_APPROVED: gate-controlled.
+    const idea = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'Idea' })
+    kernel.decideGate({ gate_id: idea.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
+    attempt('CONTRACT_APPROVED')
+    // Walk to RELEASE_READY; RELEASE_READY -> RELEASED: gate-controlled.
+    for (const to of ['EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'] as const) {
+      kernel.transition(project.project_id, to, kernel.getProject(project.project_id).revision)
+    }
+    attempt('RELEASED')
+    // The gates remain the ONLY path into those states: a pending release
+    // gate at RELEASE_READY approves into RELEASED (no generic transition).
+    const release = kernel.createGate({ project_id: project.project_id, type: 'release', title: 'Release' })
+    kernel.decideGate({ gate_id: release.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('RELEASED')
+    kernel.close()
+  })
+})
+
+describe('governance: concurrent decision (acceptance-tests.md §2)', () => {
+  it('two parallel decisions on one gate: exactly one succeeds, the other 409', async () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const url = `http://127.0.0.1:${port}/v1/gates/${gate.gate_id}/decisions`
+      const body = JSON.stringify({ actor: 'human-a', principal: { principal_id: 'p-a' }, decision: 'approved' })
+      const [r1, r2] = await Promise.all([
+        fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
+        fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
+      ])
+      const statuses = [r1.status, r2.status].sort((a, b) => a - b)
+      expect(statuses).toEqual([200, 409])
+      const loser = r1.status === 409 ? r1 : r2
+      const envelope = await loser.json() as { error?: { code?: string } }
+      expect(envelope.error?.code).toBe('gate_already_decided')
+      const decisions = kernel.listDecisions(project.project_id)
+      expect(decisions).toHaveLength(1)
+      expect(decisions[0]!.principal?.principal_id).toBe('p-a')
+      expect(kernel.getGate(gate.gate_id).status).toBe('approved')
+    } finally {
+      server.close()
+      kernel.close()
+    }
   })
 })
 

@@ -22,6 +22,10 @@ export const zh = {
   'artifacts.detail.preview': '⧉ 预览',
   'artifacts.detail.openTab': '⧉ 在新标签页打开',
   'artifacts.detail.openTab.title': '在新浏览器标签页中打开该产物',
+  'artifacts.kindAll': '全部 ({count})',
+  'artifacts.downloadedToast': '⬇ 已下载 {count} 个产物',
+  'artifacts.detailModal': '📦 产物详情',
+  'artifacts.previewDisabled': '⚠️ 出于安全原因,HTML 预览已禁用(design §15.4)— 请下载文件。',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -44,4 +48,8 @@ export const en: Record<keyof typeof zh, string> = {
   'artifacts.detail.preview': '⧉ preview',
   'artifacts.detail.openTab': '⧉ open in tab',
   'artifacts.detail.openTab.title': 'open the artifact in a new browser tab',
+  'artifacts.kindAll': 'All ({count})',
+  'artifacts.downloadedToast': '⬇ Downloaded {count} artifact(s)',
+  'artifacts.detailModal': '📦 Artifact details',
+  'artifacts.previewDisabled': '⚠️ HTML preview is disabled for security (design §15.4) — download the file instead.',
 }

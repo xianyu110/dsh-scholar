@@ -18,16 +18,16 @@ import type { Context } from 'cordis'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
 import * as SkillLocal from '@deepseek-ai/dsh-skill-local'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ResearchClient } from '@dsh-scholar/research-client'
 import { DiskCache } from '@dsh-scholar/scholar-connectors'
 import { KernelSidecar, resolveDshHome } from './sidecar.js'
 import { registerResearchTools } from './tools.js'
 import { registerResearchCommands } from './commands.js'
 import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
+import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 
 export const name = 'research-plugin'
 
@@ -57,8 +57,40 @@ declare module 'cordis' {
       roles: RoleRegistry
       endpoint: string
       projectIdFor(sessionId: string): Promise<string | null>
+      /** Deterministic Brief → skill pack selection (acceptance-tests.md §9). */
+      skillsFor(brief: { domain?: string | null; target_venue?: string | null } | null | undefined): SkillSelection
     }
   }
+}
+
+/** Model preference file written by the standalone UI (/api/model).
+ *  Same path contract as packages/dsh-research-ui/src/standalone/server.ts. */
+const STANDALONE_MODEL_FILE = 'model.json'
+
+function standaloneModelPreference(): string {
+  try {
+    const base = process.env.DSH_SCHOLAR_STANDALONE_DATA ?? join(homedir(), '.dsh-scholar-standalone', 'research-ui-standalone')
+    const raw = readFileSync(join(base, STANDALONE_MODEL_FILE), 'utf8')
+    const parsed = JSON.parse(raw) as { model?: unknown }
+    return typeof parsed.model === 'string' ? parsed.model : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * §8.5 per-role model routing for spawned panel children. Resolution order:
+ * explicit config.models[role] → standalone UI preference (primary role
+ * only) → undefined (agent default).
+ */
+function modelForRole(config: ResearchPluginConfig, role: string): string | undefined {
+  const explicit = config.models?.[role]
+  if (explicit !== undefined && explicit !== '') return explicit
+  if (role === 'pi') {
+    const preferred = standaloneModelPreference()
+    if (preferred !== '') return preferred
+  }
+  return undefined
 }
 
 export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
@@ -91,10 +123,14 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
       const project = await client.getProjectBySession(sessionId).catch(() => null)
       return project?.project_id ?? null
     },
+    skillsFor: selectSkillPacks,
   })
 
   // Research tool surface (design §4.1) with per-role ACL (§1.3 least privilege).
-  registerResearchTools({ tools: ctx.tools }, { client, cache, ctx: ctx as never, roles, modelFor: (role) => config.models?.[role] })
+  // Model routing: explicit config.models[role] wins; otherwise the standalone
+  // UI preference (model.json in the standalone data dir) applies to the
+  // primary role; '' means the agent default.
+  registerResearchTools({ tools: ctx.tools }, { client, cache, ctx: ctx as never, roles, modelFor: (role) => modelForRole(config, role) })
 
   // Role-based ACL: deny research tools outside the caller role's surface.
   const researchToolSet = new Set<string>(RESEARCH_TOOLS)
@@ -113,12 +149,15 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
   registerResearchCommands(ctx, { client, cache, unattended })
 
   // Skill pack mount: methodology plus deterministic domain/venue packs.
-  // `import.meta.url` is lib/plugin/index.js after compilation, so two parent
-  // traversals are required to reach the package-root skills/ directory.
-  const ownDir = dirname(fileURLToPath(import.meta.url))
-  const skillRoot = join(ownDir, '..', '..', 'skills')
-  const skillDirs = ['research-core', 'domain-machine-learning', 'domain-data-science', 'venue-templates']
-    .map(name => join(skillRoot, name))
+  // §9: the provider resolves the four groups from the PUBLISHED PACKAGE
+  // ROOT (`<root>/skills/`, two parents up from lib/plugin) — never a
+  // non-existent `lib/skills`. All four stay discoverable; which packs apply
+  // to a project is the deterministic `selectSkillPacks(brief)` decision
+  // (exposed as ctx.research.skillsFor and echoed by research_project create).
+  const { dirs: skillDirs, missing: missingSkills } = resolveExistingSkillDirs()
+  if (missingSkills.length > 0) {
+    ctx.logger('research').warn(`skill groups missing from package root: ${missingSkills.join(', ')}`)
+  }
   void ctx.plugin(SkillLocal, {
     providerName: 'dsh-scholar:research-skills',
     includeDefaultRoots: false,
@@ -141,3 +180,4 @@ export function scratchCacheDir(): string {
 
 export { KernelSidecar, resolveDshHome, RoleRegistry, type ResearchRole }
 export { applyPatchToWorkspace, snapshotWorkspace } from './tools.js'
+export { selectSkillPacks, selectedSkillNames, resolveSkillRoot, resolveSkillDirs, SKILL_GROUPS, type SkillSelection } from './skills.js'

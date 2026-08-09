@@ -902,6 +902,18 @@ function handleTerminalSse(
   jobId: string,
   url: URL,
 ): void {
+  // log-authz (acceptance-tests.md §5): when the caller pins a project with
+  // ?project_id=, the job must belong to THAT project — a cross-project read
+  // answers 404 (no enumeration). Callers without a project_id (legacy direct
+  // kernel access; the BFF enforces membership itself) keep the job-scoped
+  // behavior. Synchronous throw -> the router's fail() sends the 404 JSON.
+  const projectId = url.searchParams.get('project_id')
+  if (projectId !== null && projectId !== '') {
+    const job = kernel.getJob(jobId)
+    if (job.project_id !== projectId) {
+      throw new KernelError(404, 'project_not_found', 'project not found or access denied')
+    }
+  }
   const runId = url.searchParams.get('run_id')
     ?? kernel.resolveTerminalRun(jobId)
     ?? jobId

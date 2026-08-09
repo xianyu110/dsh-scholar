@@ -22,6 +22,7 @@ import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
 import { validateImageDigest, type SecureJobKind } from './images-lock.js'
+import { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
 
 export interface KernelOptions {
   /** SQLite database path (defaults to `:memory:`). */
@@ -1529,7 +1530,24 @@ export class ResearchKernel {
       const manifest = input.run_manifest as Record<string, unknown>
       const buildRow = this.db.prepare('SELECT build_id FROM tex_builds WHERE job_id = ?').get(job.job_id) as { build_id: string } | undefined
       if (buildRow !== undefined) {
-        const diagnostics = Array.isArray(manifest.tex_diagnostics) ? manifest.tex_diagnostics : []
+        let diagnostics: LatexDiagnostic[] = Array.isArray(manifest.tex_diagnostics)
+          ? manifest.tex_diagnostics as LatexDiagnostic[]
+          : []
+        // §7 (TEX-DIAG): re-parse the AUTHORITATIVE log artifact at
+        // completion so the durable diagnostics carry file/line location and
+        // structured kinds (undefined citation, missing file). The runner's
+        // first-pass parse stays as the fallback when no log artifact is
+        // registered or the log yields nothing.
+        if (typeof manifest.tex_log_artifact === 'string' && manifest.tex_log_artifact !== '') {
+          try {
+            const record = this.getArtifact(job.project_id, manifest.tex_log_artifact)
+            const logText = this.cas.read(record.sha256).toString('utf8')
+            const enriched = parseLatexDiagnostics(logText)
+            if (enriched.length > 0) diagnostics = enriched
+          } catch {
+            // Log artifact unreadable — keep the manifest diagnostics.
+          }
+        }
         this.texUpdateBuild(buildRow.build_id, {
           status: input.status === 'succeeded' ? 'succeeded' : (input.status === 'cancelled' ? 'cancelled' : 'failed'),
           diagnostics: JSON.stringify(diagnostics),

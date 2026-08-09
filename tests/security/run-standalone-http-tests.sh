@@ -80,6 +80,27 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/a
   -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$(($WEB_PORT + 100))" -H 'content-type: application/json' -d '{}')
 [ "$R" = "403" ] && ok "SEC: cross-port loopback origin -> 403" || fail "SEC: cross-port origin -> $R"
 
+# ── model preference seat (/api/model): catalog + persist + authz ──────────
+R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/api/model")
+[ "$R" = "401" ] && ok "MODEL: /api/model without token -> 401" || fail "MODEL: no-token /api/model -> $R"
+M=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/api/model")
+if echo "$M" | grep -q 'deepseek-v4-flash' && echo "$M" | grep -q '"ok":true'; then
+  ok "MODEL: GET /api/model with token -> catalog + current preference"
+else
+  fail "MODEL: GET /api/model payload -> $M"
+fi
+R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{"model":"deepseek-v4-pro"}')
+[ "$R" = "200" ] && ok "MODEL: PUT /api/model persists (deepseek-v4-pro)" || fail "MODEL: PUT persist -> $R"
+M=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/api/model")
+echo "$M" | grep -q '"model":"deepseek-v4-pro"' && ok "MODEL: preference re-read after persist" || fail "MODEL: re-read -> $M"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{"model":"gpt-unknown"}')
+[ "$R" = "422" ] && ok "MODEL: unknown model -> 422" || fail "MODEL: unknown model -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
+  -H "Authorization: Bearer $TOKEN" -H 'Origin: http://evil.example' -H 'content-type: application/json' -d '{"model":"deepseek-v4-flash"}')
+[ "$R" = "403" ] && ok "MODEL: foreign-origin PUT -> 403" || fail "MODEL: foreign origin -> $R"
+
 # ── ART-01: binary round-trip through the same-origin proxy ────────────────
 P=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -X POST "http://127.0.0.1:$WEB_PORT/v1/projects" \
@@ -169,10 +190,21 @@ done
 ok "API-01: BFF instances cleaned up"
 
 # ── §9: legacy DSH bridge paths must 404 (no SPA/v1 fallback) ─────────────
-for PTH in /research-api /research-ui-api /research-api/anything /research-ui-api/x; do
+for PTH in /research-api /research-ui-api /research-api/anything /research-ui-api/x /research-ui-api/v1/projects; do
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT$PTH")
   [ "$R" = "404" ] && ok "SEC: $PTH -> 404" || fail "SEC: $PTH -> $R"
+  # Must be a real JSON 404 — never the SPA bootstrap HTML and never a
+  # fallback to the /v1 kernel proxy (which would answer 200/401/502).
+  BODY=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT$PTH")
+  case "$BODY" in
+    *'"ok":false'*|*'"error"'*) ok "SEC: $PTH body is a JSON error (not SPA fallback)" ;;
+    *) fail "SEC: $PTH body is not a JSON 404: ${BODY:0:60}" ;;
+  esac
 done
+# POST on the legacy bridge paths must also 404 (no accidental proxy).
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$WEB_PORT/research-api/projects")
+[ "$R" = "404" ] && ok "SEC: POST /research-api/projects -> 404" || fail "SEC: POST /research-api -> $R"
 
 # ── §9.1: the standalone token must never reach the kernel argv ────────────
 KPID_BY_PORT=$(ss -ltnp 2>/dev/null | grep ":$KERNEL_PORT " | grep -oP 'pid=\K[0-9]+' | head -1)
@@ -184,6 +216,13 @@ if [ -n "$KPID_BY_PORT" ]; then
   fi
 else
   fail "SEC: kernel pid not found for argv check"
+fi
+
+# ── §9.1: the token must never be written to the server log ────────────────
+if grep -q "$TOKEN" "$LOG" 2>/dev/null; then
+  fail "SEC: standalone token leaked into server log"
+else
+  ok "SEC: token absent from server log"
 fi
 
 # ── API-01/v2: Idempotency-Key + X-Request-Id pass through the proxy ──────
@@ -231,15 +270,32 @@ fi
 kill "$BLOCKER" 2>/dev/null || true
 
 # ── SEC-UI-01: --no-token on non-loopback rejected ─────────────────────────
-NLOG="$WORK/notoken.log"
-if node "$SERVER_BIN" --host 0.0.0.0 --port "$((CONFLICT_PORT + 100))" --kernel-port "$((CONFLICT_PORT + 101))" \
-  --data-dir "$WORK/ntdata" --no-token > "$NLOG" 2>&1; then
-  fail "SEC: --no-token on 0.0.0.0 accepted"
+# §9.1: --no-token accepts ONLY localhost / ::1 / 127.0.0.0/8. Every
+# non-loopback combination (wildcard, LAN, hostname) must fail in loadOptions
+# BEFORE listen — nothing may bind.
+for BAD_HOST in 0.0.0.0 192.168.1.9 10.0.0.5 example.test; do
+  NLOG="$WORK/notoken-$BAD_HOST.log"
+  if node "$SERVER_BIN" --host "$BAD_HOST" --port "$((CONFLICT_PORT + 100))" --kernel-port "$((CONFLICT_PORT + 101))" \
+    --data-dir "$WORK/ntdata-$BAD_HOST" --no-token > "$NLOG" 2>&1; then
+    fail "SEC: --no-token on $BAD_HOST accepted"
+  else
+    ok "SEC: --no-token on $BAD_HOST rejected before listen"
+  fi
+  R=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:$((CONFLICT_PORT + 100))/" 2>/dev/null || true)
+  [ "$R" = "000" ] && ok "SEC: rejected $BAD_HOST server not listening" || fail "SEC: rejected $BAD_HOST server responded $R"
+done
+# Loopback 127.0.0.0/8 outside 127.0.0.1 stays allowed with --no-token.
+NLOG="$WORK/notoken-lo.log"
+node "$SERVER_BIN" --host 127.0.0.2 --port "$((CONFLICT_PORT + 100))" --kernel-port "$((CONFLICT_PORT + 101))" \
+  --data-dir "$WORK/ntdata-lo" --no-token > "$NLOG" 2>&1 &
+NOTOKEN_PID=$!
+sleep 1
+if kill -0 "$NOTOKEN_PID" 2>/dev/null; then
+  ok "SEC: --no-token on 127.0.0.2 (127/8) accepted"
 else
-  ok "SEC: --no-token on 0.0.0.0 rejected"
+  fail "SEC: --no-token on 127.0.0.2 rejected (log: $(tail -2 "$NLOG" | tr '\n' ' '))"
 fi
-R=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:$((CONFLICT_PORT + 100))/" 2>/dev/null || true)
-[ "$R" = "000" ] && ok "SEC: rejected server not listening" || fail "SEC: rejected server responded $R"
+kill "$NOTOKEN_PID" 2>/dev/null || true
 
 echo "== standalone http acceptance: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1
