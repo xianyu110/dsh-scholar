@@ -38,30 +38,30 @@ export function openContractDetailModal(root: ShadowRoot, contract: Record<strin
   const metrics = contract.metrics as Record<string, unknown> | undefined
   const analysis = contract.analysis as Record<string, unknown> | undefined
   modal.appendChild(el('div', 'section-label', t('overview', 'overview.contractSection')))
-  row('Contract', String(contract.contract_id ?? '—'))
-  row('Status', String(contract.status ?? '—'))
-  if (typeof contract.version === 'string') row('Version', contract.version)
-  if (typeof contract.idea_id === 'string') row('Idea', contract.idea_id)
+  row(t('overview', 'overview.detailContract'), String(contract.contract_id ?? '—'))
+  row(t('overview', 'overview.detailStatus'), String(contract.status ?? '—'))
+  if (typeof contract.version === 'string') row(t('overview', 'overview.detailVersion'), contract.version)
+  if (typeof contract.idea_id === 'string') row(t('overview', 'overview.detailIdea'), contract.idea_id)
   if (data !== undefined) {
     modal.appendChild(el('div', 'section-label', t('overview', 'overview.contractData')))
-    if (typeof data.dataset_id === 'string') row('Dataset', data.dataset_id)
-    if (typeof data.split === 'string') row('Split', data.split)
-    if (typeof data.version === 'string') row('Version', data.version)
+    if (typeof data.dataset_id === 'string') row(t('overview', 'overview.detailDataset'), data.dataset_id)
+    if (typeof data.split === 'string') row(t('overview', 'overview.detailSplit'), data.split)
+    if (typeof data.version === 'string') row(t('overview', 'overview.detailVersion'), data.version)
   }
   if (methods !== undefined) {
     modal.appendChild(el('div', 'section-label', t('overview', 'overview.contractMethods')))
-    row('Baseline', String(methods.baseline ?? '—'))
-    row('Treatment', String(methods.treatment ?? '—'))
+    row(t('overview', 'overview.detailBaseline'), String(methods.baseline ?? '—'))
+    row(t('overview', 'overview.detailTreatment'), String(methods.treatment ?? '—'))
   }
   if (metrics !== undefined) {
     modal.appendChild(el('div', 'section-label', t('overview', 'overview.contractMetrics')))
-    row('Primary', String(metrics.primary ?? '—'))
+    row(t('overview', 'overview.detailPrimary'), String(metrics.primary ?? '—'))
     const secondary = Array.isArray(metrics.secondary) ? (metrics.secondary as string[]).join(', ') : '—'
-    row('Secondary', secondary)
+    row(t('overview', 'overview.detailSecondary'), secondary)
   }
   const seeds = Array.isArray(contract.seeds) ? (contract.seeds as number[]).join(', ') : '—'
   modal.appendChild(el('div', 'section-label', t('overview', 'overview.contractAnalysis')))
-  row('Seeds', seeds)
+  row(t('overview', 'overview.detailSeeds'), seeds)
   if (analysis !== undefined) {
     row('Effect', String(analysis.effect_size ?? '—'))
     row('Interval', String(analysis.interval ?? '—'))
@@ -101,7 +101,7 @@ export function openIdeaDetailModal(root: ShadowRoot, idea: Record<string, unkno
   }
   const titleRow = el('div', 'row')
   titleRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:8px'
-  titleRow.appendChild(el('span', 'pname', String(idea.title ?? 'untitled')))
+  titleRow.appendChild(el('span', 'pname', String(idea.title ?? t('overview', 'overview.untitled'))))
   titleRow.appendChild(el('span', 'grow'))
   titleRow.appendChild(pill(String(idea.status ?? '')))
   modal.appendChild(titleRow)

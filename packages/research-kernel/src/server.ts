@@ -69,13 +69,13 @@ const gateSchema = z.object({
 })
 
 const decisionSchema = z.object({
-  actor: z.string().min(1),
-  // hardening GOV-01 (fail-closed): the authenticated human principal is
-  // REQUIRED — the BFF injects it from the login identity and a bare actor
-  // (unauthenticated or forged identity) is rejected with 422
-  // principal_required. The only actor-based exception is the internal
-  // orchestrator approve route (contracts/{id}/approve), which is not a
-  // Human Gate decision.
+  // GOV-01: `actor` is a legacy display label only — the identity is the
+  // REQUIRED `principal` below. The route rejects requests without a
+  // principal (422 principal_required, fail-closed) and defaults actor to
+  // principal.principal_id when omitted. The only actor-based exception is
+  // the internal orchestrator approve route (contracts/{id}/approve), which
+  // is not a Human Gate decision.
+  actor: z.string().min(1).optional(),
   principal: z.object({
     principal_id: z.string().min(1),
     tenant_id: z.string().optional(),
@@ -420,8 +420,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.listJobs(id))
               return
             }
-            if (method === 'GET' && sub === 'runs') {
+            if (method === 'GET' && sub === 'runs' && subId === undefined) {
               ok(res, kernel.listRuns(id))
+              return
+            }
+            if (method === 'GET' && sub === 'runs' && subId !== undefined) {
+              ok(res, kernel.getRun(id, subId))
               return
             }
             if (method === 'GET' && sub === 'artifacts') {
@@ -578,8 +582,24 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
         }
         case 'gates': {
           if (id !== undefined && sub === 'decisions' && method === 'POST') {
+            // GOV-01 (fail-closed): a Human Gate decision is only accepted
+            // with an authenticated principal — anonymous or bare-actor
+            // (forged identity) decisions are 422 principal_required and
+            // never recorded. The internal orchestrator approve route
+            // (contracts/{id}/approve) is NOT a gate decision and keeps its
+            // actor-only semantics.
+            const bodyObj = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
+            const p = bodyObj.principal as Record<string, unknown> | undefined
+            const principalId = typeof p === 'object' && p !== null && !Array.isArray(p)
+              && typeof p.principal_id === 'string'
+              ? p.principal_id
+              : ''
+            if (principalId === '') {
+              send(res, 422, { error: errorEnvelope('principal_required', 'gate decisions require an authenticated principal (principal.principal_id); anonymous or actor-only decisions are rejected') })
+              return
+            }
             const input = decisionSchema.parse(body)
-            ok(res, kernel.decideGate({ gate_id: id, ...input }))
+            ok(res, kernel.decideGate({ gate_id: id, actor: input.actor ?? principalId, ...input }))
             return
           }
           break
@@ -1083,7 +1103,10 @@ async function handleV2(ctx: {
   // has no BFF identity and the route falls back to principal/member checks.
   const role = typeof req.headers['x-principal-role'] === 'string' ? req.headers['x-principal-role'] : undefined
   const roleOk = role === undefined || role === 'pi' || role === 'researcher' || role === 'operator' || role === 'auditor' || role === 'viewer'
-  const governanceWrite = /(?:transitions|gates|decisions|budget|approve|accept)/.test(url.pathname)
+  // Governance writes (API-01): transitions, gate creation/decisions
+  // (incl. gate-requests), budget and the internal approve/accept channels.
+  // researcher may submit ordinary work but never these.
+  const governanceWrite = /(?:transitions|gate(?:s)?(?:\/|$)|decisions|budget|approve|accept)/.test(url.pathname)
   if (!roleOk) {
     send(res, 403, { error: { code: 'role_required', message: 'invalid x-principal-role; BFF must inject pi|researcher|operator|auditor|viewer' } })
     return
@@ -1183,6 +1206,15 @@ async function handleV2(ctx: {
       payload: input.payload,
     })
     send(res, 201, { gate })
+    return
+  }
+  if (id !== undefined && sub === 'jobs' && method === 'POST') {
+    // v2 ordinary work submission (API-01): allowed for pi/operator/
+    // researcher; viewer/auditor are read-only (enforced above).
+    memberOr404(id)
+    const input = jobSchema.parse(body)
+    const job = kernel.submitJob({ ...input, project_id: id })
+    send(res, 201, job)
     return
   }
   if (id !== undefined && sub === 'transitions' && method === 'POST') {

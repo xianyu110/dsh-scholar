@@ -81,8 +81,10 @@ export async function renderGates(body: HTMLElement, projectId: string): Promise
           body: JSON.stringify({
             actor: 'web-user',
             decision: 'approved',
+            // Raw wire payload: the reason string is stored verbatim in the
+            // kernel Gate Decision ledger (acceptance §8 line 115 — wire
+            // text stays raw), never displayed as UI chrome.
             reason: 'bulk approved from Research OS panel',
-
           }),
         })
       }
@@ -97,7 +99,7 @@ export async function renderGates(body: HTMLElement, projectId: string): Promise
       for (const id of gatesSelected) {
         await api(`/v1/gates/${encodeURIComponent(id)}/decisions`, {
           method: 'POST',
-          body: JSON.stringify({ actor: 'web-user', decision: 'rejected', reason: 'bulk rejected from Research OS panel' }),
+          body: JSON.stringify({ actor: 'web-user', decision: 'rejected', reason: 'bulk rejected from Research OS panel' }), // raw wire payload → stored verbatim in the Gate Decision ledger
         })
       }
       showToast(rootHost(), t('overview', 'overview.gatesRejectedToast', { count: String(gatesSelected.size) }))

@@ -143,7 +143,7 @@ else
 fi
 
 say "Test: complete fencing (missing / future generation / current)"
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/status" -H 'content-type: application/json' -d '{"owner":"runner-fence","status":"succeeded","run_manifest":{}}')
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/status" -H 'content-type: application/json' -d '{"owner":"runner-fence","status":"succeeded"}')
 ERR=$(jfield '.error.code' < "$WORK/resp.json")
 if [[ "$CODE" == "409" && "$ERR" == "lease_stale" ]]; then
   ok "complete without generation/token -> HTTP 409 lease_stale"
@@ -157,7 +157,7 @@ if [[ "$CODE" == "409" && "$ERR" == "lease_stale" ]]; then
 else
   bad "complete future generation: expected 409 lease_stale, got HTTP $CODE (error=$ERR)"
 fi
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-fence\",\"status\":\"succeeded\",\"lease_generation\":$G,\"lease_token\":\"$T\",\"run_manifest\":{}}")
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-fence\",\"status\":\"succeeded\",\"lease_generation\":$G,\"lease_token\":\"$T\"}")
 STATUS=$(jfield '.status' < "$WORK/resp.json")
 if [[ "$CODE" == "200" && "$STATUS" == "succeeded" ]]; then
   ok "complete with current generation/token -> HTTP 200, job '$STATUS'"

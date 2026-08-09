@@ -181,6 +181,143 @@ else
   bad "alias deprecation metadata missing"
 fi
 
+# ── §9 DSH-01: unknown Agent ACL deny + pre-execute semantics + disposer ─────
+# Isolated fixture: unknown/unregistered agent ids resolve to role 'none'
+# (DEFAULT_ROLE) and every research write tool is denied; known roles keep
+# their documented surface (director = PI); agent-less calls pass through
+# (tool-layer semantics); the plugin's ctx.effect disposer stops the sidecar.
+say "DSH-01: unknown-agent deny / pre-execute waterfall / plugin disposer"
+DSH01=$(jnode - "$REPO" <<'EOF'
+const repo = process.argv[2]
+const { RoleRegistry, RESEARCH_TOOLS, DEFAULT_ROLE, ROLE_TOOLS } = await import(`${repo}/lib/plugin/acl.js`)
+const { apply, KernelSidecar } = await import(`${repo}/lib/plugin/index.js`)
+
+const problems = []
+
+// 1. DEFAULT_ROLE = none; unknown sessions resolve to none; none has an
+//    EMPTY tool surface -> every research tool is denied for unknown agents.
+if (DEFAULT_ROLE !== 'none') problems.push('DEFAULT_ROLE must be none')
+const roles = new RoleRegistry()
+if (roles.get('some-unknown-agent-42') !== 'none') problems.push('unknown session role must resolve to none')
+if (ROLE_TOOLS.none.length !== 0) problems.push('none role surface must be empty')
+for (const tool of RESEARCH_TOOLS) {
+  if (roles.allows(DEFAULT_ROLE, tool)) problems.push(`unknown agent may call ${tool}`)
+}
+
+// 2. pre-execute waterfall replicated 1:1 from src/plugin/index.ts (the
+//    tools/pre-execute listener): agent-id calls on research tools go
+//    through RoleRegistry.allows and are denied outside the role surface;
+//    agent-less calls and non-research tools pass through to next().
+const researchToolSet = new Set(RESEARCH_TOOLS)
+const preExecute = async (exec, next) => {
+  const agentId = exec.agent?.id
+  if (agentId !== undefined && researchToolSet.has(exec.name)) {
+    const role = roles.get(agentId)
+    if (!roles.allows(role, exec.name)) {
+      return { kind: 'deny', reason: `research tool ${exec.name} is outside the ${role} role's tool surface` }
+    }
+  }
+  return next()
+}
+const run = async (agentId, tool) => {
+  let calledNext = false
+  const result = await preExecute(
+    { agent: agentId === undefined ? undefined : { id: agentId }, name: tool },
+    () => { calledNext = true; return 'NEXT' },
+  )
+  return result?.kind === 'deny' ? 'deny' : calledNext ? 'allow' : 'other'
+}
+
+// unknown agent: EVERY research tool (canonical + deprecation alias) denied
+for (const tool of RESEARCH_TOOLS) {
+  if (await run('unknown-agent-abc', tool) !== 'deny') problems.push(`unknown agent NOT denied on ${tool}`)
+}
+// known role (director = the PI surface, docs/dsh-integration.md §4):
+// every tool in its surface is allowed; the alias is canonical-only.
+roles.set('pi-session', 'director')
+for (const tool of ROLE_TOOLS.director) {
+  if (await run('pi-session', tool) !== 'allow') problems.push(`director denied on ${tool}`)
+}
+if (await run('pi-session', 'claim_verify') !== 'deny') problems.push('director must not get the claim_verify alias (canonical-only surface)')
+// statistician: claim_verify_request allowed (canonical + alias),
+// project creation denied.
+roles.set('stat-session', 'statistician')
+if (await run('stat-session', 'claim_verify_request') !== 'allow') problems.push('statistician denied claim_verify_request')
+if (await run('stat-session', 'claim_verify') !== 'allow') problems.push('statistician denied claim_verify alias')
+if (await run('stat-session', 'research_project') !== 'deny') problems.push('statistician must not create projects')
+// writer: manuscript_build allowed; research writes and the verify alias denied.
+roles.set('writer-session', 'writer')
+if (await run('writer-session', 'manuscript_build') !== 'allow') problems.push('writer denied manuscript_build')
+if (await run('writer-session', 'research_project') !== 'deny') problems.push('writer must not create projects')
+if (await run('writer-session', 'claim_verify') !== 'deny') problems.push('writer must not verify claims (alias)')
+// no agent id: tool-layer semantics — ACL never restricts agent-less calls.
+if (await run(undefined, 'research_project') !== 'allow') problems.push('agent-less call must pass through the ACL')
+if (await run(undefined, 'claim_verify_request') !== 'allow') problems.push('agent-less claim_verify_request must pass through')
+// non-research tools are outside the ACL surface.
+if (await run('unknown-agent-abc', 'web_fetch') !== 'allow') problems.push('non-research tool must pass through')
+
+// 3. register disposer: apply() registers ctx.effect -> sidecar.stop();
+//    a simulated dispose must invoke it (acceptance §9 "插件停止清理
+//    tool/listener/sidecar ownership").
+let startCalled = 0
+let stopCalled = 0
+const origStart = KernelSidecar.prototype.start
+const origStop = KernelSidecar.prototype.stop
+KernelSidecar.prototype.start = async function () { startCalled += 1 }
+KernelSidecar.prototype.stop = async function () { stopCalled += 1 }
+const cleanups = []
+const ctx = {
+  logger: () => ({ info() {}, error() {}, warn() {} }),
+  provide() {},
+  plugin: async () => ({}),
+  on() {},
+  effect(fn) { const d = fn(); if (typeof d === 'function') cleanups.push(d) },
+  tools: { register() {} },
+  commands: { register() {} },
+}
+try {
+  apply(ctx, { kernel: { host: '127.0.0.1', port: 7412, dataDir: process.env.DSH01_DATA ?? '/tmp/dsh01' }, cacheDir: process.env.DSH01_CACHE ?? '/tmp/dsh01-cache' })
+  if (startCalled < 1) problems.push('apply must start the kernel sidecar')
+  for (const cleanup of cleanups) await cleanup()
+  if (stopCalled < 1) problems.push('plugin dispose must stop the kernel sidecar (disposer missing)')
+} finally {
+  KernelSidecar.prototype.start = origStart
+  KernelSidecar.prototype.stop = origStop
+}
+
+console.log(JSON.stringify({ problems }))
+EOF
+)
+if [ -z "$DSH01" ]; then
+  bad "DSH-01 probe script produced no output"
+else
+  if probe "$DSH01" "j.problems.length === 0"; then
+    ok "unknown agent denied on every research tool; known roles keep their surface"
+  else
+    bad "DSH-01 ACL: $(printf '%s' "$DSH01" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.join('|')))")"
+  fi
+  if probe "$DSH01" "!j.problems.some(p=>/unknown agent NOT denied/.test(p))"; then
+    ok "unknown agent denied on every research write tool (DSH-01)"
+  else
+    bad "unknown-agent ACL leak"
+  fi
+  if probe "$DSH01" "!j.problems.some(p=>/agent-less/.test(p))"; then
+    ok "agent-less tool calls pass through the ACL (tool-layer semantics)"
+  else
+    bad "agent-less call restricted by ACL"
+  fi
+  if probe "$DSH01" "!j.problems.some(p=>/alias/.test(p))"; then
+    ok "deprecation aliases stay ACL-enforced on canonical surfaces"
+  else
+    bad "alias ACL leak"
+  fi
+  if probe "$DSH01" "!j.problems.some(p=>/dispose/.test(p))"; then
+    ok "plugin disposer stops the kernel sidecar (register cleanup)"
+  else
+    bad "plugin disposer missing sidecar stop"
+  fi
+fi
+
 # ── §9: /research subcommand handlers against a real kernel ────────────────
 say "research subcommands (kernel-backed)"
 PORT=$((21500 + $$ % 400))

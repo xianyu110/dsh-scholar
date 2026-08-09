@@ -33,6 +33,9 @@
 #                               in the published plugin; dev overlay opt-in)
 #
 # Usage: bash tests/security/run-all-v2-blocking-tests.sh
+# The local CI gateway (scripts/ci-gate.sh, `pnpm test:ci`) runs this script
+# with CI=true, so every SKIP/zero-assertion/unexecuted sub-script is
+# fail-closed and the aggregator exit code contributes to the gate.
 set -u
 
 cd "$(dirname "$0")"

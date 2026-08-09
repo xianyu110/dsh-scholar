@@ -32,7 +32,26 @@ export const zh = {
   'evidence.apiRequests': 'API 请求',
   'evidence.budgetExceeded': '⚠️ 预算限额已超出 — 项目处于 BLOCKED_GATE,直到人工 Budget Gate 批准。',
   'evidence.detailsModal': '📊 证据详情',
+
+
+  'evidence.detailClaim': '主张',
+  'evidence.detailStatus': '状态',
+  'evidence.detailConfidence': '置信度',
+  'evidence.detailDataset': '数据集',
+  'evidence.detailSplit': '划分',
+  'evidence.detailEvidence': '证据',
+  'evidence.detailAnalysisArtifact': '分析产物',
+  'evidence.detailMetric': '指标',
+  'evidence.detailValue': '数值',
+  'evidence.detailEffect': '效应',
+  'evidence.detailCi': 'CI',
+  'evidence.detailNSeeds': '种子数',
+  'evidence.detailMethod': '方法',
+  'evidence.detailRuns': '运行',
+  'evidence.detailArtifacts': '产物',
+  'evidence.copyClaimId': '复制主张 ID',
 }
+
 
 export const en: Record<keyof typeof zh, string> = {
   'evidence.filterPlaceholder': '🔍 Filter claims & evidence…',
@@ -63,4 +82,23 @@ export const en: Record<keyof typeof zh, string> = {
   'evidence.apiRequests': 'API requests',
   'evidence.budgetExceeded': '⚠️ Budget limit exceeded — project is BLOCKED_GATE until a human Budget Gate approves.',
   'evidence.detailsModal': '📊 Evidence details',
+
+
+  'evidence.detailClaim': 'Claim',
+  'evidence.detailStatus': 'Status',
+  'evidence.detailConfidence': 'Confidence',
+  'evidence.detailDataset': 'Dataset',
+  'evidence.detailSplit': 'Split',
+  'evidence.detailEvidence': 'Evidence',
+  'evidence.detailAnalysisArtifact': 'Analysis artifact',
+  'evidence.detailMetric': 'Metric',
+  'evidence.detailValue': 'Value',
+  'evidence.detailEffect': 'Effect',
+  'evidence.detailCi': 'CI',
+  'evidence.detailNSeeds': 'n seeds',
+  'evidence.detailMethod': 'Method',
+  'evidence.detailRuns': 'Runs',
+  'evidence.detailArtifacts': 'Artifacts',
+  'evidence.copyClaimId': 'Copy claim ID',
 }
+

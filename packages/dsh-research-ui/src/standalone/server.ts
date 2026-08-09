@@ -746,7 +746,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           if (memberProjectId !== null && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
             const role = await projectRole(memberProjectId)
             if (role !== null) {
-              const governanceWrite = /(?:transitions|gates|decisions|budget|approve|accept)/.test(url.pathname)
+              const governanceWrite = /(?:transitions|gates(?:\/|$)|decisions|budget|approve|accept)/.test(url.pathname)
               if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && governanceWrite)) {
                 sendJson(res, 403, { ok: false, error: 'role forbidden' })
                 return

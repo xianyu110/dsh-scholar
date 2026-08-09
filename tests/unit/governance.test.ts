@@ -11,7 +11,7 @@ import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-gov-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function makeBrief() {

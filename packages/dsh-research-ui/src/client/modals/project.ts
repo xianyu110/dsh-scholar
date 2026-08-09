@@ -237,24 +237,24 @@ export async function openProjectDetailModal(root: ShadowRoot, projectId: string
   modal.appendChild(titleRow)
 
   modal.appendChild(el('div', 'section-label', t('shell', 'shell.projectDetails.overview')))
-  row('Project', `\`${projectId}\` · rev ${proj.revision ?? 0}`)
-  row('Problem', proj.brief?.problem ?? '—')
-  row('Metrics', (proj.brief?.primary_metrics ?? []).join(', ') || '—')
-  row('Workspace', proj.workspace ?? '—')
+  row(t('shell', 'shell.projectDetails.rowProject'), `\`${projectId}\` · rev ${proj.revision ?? 0}`)
+  row(t('shell', 'shell.projectDetails.rowProblem'), proj.brief?.problem ?? '—')
+  row(t('shell', 'shell.projectDetails.rowMetrics'), (proj.brief?.primary_metrics ?? []).join(', ') || '—')
+  row(t('shell', 'shell.projectDetails.rowWorkspace'), proj.workspace ?? '—')
 
   const c = proj.constraints
   modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.constraints')))
-  row('Budget', `$${c?.max_model_cost_usd ?? '∞'} max`)
-  row('GPU hours', `${c?.max_gpu_hours ?? '∞'} max`)
-  row('Parallel jobs', String(c?.max_parallel_jobs ?? '—'))
+  row(t('shell', 'shell.projectDetails.rowBudget'), `$${c?.max_model_cost_usd ?? '∞'} max`)
+  row(t('budget', 'budget.gpuHours'), `${c?.max_gpu_hours ?? '∞'} max`)
+  row(t('budget', 'budget.parallelJobs'), String(c?.max_parallel_jobs ?? '—'))
 
   const counts = p.counts
   if (counts !== undefined) {
     modal.appendChild(el('div', 'section-label', t('budget', 'budget.projectContents')))
-    row('Corpus snapshots', String(counts.corpus_snapshots ?? 0))
-    row('Ideas / Contracts', `${counts.ideas ?? 0} / ${counts.contracts ?? 0}`)
-    row('Claims / Evidence', `${counts.claims ?? 0} / ${counts.evidence ?? 0}`)
-    row('Artifacts', String(counts.artifacts ?? 0))
+    row(t('shell', 'shell.projectDetails.rowCorpus'), String(counts.corpus_snapshots ?? 0))
+    row(t('shell', 'shell.projectDetails.rowIdeasContracts'), `${counts.ideas ?? 0} / ${counts.contracts ?? 0}`)
+    row(t('shell', 'shell.projectDetails.rowClaimsEvidence'), `${counts.claims ?? 0} / ${counts.evidence ?? 0}`)
+    row(t('shell', 'shell.projectDetails.rowArtifacts'), String(counts.artifacts ?? 0))
   }
 
   const pending = p.pending_gates ?? []

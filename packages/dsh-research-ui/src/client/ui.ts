@@ -7,6 +7,8 @@ import { state } from './state'
 /* ─────────────────────────── design system ─────────────────────────── */
 
 export const STATUS_META: Record<string, { label: string; tone: string }> = {
+  // Status pill labels mirror the kernel's raw status ENUMS verbatim
+  // (acceptance-tests.md §8 line 115: unknown enum / wire text stays raw).
   // project phases
   DRAFT: { label: 'DRAFT', tone: 'slate' },
   SCOPED: { label: 'SCOPED', tone: 'blue' },
@@ -140,7 +142,7 @@ export function openContextMenu(root: ShadowRoot, x: number, y: number, items: C
   scrim.style.cssText = 'position:fixed;inset:0;z-index:10001;background:transparent'
   const menu = el('div')
   menu.setAttribute('role', 'menu')
-  menu.setAttribute('aria-label', 'context menu')
+  menu.setAttribute('aria-label', t('common', 'common.contextMenuAria'))
   menu.style.cssText = 'position:fixed;min-width:200px;background:var(--bg-2);border:1px solid var(--border-strong);border-radius:10px;padding:4px;box-shadow:0 12px 40px rgba(0,0,0,.35);z-index:10002;font:12px/1.4 system-ui,sans-serif;color:var(--text)'
   const menuButtons: HTMLButtonElement[] = []
   for (const it of items) {
@@ -195,7 +197,10 @@ export function openContextMenu(root: ShadowRoot, x: number, y: number, items: C
 export function copyText(text: string): void {
   const confirm = (): void => {
     const root = rootHost()
-    if (root != null) showToast(root, `Copied: ${text.length > 48 ? `${text.slice(0, 48)}…` : text}`)
+    if (root != null) {
+      const preview = text.length > 48 ? `${text.slice(0, 48)}…` : text
+      showToast(root, t('common', 'common.copiedToClipboard', { preview }))
+    }
   }
   const fallback = (): void => {
     const ta = document.createElement('textarea')

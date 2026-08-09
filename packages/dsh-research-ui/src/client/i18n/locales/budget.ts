@@ -16,7 +16,23 @@ export const zh = {
   'budget.modal.placeholderProblem': '例如 不确定性加权在域偏移下是否有帮助?',
   'budget.modal.placeholderMetric': '例如 mAP@0.5',
   'budget.detailsModal': '💰 预算与策略详情',
+  'budget.modelCost': '模型成本',
+  'budget.gpuHours': 'GPU 小时',
+
+
+  'budget.datasets': '数据集',
+  'budget.modelUpload': '模型上传',
+  'budget.parallelJobs': '并行作业',
+  'budget.runner': '运行器',
+  'budget.network': '网络',
+  'budget.artifacts': '产物',
+  'budget.baselineRepro': '基线复现',
+  'budget.contract': '合同',
+  'budget.claimLinks': '主张链接',
+  'budget.cleanRoom': '洁净室',
+  'budget.autoRelease': '自动发布',
 }
+
 
 export const en: Record<keyof typeof zh, string> = {
   'budget.section': 'Budget',
@@ -32,4 +48,20 @@ export const en: Record<keyof typeof zh, string> = {
   'budget.modal.placeholderProblem': 'e.g. Does uncertainty weighting help under domain shift?',
   'budget.modal.placeholderMetric': 'e.g. mAP@0.5',
   'budget.detailsModal': '💰 Budget & policy details',
+  'budget.modelCost': 'Model cost',
+  'budget.gpuHours': 'GPU hours',
+
+
+  'budget.datasets': 'Datasets',
+  'budget.modelUpload': 'Model upload',
+  'budget.parallelJobs': 'Parallel jobs',
+  'budget.runner': 'Runner',
+  'budget.network': 'Network',
+  'budget.artifacts': 'Artifacts',
+  'budget.baselineRepro': 'Baseline repro',
+  'budget.contract': 'Contract',
+  'budget.claimLinks': 'Claim links',
+  'budget.cleanRoom': 'Clean-room',
+  'budget.autoRelease': 'Auto release',
 }
+

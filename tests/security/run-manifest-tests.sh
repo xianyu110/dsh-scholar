@@ -71,6 +71,51 @@ BASE="http://127.0.0.1:$PORT"
 PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"manifest\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 
+say "setup: Ed25519 runner key (signed manifests are the default, RUN-01)"
+cat > "$WORK/gen-key.mjs" <<'EOF'
+import { generateKeyPairSync } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
+const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+writeFileSync(process.argv[2], privateKey.export({ type: 'pkcs8', format: 'pem' }).toString())
+writeFileSync(process.argv[3], publicKey.export({ type: 'spki', format: 'pem' }).toString())
+EOF
+cat > "$WORK/sign-manifest.mjs" <<'EOF'
+// args: jobId projectId metricsArtifact privateKeyPath keyId leaseGeneration mode
+import { createHash, sign } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+const [jobId, projectId, metricsArtifact, keyPath, keyId, generation, mode] = process.argv.slice(2)
+const canonical = (m) => JSON.stringify(m, Object.keys(m).sort())
+const privateKey = readFileSync(keyPath, 'utf8')
+const manifest = {
+  run_id: `run_shell_${Date.now()}`,
+  job_id: jobId,
+  project_id: projectId,
+  code_commit: 'abc123',
+  command: ['echo', 'hello'],
+  resources: { gpu: 0, cpu: 1, memory_gb: 1 },
+  started_at: new Date().toISOString(),
+  finished_at: new Date().toISOString(),
+  exit_code: 0,
+  metrics_artifact: metricsArtifact,
+}
+if (generation !== '' && generation !== '0' && generation !== 'undefined') manifest.lease = { generation: Number(generation) }
+const payloadSha256 = createHash('sha256').update(canonical(manifest)).digest('hex')
+const signed = { ...manifest, runner_key_id: keyId, payload_sha256: payloadSha256 }
+const signature = sign(null, Buffer.from(canonical(signed), 'utf8'), privateKey).toString('base64')
+const envelope = { ...signed, signature }
+if (mode === 'bad') {
+  envelope.exit_code = 1
+  const { signature: _s, runner_key_id: _r, payload_sha256: _p, ...payloadOnly } = envelope
+  envelope.payload_sha256 = createHash('sha256').update(canonical(payloadOnly)).digest('hex')
+}
+process.stdout.write(JSON.stringify(envelope))
+EOF
+node "$WORK/gen-key.mjs" "$WORK/runner-key.pem" "$WORK/runner-key.pub"
+KEY_BODY=$(node -e "process.stdout.write(JSON.stringify({ key_id: 'runner-key-shell', public_key_pem: require('fs').readFileSync(process.argv[1], 'utf8') }))" "$WORK/runner-key.pub")
+KEY_ID=$(api -X POST "$BASE/v1/runner-keys" -d "$KEY_BODY" | jfield '.key_id')
+[[ "$KEY_ID" == "runner-key-shell" ]] || { bad "runner key registration failed (got $KEY_ID)"; exit 1; }
+ok "registered Ed25519 runner key runner-key-shell (default requireSignedManifest)"
+
 say "Test: manifest-missing-artifact-rejected"
 J1=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"mfa-1","kind":"echo","payload":{"message":"x"}}' | jfield '.job_id')
 CLAIM1=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-mfa","lease_ttl_seconds":60,"limit":8}')
@@ -79,7 +124,8 @@ G1=$(printf '%s' "$CLAIM1" | jfield '[0].lease_generation')
 T1=$(printf '%s' "$CLAIM1" | jfield '[0].lease_token')
 [[ "$CLAIMED" == "$J1" ]] || { echo "claim setup broken: expected $J1 got $CLAIMED"; exit 1; }
 
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J1/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"lease_generation\":$G1,\"lease_token\":\"$T1\",\"run_manifest\":{\"metrics_artifact\":\"$MISSING_SHA\"}}")
+SIGNED1=$(node "$WORK/sign-manifest.mjs" "$J1" "$PROJ" "$MISSING_SHA" "$WORK/runner-key.pem" "runner-key-shell" "$G1" good)
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J1/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"lease_generation\":$G1,\"lease_token\":\"$T1\",\"run_manifest\":$SIGNED1}")
 ERR_CODE=$(jfield '.error.code' < "$WORK/resp.json")
 S1=$(api "$BASE/v1/jobs/$J1" | jfield '.status')
 if [[ "$CODE" == "422" && "$ERR_CODE" == "manifest_refs_missing" ]]; then
@@ -97,7 +143,8 @@ CLAIMED2=$(printf '%s' "$CLAIM2" | jfield '[0].job_id')
 G2=$(printf '%s' "$CLAIM2" | jfield '[0].lease_generation')
 T2=$(printf '%s' "$CLAIM2" | jfield '[0].lease_token')
 [[ "$CLAIMED2" == "$J2" ]] || { echo "claim setup broken: expected $J2 got $CLAIMED2"; exit 1; }
-CODE2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J2/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"lease_generation\":$G2,\"lease_token\":\"$T2\",\"run_manifest\":{\"metrics_artifact\":\"$ART\"}}")
+SIGNED2=$(node "$WORK/sign-manifest.mjs" "$J2" "$PROJ" "$ART" "$WORK/runner-key.pem" "runner-key-shell" "$G2" good)
+CODE2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J2/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"lease_generation\":$G2,\"lease_token\":\"$T2\",\"run_manifest\":$SIGNED2}")
 S2=$(api "$BASE/v1/jobs/$J2" | jfield '.status')
 if [[ "$CODE2" == "200" && "$S2" == "succeeded" ]]; then
   ok "control: manifest with real artifact -> HTTP 200, job succeeded"
@@ -143,52 +190,6 @@ else
 fi
 
 say "Test: manifest-signature-invalid-rejected (SCH-MANIFEST-001, §12.7)"
-# Ed25519 helper scripts (node) — write them into the scratch dir.
-cat > "$WORK/gen-key.mjs" <<'EOF'
-import { generateKeyPairSync } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
-const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-writeFileSync(process.argv[2], privateKey.export({ type: 'pkcs8', format: 'pem' }).toString())
-writeFileSync(process.argv[3], publicKey.export({ type: 'spki', format: 'pem' }).toString())
-EOF
-cat > "$WORK/sign-manifest.mjs" <<'EOF'
-// args: jobId projectId metricsArtifact privateKeyPath keyId leaseGeneration mode
-import { createHash, sign } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-const [jobId, projectId, metricsArtifact, keyPath, keyId, generation, mode] = process.argv.slice(2)
-const canonical = (m) => JSON.stringify(m, Object.keys(m).sort())
-const privateKey = readFileSync(keyPath, 'utf8')
-const manifest = {
-  run_id: `run_shell_${Date.now()}`,
-  job_id: jobId,
-  project_id: projectId,
-  code_commit: 'abc123',
-  command: ['echo', 'hello'],
-  resources: { gpu: 0, cpu: 1, memory_gb: 1 },
-  started_at: new Date().toISOString(),
-  finished_at: new Date().toISOString(),
-  exit_code: 0,
-  metrics_artifact: metricsArtifact,
-}
-if (generation !== '' && generation !== '0' && generation !== 'undefined') manifest.lease = { generation: Number(generation) }
-const payloadSha256 = createHash('sha256').update(canonical(manifest)).digest('hex')
-const signed = { ...manifest, runner_key_id: keyId, payload_sha256: payloadSha256 }
-const signature = sign(null, Buffer.from(canonical(signed), 'utf8'), privateKey).toString('base64')
-const envelope = { ...signed, signature }
-if (mode === 'bad') {
-  // Forgery: tamper with the payload and honestly recompute the hash, but the
-  // signature still covers the ORIGINAL payload -> must fail verification.
-  envelope.exit_code = 1
-  const { signature: _s, runner_key_id: _r, payload_sha256: _p, ...payloadOnly } = envelope
-  envelope.payload_sha256 = createHash('sha256').update(canonical(payloadOnly)).digest('hex')
-}
-process.stdout.write(JSON.stringify(envelope))
-EOF
-node "$WORK/gen-key.mjs" "$WORK/runner-key.pem" "$WORK/runner-key.pub"
-KEY_BODY=$(node -e "process.stdout.write(JSON.stringify({ key_id: 'runner-key-shell', public_key_pem: require('fs').readFileSync(process.argv[1], 'utf8') }))" "$WORK/runner-key.pub")
-KEY_ID=$(api -X POST "$BASE/v1/runner-keys" -d "$KEY_BODY" | jfield '.key_id')
-[[ "$KEY_ID" == "runner-key-shell" ]] || { bad "runner key registration failed (got $KEY_ID)"; exit 1; }
-ok "registered Ed25519 runner key runner-key-shell"
 ART2=$(api -X POST "$BASE/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\"analysis\",\"content_base64\":\"$META_B64\"}" | jfield '.artifact_id')
 J4=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"sig-1","kind":"echo","payload":{"message":"sig"}}' | jfield '.job_id')
 C4=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-sig","lease_ttl_seconds":60,"limit":8}')

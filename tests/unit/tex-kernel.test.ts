@@ -18,7 +18,7 @@ import type { TexSnapshotManifest } from '@dsh-scholar/runner-gateway'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-tex-kernel-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function makeBrief() {

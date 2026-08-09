@@ -11,7 +11,7 @@ import { ResearchKernel } from '@dsh-scholar/research-kernel'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-casgc-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function makeBrief() {

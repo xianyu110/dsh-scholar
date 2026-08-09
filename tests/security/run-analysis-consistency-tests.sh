@@ -119,7 +119,7 @@ PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"analysis-consistency\",\"
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 ok "project $PROJ"
 
-CT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_consistency","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"baseline-engine","treatment":"treatment-engine"},"metrics":{"primary":"m1","secondary":["n_samples","m2"],"direction":"higher_is_better"},"seeds":[1,2,3],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"}}' | jfield '.contract_id')
+CT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_consistency","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"baseline-engine","treatment":"treatment-engine"},"metrics":{"primary":"m1","secondary":["n_samples","m2"],"direction":"higher_is_better"},"seeds":[1,2,3],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | jfield '.contract_id')
 APPROVE=$(api -X POST "$BASE/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"analysis-consistency-eval"}' | jfield '.status')
 if [[ "$CT" == expc_* ]] && [[ "$APPROVE" == "approved" ]]; then
   ok "contract $CT registered + frozen (status=approved, metrics m1 primary / n_samples,m2 secondary, direction higher_is_better, seeds 1..3)"

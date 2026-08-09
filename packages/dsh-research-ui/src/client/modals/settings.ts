@@ -197,7 +197,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   // Accent colour (dsh-web theming).
   const accentRow = el('div', 'row')
   accentRow.style.cssText = 'padding:4px 0'
-  const accentLabel = el('span', '', 'Accent')
+  const accentLabel = el('span', '', t('shell', 'shell.settings.accent'))
   accentLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
   const accentSelect = el('select', 'picker')
   accentSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
@@ -225,7 +225,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   // Corner radius (dsh-web appearance).
   const radiusRow = el('div', 'row')
   radiusRow.style.cssText = 'padding:4px 0'
-  const radiusLabel = el('span', '', 'Corners')
+  const radiusLabel = el('span', '', t('shell', 'shell.settings.corners'))
   radiusLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
   const radiusSelect = el('select', 'picker')
   radiusSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
@@ -248,7 +248,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   // Background texture (dsh-web appearance).
   const textureRow = el('div', 'row')
   textureRow.style.cssText = 'padding:4px 0'
-  const textureLabel = el('span', '', 'Texture')
+  const textureLabel = el('span', '', t('shell', 'shell.settings.texture'))
   textureLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
   const textureSelect = el('select', 'picker')
   textureSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
@@ -272,15 +272,15 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   modal.appendChild(section(t('shell', 'shell.settings.conversation')))
   const convRow = el('div', 'row')
   convRow.style.cssText = 'padding:4px 0'
-  const convLabel = el('span', '', 'Transcript')
+  const convLabel = el('span', '', t('shell', 'shell.settings.transcript'))
   convLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const convValue = el('span', 'mono', `${state.chatSessions.length} session(s) · ${state.chatMessages.length} messages`)
+  const convValue = el('span', 'mono', t('shell', 'shell.settings.transcriptValue', { sessions: String(state.chatSessions.length), messages: String(state.chatMessages.length) }))
   convValue.style.cssText = 'font-size:11px'
-  const clearBtn = el('button', 'hbtn', 'Clear')
+  const clearBtn = el('button', 'hbtn', t('common', 'common.action.clear'))
   clearBtn.style.cssText = 'padding:1px 8px'
   clearBtn.onclick = () => {
     chatClear()
-    convValue.textContent = '0 messages'
+    convValue.textContent = t('shell', 'shell.settings.zeroMessages')
     state.rerender()
   }
   convRow.append(convLabel, convValue, clearBtn)
@@ -290,16 +290,16 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   modal.appendChild(section(t('shell', 'shell.settings.project')))
   const projRow = el('div', 'row')
   projRow.style.cssText = 'padding:4px 0'
-  const projLabel = el('span', '', 'Summary')
+  const projLabel = el('span', '', t('shell', 'shell.settings.summary'))
   projLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const summaryBtn = el('button', 'hbtn', 'Copy markdown')
+  const summaryBtn = el('button', 'hbtn', t('common', 'common.action.copyMarkdown'))
   summaryBtn.style.cssText = 'padding:2px 10px'
   summaryBtn.onclick = async () => {
     const id = state.projectId
     if (id === undefined) return
     const p = await api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)
     if (p === null || p.project === undefined) {
-      summaryBtn.textContent = 'unavailable'
+      summaryBtn.textContent = t('common', 'common.status.unavailable')
       return
     }
     const counts = p.counts ?? {}
@@ -316,13 +316,13 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       `- Next: ${(p.next_actions ?? []).join('; ') || '—'}`,
     ]
     await navigator.clipboard.writeText(lines.join('\n'))
-    summaryBtn.textContent = '✓ copied'
-    setTimeout(() => { summaryBtn.textContent = 'Copy markdown' }, 1800)
+    summaryBtn.textContent = t('common', 'common.action.copied')
+    setTimeout(() => { summaryBtn.textContent = t('common', 'common.action.copyMarkdown') }, 1800)
   }
   projRow.append(projLabel, summaryBtn)
   modal.appendChild(projRow)
 
-  const about = el('button', 'hbtn', 'ℹ About this plugin')
+  const about = el('button', 'hbtn', t('shell', 'shell.aboutButton'))
   about.style.cssText = 'margin-top:16px;padding:3px 12px;align-self:flex-start'
   about.onclick = () => { openAboutModal(root) }
   modal.appendChild(about)
@@ -331,7 +331,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   modal.appendChild(section(t('shell', 'shell.settings.help')))
   const helpRow = el('div', 'row')
   helpRow.style.cssText = 'padding:4px 0'
-  const helpBtn = el('button', 'hbtn', '⌨ Keyboard shortcuts')
+  const helpBtn = el('button', 'hbtn', t('shell', 'shell.shortcuts.title'))
   helpBtn.style.cssText = 'padding:2px 10px'
   helpBtn.onclick = () => { overlay.remove(); openShortcutsModal(root) }
   helpRow.appendChild(helpBtn)
@@ -340,11 +340,11 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   modal.appendChild(section(t('shell', 'shell.settings.data')))
   const resetRow = el('div', 'row')
   resetRow.style.cssText = 'padding:4px 0'
-  const resetLabel = el('span', '', 'Local data')
+  const resetLabel = el('span', '', t('shell', 'shell.settings.localData'))
   resetLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const resetBtn = el('button', 'btn cancel', '🗑 Reset preferences')
+  const resetBtn = el('button', 'btn cancel', t('common', 'common.action.resetPreferences'))
   resetBtn.style.cssText = 'padding:3px 10px;font-size:11px'
-  resetBtn.title = 'clear theme, tabs, sessions, history and notifications (reload to apply)'
+  resetBtn.title = t('shell', 'shell.settings.resetTitle')
   resetBtn.onclick = () => {
     const toRemove: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
@@ -354,7 +354,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
     }
     for (const k of toRemove) localStorage.removeItem(k)
     overlay.remove()
-    showToast(rootHost(), '🗑 Local preferences cleared — reload the page to apply')
+    showToast(rootHost(), t('shell', 'shell.settings.resetDone'))
   }
   resetRow.append(resetLabel, resetBtn)
   modal.appendChild(resetRow)
@@ -374,13 +374,13 @@ export function openAboutModal(root: ShadowRoot | null | undefined): void {
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:520px;max-width:92vw'
-  const header = el('div', 'modal-header', 'ℹ About Research OS')
+  const header = el('div', 'modal-header', t('shell', 'shell.about.title'))
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
   header.appendChild(closeBtn)
   modal.appendChild(header)
 
-  const intro = el('div', 'muted', 'DSH Scholar — Research OS standalone web plugin. A fully self-contained research workspace: plan, run and review experiments with human-gated decisions.')
+  const intro = el('div', 'muted', t('shell', 'shell.about.intro'))
   intro.style.cssText = 'font-size:12px;line-height:1.6'
   modal.appendChild(intro)
 
@@ -394,23 +394,23 @@ export function openAboutModal(root: ShadowRoot | null | undefined): void {
     r.append(l, v)
     modal.appendChild(r)
   }
-  modal.appendChild(el('div', 'section-label', 'Version'))
-  row('Plugin', 'v0.2 (hardening branch)')
-  row('Surface', 'Research · Execution · Review · Operations')
-  row('Kernel', 'Research Kernel (SQLite + CAS)')
-  row('Runner', 'docker isolation (baseline/pilot/formal/reproduce)')
+  modal.appendChild(el('div', 'section-label', t('shell', 'shell.about.version')))
+  row(t('shell', 'shell.about.rowPlugin'), 'v0.2 (hardening branch)')
+  row(t('shell', 'shell.about.rowSurface'), 'Research · Execution · Review · Operations')
+  row(t('shell', 'shell.about.rowKernel'), 'Research Kernel (SQLite + CAS)')
+  row(t('shell', 'shell.about.rowRunner'), 'docker isolation (baseline/pilot/formal/reproduce)')
 
-  modal.appendChild(el('div', 'section-label', 'Architecture'))
-  const arch = el('div', 'muted', 'The plugin serves its own origin with a bundled kernel sidecar. The browser talks to a same-origin /v1 proxy protected by a bearer token and CSRF origin checks (design §15.2/§15.3). Every gate decision is recorded in the kernel ledger with the operator identity; experiment jobs run in disposable containers with Ed25519-signed run manifests.')
+  modal.appendChild(el('div', 'section-label', t('shell', 'shell.about.architecture')))
+  const arch = el('div', 'muted', t('shell', 'shell.about.architectureText'))
   arch.style.cssText = 'font-size:11.5px;line-height:1.6'
   modal.appendChild(arch)
 
-  modal.appendChild(el('div', 'section-label', 'Safety model'))
-  const safety = el('div', 'muted', 'gate-only mode: scope / idea / contract / release gates always require a human decision (Approve/Reject in Execution → Approvals or the sidebar). Budget overruns park the project as BLOCKED_GATE until a human Budget Gate approves.')
+  modal.appendChild(el('div', 'section-label', t('shell', 'shell.about.safety')))
+  const safety = el('div', 'muted', t('shell', 'shell.about.safetyText'))
   safety.style.cssText = 'font-size:11.5px;line-height:1.6'
   modal.appendChild(safety)
 
-  const footer = el('div', 'muted', 'DSH Scholar · standalone Research OS · BSD-3-Clause')
+  const footer = el('div', 'muted', t('shell', 'shell.about.footer'))
   footer.style.cssText = 'margin-top:16px;font-size:10.5px'
   modal.appendChild(footer)
 

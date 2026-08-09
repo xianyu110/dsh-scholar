@@ -26,7 +26,14 @@ export const zh = {
   'artifacts.downloadedToast': '⬇ 已下载 {count} 个产物',
   'artifacts.detailModal': '📦 产物详情',
   'artifacts.previewDisabled': '⚠️ 出于安全原因,HTML 预览已禁用(design §15.4)— 请下载文件。',
+  'artifacts.truncated': '…(已截断)',
+
+
+  'artifacts.detailArtifact': '产物',
+  'artifacts.detailKind': '类型',
+  'artifacts.detailSize': '大小',
 }
+
 
 export const en: Record<keyof typeof zh, string> = {
   'artifacts.section': 'Artifacts ({count}, click to preview)',
@@ -52,4 +59,11 @@ export const en: Record<keyof typeof zh, string> = {
   'artifacts.downloadedToast': '⬇ Downloaded {count} artifact(s)',
   'artifacts.detailModal': '📦 Artifact details',
   'artifacts.previewDisabled': '⚠️ HTML preview is disabled for security (design §15.4) — download the file instead.',
+  'artifacts.truncated': '… (truncated)',
+
+
+  'artifacts.detailArtifact': 'Artifact',
+  'artifacts.detailKind': 'Kind',
+  'artifacts.detailSize': 'Size',
 }
+

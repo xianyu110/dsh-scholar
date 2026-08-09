@@ -18,7 +18,7 @@ import {
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-texbuild-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function fenceArgs(kernel: ResearchKernel, jobId: string): { lease_generation: number | null; lease_token: string | null } {

@@ -2,19 +2,22 @@
 # §19.2 P0 blocking test: agent-cannot-decide-gate + acceptance-tests.md §2
 # Gate/治理 kernel-level cases.
 #
-# Full §19.2 intent: a research gate must never be decided by an agent — only
-# a human with an authenticated principal may decide. The kernel API carries
-# no principal/role concept (only a free-form `actor` string), so the
-# agent-vs-human enforcement is currently a tool-layer concern. What the
-# kernel CAN and MUST enforce today:
+# §19.2 intent: a research gate must only be decided by a human with an
+# authenticated principal. Since the v1 kernel surface has no header-carried
+# identity, the HTTP gate-decision contract is principal fail-closed
+# (GOV-01): POST /v1/gates/{id}/decisions REQUIRES `principal` — an
+# anonymous or bare-actor (forged identity) decision is 422
+# principal_required and never recorded. What the kernel enforces:
 #
-#   1. gate decision requires an actor — a decision WITHOUT actor is rejected
-#      (validation 422), it is never recorded as anonymous.
+#   1. a gate decision requires a principal — a decision without principal
+#      (with or without a bare `actor`) is rejected 422 principal_required,
+#      it is never recorded as anonymous;
 #   2. a gate can be decided at most once — a second decision is rejected
 #      (409 gate_already_decided), the first decision wins.
 #
-# The script also records the actual behavior for agent-like actors (any
-# `actor` string, including "agent-*", is accepted and recorded verbatim).
+# The internal orchestrator channel is NOT the gate-decision route: it uses
+# the contract approve route (POST /v1/projects/{id}/contracts/{cid}/approve,
+# actor-only), which is exercised by the kernel/orchestrator unit tests.
 #
 # §2 coverage added here (kernel layer):
 #   - gate-state-cannot-transition: the four gate-controlled states
@@ -80,14 +83,14 @@ PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"gate\",\"workspace\":\"/w
 GATE=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Scope Gate v0.2"}' | jfield '.gate_id')
 [[ -n "$PROJ" && -n "$GATE" ]] || { echo "failed to create project/gate"; exit 1; }
 
-say "Test 1: gate decision without actor -> rejected (no anonymous decisions)"
+say "Test 1: gate decision without principal -> rejected 422 principal_required (no anonymous decisions)"
 CODE_NO=$(curl -s -o "$WORK/no-actor.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"decision":"approved"}')
 ERR_NO=$(jfield '.error.code' < "$WORK/no-actor.json")
 N_DEC0=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '.length')
-if [[ "$CODE_NO" == "422" && "$N_DEC0" == "0" ]]; then
-  ok "decision without actor -> HTTP 422 ($ERR_NO), no decision recorded"
+if [[ "$CODE_NO" == "422" && "$ERR_NO" == "principal_required" && "$N_DEC0" == "0" ]]; then
+  ok "decision without principal -> HTTP 422 ($ERR_NO), no decision recorded"
 else
-  bad "expected 422 with no decision recorded, got HTTP $CODE_NO ($ERR_NO), decisions=$N_DEC0"
+  bad "expected 422 principal_required with no decision recorded, got HTTP $CODE_NO ($ERR_NO), decisions=$N_DEC0"
 fi
 
 say "Test 2: agent-like actor is accepted and recorded verbatim (actual behavior)"
@@ -95,7 +98,7 @@ CODE_AGENT=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$GAT
 ACTOR=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '[0].actor')
 GATE_STATUS=$(api "$BASE/v1/projects/$PROJ/gates" | jfield '[0].status')
 if [[ "$CODE_AGENT" == "200" && "$ACTOR" == "agent-tool-1" && "$GATE_STATUS" == "approved" ]]; then
-  ok "actor 'agent-tool-1' accepted and recorded (kernel has no agent/human principal check — enforcement is tool-layer; recorded for report)"
+  ok "agent-like principal accepted and recorded verbatim (HTTP surface requires a principal; recorded for report)"
 else
   bad "expected 200 + actor recorded; got HTTP $CODE_AGENT actor='$ACTOR' gate='$GATE_STATUS'"
 fi
@@ -268,10 +271,10 @@ P9=$(api -X POST "$BASE/v1/projects" -d '{"name":"gov-principal","workspace":"/w
 G9=$(api -X POST "$BASE/v1/projects/$P9/gates" -d '{"type":"scope","title":"principal gate"}' | jfield '.gate_id')
 CODE=$(curl -s -o "$WORK/gov9.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$G9/decisions" -H 'content-type: application/json' -d '{"actor":"anon","decision":"approved"}')
 ERR=$(jfield '.error.code' < "$WORK/gov9.json")
-if [[ "$CODE" == "422" && "$ERR" == "validation_error" ]]; then
-  ok "bare-actor gate decision -> HTTP 422 validation_error (GOV-01 fail-closed, principal required)"
+if [[ "$CODE" == "422" && "$ERR" == "principal_required" ]]; then
+  ok "bare-actor gate decision -> HTTP 422 principal_required (GOV-01 fail-closed, principal required)"
 else
-  bad "bare-actor decision: expected 422 validation_error, got HTTP $CODE (error=$ERR)"
+  bad "bare-actor decision: expected 422 principal_required, got HTTP $CODE (error=$ERR)"
 fi
 # Control: with a principal the same gate decides fine (and the state moves).
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$G9/decisions" -H 'content-type: application/json' -d '{"actor":"web-user","principal":{"principal_id":"pi-gov","auth_method":"dsh-session"},"decision":"approved"}')

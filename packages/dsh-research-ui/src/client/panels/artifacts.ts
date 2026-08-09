@@ -244,9 +244,9 @@ export function openArtifactDetailModal(root: ShadowRoot, artifact: ArtifactRow)
   modal.appendChild(titleRow)
 
   modal.appendChild(el('div', 'section-label', t('artifacts', 'artifacts.detail.title')))
-  row('Artifact', String(artifact.artifact_id ?? '—'))
-  row('Kind', String(artifact.kind ?? '—'))
-  row('Size', fmtBytes(artifact.size_bytes))
+  row(t('artifacts', 'artifacts.detailArtifact'), String(artifact.artifact_id ?? '—'))
+  row(t('artifacts', 'artifacts.detailKind'), String(artifact.kind ?? '—'))
+  row(t('artifacts', 'artifacts.detailSize'), fmtBytes(artifact.size_bytes))
   const meta = artifact.metadata
   if (meta !== undefined && Object.keys(meta).length > 0) {
     modal.appendChild(el('div', 'section-label', t('artifacts', 'artifacts.detail.metadata')))
@@ -343,7 +343,7 @@ export async function previewArtifact(artifactId: string): Promise<void> {
       modal.appendChild(downloadLink(blob, artifactId))
     } else {
       const content = text ?? (await blob.text())
-      const pre = el('pre', '', content.length > 6000 ? content.slice(0, 6000) + String.fromCharCode(10) + '… (truncated)' : content)
+      const pre = el('pre', '', content.length > 6000 ? content.slice(0, 6000) + String.fromCharCode(10) + t('artifacts', 'artifacts.truncated') : content)
       pre.className = 'pre'
       modal.appendChild(pre)
       modal.appendChild(downloadLink(blob, artifactId))

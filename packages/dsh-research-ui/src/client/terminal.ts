@@ -336,7 +336,7 @@ export function renderTerminal(body: HTMLElement, p: Projection, projectId: stri
   wrap.style.cssText = 'position:relative;flex:1;min-height:320px;display:flex;flex-direction:column'
   const stream = el('div')
   stream.style.cssText = 'flex:1;overflow:auto;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:11px/1.5 ui-monospace,Menlo,monospace;white-space:pre'
-  stream.setAttribute('aria-label', 'run terminal output')
+  stream.setAttribute('aria-label', t('terminal', 'terminal.streamAria'))
   stream.setAttribute('aria-live', 'polite')
   const renderLines = (): void => {
     stream.replaceChildren()
@@ -358,7 +358,7 @@ export function renderTerminal(body: HTMLElement, p: Projection, projectId: stri
     jumpBtn.style.display = nearBottom ? 'none' : 'inline-block'
   }
   const jumpBtn = el('button', 'hbtn', t('terminal', 'terminal.action.jumpLatest'))
-  jumpBtn.title = 'jump to the newest output'
+  jumpBtn.title = t('terminal', 'terminal.jumpLatestTitle')
   jumpBtn.style.cssText = 'position:absolute;right:12px;bottom:12px;display:none'
   jumpBtn.onclick = () => { stream.scrollTop = stream.scrollHeight; state.terminalAutoScroll = true; jumpBtn.style.display = 'none' }
   wrap.append(stream, jumpBtn)

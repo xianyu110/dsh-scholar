@@ -79,6 +79,8 @@ export const zh = {
   'common.clickForDetails': '点击查看详情',
   'common.error.generic': '出错了',
   'common.error.bridge': '通信桥错误',
+  'common.contextMenuAria': '上下文菜单',
+  'common.copiedToClipboard': '已复制: {preview}',
 } as const
 
 export type CommonKey = keyof typeof zh
@@ -160,4 +162,6 @@ export const en: Record<CommonKey, string> = {
   'common.clickForDetails': 'click for details',
   'common.error.generic': 'Something went wrong',
   'common.error.bridge': 'Bridge error',
+  'common.contextMenuAria': 'context menu',
+  'common.copiedToClipboard': 'Copied: {preview}',
 }

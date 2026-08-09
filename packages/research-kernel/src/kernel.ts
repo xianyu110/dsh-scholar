@@ -20,6 +20,11 @@ import {
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
+
+/** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
+ * 10,000 in production — the kernel never lowers them. */
+const ANALYSIS_RESAMPLES = 10_000
+
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
 import { validateImageDigest, type SecureJobKind } from './images-lock.js'
 import { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
@@ -133,6 +138,54 @@ function jobFromRow(row: JobRow): JobSpecBound {
   }
 }
 
+/**
+ * §3.1 (STORE-01): a durable run-attempt row — one row per job claim,
+ * identity (run_id) per attempt. Populated at claim time and finalized at
+ * completion (RUN-01). `snapshot_sha256` is the CAS sha256 of the job's
+ * bound code snapshot (null when the job has none, e.g. echo/smoke/TeX).
+ */
+export interface RunRecord {
+  run_id: string
+  project_id: string
+  job_id: string
+  attempt_no: number
+  contract_id: string | null
+  snapshot_sha256: string | null
+  manifest_json: Record<string, unknown> | null
+  signature_status: 'pending' | 'signed' | 'unsigned'
+  started_at: string
+  finished_at: string | null
+}
+
+/** Row shape for the §3.1 runs table. */
+interface RunRow {
+  run_id: string
+  project_id: string
+  job_id: string
+  attempt_no: number
+  contract_id: string | null
+  snapshot_sha256: string | null
+  manifest_json: string | null
+  signature_status: string
+  started_at: string
+  finished_at: string | null
+}
+
+function runFromRow(row: RunRow): RunRecord {
+  return {
+    run_id: row.run_id,
+    project_id: row.project_id,
+    job_id: row.job_id,
+    attempt_no: row.attempt_no,
+    contract_id: row.contract_id,
+    snapshot_sha256: row.snapshot_sha256,
+    manifest_json: jsonParse(row.manifest_json, null),
+    signature_status: row.signature_status as RunRecord['signature_status'],
+    started_at: row.started_at,
+    finished_at: row.finished_at,
+  }
+}
+
 /** Row shape for the event outbox (§16 canonical envelope, EVENT-01). */
 interface OutboxEventRow {
   event_id: string
@@ -229,7 +282,11 @@ export class ResearchKernel {
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
-    this.requireSignedManifest = options.requireSignedManifest ?? false
+    // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
+    // registers an ephemeral Ed25519 key and signs every completion, so the
+    // default only affects callers that never sign. Unit tests that exercise
+    // unrelated paths opt out explicitly (freshKernel passes false).
+    this.requireSignedManifest = options.requireSignedManifest ?? true
   }
 
   close(): void {
@@ -1549,26 +1606,18 @@ export class ResearchKernel {
 
   /** §3.1 / RUN-01: durable per-attempt run rows of a project (claim-time
    * identity + completion manifest/signature status), newest first. */
-  listRuns(projectId: string): Array<{
-    run_id: string; project_id: string; job_id: string; attempt_no: number
-    contract_id: string | null; snapshot_sha256: string | null
-    manifest_json: string | null; signature_status: string
-    started_at: string; finished_at: string | null
-  }> {
+  listRuns(projectId: string): RunRecord[] {
     this.getProject(projectId)
-    const rows = this.db.prepare('SELECT * FROM runs WHERE project_id = ? ORDER BY started_at DESC').all(projectId) as unknown as Array<Record<string, unknown>>
-    return rows.map(row => ({
-      run_id: row.run_id as string,
-      project_id: row.project_id as string,
-      job_id: row.job_id as string,
-      attempt_no: Number(row.attempt_no),
-      contract_id: row.contract_id as string | null,
-      snapshot_sha256: row.snapshot_sha256 as string | null,
-      manifest_json: row.manifest_json as string | null,
-      signature_status: row.signature_status as string,
-      started_at: row.started_at as string,
-      finished_at: row.finished_at as string | null,
-    }))
+    const rows = this.db.prepare('SELECT * FROM runs WHERE project_id = ? ORDER BY started_at DESC').all(projectId) as unknown as RunRow[]
+    return rows.map(runFromRow)
+  }
+
+  /** §3.1 / RUN-01: single run attempt, project-scoped (404 when unknown). */
+  getRun(projectId: string, runId: string): RunRecord {
+    this.getProject(projectId)
+    const row = this.db.prepare('SELECT * FROM runs WHERE run_id = ? AND project_id = ?').get(runId, projectId) as RunRow | undefined
+    if (row === undefined) throw new KernelError(404, 'run_not_found', `run ${runId} not found in project ${projectId}`)
+    return runFromRow(row)
   }
 
   /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3, §12.6).
@@ -1594,19 +1643,40 @@ export class ResearchKernel {
         const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow)
         // §3.1 / RUN-01 (Run attempt): every claim records a runs row — the
         // durable per-attempt identity (attempt_no = attempts after claim).
+        // run_id is run_<12 hex>; snapshot_sha256 is the CAS sha256 resolved
+        // from the job's code_snapshot_id ('' → NULL when the job has none).
         this.db.prepare(
           `INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, signature_status, started_at)
            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
         ).run(
-          `run_${randomUUID().slice(0, 12)}`, claimedJob.project_id, claimedJob.job_id, claimedJob.attempts,
-          claimedJob.contract_id,
-          typeof claimedJob.code_snapshot_id === 'string' && claimedJob.code_snapshot_id !== '' ? claimedJob.code_snapshot_id : null,
-          now,
+          `run_${randomUUID().replaceAll('-', '').slice(0, 12)}`, claimedJob.project_id, claimedJob.job_id, claimedJob.attempts,
+          claimedJob.contract_id, this.resolveSnapshotSha256(claimedJob.code_snapshot_id), now,
         )
         claimed.push(claimedJob)
       }
     }
     return claimed
+  }
+
+  /**
+   * §3.1 / RUN-01: resolve the CAS sha256 recorded on a runs row from a job's
+   * `code_snapshot_id`. `sha256:<hex>` artifact ids and raw 64-hex hashes are
+   * used verbatim; `code_snap_` registry ids resolve through the
+   * authoritative code_snapshots registry (its archive artifact sha256).
+   * Jobs without a code snapshot (echo/smoke/latex-compile) yield null.
+   */
+  private resolveSnapshotSha256(codeSnapshotId: string | null): string | null {
+    if (codeSnapshotId === null || codeSnapshotId === '') return null
+    if (codeSnapshotId.startsWith('sha256:')) return codeSnapshotId.slice('sha256:'.length)
+    if (/^[0-9a-f]{64}$/.test(codeSnapshotId)) return codeSnapshotId
+    if (codeSnapshotId.startsWith('code_snap_')) {
+      try {
+        return this.getCodeSnapshot(codeSnapshotId).sha256
+      } catch {
+        return null
+      }
+    }
+    return null
   }
 
   /**
@@ -1711,10 +1781,12 @@ export class ResearchKernel {
     ).run(input.status, input.failure_class ?? null, input.run_manifest !== undefined ? JSON.stringify(input.run_manifest) : null, input.error ?? '', now, input.job_id)
     // §3.1 / RUN-01 (Run attempt): finalize the attempt's runs row (the one
     // recorded at claim time for this attempt_no). Manifest + signature
-    // status come from the completed run; legacy completions without a
-    // manifest keep signature_status 'pending'.
+    // status come from the completed run; a manifest without a non-empty
+    // `signature` (or no manifest at all) records 'unsigned'.
     const manifestRow = input.run_manifest !== undefined ? input.run_manifest : undefined
-    const signatureStatus = manifestRow !== undefined && (manifestRow as Record<string, unknown>).signature !== undefined ? 'signed' : 'unsigned'
+    const signed = typeof (manifestRow as Record<string, unknown> | undefined)?.signature === 'string'
+      && (manifestRow as Record<string, unknown>).signature !== ''
+    const signatureStatus = manifestRow !== undefined && signed ? 'signed' : 'unsigned'
     this.db.prepare(
       'UPDATE runs SET manifest_json = ?, signature_status = ?, finished_at = ? WHERE job_id = ? AND attempt_no = ?',
     ).run(
@@ -2500,7 +2572,26 @@ export class ResearchKernel {
     // mean-difference (matched-seed design, seeded percentile bootstrap).
     // The kernel never re-implements statistics — it collects baseline and
     // treatment runs, pairs them by seed, and delegates the math.
-    const minimumN = options.minimum_n ?? 1
+    // §12 MetricSpec direction + minimum_n: both resolved from the bound
+    // contract (explicit contract_id, else the project's first approved
+    // contract); direction defaults to higher_is_better, minimum_n to the
+    // contract's stop_conditions.min_completed_seeds (fallback 1) and a
+    // caller-lowered minimum_n is 422 (AnalysisPlan.minimum_n is
+    // contract-driven, reconstruction-contracts.md §12).
+    const approvedContracts = this.listContracts(projectId).filter(c => c.status === 'approved')
+    const boundContract = contractId !== undefined
+      ? approvedContracts.find(c => c.contract_id === contractId)
+      : approvedContracts[0]
+    let direction: 'higher_is_better' | 'lower_is_better' = 'higher_is_better'
+    if (boundContract !== undefined && boundContract.metrics.direction !== undefined) {
+      direction = boundContract.metrics.direction
+    }
+    const contractMinimum = boundContract?.stop_conditions.min_completed_seeds
+    const minimumN = options.minimum_n ?? contractMinimum ?? 1
+    if (contractMinimum !== undefined && options.minimum_n !== undefined && options.minimum_n < contractMinimum) {
+      throw new KernelError(422, 'minimum_n_too_low',
+        `analysis minimum_n ${options.minimum_n} < contract stop_conditions.min_completed_seeds ${contractMinimum} (cannot be lowered by the caller, §12)`)
+    }
     const baselineRuns: Array<{ seed?: number; value: number }> = []
     const treatmentRuns: Array<{ seed?: number; value: number }> = []
     for (const v of metricValues) {
@@ -2525,17 +2616,6 @@ export class ResearchKernel {
       const hit = treatmentRuns.find(t => t.seed === s)!
       return hit.value
     })
-    // §12 MetricSpec direction: resolved from the bound contract (explicit
-    // contract_id, else the project's first approved contract); defaults to
-    // higher_is_better when the contract declares none.
-    let direction: 'higher_is_better' | 'lower_is_better' = 'higher_is_better'
-    const approvedContracts = this.listContracts(projectId).filter(c => c.status === 'approved')
-    const boundContract = contractId !== undefined
-      ? approvedContracts.find(c => c.contract_id === contractId)
-      : approvedContracts[0]
-    if (boundContract !== undefined && boundContract.metrics.direction !== undefined) {
-      direction = boundContract.metrics.direction
-    }
     const worker = computePairedAnalysis(
       {
         contract_id: contractId ?? 'auto',
@@ -2543,7 +2623,7 @@ export class ResearchKernel {
         paired_by: 'seed',
         baseline_run_set_id: 'kernel-baseline',
         treatment_run_set_id: 'kernel-treatment',
-        method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 1000 },
+        method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: ANALYSIS_RESAMPLES },
         multiple_testing: 'holm',
         minimum_n: minimumN,
       },
@@ -2573,7 +2653,7 @@ export class ResearchKernel {
     const artifact = this.registerArtifact({
       project_id: projectId,
       kind: 'analysis',
-      content: JSON.stringify({ analysis: result, method: 'percentile-bootstrap-95', n_resamples: 1000, project_id: projectId }, null, 2),
+      content: JSON.stringify({ analysis: result, method: 'percentile-bootstrap-95', n_resamples: ANALYSIS_RESAMPLES, project_id: projectId }, null, 2),
       metadata: { kind: 'analysis', metric: result.metric, n: result.n, generated_by: 'research-kernel.computeAnalysis' },
     })
     this.emit(projectId, 'artifact.registered', { artifact_id: artifact.artifact_id, kind: 'analysis' })

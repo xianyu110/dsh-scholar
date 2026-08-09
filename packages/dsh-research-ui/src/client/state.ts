@@ -320,13 +320,13 @@ export function chatSessionRename(id: string): void {
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:440px;max-width:92vw'
   modal.setAttribute('role', 'dialog')
-  modal.setAttribute('aria-label', 'Rename session')
-  const header = el('div', 'modal-header', '✎ Rename Session')
+  modal.setAttribute('aria-label', t('shell', 'shell.renameSession.title'))
+  const header = el('div', 'modal-header', t('shell', 'shell.renameSession.title'))
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
   header.appendChild(closeBtn)
   modal.appendChild(header)
-  const hint = el('div', 'muted', `Rename "${session.name}" — session messages are kept.`)
+  const hint = el('div', 'muted', t('shell', 'shell.renameSession.hint', { name: session.name }))
   hint.style.cssText = 'margin-bottom:10px;font-size:11.5px'
   modal.appendChild(hint)
   const input = document.createElement('input')
@@ -343,12 +343,12 @@ export function chatSessionRename(id: string): void {
   actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
   const cancel = el('button', 'hbtn', t('budget', 'budget.modal.cancel'))
   cancel.onclick = () => overlay.remove()
-  const save = el('button', 'btn approve', 'Save')
+  const save = el('button', 'btn approve', t('common', 'common.action.save'))
   save.style.cssText = 'padding:7px 18px'
   const saveName = (): void => {
     const clean = input.value.trim()
     if (clean === '') {
-      err.textContent = 'Name must not be empty.'
+      err.textContent = t('common', 'common.nameRequired')
       err.style.display = 'block'
       return
     }

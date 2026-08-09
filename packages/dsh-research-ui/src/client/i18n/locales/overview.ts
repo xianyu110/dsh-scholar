@@ -76,7 +76,22 @@ export const zh = {
   'overview.gpuLabel': 'GPU',
   'overview.showAll': '⤵ 显示全部 ({count})',
   'overview.showLast10': '⤴ 显示最近 10 条',
+  'overview.untitled': '未命名',
+
+
+  'overview.detailContract': '合同',
+  'overview.detailStatus': '状态',
+  'overview.detailVersion': '版本',
+  'overview.detailIdea': '想法',
+  'overview.detailDataset': '数据集',
+  'overview.detailSplit': '划分',
+  'overview.detailBaseline': '基线',
+  'overview.detailTreatment': '处理',
+  'overview.detailPrimary': '主要',
+  'overview.detailSecondary': '次要',
+  'overview.detailSeeds': '种子',
 }
+
 
 export const en: Record<keyof typeof zh, string> = {
   'overview.pipeline.draft': 'Draft',
@@ -151,4 +166,19 @@ export const en: Record<keyof typeof zh, string> = {
   'overview.gpuLabel': 'GPU',
   'overview.showAll': '⤵ show all ({count})',
   'overview.showLast10': '⤴ show last 10',
+  'overview.untitled': 'untitled',
+
+
+  'overview.detailContract': 'Contract',
+  'overview.detailStatus': 'Status',
+  'overview.detailVersion': 'Version',
+  'overview.detailIdea': 'Idea',
+  'overview.detailDataset': 'Dataset',
+  'overview.detailSplit': 'Split',
+  'overview.detailBaseline': 'Baseline',
+  'overview.detailTreatment': 'Treatment',
+  'overview.detailPrimary': 'Primary',
+  'overview.detailSecondary': 'Secondary',
+  'overview.detailSeeds': 'Seeds',
 }
+

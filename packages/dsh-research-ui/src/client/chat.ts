@@ -307,11 +307,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       event.stopPropagation()
       chatSessionRename(s.id)
     }
-    tab.title = `${s.name} · double-click to rename`
+    tab.title = t('shell', 'shell.chat.tabTitle', { name: s.name })
     sessionTabs.appendChild(tab)
     // dsh-web session actions: archive/restore.
     const arch = el('button', 'hbtn ghost', s.archived === true ? '↩' : '🗄')
-    arch.title = s.archived === true ? 'restore session' : 'archive session'
+    arch.title = s.archived === true ? t('shell', 'shell.chat.sessionRestore') : t('shell', 'shell.chat.sessionArchive')
     arch.style.cssText = 'padding:0 4px;font-size:10px'
     arch.onclick = (event) => {
       event.stopPropagation()
@@ -319,7 +319,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     }
     const close = el('button', 'hbtn ghost', '×')
     close.style.cssText = 'padding:0 4px;font-size:10px'
-    close.title = `close ${s.name}`
+    close.title = t('shell', 'shell.chat.closeTabTitle', { name: s.name })
     close.onclick = (event) => {
       event.stopPropagation()
       chatSessionClose(s.id)
@@ -335,7 +335,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     if (s.archived === true) wrap.style.cssText += ';opacity:.45'
     // dsh-web session tabs: drag to reorder the session list.
     wrap.draggable = true
-    wrap.title = 'drag to reorder · right-click for actions'
+    wrap.title = t('shell', 'shell.chat.tabDragTitle')
     wrap.addEventListener('dragstart', (event) => {
       dragSessionId = s.id
       event.dataTransfer?.setData('text/plain', s.id)
@@ -363,10 +363,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const root = rootHost()
       if (root == null) return
       const ctxItems: ContextMenuItem[] = [
-        { label: 'Open', onPick: () => chatSessionSelect(s.id) },
-        { label: '✎ Rename', onPick: () => chatSessionRename(s.id) },
+        { label: t('common', 'common.action.open'), onPick: () => chatSessionSelect(s.id) },
+        { label: `✎ ${t('common', 'common.action.rename')}`, onPick: () => chatSessionRename(s.id) },
         {
-          label: s.pinned === true ? '★ Unpin' : '☆ Pin',
+          label: s.pinned === true ? `★ ${t('shell', 'shell.chat.unpinTitle')}` : `☆ ${t('shell', 'shell.chat.pinTitle')}`,
           onPick: () => {
             s.pinned = !s.pinned
             chatSessionsPersist()
@@ -375,7 +375,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
           },
         },
         {
-          label: '⧉ Duplicate',
+          label: t('shell', 'shell.chat.duplicate'),
           onPick: () => {
             const copy: ChatSession = {
               ...s,
@@ -391,13 +391,13 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
             chatSyncActive()
             chatSessionsPersist()
             state.rerender()
-            showToast(rootHost(), `⧉ Duplicated ${s.name}`)
+            showToast(rootHost(), t('shell', 'shell.chat.duplicated', { name: s.name }))
           },
         },
-        { label: s.archived === true ? '↩ Restore' : '🗄 Archive', onPick: () => chatSessionArchive(s.id) },
-        { label: 'Copy session ID', hint: s.id, onPick: () => copyText(s.id) },
+        { label: s.archived === true ? `↩ ${t('common', 'common.action.restore')}` : `🗄 ${t('common', 'common.action.archive')}`, onPick: () => chatSessionArchive(s.id) },
+        { label: t('common', 'common.action.copyId'), hint: s.id, onPick: () => copyText(s.id) },
         {
-          label: '🔍 Search here',
+          label: t('shell', 'shell.chat.searchHere'),
           onPick: () => {
             chatSessionSelect(s.id)
             state.activeTab = 'chat'
@@ -411,7 +411,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
           },
         },
         {
-          label: '⬇ Export JSON',
+          label: t('common', 'common.action.exportJson'),
           divider: true,
           onPick: () => {
             const payload = JSON.stringify({
@@ -429,18 +429,18 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
             a.click()
             a.remove()
             setTimeout(() => URL.revokeObjectURL(url), 4000)
-            showToast(rootHost(), `⬇ Exported ${s.name}`)
+            showToast(rootHost(), t('shell', 'shell.chat.exported', { name: s.name }))
           },
         },
         {
-          label: '🗑 Clear conversation',
+          label: t('shell', 'shell.chat.clearConversation'),
           onPick: () => {
             chatClear()
             state.rerender()
           },
         },
         {
-          label: '⬇ Export md',
+          label: t('common', 'common.action.exportMd'),
           onPick: () => {
             const lines = [`# Research OS conversation — ${s.name}`, '', ...s.messages.map(m => {
               const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**Research OS**'
@@ -455,10 +455,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
             a.click()
             a.remove()
             setTimeout(() => URL.revokeObjectURL(url), 4000)
-            showToast(rootHost(), `⬇ Exported ${s.name} as markdown`)
+            showToast(rootHost(), t('shell', 'shell.chat.exportedMd', { name: s.name }))
           },
         },
-        { label: '× Close', danger: true, divider: true, onPick: () => chatSessionClose(s.id) },
+        { label: `× ${t('common', 'common.action.close')}`, danger: true, divider: true, onPick: () => chatSessionClose(s.id) },
       ]
       openContextMenu(root, event.clientX, event.clientY, ctxItems)
     }
@@ -468,14 +468,14 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     sessionTabs.appendChild(wrap)
   }
   const newSession = el('button', 'hbtn', '＋')
-  newSession.title = 'new chat session'
+  newSession.title = t('shell', 'shell.chat.newSessionTitle')
   newSession.style.cssText = 'padding:3px 9px;font-size:11px'
   newSession.onclick = () => { chatSessionNew() }
   sessionTabs.appendChild(newSession)
   // dsh-web backup: export every session (transcripts included) as JSON.
   const backupBtn = el('button', 'hbtn', '💾')
-  backupBtn.title = 'backup all sessions (JSON)'
-  backupBtn.setAttribute('aria-label', 'Backup all sessions as JSON')
+  backupBtn.title = t('shell', 'shell.chat.backupTitle')
+  backupBtn.setAttribute('aria-label', t('shell', 'shell.chat.backupAria'))
   backupBtn.style.cssText = 'padding:3px 9px;font-size:11px'
   backupBtn.onclick = () => {
     const payload = JSON.stringify({
@@ -491,13 +491,13 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     a.click()
     a.remove()
     setTimeout(() => URL.revokeObjectURL(url), 4000)
-    showToast(rootHost(), `💾 Backed up ${state.chatSessions.length} session(s)`)
+    showToast(rootHost(), t('shell', 'shell.chat.backedUp', { count: String(state.chatSessions.length) }))
   }
   sessionTabs.appendChild(backupBtn)
   // dsh-web restore: import sessions back from a backup JSON file.
   const restoreBtn = el('button', 'hbtn', '⬆')
-  restoreBtn.title = 'restore sessions from a backup JSON'
-  restoreBtn.setAttribute('aria-label', 'Restore sessions from backup')
+  restoreBtn.title = t('shell', 'shell.chat.restoreTitle')
+  restoreBtn.setAttribute('aria-label', t('shell', 'shell.chat.restoreAria'))
   restoreBtn.style.cssText = 'padding:3px 9px;font-size:11px'
   const fileInput = document.createElement('input')
   fileInput.type = 'file'
@@ -518,9 +518,9 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
         chatSessionEnsure()
         chatSessionsPersist()
         state.rerender()
-        showToast(rootHost(), `⬆ Restored ${cleaned.length} session(s)`)
+        showToast(rootHost(), t('shell', 'shell.chat.restored', { count: String(cleaned.length) }))
       } catch {
-        showToast(rootHost(), '⬆ Restore failed: invalid backup file')
+        showToast(rootHost(), t('shell', 'shell.chat.restoreFailed'))
       }
     })
     fileInput.value = ''
@@ -541,14 +541,14 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   const searchRow = el('div', 'chat-search-row')
   const searchInput = document.createElement('input')
   searchInput.type = 'text'
-  searchInput.placeholder = '🔍 Search conversation…'
+  searchInput.placeholder = t('shell', 'shell.chat.searchPlaceholder')
   searchInput.value = chatSearchQuery
   searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none'
   searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
   searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
   searchInput.oninput = () => { chatSearchQuery = searchInput.value; state.rerender() }
   const clearSearch = el('button', 'hbtn', '×')
-  clearSearch.title = 'clear search'
+  clearSearch.title = t('shell', 'shell.chat.clearSearchTitle')
   clearSearch.style.cssText = 'padding:0 7px'
   clearSearch.onclick = () => {
     chatSearchQuery = ''
@@ -556,16 +556,16 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   }
   searchRow.append(searchInput, clearSearch)
   // dsh-web cross-session search: search claims/evidence across projects.
-  const globalBtn = el('button', 'hbtn', '🌐 global')
-  globalBtn.title = 'search across all projects'
+  const globalBtn = el('button', 'hbtn', t('shell', 'shell.chat.globalSearch'))
+  globalBtn.title = t('shell', 'shell.chat.globalSearchTitle')
   globalBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   globalBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
     if (root != null) openGlobalSearchModal(root)
   }
   // dsh-web cross-session search: every chat session's transcript.
-  const allBtn = el('button', 'hbtn', '🔎 all')
-  allBtn.title = 'search across all sessions'
+  const allBtn = el('button', 'hbtn', t('shell', 'shell.chat.all'))
+  allBtn.title = t('shell', 'shell.chat.allTitle')
   allBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   allBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
@@ -574,8 +574,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   searchRow.appendChild(globalBtn)
   searchRow.appendChild(allBtn)
   // dsh-web "commands only" filter: a compact list of just the commands.
-  const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? '⌘ commands on' : '⌘ commands')
-  commandsOnlyBtn.title = 'show only command messages'
+  const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? t('shell', 'shell.chat.commandsOnlyOn') : t('shell', 'shell.chat.commandsOnly'))
+  commandsOnlyBtn.title = t('shell', 'shell.chat.commandsOnlyTitle')
   commandsOnlyBtn.setAttribute('aria-pressed', chatCommandsOnly ? 'true' : 'false')
   commandsOnlyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   commandsOnlyBtn.onclick = () => {
@@ -588,8 +588,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   matchLabel.style.cssText = 'font-size:9.5px;flex-shrink:0'
   searchRow.appendChild(matchLabel)
   // dsh-web command history panel: all executed commands in one view.
-  const historyBtn = el('button', 'hbtn', '🕘 history')
-  historyBtn.title = 'command execution history'
+  const historyBtn = el('button', 'hbtn', t('shell', 'shell.chat.history'))
+  historyBtn.title = t('shell', 'shell.chat.historyTitle')
   historyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   historyBtn.onclick = () => {
     const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
@@ -597,8 +597,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   }
   searchRow.appendChild(historyBtn)
   // dsh-web share: export the whole transcript as markdown.
-  const exportChatBtn = el('button', 'hbtn', '⬇ md')
-  exportChatBtn.title = 'export conversation as markdown'
+  const exportChatBtn = el('button', 'hbtn', t('shell', 'shell.chat.exportMd'))
+  exportChatBtn.title = t('shell', 'shell.chat.exportMdTitle')
   exportChatBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   exportChatBtn.onclick = () => {
     const activeName = state.chatSessions.find(x => x.id === state.chatActiveId)?.name ?? 'conversation'
@@ -618,8 +618,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   }
   searchRow.appendChild(exportChatBtn)
   // dsh-web export: the same transcript as JSON (session metadata included).
-  const exportJsonBtn = el('button', 'hbtn', '⬇ json')
-  exportJsonBtn.title = 'export conversation as JSON'
+  const exportJsonBtn = el('button', 'hbtn', t('shell', 'shell.chat.exportJson'))
+  exportJsonBtn.title = t('shell', 'shell.chat.exportJsonTitle')
   exportJsonBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   exportJsonBtn.onclick = () => {
     const active = state.chatSessions.find(x => x.id === state.chatActiveId)
@@ -645,7 +645,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   for (const [name, line] of CHAT_COMMANDS) {
     if (!favs.has(name)) continue
     const chip = el('button', 'hbtn', `★ ${name}`)
-    chip.title = `quick run: ${line}`
+    chip.title = t('shell', 'shell.chat.quickRunTitle', { line })
     chip.style.cssText = 'padding:0 8px;flex-shrink:0;color:var(--tone-amber)'
     chip.onclick = () => {
       state.chatDraft = line
@@ -668,10 +668,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   const stream = el('div', 'chat-stream')
   // dsh-web a11y: announce assistant replies as they land.
   stream.setAttribute('aria-live', 'polite')
-  stream.setAttribute('aria-label', 'conversation')
+  stream.setAttribute('aria-label', t('shell', 'shell.chat.conversationAria'))
   const jumpBottom = el('button', 'hbtn', '↓')
-  jumpBottom.title = 'jump to the newest message'
-  jumpBottom.setAttribute('aria-label', 'Jump to newest message')
+  jumpBottom.title = t('shell', 'shell.chat.jumpNewest')
+  jumpBottom.setAttribute('aria-label', t('shell', 'shell.chat.jumpNewestAria'))
   jumpBottom.style.cssText = 'position:absolute;right:10px;bottom:10px;padding:2px 10px;font-size:12px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.25)'
   jumpBottom.onclick = () => { stream.scrollTop = stream.scrollHeight }
   stream.onscroll = () => {
@@ -680,17 +680,17 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   }
   streamWrap.append(stream, jumpBottom)
   if (state.chatMessages.length === 0) {
-    chatPush('assistant', 'Welcome to **Research OS**.\n\nType a command below, e.g. `/research status` or `/research new demo1` — or `/research help` for the full list.')
+    chatPush('assistant', t('shell', 'shell.chat.welcome'))
     // dsh-web starter chips: one-tap quick commands for a fresh session.
     const starters = el('div')
     starters.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding:2px'
     const starterDefs: Array<[string, string]> = [
-      ['🆕 new project', '/research new demo1'],
-      ['📋 list projects', '/research list'],
-      ['📌 status', '/research status'],
-      ['🧾 claims', '/research claims'],
-      ['✍️ write manuscript', '/research write'],
-      ['📦 export bundle', '/research export'],
+      [t('shell', 'shell.chat.starterNew'), '/research new demo1'],
+      [t('shell', 'shell.chat.starterList'), '/research list'],
+      [t('shell', 'shell.chat.starterStatus'), '/research status'],
+      [t('shell', 'shell.chat.starterClaims'), '/research claims'],
+      [t('shell', 'shell.chat.starterWrite'), '/research write'],
+      [t('shell', 'shell.chat.starterExport'), '/research export'],
     ]
     for (const [label, line] of starterDefs) {
       const chip = el('button', 'hbtn', label)
@@ -714,7 +714,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   const windowed = searchQ === '' && !chatCommandsOnly && state.chatMessages.length > 80
   const startIdx = windowed ? state.chatMessages.length - 80 : 0
   if (windowed) {
-    const notice = el('div', 'muted', `Showing the newest 80 of ${state.chatMessages.length} messages — ↑/↓ walk history, or search to see more.`)
+    const notice = el('div', 'muted', t('shell', 'shell.chat.showingNewest', { count: String(state.chatMessages.length) }))
     notice.style.cssText = 'font-size:10px;padding:2px;text-align:center'
     stream.appendChild(notice)
   }
@@ -723,12 +723,13 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   if (pinnedMsgs.length > 0 && searchQ === '' && !chatCommandsOnly) {
     const pinBox = el('div')
     pinBox.style.cssText = 'border:1px dashed var(--tone-amber);border-radius:10px;padding:6px 10px;display:flex;flex-direction:column;gap:4px;background:var(--tone-amber-bg)'
-    pinBox.appendChild(el('div', 'muted', `📌 Pinned (${pinnedMsgs.length})`))
+    pinBox.appendChild(el('div', 'muted', t('shell', 'shell.chat.pinned', { count: String(pinnedMsgs.length) })))
     for (const pm of pinnedMsgs) {
       const idx = state.chatMessages.indexOf(pm)
       const prow = el('div')
       prow.style.cssText = 'display:flex;gap:8px;align-items:center;cursor:pointer;font-size:11px;color:var(--text)'
-      prow.title = 'jump to pinned message'
+      prow.title = t('shell', 'shell.chat.pinnedJump')
+      // raw session-role marker on the pinned row (user/OS), kept verbatim
       const roleTag = el('span', 'artifact-kind', pm.role === 'user' ? 'YOU' : 'OS')
       const preview = el('span', 'grow', pm.text.slice(0, 90) + (pm.text.length > 90 ? '…' : ''))
       preview.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
@@ -753,10 +754,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const quotedIndex = msg.quote.index
       const quoted = state.chatMessages[quotedIndex]
       const quoteLabel = el('span', '', quoted !== undefined
+        // raw role marker in the quote preview (you/assistant), kept verbatim
         ? `↩ ${quoted.role === 'user' ? 'you' : 'assistant'}: ${quoted.text.slice(0, 60)}${quoted.text.length > 60 ? '…' : ''}`
         : `↩ #${quotedIndex + 1}`)
       quoteBox.appendChild(quoteLabel)
-      quoteBox.title = 'jump to quoted message'
+      quoteBox.title = t('shell', 'shell.chat.quoteJump')
       quoteBox.onclick = () => {
         state.chatDetailIndex = quotedIndex >= 0 && quotedIndex < state.chatMessages.length ? quotedIndex : -1
         state.rerender()
@@ -793,20 +795,20 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const grid = el('div')
       grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
       if (phaseMatch !== null) {
-        grid.appendChild(chatFieldCell('Phase', `${phaseMatch[1]} · rev ${phaseMatch[2]}`))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldPhase'), `${phaseMatch[1]} · rev ${phaseMatch[2]}`))
       }
       const next = msg.text.split('Next actions:')[1]?.split('\n\n')[0]?.split('\n').filter(l => l.trim().startsWith('- ')).map(l => l.trim().slice(2)).slice(0, 3).join('; ') ?? '—'
-      grid.appendChild(chatFieldCell('Next', next || '—'))
+      grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldNext'), next || '—'))
       const pending = pendingMatch !== null ? (pendingMatch[1] ?? '').split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
-      grid.appendChild(chatFieldCell('Pending gates', pending || 'none'))
+      grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldPendingGates'), pending || 'none'))
       const jobs = jobsMatch !== null ? (jobsMatch[1] ?? '').split('\n').filter(l => l.trim() !== '').slice(0, 3).map(l => l.trim()).join('; ') : 'none'
-      grid.appendChild(chatFieldCell('Jobs', jobs || 'none'))
+      grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldJobs'), jobs || 'none'))
       if (budgetMatch !== null) {
-        grid.appendChild(chatFieldCell('Budget', `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldBudget'), `$${budgetMatch[1]} / ${budgetMatch[2]} max · ${budgetMatch[3]} / ${budgetMatch[4]} GPU-h`))
       }
       // dsh-web depth: pending gates get a one-click jump to the Gates tab.
       if (pending !== 'none') {
-        const goGates = el('button', 'hbtn', 'Open Approvals')
+        const goGates = el('button', 'hbtn', t('shell', 'shell.openApprovalsShort'))
         goGates.style.cssText = 'grid-column:1 / -1;align-self:flex-start'
         goGates.onclick = () => {
           state.activeTab = 'gates'
@@ -824,18 +826,18 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const headRow = el('div', 'row')
       headRow.style.cssText = 'align-items:center;gap:8px'
       headRow.appendChild(el('span', '', '📚'))
-      const snapName = el('span', 'pname', snap?.[1] ?? 'snapshot')
+      const snapName = el('span', 'pname', snap?.[1] ?? t('shell', 'shell.chat.cardSnapshot'))
       snapName.style.cssText = 'font-size:12px'
       headRow.appendChild(snapName)
       headRow.appendChild(el('span', 'grow'))
-      if (snap !== null) headRow.appendChild(el('span', 'muted', `${snap[2]} papers · ${snap[3]} dedup`))
+      if (snap !== null) headRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.corpusStat', { papers: snap[2] ?? '0', dedup: snap[3] ?? '0' })))
       card.appendChild(headRow)
       const hits = msg.text.split('Top hits:')[1]?.split('\n').filter(l => /^- /.test(l.trim())).slice(0, 5) ?? []
       for (const h of hits) {
         card.appendChild(el('div', 'muted', h.trim()))
       }
       // dsh-web depth: jump to the artifacts tab (snapshot lives there).
-      const goArtifacts = el('button', 'hbtn', '→ view artifacts')
+      const goArtifacts = el('button', 'hbtn', t('shell', 'shell.viewArtifacts'))
       goArtifacts.style.cssText = 'align-self:flex-start;margin-top:4px'
       goArtifacts.onclick = () => {
         state.activeTab = 'artifacts'
@@ -850,14 +852,14 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const grid = el('div')
       grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
       if (jobMatch !== null) {
-        grid.appendChild(chatFieldCell('Job', jobMatch[1] ?? ''))
-        grid.appendChild(chatFieldCell('Kind', jobMatch[2] ?? ''))
-        grid.appendChild(chatFieldCell('Status', jobMatch[3] ?? ''))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldJob'), jobMatch[1] ?? ''))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldKind'), jobMatch[2] ?? ''))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldStatus'), jobMatch[3] ?? ''))
       } else {
-        grid.appendChild(chatFieldCell('Job', 'submitted'))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldJob'), t('shell', 'shell.chat.fieldSubmitted')))
       }
       // dsh-web depth: jump to the Runs tab to watch progress.
-      const goRuns = el('button', 'hbtn', '→ watch in Runs tab')
+      const goRuns = el('button', 'hbtn', t('shell', 'shell.watchRuns'))
       goRuns.style.cssText = 'align-self:flex-start;margin-top:4px'
       goRuns.onclick = () => {
         state.activeTab = 'runs'
@@ -872,10 +874,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const grid = el('div')
       grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0'
       if (evMatch !== null) {
-        grid.appendChild(chatFieldCell('Evidence', evMatch[1] ?? ''))
-        grid.appendChild(chatFieldCell('Status', evMatch[2] ?? ''))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldEvidence'), evMatch[1] ?? ''))
+        grid.appendChild(chatFieldCell(t('shell', 'shell.chat.fieldStatus'), evMatch[2] ?? ''))
       }
-      const goEv = el('button', 'hbtn', '→ open Evidence tab')
+      const goEv = el('button', 'hbtn', t('shell', 'shell.openEvidence'))
       goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
       goEv.onclick = () => {
         state.activeTab = 'evidence'
@@ -892,11 +894,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '⛩️'))
-      head.appendChild(el('span', 'pname', gateMatch?.[1] ?? 'gate'))
+      head.appendChild(el('span', 'pname', gateMatch?.[1] ?? t('shell', 'shell.chat.cardGate')))
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('pending'))
       card.appendChild(head)
-      const go = el('button', 'hbtn', '→ open Approvals')
+      const go = el('button', 'hbtn', t('shell', 'shell.openApprovals'))
       go.style.cssText = 'align-self:flex-start'
       go.onclick = () => {
         state.activeTab = 'gates'
@@ -913,11 +915,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '📋'))
-      head.appendChild(el('span', 'pname', cMatch?.[1] ?? 'contract'))
+      head.appendChild(el('span', 'pname', cMatch?.[1] ?? t('shell', 'shell.chat.cardContract')))
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('pending'))
       card.appendChild(head)
-      const goGates = el('button', 'hbtn', '→ open Approvals')
+      const goGates = el('button', 'hbtn', t('shell', 'shell.openApprovals'))
       goGates.style.cssText = 'align-self:flex-start'
       goGates.onclick = () => {
         state.activeTab = 'gates'
@@ -934,9 +936,9 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '🧾'))
-      head.appendChild(el('span', 'pname', `${count} claim(s)`))
+      head.appendChild(el('span', 'pname', t('shell', 'shell.chat.claimsCount', { count: String(count) })))
       head.appendChild(el('span', 'grow'))
-      const goEv = el('button', 'hbtn', '→ view in Evidence tab')
+      const goEv = el('button', 'hbtn', t('shell', 'shell.viewEvidence'))
       goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
       goEv.onclick = () => {
         state.activeTab = 'evidence'
@@ -953,11 +955,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '📄'))
-      head.appendChild(el('span', 'pname', mMatch?.[1] ?? 'manuscript'))
+      head.appendChild(el('span', 'pname', mMatch?.[1] ?? t('shell', 'shell.chat.cardManuscript')))
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('built'))
       card.appendChild(head)
-      const goPhase = el('button', 'hbtn', '→ open Overview')
+      const goPhase = el('button', 'hbtn', t('shell', 'shell.openOverview'))
       goPhase.style.cssText = 'align-self:flex-start'
       goPhase.onclick = () => {
         state.activeTab = 'phase'
@@ -974,11 +976,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '🔍'))
-      head.appendChild(el('span', 'pname', pass ? 'Review PASS' : 'Review SEE CHECKS'))
+      head.appendChild(el('span', 'pname', pass ? t('shell', 'shell.chat.reviewPass') : t('shell', 'shell.chat.reviewSeeChecks')))
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill(pass ? 'supported' : 'inconclusive'))
       card.appendChild(head)
-      const goEv = el('button', 'hbtn', '→ view claims in Evidence tab')
+      const goEv = el('button', 'hbtn', t('shell', 'shell.viewClaims'))
       goEv.style.cssText = 'align-self:flex-start;margin-top:4px'
       goEv.onclick = () => {
         state.activeTab = 'evidence'
@@ -995,11 +997,11 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '📦'))
-      head.appendChild(el('span', 'pname', bMatch?.[1] ?? 'release bundle'))
+      head.appendChild(el('span', 'pname', bMatch?.[1] ?? t('shell', 'shell.chat.cardRelease')))
       head.appendChild(el('span', 'grow'))
       head.appendChild(pill('exported'))
       card.appendChild(head)
-      const goPhase = el('button', 'hbtn', '→ open Overview')
+      const goPhase = el('button', 'hbtn', t('shell', 'shell.openOverview'))
       goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
       goPhase.onclick = () => {
         state.activeTab = 'phase'
@@ -1016,13 +1018,13 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '💡'))
-      head.appendChild(el('span', 'pname', `${ideaLines.length} IdeaCard(s)`))
+      head.appendChild(el('span', 'pname', t('shell', 'shell.chat.ideaCount', { count: String(ideaLines.length) })))
       head.appendChild(el('span', 'grow'))
       card.appendChild(head)
       for (const l of ideaLines.slice(0, 4)) {
         card.appendChild(el('div', 'muted', l.trim()))
       }
-      const goPhase = el('button', 'hbtn', '→ open Overview')
+      const goPhase = el('button', 'hbtn', t('shell', 'shell.openOverview'))
       goPhase.style.cssText = 'align-self:flex-start;margin-top:4px'
       goPhase.onclick = () => {
         state.activeTab = 'phase'
@@ -1040,7 +1042,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '📁'))
-      head.appendChild(el('span', 'pname', `${countMatch?.[1] ?? rows.length} project(s)`))
+      head.appendChild(el('span', 'pname', t('shell', 'shell.chat.projectCount', { count: String(countMatch?.[1] ?? rows.length) })))
       head.appendChild(el('span', 'grow'))
       card.appendChild(head)
       for (const r of rows.slice(0, 6)) {
@@ -1051,18 +1053,18 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
         row.textContent = r.trim().replace(/^- /, '· ')
         if (idMatch !== null) {
           const pid = idMatch[1]!
-          row.title = `switch to ${pid}`
+          row.title = t('shell', 'shell.chat.switchTo', { pid })
           row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
           row.onmouseleave = () => { row.style.background = 'none' }
           row.onclick = () => {
             projectId = pid
             state.rerender()
-            showToast(rootHost(), `⇥ Switched to ${pid.slice(0, 22)}…`)
+            showToast(rootHost(), t('shell', 'shell.chat.switched', { pid: pid.slice(0, 22) }))
           }
         }
         card.appendChild(row)
       }
-      if (rows.length > 6) card.appendChild(el('div', 'muted', `… and ${rows.length - 6} more`))
+      if (rows.length > 6) card.appendChild(el('div', 'muted', t('shell', 'shell.chat.more', { count: String(rows.length - 6) })))
       structured = card
     } else if (isJobs && searchQ === '') {
       // dsh-web runs card: job rows with status pills + jump to Runs.
@@ -1072,7 +1074,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '⚙️'))
-      head.appendChild(el('span', 'pname', `${jobLines.length} run(s)`))
+      head.appendChild(el('span', 'pname', t('shell', 'shell.chat.runCount', { count: String(jobLines.length) })))
       head.appendChild(el('span', 'grow'))
       card.appendChild(head)
       for (const l of jobLines.slice(0, 8)) {
@@ -1089,8 +1091,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
         }
         card.appendChild(row)
       }
-      if (jobLines.length > 8) card.appendChild(el('div', 'muted', `… and ${jobLines.length - 8} more`))
-      const goRuns = el('button', 'hbtn', '→ open Runs tab')
+      if (jobLines.length > 8) card.appendChild(el('div', 'muted', t('shell', 'shell.chat.more', { count: String(jobLines.length - 8) })))
+      const goRuns = el('button', 'hbtn', t('shell', 'shell.openRuns'))
       goRuns.style.cssText = 'align-self:flex-start;margin-top:4px'
       goRuns.onclick = () => {
         state.activeTab = 'runs'
@@ -1109,7 +1111,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const head = el('div', 'row')
       head.style.cssText = 'align-items:center;gap:8px'
       head.appendChild(el('span', '', '⛩️'))
-      head.appendChild(el('span', 'pname', `${rows.length} gate(s) · ${pendingCount} pending · ${decidedCount} decided`))
+      head.appendChild(el('span', 'pname', t('shell', 'shell.chat.gateStats', { total: String(rows.length), pending: String(pendingCount), decided: String(decidedCount) })))
       head.appendChild(el('span', 'grow'))
       card.appendChild(head)
       for (const r of rows.slice(0, 5)) {
@@ -1117,8 +1119,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
         const row = el('div', 'muted', r.trim().replace(/^- /, isPending ? '⏳ ' : '✅ '))
         card.appendChild(row)
       }
-      if (rows.length > 5) card.appendChild(el('div', 'muted', `… and ${rows.length - 5} more`))
-      const goGates = el('button', 'hbtn', '→ open Approvals')
+      if (rows.length > 5) card.appendChild(el('div', 'muted', t('shell', 'shell.chat.more', { count: String(rows.length - 5) })))
+      const goGates = el('button', 'hbtn', t('shell', 'shell.openApprovals'))
       goGates.style.cssText = 'align-self:flex-start;margin-top:4px'
       goGates.onclick = () => {
         state.activeTab = 'gates'
@@ -1139,7 +1141,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     }
     renderBubble()
     if (collapsed) {
-      const toggle = el('button', 'hbtn', '⤵ show more')
+      const toggle = el('button', 'hbtn', t('common', 'common.action.showMore'))
       toggle.style.cssText = 'padding:0 8px;font-size:9px;margin-top:4px;align-self:flex-start'
       toggle.setAttribute('aria-expanded', 'false')
       let expanded = false
@@ -1148,7 +1150,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
         expanded = !expanded
         if (expanded) {
           bubble.replaceChildren(...formatChatText(msg.text))
-          toggle.textContent = '⤴ show less'
+          toggle.textContent = t('common', 'common.action.showLess')
           bubble.appendChild(toggle)
         } else {
           renderBubble()
@@ -1158,7 +1160,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       bubble.appendChild(toggle)
     }
     // dsh-web "details": click a message to inspect it in the side panel.
-    bubble.title = 'click for details'
+    bubble.title = t('common', 'common.clickForDetails')
     bubble.onclick = () => {
       state.chatDetailIndex = state.chatDetailIndex === i ? -1 : i
       state.rerender()
@@ -1170,10 +1172,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       const root = rootHost()
       if (root == null) return
       const items: ContextMenuItem[] = [
-        { label: '⧉ Copy text', onPick: () => copyText(msg.text) },
-        { label: '⧉ Copy md', onPick: () => copyText(textToMarkdown(msg.text)) },
+        { label: t('common', 'common.action.copyText'), onPick: () => copyText(msg.text) },
+        { label: t('common', 'common.action.copyMd'), onPick: () => copyText(textToMarkdown(msg.text)) },
         {
-          label: '↩ Reply',
+          label: t('common', 'common.action.reply'),
           divider: true,
           onPick: () => {
             state.chatDraft = ''
@@ -1188,7 +1190,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
           },
         },
         {
-          label: msg.pinned === true ? '★ Unpin' : '☆ Pin',
+          label: msg.pinned === true ? `★ ${t('shell', 'shell.chat.unpinTitle')}` : `☆ ${t('shell', 'shell.chat.pinTitle')}`,
           onPick: () => {
             msg.pinned = !msg.pinned
             chatPersist()
@@ -1196,7 +1198,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
             state.rerender()
           },
         },
-        { label: '⧉ Details', onPick: () => { state.chatDetailIndex = i; state.rerender() } },
+        { label: `⧉ ${t('common', 'common.action.details')}`, onPick: () => { state.chatDetailIndex = i; state.rerender() } },
       ]
       openContextMenu(root, event.clientX, event.clientY, items)
     }
@@ -1206,19 +1208,19 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     if (msg.role === 'user') {
       const actionsRow = el('div')
       actionsRow.style.cssText = 'align-self:flex-end;display:flex;gap:6px;margin-top:2px'
-      const copy = el('button', 'hbtn', '⧉ copy')
+      const copy = el('button', 'hbtn', t('common', 'common.action.copyText'))
       copy.style.cssText = 'padding:0 6px;font-size:9px'
       copy.onclick = () => {
         void navigator.clipboard.writeText(msg.text).then(
-          () => { copy.textContent = '✓ copied' },
-          () => { copy.textContent = 'copy failed' },
+          () => { copy.textContent = t('common', 'common.action.copied') },
+          () => { copy.textContent = t('common', 'common.action.copyFailed') },
         )
-        setTimeout(() => { copy.textContent = '⧉ copy' }, 1600)
+        setTimeout(() => { copy.textContent = t('common', 'common.action.copyText') }, 1600)
       }
       actionsRow.appendChild(copy)
       // dsh-web pin: star the message (📌 section at the top of the chat).
       const pin = el('button', 'hbtn', msg.pinned === true ? '★' : '☆')
-      pin.title = msg.pinned === true ? 'unpin message' : 'pin message'
+      pin.title = msg.pinned === true ? t('shell', 'shell.chat.unpinTitle') : t('shell', 'shell.chat.pinTitle')
       pin.style.cssText = `padding:0 6px;font-size:9px;${msg.pinned === true ? 'color:var(--tone-amber)' : ''}`
       pin.onclick = () => {
         msg.pinned = !msg.pinned
@@ -1232,18 +1234,18 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     if (msg.role === 'assistant' || msg.role === 'error') {
       const actionsRow = el('div')
       actionsRow.style.cssText = 'align-self:flex-start;display:flex;gap:6px;margin-top:2px'
-      const copy = el('button', 'hbtn', '⧉ copy')
+      const copy = el('button', 'hbtn', t('common', 'common.action.copyText'))
       copy.style.cssText = 'padding:0 6px;font-size:9px'
       copy.onclick = () => {
         void navigator.clipboard.writeText(msg.text).then(
-          () => { copy.textContent = '✓ copied' },
-          () => { copy.textContent = 'copy failed' },
+          () => { copy.textContent = t('common', 'common.action.copied') },
+          () => { copy.textContent = t('common', 'common.action.copyFailed') },
         )
-        setTimeout(() => { copy.textContent = '⧉ copy' }, 1600)
+        setTimeout(() => { copy.textContent = t('common', 'common.action.copyText') }, 1600)
       }
       actionsRow.appendChild(copy)
       // dsh-web quote-reply: reply quoting this message.
-      const quote = el('button', 'hbtn', '↩ reply')
+      const quote = el('button', 'hbtn', t('common', 'common.action.reply'))
       quote.style.cssText = 'padding:0 6px;font-size:9px'
       quote.onclick = () => {
         state.chatDraft = ''
@@ -1261,7 +1263,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       actionsRow.appendChild(quote)
       // dsh-web pin: star the message (📌 section at the top of the chat).
       const pin = el('button', 'hbtn', msg.pinned === true ? '★' : '☆')
-      pin.title = msg.pinned === true ? 'unpin message' : 'pin message'
+      pin.title = msg.pinned === true ? t('shell', 'shell.chat.unpinTitle') : t('shell', 'shell.chat.pinTitle')
       pin.style.cssText = `padding:0 6px;font-size:9px;${msg.pinned === true ? 'color:var(--tone-amber)' : ''}`
       pin.onclick = () => {
         msg.pinned = !msg.pinned
@@ -1281,12 +1283,12 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   }
   // dsh-web match counter: reflect the active filter.
   if (searchQ !== '' || chatCommandsOnly) {
-    matchLabel.textContent = `${shownCount}/${state.chatMessages.length} shown`
+    matchLabel.textContent = t('shell', 'shell.chat.shown', { shown: String(shownCount), total: String(state.chatMessages.length) })
   }
   if (stream.childElementCount === 0 && (searchQ !== '' || chatCommandsOnly)) {
     const empty = el('div', 'empty', chatCommandsOnly
-      ? 'No commands yet — run one with /research …'
-      : `No messages match "${chatSearchQuery.trim()}".`)
+      ? t('shell', 'shell.chat.emptyCommands')
+      : t('shell', 'shell.chat.emptyNoMatch', { query: chatSearchQuery.trim() }))
     empty.style.cssText = 'padding:10px 2px'
     stream.appendChild(empty)
   }
@@ -1301,10 +1303,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     panel.style.cssText = 'width:240px;flex-shrink:0;margin-left:10px;border-left:1px solid var(--border);padding-left:12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto'
     const headRow = el('div', 'row')
     headRow.style.cssText = 'justify-content:space-between;align-items:center'
-    headRow.appendChild(el('div', 'section-label', 'Message details'))
+    headRow.appendChild(el('div', 'section-label', t('shell', 'shell.chat.detailsTitle')))
     const closeDetail = el('button', 'hbtn ghost', '×')
-    closeDetail.title = 'close details panel'
-    closeDetail.setAttribute('aria-label', 'Close details panel')
+    closeDetail.title = t('shell', 'shell.chat.detailsClose')
+    closeDetail.setAttribute('aria-label', t('shell', 'shell.chat.detailsCloseAria'))
     closeDetail.style.cssText = 'padding:0 4px;font-size:11px'
     closeDetail.onclick = () => { state.chatDetailIndex = -1; state.rerender() }
     headRow.appendChild(closeDetail)
@@ -1312,32 +1314,32 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     const meta = el('div')
     meta.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-size:10.5px'
     const roleRow = el('div', 'row')
-    roleRow.appendChild(el('span', 'muted', 'Role'))
+    roleRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailRole')))
     roleRow.appendChild(pill(detailMsg.role))
     const idxRow = el('div', 'row')
-    idxRow.appendChild(el('span', 'muted', 'Message'))
+    idxRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailMessage')))
     idxRow.appendChild(el('span', 'mono', `#${state.chatDetailIndex + 1} / ${state.chatMessages.length}`))
     const timeRow = el('div', 'row')
-    timeRow.appendChild(el('span', 'muted', 'Time'))
+    timeRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailTime')))
     timeRow.appendChild(el('span', 'mono', detailMsg.time))
     const linesRow = el('div', 'row')
-    linesRow.appendChild(el('span', 'muted', 'Lines'))
+    linesRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailLines')))
     linesRow.appendChild(el('span', 'mono', String(detailMsg.text.split('\n').length)))
     const charsRow = el('div', 'row')
-    charsRow.appendChild(el('span', 'muted', 'Chars'))
+    charsRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailChars')))
     charsRow.appendChild(el('span', 'mono', String(detailMsg.text.length)))
     // dsh-web depth: pin state and quote presence in the metadata.
     const pinnedRow = el('div', 'row')
-    pinnedRow.appendChild(el('span', 'muted', 'Pinned'))
-    pinnedRow.appendChild(el('span', 'mono', detailMsg.pinned === true ? 'yes ★' : 'no'))
+    pinnedRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailPinned')))
+    pinnedRow.appendChild(el('span', 'mono', detailMsg.pinned === true ? t('shell', 'shell.chat.detailYes') : t('shell', 'shell.chat.detailNo')))
     const quoteRow = el('div', 'row')
-    quoteRow.appendChild(el('span', 'muted', 'Quote'))
+    quoteRow.appendChild(el('span', 'muted', t('shell', 'shell.chat.detailQuote')))
     quoteRow.appendChild(el('span', 'mono', detailMsg.quote !== undefined ? `#${detailMsg.quote.index + 1}` : '—'))
     meta.append(roleRow, idxRow, timeRow, linesRow, charsRow, pinnedRow, quoteRow)
     panel.appendChild(meta)
     // dsh-web "copy command": quick re-run for user messages.
     if (detailMsg.role === 'user') {
-      const rerun = el('button', 'hbtn', '↻ re-run command')
+      const rerun = el('button', 'hbtn', t('common', 'common.action.rerunCommand'))
       rerun.style.cssText = 'align-self:flex-start'
       rerun.onclick = () => {
         state.chatDraft = detailMsg.text
@@ -1353,7 +1355,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       }
       panel.appendChild(rerun)
     }
-    const rawLabel = el('div', 'section-label', 'Raw text')
+    const rawLabel = el('div', 'section-label', t('shell', 'shell.chat.rawText'))
     panel.appendChild(rawLabel)
     const pre = el('pre', '')
     pre.style.cssText = 'white-space:pre-wrap;word-break:break-all;font:10.5px/1.5 ui-monospace,Menlo,monospace;color:var(--text-2);margin:0'
@@ -1362,26 +1364,26 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     // dsh-web share: copy raw or as markdown.
     const copyRow = el('div', 'row')
     copyRow.style.cssText = 'gap:6px'
-    const copyRaw = el('button', 'hbtn', '⧉ copy raw')
+    const copyRaw = el('button', 'hbtn', t('common', 'common.action.copyRaw'))
     copyRaw.style.cssText = 'padding:0 8px;font-size:9px'
     copyRaw.onclick = () => {
       void navigator.clipboard.writeText(detailMsg.text).then(
-        () => { copyRaw.textContent = '✓ copied' },
-        () => { copyRaw.textContent = 'copy failed' },
+        () => { copyRaw.textContent = t('common', 'common.action.copied') },
+        () => { copyRaw.textContent = t('common', 'common.action.copyFailed') },
       )
-      setTimeout(() => { copyRaw.textContent = '⧉ copy raw' }, 1600)
+      setTimeout(() => { copyRaw.textContent = t('common', 'common.action.copyRaw') }, 1600)
     }
     copyRow.appendChild(copyRaw)
-    const copyMd = el('button', 'hbtn', '⧉ copy md')
-    copyMd.title = 'copy as markdown (## heading, - bullet, [link](url))'
+    const copyMd = el('button', 'hbtn', t('common', 'common.action.copyMd'))
+    copyMd.title = t('common', 'common.action.copyMd.title')
     copyMd.style.cssText = 'padding:0 8px;font-size:9px'
     copyMd.onclick = () => {
       const md = textToMarkdown(detailMsg.text)
       void navigator.clipboard.writeText(md).then(
-        () => { copyMd.textContent = '✓ copied' },
-        () => { copyMd.textContent = 'copy failed' },
+        () => { copyMd.textContent = t('common', 'common.action.copied') },
+        () => { copyMd.textContent = t('common', 'common.action.copyFailed') },
       )
-      setTimeout(() => { copyMd.textContent = '⧉ copy md' }, 1600)
+      setTimeout(() => { copyMd.textContent = t('common', 'common.action.copyMd') }, 1600)
     }
     copyRow.appendChild(copyMd)
     panel.appendChild(copyRow)
@@ -1394,7 +1396,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   if (state.chatQuoteTarget !== null) {
     const quoteBanner = el('div', 'chat-quote')
     quoteBanner.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:5px 10px;font-size:10.5px;color:var(--text)'
-    const qText = el('span', 'grow', `Replying to: ${state.chatQuoteTarget.text.slice(0, 70)}${state.chatQuoteTarget.text.length > 70 ? '…' : ''}`)
+    const qText = el('span', 'grow', t('shell', 'shell.chat.replyingTo', { text: `${state.chatQuoteTarget.text.slice(0, 70)}${state.chatQuoteTarget.text.length > 70 ? '…' : ''}` }))
     quoteBanner.appendChild(qText)
     const cancelQuote = el('button', 'hbtn', '×')
     cancelQuote.style.cssText = 'padding:0 6px'
@@ -1412,8 +1414,10 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   input.rows = 2
   input.className = 'chat-composer-input'
   // dsh-web context: the placeholder shows the active project.
-  input.placeholder = `/research status — ${projectId !== '' && projectId !== undefined ? `active: ${projectId.slice(0, 16)}` : 'no project selected'} (Enter sends, Shift+Enter newline)`
-  input.setAttribute('aria-label', 'Research command composer')
+  input.placeholder = projectId !== '' && projectId !== undefined
+    ? t('shell', 'shell.chat.composerPlaceholderActive', { id: projectId.slice(0, 16) })
+    : t('shell', 'shell.chat.composerPlaceholderNone')
+  input.setAttribute('aria-label', t('shell', 'shell.chat.composerAria'))
   input.value = state.chatDraft
   const autosize = (): void => {
     input.style.height = '48px'
@@ -1474,7 +1478,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     completionBox.style.display = 'flex'
   }
   const send = el('button', 'chat-send', '↑')
-  send.setAttribute('aria-label', 'Send command')
+  send.setAttribute('aria-label', t('shell', 'shell.chat.sendAria'))
   const run = async (): Promise<void> => {
     const line = input.value.trim()
     if (line === '') return
@@ -1495,7 +1499,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     const runningBubble = el('div', 'chat-running')
     const spinner = el('span')
     spinner.textContent = '⏳'
-    const runningText = el('span', '', 'running…')
+    const runningText = el('span', '', t('shell', 'shell.chat.running'))
     runningBubble.append(spinner, runningText)
     const streamEl = stream
     streamEl.appendChild(runningBubble)
@@ -1545,9 +1549,9 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       input.disabled = false
       send.disabled = false
       runningBubble.remove()
-      chatPush('error', `command failed: ${(error as Error).message}`)
+      chatPush('error', t('shell', 'shell.chat.commandFailedDetail', { detail: (error as Error).message }))
       state.rerender()
-      showToast(rootHost(), `✗ command failed`)
+      showToast(rootHost(), t('shell', 'shell.chat.commandFailed'))
     }
   }
   send.onclick = () => { void run() }
@@ -1617,8 +1621,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   composer.appendChild(input)
   // dsh-web "session actions": clear this conversation.
   const clear = el('button', 'hbtn', '×')
-  clear.title = 'clear conversation'
-  clear.setAttribute('aria-label', 'Clear conversation')
+  clear.title = t('shell', 'shell.chat.clearTitle')
+  clear.setAttribute('aria-label', t('shell', 'shell.chat.clearAria'))
   clear.onclick = () => {
     chatClear()
     state.rerender()
@@ -1641,13 +1645,13 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     input.setSelectionRange(start + before.length, start + before.length + selected.length)
     autosize()
   }
-  const boldBtn = mkBtn('**B**', 'bold: wrap the selection in **…**')
+  const boldBtn = mkBtn('**B**', t('shell', 'shell.chat.toolBold'))
   boldBtn.onclick = () => insertMarkdown('**', '**', 'text')
-  const codeBtn = mkBtn('`<>`', 'inline code: wrap the selection in `…`')
+  const codeBtn = mkBtn('`<>`', t('shell', 'shell.chat.toolCode'))
   codeBtn.onclick = () => insertMarkdown('`', '`', 'code')
-  const linkBtn = mkBtn('🔗', 'link: insert [text](url)')
+  const linkBtn = mkBtn('🔗', t('shell', 'shell.chat.toolLink'))
   linkBtn.onclick = () => insertMarkdown('[', '](https://)', 'text')
-  const listBtn = mkBtn('•', 'bullet list item')
+  const listBtn = mkBtn('•', t('shell', 'shell.chat.toolList'))
   listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
   toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, clear)
   const composerActions = el('div', 'chat-composer-actions')
@@ -1729,14 +1733,14 @@ export function formatChatText(text: string, highlight?: string): HTMLElement[] 
           const head = el('div')
           head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:4px'
           const langTag = el('span', 'artifact-kind', lang.toUpperCase())
-          const copyCode = el('button', 'hbtn', '⧉ copy')
+          const copyCode = el('button', 'hbtn', t('common', 'common.action.copyText'))
           copyCode.style.cssText = 'padding:0 6px;font-size:9px'
           copyCode.onclick = () => {
             void navigator.clipboard.writeText(fenceCodeText()).then(
               () => { copyCode.textContent = '✓' },
               () => { copyCode.textContent = '✗' },
             )
-            setTimeout(() => { copyCode.textContent = '⧉ copy' }, 1600)
+            setTimeout(() => { copyCode.textContent = t('common', 'common.action.copyText') }, 1600)
           }
           head.append(langTag, copyCode)
           fence.appendChild(head)

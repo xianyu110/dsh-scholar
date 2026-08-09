@@ -84,7 +84,7 @@ export function apply(): void {
           overlay.setAttribute('aria-modal', 'true')
           const header = overlay.querySelector('.modal-header')
           const label = header?.textContent?.replace('×', '').trim()
-          overlay.setAttribute('aria-label', label !== undefined && label !== '' ? label : 'dialog')
+          overlay.setAttribute('aria-label', label !== undefined && label !== '' ? label : t('shell', 'shell.dialog.ariaFallback'))
         }
       }
     }

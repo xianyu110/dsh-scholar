@@ -251,7 +251,7 @@ export async function openJobDetailModal(root: ShadowRoot, jobId: string): Promi
   header.appendChild(closeBtn)
   modal.appendChild(header)
 
-  const loading = el('div', 'muted', 'Loading…')
+  const loading = el('div', 'muted', t('common', 'common.status.loading'))
   modal.appendChild(loading)
   overlay.appendChild(modal)
   root.appendChild(overlay)
@@ -293,22 +293,22 @@ export async function openJobDetailModal(root: ShadowRoot, jobId: string): Promi
   modal.appendChild(titleRow)
 
   modal.appendChild(el('div', 'section-label', t('runs', 'runs.sectionRun')))
-  row('Job', `\`${String(job.job_id)}\``)
-  row('Kind', String(job.kind ?? '—'))
-  row('Status', String(job.status ?? '—'))
-  if (typeof job.contract_id === 'string' && job.contract_id !== '') row('Contract', job.contract_id)
-  if (typeof job.failure_class === 'string' && job.failure_class !== '') row('Failure', job.failure_class)
-  if (typeof job.error === 'string' && job.error !== '') row('Error', job.error)
+  row(t('runs', 'runs.detailJob'), `\`${String(job.job_id)}\``)
+  row(t('runs', 'runs.detailKind'), String(job.kind ?? '—'))
+  row(t('runs', 'runs.detailStatus'), String(job.status ?? '—'))
+  if (typeof job.contract_id === 'string' && job.contract_id !== '') row(t('runs', 'runs.detailContract'), job.contract_id)
+  if (typeof job.failure_class === 'string' && job.failure_class !== '') row(t('runs', 'runs.detailFailure'), job.failure_class)
+  if (typeof job.error === 'string' && job.error !== '') row(t('runs', 'runs.detailError'), job.error)
 
   const manifest = job.run_manifest
   if (typeof manifest === 'object' && manifest !== null) {
     modal.appendChild(el('div', 'section-label', t('runs', 'runs.sectionManifest')))
     const m = manifest as Record<string, unknown>
-    if (typeof m.run_id === 'string') row('Run', m.run_id)
-    if (typeof m.exit_code === 'number') row('Exit code', String(m.exit_code))
-    if (typeof m.container_digest === 'string' && m.container_digest !== '') row('Container', m.container_digest)
-    if (typeof m.runner_key_id === 'string') row('Signer', m.runner_key_id)
-    if (typeof m.metrics_artifact === 'string') row('Metrics', fmtId(m.metrics_artifact, 24))
+    if (typeof m.run_id === 'string') row(t('runs', 'runs.detailRun'), m.run_id)
+    if (typeof m.exit_code === 'number') row(t('runs', 'runs.detailExitCode'), String(m.exit_code))
+    if (typeof m.container_digest === 'string' && m.container_digest !== '') row(t('runs', 'runs.detailContainer'), m.container_digest)
+    if (typeof m.runner_key_id === 'string') row(t('runs', 'runs.detailSigner'), m.runner_key_id)
+    if (typeof m.metrics_artifact === 'string') row(t('runs', 'runs.detailMetrics'), fmtId(m.metrics_artifact, 24))
     // dsh-web depth: copy the signed manifest for external verification.
     const copyManifest = el('button', 'hbtn', t('common', 'common.action.copyManifest'))
     copyManifest.title = t('common', 'common.action.copyManifest.title')

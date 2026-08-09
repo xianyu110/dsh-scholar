@@ -19,7 +19,10 @@ const TEXLIVE_IMAGE_DIGEST = 'texlive/texlive@sha256:8957c916b8160049f89c24d362a
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  // RUN-01: signed manifests are the production default; unit tests that do
+  // not exercise the signature path opt out explicitly (the signature path
+  // itself is covered by run-manifest-tests.sh + the manifest unit cases).
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 /** Register a minimal valid §11.3 code-snapshot archive artifact. */
@@ -433,10 +436,10 @@ describe('§11.2 recovery & concurrency cases', () => {
     // Events remain deliverable after a "restart" (reopen the same DB file).
     const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-reopen-'))
     const dbPath = join(dir, 'kernel.db')
-    const k1 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas') })
+    const k1 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas'), requireSignedManifest: false })
     const p1 = k1.createProject({ name: 'x', workspace: '/w', brief: makeBrief() })
     k1.close()
-    const k2 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas') })
+    const k2 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas'), requireSignedManifest: false })
     expect(k2.getProject(p1.project_id).status).toBe('DRAFT')
     expect(k2.getProjectBySession('whatever')).toBeNull()
     k2.close()
@@ -1504,7 +1507,8 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
     expect(runs.length).toBe(1)
     expect(runs[0]!.signature_status).toBe('unsigned')
     expect(runs[0]!.finished_at).not.toBeNull()
-    expect(runs[0]!.manifest_json).toContain('run_x')
+    expect((runs[0]!.manifest_json as Record<string, unknown> | null)?.run_id).toBe('run_x')
+    expect(runs[0]!.run_id).toMatch(/^run_[0-9a-f]{12}$/)
     kernel.close()
   })
 
@@ -1543,6 +1547,336 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
     })
     const decisions = kernel.listDecisions(project.project_id)
     expect(decisions[0]!.principal).toMatchObject({ principal_id: 'pi-7', tenant_id: 'acme', auth_method: 'dsh-session', session_id: 'sess-7' })
+    kernel.close()
+  })
+})
+
+describe('RUN-01 runs ledger: snapshot resolution + HTTP routes', () => {
+  it('resolves snapshot_sha256 (sha256: artifact, code_snap_ registry, null for snapshot-less jobs)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'snap-runs', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const contract = approvedContract(kernel, project.project_id)
+    const formal = kernel.submitJob({
+      project_id: project.project_id, idempotency_key: 'snap-runs-formal', kind: 'formal',
+      contract_id: contract, payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST,
+    })
+    const echo = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'snap-runs-echo', kind: 'echo', payload: { message: 'x' } })
+    // Registry-id job: submitJob binds code_snap_ → archive artifact id; force
+    // the raw registry id back onto the job to exercise the claim-time
+    // code_snap_ resolution path (legacy rows written before binding).
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-run-'))
+    writeFileSync(join(dir, 'train.js'), 'console.log("x")\n')
+    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'registry run')
+    const regJob = kernel.submitJob({
+      project_id: project.project_id, idempotency_key: 'snap-runs-reg', kind: 'baseline',
+      contract_id: contract, code_snapshot_id: snap.snapshot_id, image_digest: NODE_IMAGE_DIGEST,
+    })
+    kernel.db.prepare('UPDATE jobs SET code_snapshot_id = ? WHERE job_id = ?').run(snap.snapshot_id, regJob.job_id)
+
+    kernel.claimJobs('runner-1', 60, 8)
+    const runs = kernel.listRuns(project.project_id)
+    const byJob = (jobId: string): ReturnType<ResearchKernel['listRuns']>[number] => runs.find(r => r.job_id === jobId)!
+    expect(byJob(formal.job_id).snapshot_sha256).toBe(code.sha256)
+    expect(byJob(formal.job_id).snapshot_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(byJob(formal.job_id).contract_id).toBe(contract)
+    expect(byJob(regJob.job_id).snapshot_sha256).toBe(snap.sha256)
+    expect(byJob(echo.job_id).snapshot_sha256).toBeNull()
+    expect(byJob(echo.job_id).attempt_no).toBe(1)
+    kernel.close()
+  })
+
+  it('complete with a signed manifest records signature_status=signed', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'sig-runs', workspace: '/w', brief: makeBrief() })
+    const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({
+      project_id: project.project_id, idempotency_key: 'sig-runs', kind: 'formal',
+      contract_id: approvedContract(kernel, project.project_id), payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST,
+    })
+    kernel.claimJobs('runner-1', 60, 8)
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+    const keyId = 'sig-runs-key'
+    kernel.registerRunnerKey({ key_id: keyId, public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() })
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: signed })
+    expect(done.status).toBe('succeeded')
+    const run = kernel.listRuns(job.project_id)[0]!
+    expect(run.signature_status).toBe('signed')
+    expect((run.manifest_json as Record<string, unknown>)?.signature).toBe(signed.signature)
+    expect(run.finished_at).not.toBeNull()
+    kernel.close()
+  })
+
+  it('GET /v1/projects/{id}/runs lists newest-first; GET /runs/{run_id} returns one (404 otherwise)', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'http-runs', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hr1', kind: 'echo', payload: { message: 'x' } })
+    kernel.claimJobs('runner-1', 60, 8)
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const list = await fetch(`${base}/v1/projects/${project.project_id}/runs`)
+      expect(list.status).toBe(200)
+      const runs = await list.json() as Array<{ run_id: string; job_id: string; attempt_no: number; snapshot_sha256: string | null; signature_status: string }>
+      expect(runs).toHaveLength(1)
+      expect(runs[0]!.attempt_no).toBe(1)
+      expect(runs[0]!.snapshot_sha256).toBeNull()
+      expect(runs[0]!.run_id).toMatch(/^run_[0-9a-f]{12}$/)
+      const one = await fetch(`${base}/v1/projects/${project.project_id}/runs/${runs[0]!.run_id}`)
+      expect(one.status).toBe(200)
+      expect((await one.json() as { job_id: string }).job_id).toBe(runs[0]!.job_id)
+      const missing = await fetch(`${base}/v1/projects/${project.project_id}/runs/run_deadbeef`)
+      expect(missing.status).toBe(404)
+      expect((await missing.json() as { error: { code: string } }).error.code).toBe('run_not_found')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+})
+
+describe('GOV-01 principal fail-closed (HTTP gate decisions)', () => {
+  it('rejects anonymous and actor-only decisions with 422 principal_required (nothing recorded)', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'gov-http', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const post = (body: unknown): Promise<Response> => fetch(`${base}/v1/gates/${gate.gate_id}/decisions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      })
+      const none = await post({ decision: 'approved' })
+      expect(none.status).toBe(422)
+      expect((await none.json() as { error: { code: string } }).error.code).toBe('principal_required')
+      const actorOnly = await post({ actor: 'agent-tool-1', decision: 'approved' })
+      expect(actorOnly.status).toBe(422)
+      expect((await actorOnly.json() as { error: { code: string } }).error.code).toBe('principal_required')
+      const emptyPrincipal = await post({ actor: 'x', principal: { principal_id: '' }, decision: 'approved' })
+      expect(emptyPrincipal.status).toBe(422)
+      expect((await emptyPrincipal.json() as { error: { code: string } }).error.code).toBe('principal_required')
+      expect(kernel.listDecisions(project.project_id)).toHaveLength(0)
+      expect(kernel.getProject(project.project_id).status).toBe('DRAFT')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('principal-bearing decision (with session_id, no actor) succeeds and re-reads durably', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'gov-http2', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/gates/${gate.gate_id}/decisions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          principal: { principal_id: 'pi-9', tenant_id: 'acme', auth_method: 'dsh-session', session_id: 'sess-gov-9' },
+          decision: 'approved', reason: 'ok',
+        }),
+      })
+      expect(res.status).toBe(200)
+      expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
+      const decisions = kernel.listDecisions(project.project_id)
+      expect(decisions).toHaveLength(1)
+      expect(decisions[0]!.actor).toBe('pi-9') // actor defaults to principal_id
+      expect(decisions[0]!.principal).toMatchObject({ principal_id: 'pi-9', tenant_id: 'acme', auth_method: 'dsh-session', session_id: 'sess-gov-9' })
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('internal contract approve route keeps actor-only semantics (orchestrator channel)', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'gov-approve', workspace: '/w', brief: makeBrief() })
+    const contract = kernel.registerContract({
+      project_id: project.project_id, idea_id: 'idea_x', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'f1' }, seeds: [1], analysis: {}, ablations: [], stop_conditions: {},
+    })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/contracts/${contract.contract_id}/approve`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ actor: 'orchestrator-1' }),
+      })
+      expect(res.status).toBe(200)
+      const approved = await res.json() as { status: string; approval: { approved_by: string } }
+      expect(approved.status).toBe('approved')
+      expect(approved.approval.approved_by).toBe('orchestrator-1')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+})
+
+describe('v2 x-principal-role capability checks (API-01)', () => {
+  it('viewer/auditor read-only; researcher writes but no governance; operator/pi govern', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({
+      name: 'roles', workspace: '/w', brief: makeBrief(), creator_principal_id: 'ops-1',
+    } as never)
+    const projectId = project.project_id
+    kernel.addProjectMember({ project_id: projectId, principal_id: 'viewer-1', role: 'viewer', actor: 'ops-1' })
+    kernel.addProjectMember({ project_id: projectId, principal_id: 'res-1', role: 'researcher', actor: 'ops-1' })
+    kernel.addProjectMember({ project_id: projectId, principal_id: 'aud-1', role: 'auditor', actor: 'ops-1' })
+    const scopeGate = kernel.createGate({ project_id: projectId, type: 'scope', title: 'Scope' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      // Approve the scope gate via the v1 decisions route (principal required).
+      const dec = await fetch(`${base}/v1/gates/${scopeGate.gate_id}/decisions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ actor: 'ops-1', principal: { principal_id: 'ops-1', auth_method: 'dsh-session' }, decision: 'approved' }),
+      })
+      expect(dec.status).toBe(200)
+      expect(kernel.getProject(projectId).status).toBe('SCOPED')
+      const H = (role: string, principalId: string): Record<string, string> => ({
+        'content-type': 'application/json', 'x-principal-id': principalId, 'x-principal-role': role,
+      })
+      // viewer: GET 200, any write 403 role_forbidden.
+      const viewerGet = await fetch(`${base}/v2/projects/${projectId}`, { headers: H('viewer', 'viewer-1') })
+      expect(viewerGet.status).toBe(200)
+      const viewerWrite = await fetch(`${base}/v2/projects/${projectId}/gate-requests`, {
+        method: 'POST', headers: H('viewer', 'viewer-1'), body: JSON.stringify({ type: 'idea', title: 'Idea' }),
+      })
+      expect(viewerWrite.status).toBe(403)
+      expect((await viewerWrite.json() as { error: { code: string } }).error.code).toBe('role_forbidden')
+      // auditor: read-only too.
+      const auditorWrite = await fetch(`${base}/v2/projects/${projectId}/jobs`, {
+        method: 'POST', headers: H('auditor', 'aud-1'), body: JSON.stringify({ idempotency_key: 'j1', kind: 'echo' }),
+      })
+      expect(auditorWrite.status).toBe(403)
+      // researcher: ordinary work submission allowed.
+      const resJob = await fetch(`${base}/v2/projects/${projectId}/jobs`, {
+        method: 'POST', headers: H('researcher', 'res-1'), body: JSON.stringify({ idempotency_key: 'j1', kind: 'echo', payload: { message: 'x' } }),
+      })
+      expect(resJob.status).toBe(201)
+      // researcher: governance writes blocked (transitions + decisions);
+      // gate-REQUESTS are a researcher-permitted write (requesting a gate is
+      // not deciding it — only gates/decisions etc. are governance).
+      const resTrans = await fetch(`${base}/v2/projects/${projectId}/transitions`, {
+        method: 'POST', headers: H('researcher', 'res-1'), body: JSON.stringify({ to: 'SURVEYING', expected_revision: 1 }),
+      })
+      expect(resTrans.status).toBe(403)
+      expect((await resTrans.json() as { error: { code: string } }).error.code).toBe('role_forbidden')
+      const resGate = await fetch(`${base}/v2/projects/${projectId}/gate-requests`, {
+        method: 'POST', headers: H('researcher', 'res-1'), body: JSON.stringify({ type: 'idea', title: 'Idea' }),
+      })
+      expect(resGate.status).toBe(201)
+      const resDecide = await fetch(`${base}/v2/gates/${scopeGate.gate_id}/decisions`, {
+        method: 'POST', headers: H('researcher', 'res-1'), body: JSON.stringify({ actor: 'res-1', decision: 'approved' }),
+      })
+      expect(resDecide.status).toBe(403)
+      // operator: transition allowed.
+      const opTrans = await fetch(`${base}/v2/projects/${projectId}/transitions`, {
+        method: 'POST', headers: H('operator', 'ops-1'), body: JSON.stringify({ to: 'SURVEYING', expected_revision: 1 }),
+      })
+      expect(opTrans.status).toBe(200)
+      expect((await opTrans.json() as { status: string }).status).toBe('SURVEYING')
+      // pi: governance allowed.
+      const piTrans = await fetch(`${base}/v2/projects/${projectId}/transitions`, {
+        method: 'POST', headers: H('pi', 'ops-1'), body: JSON.stringify({ to: 'IDEATING', expected_revision: 2 }),
+      })
+      expect(piTrans.status).toBe(200)
+      // Invalid role -> 403 role_required (fail-closed).
+      const badRole = await fetch(`${base}/v2/projects/${projectId}`, { headers: H('superadmin', 'ops-1') })
+      expect(badRole.status).toBe(403)
+      expect((await badRole.json() as { error: { code: string } }).error.code).toBe('role_required')
+      // Present-but-empty role -> 403 role_required.
+      const emptyRole = await fetch(`${base}/v2/projects/${projectId}`, { headers: { 'x-principal-id': 'ops-1', 'x-principal-role': ' ' } })
+      expect(emptyRole.status).toBe(403)
+      expect((await emptyRole.json() as { error: { code: string } }).error.code).toBe('role_required')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+})
+
+describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
+  // One baseline + one formal run at a seed, with a metrics artifact (echo of
+  // the §12.5 file shape) so computeAnalysis can aggregate.
+  function pairRun(kernel: { submitJob(input: unknown): { job_id: string }; claimJobs(owner: string, ttl?: number, limit?: number): Array<{ job_id: string; lease_generation?: number | null; lease_token?: string | null }>; registerArtifact(input: unknown): { artifact_id: string; sha256: string }; completeJob(input: unknown): unknown }, projectId: string, codeSnap: string, contractId: string, key: string, kind: 'baseline' | 'formal', seed: number, value: number): void {
+    const job = kernel.submitJob({
+      project_id: projectId, idempotency_key: key, kind, contract_id: contractId, code_snapshot_id: codeSnap,
+      payload: { seed }, image_digest: 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32',
+    })
+    const [claimed] = kernel.claimJobs('stat-runner', 60, 8)
+    expect(claimed?.job_id).toBe(job.job_id)
+    const record = kernel.registerArtifact({
+      project_id: projectId, kind: 'analysis',
+      content: Buffer.from(JSON.stringify({ schema_version: 1, seed, metrics: [{ name: 'm', value, unit: '' }] })),
+    })
+    kernel.completeJob({
+      job_id: job.job_id, owner: 'stat-runner', status: 'succeeded',
+      lease_generation: claimed!.lease_generation!, lease_token: claimed!.lease_token!,
+      run_manifest: {
+        run_id: `run_${key}`, job_id: job.job_id, code_commit: 'c',
+        started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+        exit_code: 0, metrics_artifact: `sha256:${record.sha256}`,
+      },
+    })
+  }
+
+  it('analysis uses the fixed 10,000 resamples and reports n_resamples', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'stat', workspace: '/w', brief: makeBrief() })
+    const codeSnap = kernel.registerArtifact({
+      project_id: project.project_id, kind: 'code', content: Buffer.from('x=1'),
+    }).artifact_id
+    const contract = kernel.registerContract({
+      project_id: project.project_id, idea_id: 'i',
+      data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'm' }, seeds: [1, 2],
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 2, stop_on_data_leakage: true },
+    })
+    kernel.approveContract(contract.contract_id, 'dec_gate_1', 'pi')
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b1', 'baseline', 1, 0.4)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b2', 'baseline', 2, 0.5)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f1', 'formal', 1, 0.6)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f2', 'formal', 2, 0.7)
+    const analysis = kernel.computeAnalysis(project.project_id, undefined, 'm', { minimum_n: 2 })
+    expect(analysis.n).toBe(2)
+    expect(analysis.effect_size).toBeCloseTo(0.2, 9)
+    const artifact = kernel.getArtifact(project.project_id, analysis.artifact_id)
+    const content = JSON.parse(kernel.cas.read(artifact.sha256).toString('utf8')) as { n_resamples?: number }
+    expect(content.n_resamples).toBe(10000)
+    kernel.close()
+  })
+
+  it('caller cannot lower minimum_n below the contract minimum (422)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'stat2', workspace: '/w', brief: makeBrief() })
+    const codeSnap = kernel.registerArtifact({
+      project_id: project.project_id, kind: 'code', content: Buffer.from('x=1'),
+    }).artifact_id
+    const contract = kernel.registerContract({
+      project_id: project.project_id, idea_id: 'i',
+      data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'm' }, seeds: [1, 2, 3],
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 3, stop_on_data_leakage: true },
+    })
+    kernel.approveContract(contract.contract_id, 'dec_gate_1', 'pi')
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b1', 'baseline', 1, 0.4)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b2', 'baseline', 2, 0.5)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b3', 'baseline', 3, 0.6)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f1', 'formal', 1, 0.6)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f2', 'formal', 2, 0.7)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f3', 'formal', 3, 0.8)
+    // 3 paired runs exist, contract minimum is 3 — a caller asking for 1 must
+    // be rejected before the analysis runs.
+    expect(() => kernel.computeAnalysis(project.project_id, contract.contract_id, 'm', { minimum_n: 1 }))
+      .toThrowError(/cannot be lowered by the caller/)
     kernel.close()
   })
 })

@@ -124,21 +124,41 @@ if (startAgent.includes('research-dev-selfmod.cordis.yml')) {
   errors.push('start-dsh-agent-dev.sh must NOT load the selfmod overlay (SELFMOD-01)')
 }
 
-// DOC-02: change-aware docs sync — when source or eval files changed in the
-// reviewed range, the hardening status ledger must have moved too (DOC-01:
-// every implementation change updates hardening-v0.2-status.md).
+// DOC-02: change-aware docs sync — when implementation or documentation
+// files changed in the reviewed range, the hardening status ledger must have
+// moved too (DOC-01: every implementation change updates
+// docs/hardening-v0.2-status.md).
 // Usage: node scripts/verify-docs.mjs --diff-check [<base-ref>]
+//
+// The touch coverage is the full implementation surface, not just the
+// packages/workers src and eval shells: root plugin src/, configs/,
+// migrations/, scripts/ (except this file), tests/unit + tests/security,
+// docs/ (except the ledger itself) and evals/ shells. New/modified docs must
+// satisfy the same sync contract as code: the ledger must move in the same
+// range. An unreachable base ref stays FAIL-CLOSED (repository-blueprint.md /
+// acceptance-tests.md §base_ref_unavailable): the git error propagates and
+// the check exits 1.
 if (process.argv.includes('--diff-check')) {
   const base = process.argv[process.argv.indexOf('--diff-check') + 1] ?? 'origin/main'
   // Fail closed when the base ref does not exist (repository-blueprint.md).
   runGit(['rev-parse', '--verify', '--quiet', `${base}^{commit}`])
   const changed = runGit(['diff', '--name-only', `${base}...HEAD`])
-  const sourceChanged = changed.some((file) =>
-    /^(?:packages|workers)\/[^/]+\/src\/.+\.(?:ts|tsx)$/.test(file) && !file.endsWith('.test.ts'))
-  const evalChanged = changed.some((file) => file.startsWith('evals/') && file.endsWith('.sh'))
-  const statusLedgerChanged = changed.some((file) => file === 'docs/hardening-v0.2-status.md')
-  if ((sourceChanged || evalChanged) && !statusLedgerChanged) {
-    errors.push(`DOC-02: source/eval changes in this range (${base}...HEAD) must also update docs/hardening-v0.2-status.md`)
+  const isSourceFile = (file) => /\.(?:ts|tsx)$/.test(file) && !/\.(?:test|spec)\.(?:ts|tsx)$/.test(file)
+  const triggers = []
+  if (changed.some((file) => (/^(?:packages|workers)\/[^/]+\/src\//.test(file) || file.startsWith('src/')) && isSourceFile(file))) {
+    triggers.push('packages/workers/root src')
+  }
+  if (changed.some((file) => file.startsWith('configs/'))) triggers.push('configs/')
+  if (changed.some((file) => file.startsWith('migrations/'))) triggers.push('migrations/')
+  if (changed.some((file) => /^tests\/(?:unit|security)\//.test(file))) triggers.push('tests/unit+security')
+  if (changed.some((file) => file.startsWith('scripts/') && file !== 'scripts/verify-docs.mjs')) triggers.push('scripts/ (except verify-docs.mjs)')
+  if (changed.some((file) => file.startsWith('docs/') && file !== 'docs/hardening-v0.2-status.md')) triggers.push('docs/ (except ledger)')
+  if (changed.some((file) => file.startsWith('evals/') && file.endsWith('.sh'))) triggers.push('evals/ shells')
+  const statusLedgerChanged = changed.includes('docs/hardening-v0.2-status.md')
+  if (triggers.length > 0 && !statusLedgerChanged) {
+    errors.push(
+      `DOC-02: ${triggers.join(', ')} changes in this range (${base}...HEAD) must also update ` +
+      'docs/hardening-v0.2-status.md (ledger/spec sync)')
   }
 }
 

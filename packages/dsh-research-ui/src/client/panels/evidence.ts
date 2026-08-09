@@ -79,8 +79,8 @@ export async function renderEvidence(body: HTMLElement, projectId: string): Prom
         if (root == null || claim.claim_id === undefined) return
         const cid = claim.claim_id
         openContextMenu(root, event.clientX, event.clientY, [
-          { label: '⧉ Details', onPick: () => openClaimDetailModal(root, claim) },
-          { label: 'Copy claim ID', hint: cid, onPick: () => copyText(cid) },
+          { label: `⧉ ${t('common', 'common.action.details')}`, onPick: () => openClaimDetailModal(root, claim) },
+          { label: t('evidence', 'evidence.copyClaimId'), hint: cid, onPick: () => copyText(cid) },
         ])
       }
       const stmt = el('div', 'grow', claim.statement ?? '')
@@ -216,19 +216,19 @@ export function openClaimDetailModal(root: ShadowRoot, claim: ClaimRow): void {
   modal.appendChild(stmt)
 
   modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.claim.title')))
-  row('Claim', String(claim.claim_id ?? '—'))
-  row('Status', String(claim.status ?? '—'))
-  row('Confidence', String(claim.confidence ?? '—'))
+  row(t('evidence', 'evidence.detailClaim'), String(claim.claim_id ?? '—'))
+  row(t('evidence', 'evidence.detailStatus'), String(claim.status ?? '—'))
+  row(t('evidence', 'evidence.detailConfidence'), String(claim.confidence ?? '—'))
   const scope = claim.scope
   if (scope !== undefined) {
-    row('Dataset', String(scope.dataset ?? '—'))
-    row('Split', String(scope.split ?? '—'))
+    row(t('evidence', 'evidence.detailDataset'), String(scope.dataset ?? '—'))
+    row(t('evidence', 'evidence.detailSplit'), String(scope.split ?? '—'))
   }
   const ev = claim.evidence
   if (ev !== undefined && (ev.evidence_ids ?? []).length > 0) {
     modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.claim.supporting')))
-    for (const id of ev.evidence_ids ?? []) row('Evidence', fmtId(id, 40))
-    if (typeof ev.analysis_artifact === 'string' && ev.analysis_artifact !== '') row('Analysis artifact', fmtId(ev.analysis_artifact, 40))
+    for (const id of ev.evidence_ids ?? []) row(t('evidence', 'evidence.detailEvidence'), fmtId(id, 40))
+    if (typeof ev.analysis_artifact === 'string' && ev.analysis_artifact !== '') row(t('evidence', 'evidence.detailAnalysisArtifact'), fmtId(ev.analysis_artifact, 40))
   }
   const limitations = claim.limitations ?? []
   if (limitations.length > 0) {
@@ -279,16 +279,16 @@ export function openEvidenceDetailModal(root: ShadowRoot, item: EvidenceRow): vo
   }
   const r = item.result
   modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.detail.result')))
-  row('Metric', r?.primary_metric ?? '—')
-  row('Value', String(r?.value ?? '—'))
-  row('Effect', r?.effect_size !== undefined ? `Δ${r.effect_size >= 0 ? '+' : ''}${r.effect_size}` : '—')
-  row('CI', `[${r?.ci_low ?? '—'}, ${r?.ci_high ?? '—'}]`)
-  row('n seeds', String(r?.n_seeds ?? '—'))
+  row(t('evidence', 'evidence.detailMetric'), r?.primary_metric ?? '—')
+  row(t('evidence', 'evidence.detailValue'), String(r?.value ?? '—'))
+  row(t('evidence', 'evidence.detailEffect'), r?.effect_size !== undefined ? `Δ${r.effect_size >= 0 ? '+' : ''}${r.effect_size}` : '—')
+  row(t('evidence', 'evidence.detailCi'), `[${r?.ci_low ?? '—'}, ${r?.ci_high ?? '—'}]`)
+  row(t('evidence', 'evidence.detailNSeeds'), String(r?.n_seeds ?? '—'))
   modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.detail.provenance')))
-  row('Evidence', String(item.evidence_id ?? '—'))
-  row('Method', item.analysis_method ?? '—')
-  row('Runs', Array.isArray(item.run_ids) ? item.run_ids.join(', ') : '—')
-  row('Artifacts', Array.isArray(item.artifact_refs) ? item.artifact_refs.map(a => fmtId(a, 18)).join(', ') : '—')
+  row(t('evidence', 'evidence.detailEvidence'), String(item.evidence_id ?? '—'))
+  row(t('evidence', 'evidence.detailMethod'), item.analysis_method ?? '—')
+  row(t('evidence', 'evidence.detailRuns'), Array.isArray(item.run_ids) ? item.run_ids.join(', ') : '—')
+  row(t('evidence', 'evidence.detailArtifacts'), Array.isArray(item.artifact_refs) ? item.artifact_refs.map(a => fmtId(a, 18)).join(', ') : '—')
   overlay.appendChild(modal)
   root.appendChild(overlay)
   trapFocus(overlay, null)

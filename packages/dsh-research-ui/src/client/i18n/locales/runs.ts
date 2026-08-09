@@ -34,7 +34,21 @@ export const zh = {
   'runs.sectionRun': '运行',
   'runs.sectionManifest': 'RunManifest',
   'runs.openRunsTab': '打开运行标签页',
+
+
+  'runs.detailJob': '作业',
+  'runs.detailKind': '类型',
+  'runs.detailStatus': '状态',
+  'runs.detailContract': '合同',
+  'runs.detailFailure': '失败',
+  'runs.detailError': '错误',
+  'runs.detailRun': '运行',
+  'runs.detailExitCode': '退出码',
+  'runs.detailContainer': '容器',
+  'runs.detailSigner': '签名者',
+  'runs.detailMetrics': '指标',
 }
+
 
 export const en: Record<keyof typeof zh, string> = {
   'runs.section': 'Runs ({count})',
@@ -68,4 +82,18 @@ export const en: Record<keyof typeof zh, string> = {
   'runs.sectionRun': 'Run',
   'runs.sectionManifest': 'RunManifest',
   'runs.openRunsTab': 'open the Runs tab',
+
+
+  'runs.detailJob': 'Job',
+  'runs.detailKind': 'Kind',
+  'runs.detailStatus': 'Status',
+  'runs.detailContract': 'Contract',
+  'runs.detailFailure': 'Failure',
+  'runs.detailError': 'Error',
+  'runs.detailRun': 'Run',
+  'runs.detailExitCode': 'Exit code',
+  'runs.detailContainer': 'Container',
+  'runs.detailSigner': 'Signer',
+  'runs.detailMetrics': 'Metrics',
 }
+

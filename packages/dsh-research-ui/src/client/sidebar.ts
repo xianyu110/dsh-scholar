@@ -5,6 +5,7 @@ import { openCompareModal } from './modals/search'
 import { openSettingsModal } from './modals/settings'
 import { favProjectToggle, favProjects, state, tabSave } from './state'
 import { STATUS_META, copyText, el, openContextMenu, rootHost, showToast } from './ui'
+import { t } from './i18n/index'
 /** Sidebar search filter (dsh-web "Search sessions" feel). */
 export let sidebarQuery = ''
 /** Sidebar grouping (dsh-web "Group by" feel): all | active | done. */
@@ -42,14 +43,14 @@ export function renderSidebar(
   sidebar.replaceChildren()
 
   const brandRow = el('div', 'sidebar-brand-row')
-  brandRow.append(el('span', 'sidebar-wordmark', 'dsh'), el('span', 'sidebar-product', 'research'))
+  brandRow.append(el('span', 'sidebar-wordmark', t('shell', 'shell.sidebar.wordmark')), el('span', 'sidebar-product', t('shell', 'shell.sidebar.product')))
   sidebar.appendChild(brandRow)
 
   const head = el('div', 'sidebar-head')
-  head.appendChild(el('span', 'sidebar-title', 'Workspaces'))
+  head.appendChild(el('span', 'sidebar-title', t('shell', 'shell.sidebar.title')))
   // dsh-web sort toggle: recent activity vs alphabetical.
-  const sortBtn = el('button', 'sidebar-new', sidebarSort === 'name' ? 'A–Z' : 'Recent')
-  sortBtn.title = sidebarSort === 'name' ? 'sort by name (click for recent)' : 'sort by recent activity (click for A–Z)'
+  const sortBtn = el('button', 'sidebar-new', sidebarSort === 'name' ? 'A–Z' : t('shell', 'shell.sidebar.sortRecent'))
+  sortBtn.title = sidebarSort === 'name' ? t('shell', 'shell.sidebar.sortByName') : t('shell', 'shell.sidebar.sortByRecent')
   sortBtn.style.cssText = 'padding:1px 8px;font-size:10px'
   sortBtn.onclick = () => {
     sidebarSort = sidebarSort === 'recent' ? 'name' : 'recent'
@@ -58,8 +59,8 @@ export function renderSidebar(
   }
   head.appendChild(sortBtn)
   const newBtn = el('button', 'sidebar-new', '＋')
-  newBtn.title = 'new project'
-  newBtn.setAttribute('aria-label', 'New project')
+  newBtn.title = t('shell', 'shell.sidebar.newTitle')
+  newBtn.setAttribute('aria-label', t('shell', 'shell.sidebar.newAria'))
   newBtn.onclick = () => {
     const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
     if (root != null) openNewProjectModal(root)
@@ -72,7 +73,7 @@ export function renderSidebar(
   const search = document.createElement('input')
   search.className = 'sidebar-search'
   search.type = 'text'
-  search.placeholder = 'Search workspaces…'
+  search.placeholder = t('shell', 'shell.sidebar.searchPlaceholder')
   search.value = sidebarQuery
   // dsh-web search box: Escape clears the filter in place.
   search.onkeydown = (event) => {
@@ -88,7 +89,8 @@ export function renderSidebar(
   // Group by (dsh-web "Group by"): all / active / done.
   const groupRow = el('div', 'sidebar-groups')
   const GROUP_DEFS: Array<['all' | 'active' | 'done' | 'archived', string]> = [
-    ['all', 'All'], ['active', 'Active'], ['done', 'Done'], ['archived', 'Archived'],
+    ['all', t('shell', 'shell.sidebar.groupAll')], ['active', t('shell', 'shell.sidebar.groupActive')],
+    ['done', t('shell', 'shell.sidebar.groupDone')], ['archived', t('shell', 'shell.sidebar.groupArchived')],
   ]
   for (const [key, label] of GROUP_DEFS) {
     const chip = el('button', 'sidebar-filter')
@@ -101,9 +103,9 @@ export function renderSidebar(
 
   const list = el('div', 'sidebar-list')
   list.setAttribute('role', 'tree')
-  list.setAttribute('aria-label', 'Research workspaces')
+  list.setAttribute('aria-label', t('shell', 'shell.sidebar.workspacesAria'))
   // dsh-web counts: the footer shows the filtered/total project counts.
-  const footLabel = el('span', '', `${projects.length} projects`)
+  const footLabel = el('span', '', t('shell', 'shell.sidebar.projectCount', { count: String(projects.length) }))
   const renderRows = (): void => {
     list.replaceChildren()
     const q = sidebarQuery.trim().toLowerCase()
@@ -120,10 +122,12 @@ export function renderSidebar(
     }
     // dsh-web counts: reflect the active filter in the footer.
     footLabel.textContent = q === '' && sidebarGroup === 'all'
-      ? `${projects.length} projects`
-      : `${filtered.length}/${projects.length} projects`
+      ? t('shell', 'shell.sidebar.projectCount', { count: String(projects.length) })
+      : t('shell', 'shell.sidebar.projectCount', { count: `${filtered.length}/${projects.length}` })
     if (filtered.length === 0) {
-      const empty = el('div', 'empty', projects.length === 0 ? 'No projects yet — create one with ＋ above or /research new in Chat.' : 'No matches for the current filter.')
+      const empty = el('div', 'empty', projects.length === 0
+        ? t('shell', 'shell.sidebar.emptyNoProjects')
+        : t('shell', 'shell.sidebar.emptyNoMatch'))
       empty.style.cssText = 'padding:10px 12px'
       list.appendChild(empty)
       return
@@ -131,12 +135,12 @@ export function renderSidebar(
     for (const p of filtered) {
       const item = el('button', 'ws-item')
       item.setAttribute('role', 'treeitem')
-      item.setAttribute('aria-label', `project ${p.name ?? p.project_id ?? ''}`)
+      item.setAttribute('aria-label', t('shell', 'shell.sidebar.itemAria', { name: p.name ?? p.project_id ?? '' }))
       // dsh-web starred projects: ★ toggles the favourite (sorted first).
       const isFav = p.project_id !== undefined && favProjects.has(p.project_id)
       const favStar = el('span', '', isFav ? '★' : '☆')
       favStar.style.cssText = `cursor:pointer;color:${isFav ? 'var(--tone-amber)' : 'var(--text-3)'};font-size:10px;flex-shrink:0`
-      favStar.title = isFav ? 'unfavourite project' : 'favourite project (pinned first)'
+      favStar.title = isFav ? t('shell', 'shell.sidebar.unfavTitle') : t('shell', 'shell.sidebar.favTitle')
       favStar.onclick = (event) => {
         event.stopPropagation()
         if (p.project_id === undefined) return
@@ -151,7 +155,7 @@ export function renderSidebar(
       if (sidebarSelecting && p.project_id !== undefined) {
         if (sidebarSelected.has(p.project_id)) item.classList.add('selected')
         const box = el('span', 'ws-check', sidebarSelected.has(p.project_id) ? '☑' : '☐')
-        box.title = 'toggle selection'
+        box.title = t('shell', 'shell.sidebar.toggleSelection')
         box.onclick = (event) => {
           event.stopPropagation()
           if (p.project_id === undefined) return
@@ -177,7 +181,7 @@ export function renderSidebar(
       item.appendChild(itemText)
       if (blocked) {
         const badge = el('span', 'ws-status', '!')
-        badge.title = 'blocked on a human gate decision — click to open Approvals'
+        badge.title = t('shell', 'shell.sidebar.blockedTitle')
         badge.style.cssText = 'color:var(--tone-amber);font-weight:700;cursor:pointer'
         badge.onclick = (event) => {
           event.stopPropagation()
@@ -189,7 +193,8 @@ export function renderSidebar(
         item.appendChild(badge)
       }
       item.onclick = () => { if (p.project_id !== undefined) onPick(p.project_id) }
-      // dsh-web tooltip: full identity of the project on hover.
+      // dsh-web tooltip: full identity of the project on hover. Raw wire
+      // join (name · status · id) — no UI prose, kept verbatim (§8 line 115).
       item.title = `${p.name ?? ''} · ${p.status ?? ''} · ${p.project_id ?? ''}`
       // dsh-web context menu: right-click on a project row.
       item.oncontextmenu = (event) => {
@@ -200,27 +205,27 @@ export function renderSidebar(
         const id = p.project_id
         const isArchived = p.status === 'ARCHIVED'
         const ctxItems: ContextMenuItem[] = [
-          { label: 'Open', hint: p.status ?? '', onPick: () => onPick(id) },
-          { label: '✎ Rename', onPick: () => openRenameModal(root, id, p.name ?? '', () => state.rerender()) },
-          { label: 'Copy name', hint: p.name ?? '', onPick: () => copyText(p.name ?? id) },
+          { label: t('common', 'common.action.open'), hint: p.status ?? '', onPick: () => onPick(id) },
+          { label: `✎ ${t('common', 'common.action.rename')}`, onPick: () => openRenameModal(root, id, p.name ?? '', () => state.rerender()) },
+          { label: t('common', 'common.action.copyName'), hint: p.name ?? '', onPick: () => copyText(p.name ?? id) },
         ]
         if (isArchived) {
           ctxItems.push({
-            label: '↩ Restore',
+            label: `↩ ${t('common', 'common.action.restore')}`,
             divider: true,
             onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/unarchive`, { method: 'POST' }).then(() => state.rerender()) },
           })
         } else {
           ctxItems.push({
-            label: '🗄 Archive',
-            hint: 'data kept',
+            label: `🗄 ${t('common', 'common.action.archive')}`,
+            hint: t('shell', 'shell.sidebar.archiveHint'),
             divider: true,
             onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/archive`, { method: 'POST' }).then(() => state.rerender()) },
           })
         }
         ctxItems.push(
-          { label: '⧉ Details', onPick: () => { void openProjectDetailModal(root, id) } },
-          { label: 'Copy project ID', hint: id, onPick: () => copyText(id) },
+          { label: `⧉ ${t('common', 'common.action.details')}`, onPick: () => { void openProjectDetailModal(root, id) } },
+          { label: t('common', 'common.action.copyProjectId'), hint: id, onPick: () => copyText(id) },
         )
         openContextMenu(root, event.clientX, event.clientY, ctxItems)
       }
@@ -235,7 +240,7 @@ export function renderSidebar(
       const actionsWrap = el('span')
       actionsWrap.style.cssText = 'display:none;align-items:center;gap:2px;flex-shrink:0'
       const renameBtn = el('span', 'ws-rename', '✎')
-      renameBtn.title = 'rename project'
+      renameBtn.title = t('shell', 'shell.sidebar.renameTitle')
       renameBtn.onclick = (event) => {
         event.stopPropagation()
         if (p.project_id === undefined) return
@@ -244,18 +249,18 @@ export function renderSidebar(
       }
       const archived = p.status === 'ARCHIVED'
       const arcBtn = el('span', 'ws-rename', archived ? '↩' : '🗄')
-      arcBtn.title = archived ? 'restore project' : 'archive project (data kept)'
+      arcBtn.title = archived ? t('shell', 'shell.sidebar.restoreTitle') : t('shell', 'shell.sidebar.archiveTitle')
       arcBtn.onclick = async (event) => {
         event.stopPropagation()
         if (p.project_id === undefined) return
         if (!archived) {
           const ok = await api(`/v1/projects/${encodeURIComponent(p.project_id)}/archive`, { method: 'POST' })
-          if (ok === null) { state.lastError = 'archive failed (bridge error)'; return }
-          showToast(rootHost(), `🗄 Archived ${p.name ?? p.project_id}`)
+          if (ok === null) { state.lastError = t('shell', 'shell.sidebar.archiveFailed'); return }
+          showToast(rootHost(), t('shell', 'shell.sidebar.archived', { name: p.name ?? p.project_id ?? '' }))
         } else {
           const ok = await api(`/v1/projects/${encodeURIComponent(p.project_id)}/unarchive`, { method: 'POST' })
-          if (ok === null) { state.lastError = 'restore failed (bridge error)'; return }
-          showToast(rootHost(), `↩ Restored ${p.name ?? p.project_id}`)
+          if (ok === null) { state.lastError = t('shell', 'shell.sidebar.restoreFailed'); return }
+          showToast(rootHost(), t('shell', 'shell.sidebar.restored', { name: p.name ?? p.project_id ?? '' }))
         }
         state.rerender()
       }
@@ -273,17 +278,17 @@ export function renderSidebar(
   // dsh-web overview: activity snapshot under the project list.
   const activeCount = projects.filter(p => isProjectActive(p.status)).length
   const blockedCount = projects.filter(p => p.status === 'BLOCKED_GATE').length
-  const footStats = el('span', 'muted', `${activeCount} active · ${blockedCount} blocked`)
+  const footStats = el('span', 'muted', t('shell', 'shell.sidebar.stats', { active: String(activeCount), blocked: String(blockedCount) }))
   footStats.style.cssText = 'font-size:9.5px;flex-shrink:0'
-  const settingsBtn = el('button', 'hbtn', '⚙ Settings')
-  settingsBtn.title = 'connection, token and appearance settings'
+  const settingsBtn = el('button', 'hbtn', t('shell', 'shell.settings.title'))
+  settingsBtn.title = t('shell', 'shell.settings.buttonTitle')
   settingsBtn.onclick = () => {
     const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
     if (root != null) openSettingsModal(root)
   }
   if (!sidebarSelecting) {
-    const selectBtn = el('button', 'hbtn', '☑ Select')
-    selectBtn.title = 'multi-select projects (bulk actions)'
+    const selectBtn = el('button', 'hbtn', `☑ ${t('common', 'common.action.select')}`)
+    selectBtn.title = t('shell', 'shell.sidebar.selectTitle')
     selectBtn.setAttribute('aria-pressed', 'false')
     selectBtn.onclick = () => {
       sidebarSelecting = true
@@ -292,26 +297,26 @@ export function renderSidebar(
     }
     foot.append(footLabel, footStats, selectBtn, settingsBtn)
   } else {
-    const doneBtn = el('button', 'hbtn', 'Done')
+    const doneBtn = el('button', 'hbtn', t('common', 'common.action.done'))
     doneBtn.onclick = () => {
       sidebarSelecting = false
       sidebarSelected.clear()
       renderSidebar(sidebar, projects, activeId, onPick)
     }
-    const countLabel = el('span', '', `${sidebarSelected.size} selected`)
-    const archiveSel = el('button', 'hbtn', '🗄 Archive')
+    const countLabel = el('span', '', t('common', 'common.selected', { count: String(sidebarSelected.size) }))
+    const archiveSel = el('button', 'hbtn', `🗄 ${t('common', 'common.action.archive')}`)
     archiveSel.disabled = sidebarSelected.size === 0
     archiveSel.onclick = async () => {
       for (const id of sidebarSelected) {
         await api(`/v1/projects/${encodeURIComponent(id)}/archive`, { method: 'POST' })
       }
-      showToast(rootHost(), `🗄 Archived ${sidebarSelected.size} project(s)`)
+      showToast(rootHost(), t('shell', 'shell.sidebar.archivedMany', { count: String(sidebarSelected.size) }))
       sidebarSelecting = false
       sidebarSelected.clear()
       state.rerender()
     }
     // dsh-web compare: side-by-side view of the selected projects.
-    const compareBtn = el('button', 'hbtn', '⇄ Compare')
+    const compareBtn = el('button', 'hbtn', `⇄ ${t('shell', 'shell.compare.button')}`)
     compareBtn.disabled = sidebarSelected.size < 2
     compareBtn.onclick = () => {
       const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
