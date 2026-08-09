@@ -120,7 +120,15 @@ export const BudgetRecord = z.object({
 })
 export type BudgetRecord = z.infer<typeof BudgetRecord>
 
-/** One append-only kernel event (outbox, at-least-once delivery). */
+/**
+ * One append-only kernel event — §16 outbox canonical envelope (EVENT-01):
+ * `{event_id, event_seq, event_version, project_id, kind, aggregate_type,
+ * aggregate_id, aggregate_revision, source, request_id, session_id?, payload,
+ * created_at}` plus delivery bookkeeping. SQLite allocates
+ * event_seq = per-aggregate max+1 inside the write transaction; consumers
+ * dedupe by event_id and record attempts/last_error/next_attempt_at (20
+ * attempts → dead_lettered_at, event kept).
+ */
 export const KernelEvent = z.object({
   event_id: z.string().min(1),
   project_id: z.string().nullable().default(null),
@@ -129,6 +137,18 @@ export const KernelEvent = z.object({
   source: z.string().default('kernel'),
   delivered: z.boolean().default(false),
   created_at: z.string(),
+  /** §16: monotonic within one aggregate (NULL bucket for aggregate-less events). */
+  event_seq: z.number().int().nonnegative().optional(),
+  event_version: z.number().int().nonnegative().optional(),
+  aggregate_type: z.string().nullable().optional(),
+  aggregate_id: z.string().nullable().optional(),
+  aggregate_revision: z.number().int().nullable().optional(),
+  request_id: z.string().nullable().optional(),
+  session_id: z.string().nullable().optional(),
+  attempts: z.number().int().nonnegative().optional(),
+  last_error: z.string().nullable().optional(),
+  next_attempt_at: z.string().nullable().optional(),
+  dead_lettered_at: z.string().nullable().optional(),
 })
 export type KernelEvent = z.infer<typeof KernelEvent>
 

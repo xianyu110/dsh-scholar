@@ -4,10 +4,14 @@
 #
 #   OPS-01: CLI host/port/dataDir/token parsing, real-URL + token-check
 #           readiness, failure -> non-zero exit with log tail, cleanup.
-#   SEC-UI-01: --no-token requires loopback; token file 0600 / non-symlink /
-#           non-empty; /api/token-check 401 on wrong token; /v1/* requires
-#           the bearer; cross-origin writes rejected; same 127/8 origin
-#           allowed.
+#   SEC-UI-01: --no-token requires loopback (direct + start-standalone-ui.sh);
+#           token file 0600 / non-symlink / non-empty; /api/token-check 401
+#           on wrong token; /v1/* requires the bearer; cross-origin writes
+#           rejected; same 127/8 origin allowed; CSRF session token required
+#           on /api writes; /api/chat/survey membership fail-closed with
+#           unchanged Corpus Snapshot/Outbox counts; token never in server
+#           log or kernel/server argv (0600 token-file handoff); stable
+#           error bodies without internal paths/env detail.
 #
 # Usage: bash tests/security/run-standalone-http-tests.sh
 set -eu
@@ -25,7 +29,18 @@ ok() { echo "  ok: $*"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 
 WORK=$(mktemp -d)
-trap 'pkill -f "standalone/server.js" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+# Kill ONLY the standalone instances this test started (their argv carries the
+# $WORK data dir) — never a user's server (e.g. the 8443-facing 18610
+# instance). A broad `pkill -f standalone/server.js` here would take the
+# user's UI down on every run.
+kill_test_servers() {
+  for pid in $(pgrep -f "standalone/server.js" 2>/dev/null || true); do
+    if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF "$WORK"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+}
+trap 'kill_test_servers; rm -rf "$WORK"' EXIT
 
 # ── OPS-01: custom CLI args + readiness + cleanup ──────────────────────────
 WEB_PORT=$((21000 + RANDOM % 5000))
@@ -60,6 +75,32 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/a
 R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}")
 [ "$R" = "200" ] && ok "SEC: token-check right token -> 200" || fail "SEC: token-check right -> $R"
 
+# ── SEC-UI-01: CSRF session token gate on /api writes ───────────────────────
+R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/api/session/csrf")
+[ "$R" = "401" ] && ok "SEC: GET /api/session/csrf without token -> 401" || fail "SEC: csrf no-token -> $R"
+CSRF=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/api/session/csrf" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
+if printf '%s' "$CSRF" | grep -qE '^[0-9a-f]{64}$'; then
+  ok "SEC: GET /api/session/csrf issues a 32-byte hex token"
+else
+  fail "SEC: csrf token malformed -> '$CSRF'"
+fi
+CSRF2=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/api/session/csrf" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
+[ "$CSRF2" = "$CSRF" ] && ok "SEC: csrf token stable per process" || fail "SEC: csrf token rotated unexpectedly"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{"model":"deepseek-v4-flash"}')
+[ "$R" = "403" ] && ok "SEC: PUT /api/model without csrf -> 403" || fail "SEC: PUT model no-csrf -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'x-csrf-token: deadbeef' -H 'content-type: application/json' -d '{"model":"deepseek-v4-flash"}')
+[ "$R" = "403" ] && ok "SEC: PUT /api/model wrong csrf -> 403" || fail "SEC: PUT model bad-csrf -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{"project_id":"x","query":"y"}')
+[ "$R" = "403" ] && ok "SEC: survey without csrf -> 403" || fail "SEC: survey no-csrf -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'x-csrf-token: deadbeef' -H 'content-type: application/json' -d '{"project_id":"x","query":"y"}')
+[ "$R" = "403" ] && ok "SEC: survey wrong csrf -> 403" || fail "SEC: survey bad-csrf -> $R"
+
 # ── SEC-UI-01: /v1/* requires the bearer ───────────────────────────────────
 R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/v1/projects")
 [ "$R" = "401" ] && ok "SEC: /v1/projects without token -> 401" || fail "SEC: no-token /v1/projects -> $R"
@@ -69,16 +110,17 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "ht
 [ "$R" = "200" ] && ok "SEC: /v1/projects good bearer -> 200" || fail "SEC: good bearer -> $R"
 
 # ── SEC-UI-01: cross-origin writes rejected, same-127/8 allowed ───────────
+# (Origin stays a SECOND layer on top of the CSRF token.)
 R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
-  -H "Authorization: Bearer $TOKEN" -H 'Origin: http://evil.example' -H 'content-type: application/json' -d '{}')
-[ "$R" = "403" ] && ok "SEC: foreign Origin write -> 403" || fail "SEC: foreign origin -> $R"
+  -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $CSRF" -H 'Origin: http://evil.example' -H 'content-type: application/json' -d '{}')
+[ "$R" = "403" ] && ok "SEC: foreign Origin + valid csrf -> 403" || fail "SEC: foreign origin -> $R"
 R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
-  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{}')
-[ "$R" != "403" ] && ok "SEC: same-origin (127/8 + port) accepted (got $R)" || fail "SEC: same-origin -> 403"
+  -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $CSRF" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{}')
+[ "$R" = "400" ] && ok "SEC: same-origin (127/8 + port) + csrf passes gate (got $R)" || fail "SEC: same-origin -> $R"
 # A DIFFERENT loopback port is a different origin — CSRF must reject it.
 R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
-  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$(($WEB_PORT + 100))" -H 'content-type: application/json' -d '{}')
-[ "$R" = "403" ] && ok "SEC: cross-port loopback origin -> 403" || fail "SEC: cross-port origin -> $R"
+  -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $CSRF" -H "Origin: http://127.0.0.1:$(($WEB_PORT + 100))" -H 'content-type: application/json' -d '{}')
+[ "$R" = "403" ] && ok "SEC: cross-port loopback origin + valid csrf -> 403" || fail "SEC: cross-port origin -> $R"
 
 # ── model preference seat (/api/model): catalog + persist + authz ──────────
 R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/api/model")
@@ -90,16 +132,16 @@ else
   fail "MODEL: GET /api/model payload -> $M"
 fi
 R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
-  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{"model":"deepseek-v4-pro"}')
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H "x-csrf-token: $CSRF" -H 'content-type: application/json' -d '{"model":"deepseek-v4-pro"}')
 [ "$R" = "200" ] && ok "MODEL: PUT /api/model persists (deepseek-v4-pro)" || fail "MODEL: PUT persist -> $R"
 M=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/api/model")
 echo "$M" | grep -q '"model":"deepseek-v4-pro"' && ok "MODEL: preference re-read after persist" || fail "MODEL: re-read -> $M"
 R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
-  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'content-type: application/json' -d '{"model":"gpt-unknown"}')
+  -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$WEB_PORT" -H "x-csrf-token: $CSRF" -H 'content-type: application/json' -d '{"model":"gpt-unknown"}')
 [ "$R" = "422" ] && ok "MODEL: unknown model -> 422" || fail "MODEL: unknown model -> $R"
 R=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://127.0.0.1:$WEB_PORT/api/model" \
-  -H "Authorization: Bearer $TOKEN" -H 'Origin: http://evil.example' -H 'content-type: application/json' -d '{"model":"deepseek-v4-flash"}')
-[ "$R" = "403" ] && ok "MODEL: foreign-origin PUT -> 403" || fail "MODEL: foreign origin -> $R"
+  -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $CSRF" -H 'Origin: http://evil.example' -H 'content-type: application/json' -d '{"model":"deepseek-v4-flash"}')
+[ "$R" = "403" ] && ok "MODEL: foreign-origin PUT + valid csrf -> 403" || fail "MODEL: foreign origin -> $R"
 
 # ── ART-01: binary round-trip through the same-origin proxy ────────────────
 P=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
@@ -182,6 +224,62 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
   [ "$R" = "404" ] && ok "API-01: non-member terminal SSE -> 404" || fail "API-01: non-member terminal -> $R"
 fi
 
+# ── SEC-UI-01: /api/chat/survey membership fail-closed ──────────────────────
+# With --principal ops-1, survey on a FOREIGN project must 404 BEFORE the
+# connector runs or the corpus is written: snapshot/outbox counts unchanged.
+if [ "$memready" = 1 ] && [ -n "$MP" ]; then
+  MEMCSRF=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/api/session/csrf" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
+  [ -n "$MEMCSRF" ] && ok "SEC: BFF issues its own csrf token for survey" || fail "SEC: BFF csrf fetch"
+  # Project B exists on the kernel but ops-1 is NOT a member (foreign PI).
+  PB=$(curl -s -H 'content-type: application/json' -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
+    -d '{"name":"foreign-b","workspace":"/w/foreign-b","mode":"gate-only","creator_principal_id":"ops-other","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+  [ -n "$PB" ] && ok "SEC: foreign project B created on kernel ($PB)" || fail "SEC: foreign project B create"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$PB")
+  [ "$R" = "404" ] && ok "SEC: ops-1 cannot read foreign project B -> 404" || fail "SEC: B read -> $R"
+  count_json() { curl -s "http://127.0.0.1:$MEM_KERNEL/v1/projects/$1/$2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(Array.isArray(a)?a.length:'ERR')}catch(e){console.log('ERR')}})"; }
+  B_SNAP_BEFORE=$(count_json "$PB" corpus-snapshots)
+  B_EVT_BEFORE=$(count_json "$PB" events)
+  A_SNAP_BEFORE=$(count_json "$MP" corpus-snapshots)
+  A_EVT_BEFORE=$(count_json "$MP" events)
+  BODY=$(curl -s -X POST "http://127.0.0.1:$MEM_WEB/api/chat/survey" \
+    -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $MEMCSRF" -H "Origin: http://127.0.0.1:$MEM_WEB" \
+    -H 'content-type: application/json' -d "{\"project_id\":\"$PB\",\"query\":\"temporal action localization\"}")
+  case "$BODY" in
+    *'"ok":false'*'project not found or access denied'*) ok "SEC: foreign project survey -> 404 fail-closed body" ;;
+    *) fail "SEC: foreign survey body -> $BODY" ;;
+  esac
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$MEM_WEB/api/chat/survey" \
+    -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $MEMCSRF" -H "Origin: http://127.0.0.1:$MEM_WEB" \
+    -H 'content-type: application/json' -d "{\"project_id\":\"$PB\",\"query\":\"temporal action localization\"}")
+  [ "$R" = "404" ] && ok "SEC: foreign project survey -> 404" || fail "SEC: foreign survey -> $R"
+  [ "$(count_json "$PB" corpus-snapshots)" = "$B_SNAP_BEFORE" ] && ok "SEC: foreign survey leaves B corpus snapshot count unchanged ($B_SNAP_BEFORE)" || fail "SEC: B snapshot count changed"
+  [ "$(count_json "$PB" events)" = "$B_EVT_BEFORE" ] && ok "SEC: foreign survey leaves B outbox/events count unchanged ($B_EVT_BEFORE)" || fail "SEC: B events changed"
+  BODY=$(curl -s -X POST "http://127.0.0.1:$MEM_WEB/api/chat/survey" \
+    -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $MEMCSRF" -H "Origin: http://127.0.0.1:$MEM_WEB" \
+    -H 'content-type: application/json' -d '{"project_id":"rsp_nonexistent","query":"temporal action localization"}')
+  case "$BODY" in
+    *'"ok":false'*'project not found or access denied'*) ok "SEC: unknown project survey -> 404 fail-closed body" ;;
+    *) fail "SEC: unknown survey body -> $BODY" ;;
+  esac
+  # Member's OWN project: survey runs and writes exactly one new snapshot.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$MEM_WEB/api/chat/survey" \
+    -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $MEMCSRF" -H "Origin: http://127.0.0.1:$MEM_WEB" \
+    -H 'content-type: application/json' -d "{\"project_id\":\"$MP\",\"query\":\"temporal action localization\"}" -m 90)
+  [ "$R" = "200" ] && ok "SEC: member project survey -> 200" || fail "SEC: member survey -> $R"
+  [ "$(count_json "$MP" corpus-snapshots)" = "$((A_SNAP_BEFORE + 1))" ] && ok "SEC: member survey writes exactly one corpus snapshot ($((A_SNAP_BEFORE + 1)))" || fail "SEC: A snapshot count after survey"
+  [ "$(count_json "$MP" events)" = "$((A_EVT_BEFORE + 1))" ] && ok "SEC: member survey emits exactly one outbox event ($((A_EVT_BEFORE + 1)))" || fail "SEC: A events after survey"
+  # Stable error codes: the fail-closed body never echoes internal detail.
+  for NEEDLE in '/home/' '/dev/' 'http://' 'at ' 'env'; do
+    if printf '%s' "$BODY" | grep -qF "$NEEDLE"; then
+      fail "SEC: fail-closed body leaks '$NEEDLE' -> $BODY"
+    else
+      ok "SEC: fail-closed body has no '$NEEDLE'"
+    fi
+  done
+fi
+
 kill "$MEM_PID" "$MEM2_PID" 2>/dev/null || true
 for _ in $(seq 1 15); do
   if ! ss -ltn 2>/dev/null | grep -qE ":$MEM_WEB |:$((MEM_WEB + 2)) "; then break; fi
@@ -237,6 +335,30 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TO
   -d '{"name":"v2-rt","workspace":"/w/v2rt","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}')
 [ "$R" = "201" ] && ok "API-01: v2 idempotent replay via proxy -> 201" || fail "API-01: v2 replay -> $R"
 
+# ── SEC-UI-01: stable error codes (no connector URL / internal paths) ───────
+# Survey on a nonexistent project with NO principal: the connector may run,
+# but the corpus write fails -> 502 with a generic message; the proxy error
+# bodies must never echo internal details.
+BODY=$(curl -s -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
+  -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $CSRF" -H "Origin: http://127.0.0.1:$WEB_PORT" \
+  -H 'content-type: application/json' -d '{"project_id":"rsp_nonexistent","query":"temporal action localization"}' -m 90)
+case "$BODY" in
+  *'"ok":false'*'connector unavailable'*|*'"ok":false'*'corpus snapshot failed'*) ok "SEC: survey 502 body is generic" ;;
+  *) fail "SEC: survey 502 body -> $BODY" ;;
+esac
+BODY=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/projects/rsp_nonexistent")
+case "$BODY" in
+  *'"code"'*'"message"'*) ok "SEC: proxy 404 body is structured and generic" ;;
+  *) fail "SEC: proxy 404 body -> $BODY" ;;
+esac
+for NEEDLE in '/home/' '/dev/' '/usr/' 'http://' 'https://' 'env' ' at '; do
+  if printf '%s' "$BODY" | grep -qF "$NEEDLE"; then
+    fail "SEC: error body leaks '$NEEDLE' -> $BODY"
+  else
+    ok "SEC: error body has no '$NEEDLE'"
+  fi
+done
+
 # ── OPS-01: clean shutdown frees both ports ────────────────────────────────
 kill "$SPID" 2>/dev/null || true
 for _ in $(seq 1 20); do
@@ -245,7 +367,7 @@ for _ in $(seq 1 20); do
 done
 if ss -ltn 2>/dev/null | grep -qE ":$WEB_PORT |:$KERNEL_PORT "; then
   fail "OPS: ports still bound after kill"
-  pkill -f "standalone/server.js" 2>/dev/null || true
+  kill_test_servers
 else
   ok "OPS: kill frees web+kernel ports"
 fi
@@ -296,6 +418,112 @@ else
   fail "SEC: --no-token on 127.0.0.2 rejected (log: $(tail -2 "$NLOG" | tr '\n' ' '))"
 fi
 kill "$NOTOKEN_PID" 2>/dev/null || true
+
+# ── SEC-UI-01: start-standalone-ui.sh --no-token host combos ────────────────
+# §9.1: the SUPPORTED launcher must fail the same way before anything binds,
+# with a stable error message that contains no internal path.
+for BAD_HOST in 0.0.0.0 192.168.1.9 example.test; do
+  SLOG="$WORK/script-nt-$BAD_HOST.log"
+  if DSH_SCHOLAR_STANDALONE_PORT="$((CONFLICT_PORT + 110))" DSH_SCHOLAR_STANDALONE_KERNEL_PORT="$((CONFLICT_PORT + 111))" \
+      DSH_SCHOLAR_STANDALONE_DATA="$WORK/script-ntdata-$BAD_HOST" \
+      bash "$REPO/scripts/start-standalone-ui.sh" --host "$BAD_HOST" --no-token > "$SLOG" 2>&1; then
+    fail "SEC: script --no-token on $BAD_HOST accepted"
+  else
+    ok "SEC: script --no-token on $BAD_HOST fails non-zero"
+  fi
+  if grep -q "loopback" "$SLOG"; then
+    ok "SEC: script $BAD_HOST error names the loopback requirement"
+  else
+    fail "SEC: script $BAD_HOST error message (got: $(tail -3 "$SLOG" | tr '\n' ' '))"
+  fi
+  if grep -qE "/home/|/dev/|/usr/|\.ts[0-9]?:" "$SLOG"; then
+    fail "SEC: script $BAD_HOST error leaks an internal path"
+  else
+    ok "SEC: script $BAD_HOST error has no internal path"
+  fi
+  R=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:$((CONFLICT_PORT + 110))/" 2>/dev/null || true)
+  [ "$R" = "000" ] && ok "SEC: script rejected $BAD_HOST not listening" || fail "SEC: script rejected $BAD_HOST responded $R"
+done
+
+# ── SEC-UI-01: script --no-token on loopback starts and readies ─────────────
+SLOOP_WEB=$((CONFLICT_PORT + 120))
+SLOOP_KERNEL=$((CONFLICT_PORT + 121))
+SLOOP_DATA="$WORK/script-lo-data"
+if DSH_SCHOLAR_STANDALONE_DATA="$SLOOP_DATA" \
+    bash "$REPO/scripts/start-standalone-ui.sh" --host 127.0.0.1 --port "$SLOOP_WEB" --kernel-port "$SLOOP_KERNEL" \
+    --data-dir "$SLOOP_DATA/research-ui-standalone" --no-token > "$WORK/script-lo.log" 2>&1; then
+  ok "SEC: script --no-token on 127.0.0.1 exits 0 after readiness"
+else
+  fail "SEC: script --no-token loopback did not become ready (log: $(tail -3 "$WORK/script-lo.log" | tr '\n' ' '))"
+fi
+SLOOP_PID=$(ss -ltnp 2>/dev/null | grep ":$SLOOP_WEB " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+if [ -n "$SLOOP_PID" ]; then
+  kill "$SLOOP_PID" 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    if ! ss -ltn 2>/dev/null | grep -qE ":$SLOOP_WEB |:$SLOOP_KERNEL "; then break; fi
+    sleep 0.5
+  done
+  ok "SEC: script --no-token instance cleaned up"
+else
+  fail "SEC: script --no-token server pid not found for cleanup"
+  kill_test_servers
+fi
+
+# ── SEC-UI-01: script --token never reaches argv or logs ────────────────────
+# §9.1: token mode must keep the secret out of the server/Kernel argv and the
+# server log; the launcher hands it over through the 0600 token file only.
+SECRET="secret-token-xyz-$(date +%s)"
+SWEB=$((CONFLICT_PORT + 130))
+SKERNEL=$((CONFLICT_PORT + 131))
+SDATA="$WORK/script-tok-data"
+if DSH_SCHOLAR_STANDALONE_DATA="$SDATA" \
+    bash "$REPO/scripts/start-standalone-ui.sh" --host 127.0.0.1 --port "$SWEB" --kernel-port "$SKERNEL" \
+    --data-dir "$SDATA/research-ui-standalone" --token "$SECRET" > "$WORK/script-tok.log" 2>&1; then
+  ok "SEC: script --token exits 0 after token-check readiness"
+else
+  fail "SEC: script --token did not become ready (log: $(tail -3 "$WORK/script-tok.log" | tr '\n' ' '))"
+fi
+if grep -q "$SECRET" "$WORK/script-tok.log" 2>/dev/null; then
+  fail "SEC: launcher echoed the token in its own output"
+else
+  ok "SEC: launcher output does not contain the token"
+fi
+if grep -q "$SECRET" "$SDATA/standalone.log" 2>/dev/null; then
+  fail "SEC: token leaked into standalone.log"
+else
+  ok "SEC: standalone.log does not contain the token"
+fi
+[ "$(stat -c %a "$SDATA/research-ui-standalone/standalone-token" 2>/dev/null || echo '?')" = "600" ] \
+  && ok "SEC: script-written token file 0600" || fail "SEC: script token file mode"
+[ "$(tr -d '\n' < "$SDATA/research-ui-standalone/standalone-token")" = "$SECRET" ] \
+  && ok "SEC: script token file carries the exact secret" || fail "SEC: script token file mismatch"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SWEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$SECRET\"}")
+[ "$R" = "200" ] && ok "SEC: script-started server accepts the token" || fail "SEC: script token-check -> $R"
+for PORT in "$SWEB" "$SKERNEL"; do
+  PID=$(ss -ltnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+  if [ -z "$PID" ]; then
+    fail "SEC: no pid found on port $PORT for argv scan"
+    continue
+  fi
+  if tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "$SECRET"; then
+    fail "SEC: token leaked into argv of pid $PID (port $PORT)"
+  else
+    ok "SEC: token absent from argv of pid $PID (port $PORT)"
+  fi
+done
+# Cleanup the script-started instance (setsid process group).
+SWEB_PID=$(ss -ltnp 2>/dev/null | grep ":$SWEB " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+if [ -n "$SWEB_PID" ]; then
+  kill -- "-$SWEB_PID" 2>/dev/null || kill "$SWEB_PID" 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    if ! ss -ltn 2>/dev/null | grep -qE ":$SWEB |:$SKERNEL "; then break; fi
+    sleep 0.5
+  done
+  ok "SEC: script token instance cleaned up"
+else
+  fail "SEC: script token server pid not found for cleanup"
+  kill_test_servers
+fi
 
 echo "== standalone http acceptance: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

@@ -1055,26 +1055,30 @@ describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
+    // P0 (acceptance-tests.md §4): data_artifact_ids must be registered in
+    // the SAME project — register a real data artifact and bind it.
+    const data = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'dataset-v1' })
     const job = kernel.submitJob({
       project_id: project.project_id,
       idempotency_key: 'bound-1',
       kind: 'formal',
       contract_id: approvedContract(kernel, project.project_id),
       code_snapshot_id: code.artifact_id,
-      data_artifact_ids: ['sha256:' + 'b'.repeat(64)],
+      data_artifact_ids: [data.artifact_id],
       image_digest: NODE_IMAGE_DIGEST,
       output_contract: { metrics: '/outputs/metrics.json', logs: '/outputs/run.log' },
     })
     expect(job.code_snapshot_id).toBe(code.artifact_id)
     expect(job.image_digest).toBe(NODE_IMAGE_DIGEST)
     expect(job.output_contract?.metrics).toBe('/outputs/metrics.json')
-    expect(job.payload.data_artifact_ids).toEqual(['sha256:' + 'b'.repeat(64)])
+    expect(job.payload.data_artifact_ids).toEqual([data.artifact_id])
 
     // Survives a read-back from the DB (jobFromRow).
     const reloaded = kernel.getJob(job.job_id)
     expect(reloaded.code_snapshot_id).toBe(code.artifact_id)
     expect(reloaded.image_digest).toBe(NODE_IMAGE_DIGEST)
     expect(reloaded.output_contract?.logs).toBe('/outputs/run.log')
+    expect(reloaded.data_artifact_ids).toEqual([data.artifact_id])
 
     // P0: secure kinds require the trusted images.lock digest — missing input
     // is rejected, never defaulted to a tag; the exact locked digest binds.
@@ -1220,6 +1224,260 @@ describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
     expect(analysis.mean).toBeCloseTo(0.83, 3)
     expect(analysis.baseline_value).toBeCloseTo(0.8, 3)
     expect(analysis.runs.map(r => r.seed).sort()).toEqual([11, 12, 13])
+    kernel.close()
+  })
+})
+
+// ── P0: data_artifact_ids binding (acceptance-tests.md §4) ─────────────────
+
+describe('§4 data artifact binding (P0, acceptance-tests.md §4)', () => {
+  /** A failed submission must never leave a queued job behind. */
+  function expectNotQueued(kernel: ResearchKernel, projectId: string, idempotencyKey: string): void {
+    expect(kernel.listJobs(projectId).some(j => j.idempotency_key === idempotencyKey)).toBe(false)
+  }
+
+  it('accepts data_artifact_ids registered in the SAME project with a verifiable hash', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const data = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'dataset-v1\n' })
+    const job = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'data-ok',
+      kind: 'smoke',
+      data_artifact_ids: [data.artifact_id],
+    })
+    expect(job.status).toBe('queued')
+    expect(job.data_artifact_ids).toEqual([data.artifact_id])
+    // Bare hex ids are normalized to sha256:<hex> like getArtifact does.
+    const bare = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'data-ok-bare',
+      kind: 'smoke',
+      data_artifact_ids: [data.sha256],
+    })
+    expect(bare.status).toBe('queued')
+    expect(bare.data_artifact_ids).toEqual([data.sha256])
+    kernel.close()
+  })
+
+  it('rejects an unregistered id with 422 data_artifact_missing (never queued)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const key = 'data-missing'
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: key, kind: 'smoke', data_artifact_ids: ['sha256:' + 'c'.repeat(64)] }),
+      422, 'data_artifact_missing',
+    )
+    expectNotQueued(kernel, project.project_id, key)
+    kernel.close()
+  })
+
+  it('rejects an artifact of ANOTHER project with 422 data_artifact_foreign (never queued)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const other = kernel.createProject({ name: 'o', workspace: '/o', brief: makeBrief() })
+    const foreign = kernel.registerArtifact({ project_id: other.project_id, kind: 'data', content: 'other-project-dataset' })
+    const key = 'data-foreign'
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: key, kind: 'smoke', data_artifact_ids: [foreign.artifact_id] }),
+      422, 'data_artifact_foreign',
+    )
+    expectNotQueued(kernel, project.project_id, key)
+    kernel.close()
+  })
+
+  it('rejects a blob missing from CAS with 422 data_artifact_hash_unverifiable (never queued)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const data = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'will-be-evicted' })
+    // Simulate an orphaned artifact record (e.g. CAS GC went wrong): the
+    // record exists but its blob cannot be re-verified.
+    expect(kernel.cas.remove(data.sha256)).toBe(true)
+    expect(kernel.cas.has(data.sha256)).toBe(false)
+    const key = 'data-hash'
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: key, kind: 'smoke', data_artifact_ids: [data.artifact_id] }),
+      422, 'data_artifact_hash_unverifiable',
+    )
+    expectNotQueued(kernel, project.project_id, key)
+    kernel.close()
+  })
+
+  it('empty/undefined data_artifact_ids skip validation entirely', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const undefinedIds = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'data-none', kind: 'smoke' })
+    expect(undefinedIds.status).toBe('queued')
+    const emptyIds = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'data-empty', kind: 'smoke', data_artifact_ids: [] })
+    expect(emptyIds.status).toBe('queued')
+    kernel.close()
+  })
+})
+
+// ── STORE-02: snapshot size limits + host-path hygiene ─────────────────────
+
+describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
+  function captureKernelError(fn: () => unknown): { status: number; code: string; message: string } {
+    try {
+      fn()
+      throw new Error('expected KernelError to be thrown')
+    } catch (error) {
+      expect(error).toBeInstanceOf(KernelError)
+      return { status: (error as KernelError).status, code: (error as KernelError).code, message: (error as KernelError).message }
+    }
+  }
+
+  it('rejects a single oversized file without buffering it (422 snapshot_too_large)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-file-limit-'))
+    writeFileSync(join(dir, 'big.js'), 'x'.repeat(8))
+    const saved = ResearchKernel.SNAPSHOT_MAX_FILE_BYTES
+    try {
+      ResearchKernel.SNAPSHOT_MAX_FILE_BYTES = 4 // tiny cap for the test
+      const err = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, dir, 'limit test'))
+      expect(err.status).toBe(422)
+      expect(err.code).toBe('snapshot_too_large')
+      expect(err.message).toContain('max_file_bytes=4')
+      expect(err.message).toContain('big.js')
+    } finally {
+      ResearchKernel.SNAPSHOT_MAX_FILE_BYTES = saved
+    }
+    kernel.close()
+  })
+
+  it('rejects archives beyond max_files / max_total_bytes with measured values (422 snapshot_too_large)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-count-limit-'))
+    writeFileSync(join(dir, 'a.js'), 'a')
+    writeFileSync(join(dir, 'b.js'), 'b')
+    writeFileSync(join(dir, 'c.js'), 'c')
+    const savedFiles = ResearchKernel.SNAPSHOT_MAX_FILES
+    const savedTotal = ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES
+    try {
+      ResearchKernel.SNAPSHOT_MAX_FILES = 2
+      const err = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, dir, 'limit test'))
+      expect(err.status).toBe(422)
+      expect(err.code).toBe('snapshot_too_large')
+      expect(err.message).toContain('max_files=2')
+
+      ResearchKernel.SNAPSHOT_MAX_FILES = savedFiles
+      ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES = 3
+      // Files are 2 bytes each → total 6 > 3 must fail with the measured total.
+      writeFileSync(join(dir, 'a.js'), 'aa')
+      writeFileSync(join(dir, 'b.js'), 'bb')
+      writeFileSync(join(dir, 'c.js'), 'cc')
+      const err2 = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, dir, 'limit test'))
+      expect(err2.status).toBe(422)
+      expect(err2.code).toBe('snapshot_too_large')
+      expect(err2.message).toContain('max_total_bytes=3')
+    } finally {
+      ResearchKernel.SNAPSHOT_MAX_FILES = savedFiles
+      ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES = savedTotal
+    }
+    kernel.close()
+  })
+
+  it('never exposes the host path: archive/manifest/registry/snapshot use a display root', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-leak-'))
+    writeFileSync(join(dir, 'a.js'), 'a')
+    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'leak test')
+
+    const archive = JSON.parse(kernel.cas.read(snap.sha256).toString('utf8')) as { root?: unknown }
+    const manifest = JSON.parse(kernel.cas.read(snap.manifest_artifact_id!.replace('sha256:', '')).toString('utf8')) as { root?: unknown }
+    const row = kernel.getCodeSnapshot(snap.snapshot_id)
+    const record = kernel.getArtifact(project.project_id, snap.archive_artifact_id!)
+
+    // Placeholder roots for display; materialization only ever reads `files`.
+    expect(archive.root).toBe('~')
+    expect(manifest.root).toBe('~')
+    expect(snap.path).toBe('~')
+    expect(row.source.root).toBe('~')
+    expect((record.metadata as Record<string, unknown>).root).toBeUndefined()
+
+    // The absolute host path must not appear anywhere in the public surface.
+    const text = JSON.stringify({ snap, archive, manifest, row, record })
+    expect(text).not.toContain(dir)
+    expect(text).not.toContain('/home')
+    kernel.close()
+  })
+})
+
+// ── §16 outbox canonical envelope (EVENT-01) ────────────────────────────────
+
+describe('§16 outbox canonical envelope (EVENT-01)', () => {
+  it('allocates per-aggregate monotonic event_seq and fills the envelope columns', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    // createProject already emitted project.created into the project bucket.
+    const e1 = kernel.emit(project.project_id, 'project.transitioned', { project_id: project.project_id, revision: 1, from: 'DRAFT', to: 'SCOPED' })
+    const e2 = kernel.emit(project.project_id, 'project.transitioned', { project_id: project.project_id, revision: 2 })
+    const e3 = kernel.emit(null, 'job.submitted', { job_id: 'job_x' })
+    expect(e1.event_seq).toBeGreaterThan(0)
+    expect(e2.event_seq).toBe(e1.event_seq! + 1) // monotonic within the aggregate
+    expect(e1.event_version).toBe(1)
+    expect(e1.aggregate_type).toBe('project')
+    expect(e1.aggregate_id).toBe(project.project_id)
+    expect(e1.aggregate_revision).toBe(1)
+    expect(e2.aggregate_revision).toBe(2)
+    // Aggregate-less events live in their own bucket (first one starts at 1).
+    expect(e3.aggregate_type).toBeNull()
+    expect(e3.aggregate_id).toBeNull()
+    expect(e3.event_seq).toBe(1)
+    expect(e3.aggregate_revision).toBeNull()
+
+    // DB rows carry the new columns with defaults.
+    const rows = kernel.db.prepare(
+      `SELECT event_id, event_seq, event_version, aggregate_type, aggregate_id, aggregate_revision,
+              request_id, session_id, attempts, last_error, next_attempt_at, dead_lettered_at
+       FROM events WHERE aggregate_type = 'project' ORDER BY event_seq`,
+    ).all() as unknown as Array<Record<string, unknown>>
+    expect(rows.map(r => r.event_seq)).toEqual([1, 2, 3])
+    for (const r of rows) {
+      expect(r.event_version).toBe(1)
+      expect(r.attempts).toBe(0)
+      expect(r.last_error).toBeNull()
+      expect(r.next_attempt_at).toBeNull()
+      expect(r.dead_lettered_at).toBeNull()
+      expect(r.request_id).toBeNull()
+      expect(r.session_id).toBeNull()
+    }
+
+    // listEvents surfaces the envelope without breaking kind/payload shape.
+    const listed = kernel.listEvents(project.project_id)
+    expect(listed.map(e => e.event_seq)).toEqual([1, 2, 3])
+    for (const e of listed) {
+      expect(e.kind).toBeTruthy()
+      expect(e.payload).toBeTruthy()
+    }
+    kernel.close()
+  })
+
+  it('passes request_id/session_id through from the payload when present', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const e = kernel.emit(project.project_id, 'evidence.accepted', { project_id: project.project_id, request_id: 'req_123', session_id: 'sess_9' })
+    expect(e.request_id).toBe('req_123')
+    expect(e.session_id).toBe('sess_9')
+    const row = kernel.db.prepare('SELECT request_id, session_id FROM events WHERE event_id = ?').get(e.event_id) as { request_id: string | null; session_id: string | null }
+    expect(row.request_id).toBe('req_123')
+    expect(row.session_id).toBe('sess_9')
+    kernel.close()
+  })
+
+  it('emit inside an existing transaction reuses it (no nested BEGIN)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    // createProjectWithInitialGate runs createProject (which emits) inside a
+    // withTransaction — this path must not throw "cannot start a transaction".
+    const created = kernel.createProjectWithInitialGate({ name: 'txn', workspace: '/w', brief: makeBrief() })
+    expect(created.project.status).toBe('DRAFT')
+    const seqs = kernel.listEvents(created.project.project_id).map(ev => ev.event_seq)
+    expect(seqs.length).toBeGreaterThan(0)
+    expect([...seqs].sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual(seqs)
     kernel.close()
   })
 })

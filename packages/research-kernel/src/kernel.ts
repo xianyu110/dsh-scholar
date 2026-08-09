@@ -18,7 +18,7 @@ import {
   buildProjectId, type ArtifactKind, type GateType, type JobSpecBound, type JobStatus, type ProjectStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
-import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
+import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
 import { validateImageDigest, type SecureJobKind } from './images-lock.js'
@@ -133,7 +133,30 @@ function jobFromRow(row: JobRow): JobSpecBound {
   }
 }
 
-function eventFromRow(row: EventRow): KernelEvent {
+/** Row shape for the event outbox (§16 canonical envelope, EVENT-01). */
+interface OutboxEventRow {
+  event_id: string
+  project_id: string | null
+  kind: string
+  payload: string
+  source: string
+  delivered: number
+  created_at: string
+  /** §16: per-aggregate monotonic sequence (max+1 in the write transaction). */
+  event_seq: number | null
+  event_version: number | null
+  aggregate_type: string | null
+  aggregate_id: string | null
+  aggregate_revision: number | null
+  request_id: string | null
+  session_id: string | null
+  attempts: number | null
+  last_error: string | null
+  next_attempt_at: string | null
+  dead_lettered_at: string | null
+}
+
+function eventFromRow(row: OutboxEventRow): KernelEvent {
   return {
     event_id: row.event_id,
     project_id: row.project_id,
@@ -142,6 +165,19 @@ function eventFromRow(row: EventRow): KernelEvent {
     source: row.source,
     delivered: row.delivered === 1,
     created_at: row.created_at,
+    // §16 outbox canonical envelope (EVENT-01): additive fields surfaced on
+    // reads; old rows keep NULLs except the NOT NULL defaults.
+    event_seq: row.event_seq ?? undefined,
+    event_version: row.event_version ?? undefined,
+    aggregate_type: row.aggregate_type,
+    aggregate_id: row.aggregate_id,
+    aggregate_revision: row.aggregate_revision,
+    request_id: row.request_id,
+    session_id: row.session_id,
+    attempts: row.attempts ?? undefined,
+    last_error: row.last_error,
+    next_attempt_at: row.next_attempt_at,
+    dead_lettered_at: row.dead_lettered_at,
   }
 }
 
@@ -168,6 +204,18 @@ export function withTransaction<T>(db: DatabaseSync, fn: () => T): T {
 }
 
 export class ResearchKernel {
+  /**
+   * Code-snapshot fixed resource limits (reconstruction-contracts.md §3,
+   * STORE-02): the archive walk refuses to grow past these instead of
+   * silently truncating. Static so deployments/tests can override them
+   * (e.g. a unit test temporarily lowers SNAPSHOT_MAX_FILE_BYTES and
+   * restores it in `finally`); 超限 → 422 `snapshot_too_large` with the
+   * concrete limit and measured value in the message.
+   */
+  static SNAPSHOT_MAX_FILES = 10_000
+  static SNAPSHOT_MAX_FILE_BYTES = 64 * 1024 * 1024 // 64 MiB per file
+  static SNAPSHOT_MAX_TOTAL_BYTES = 512 * 1024 * 1024 // 512 MiB total
+
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
   readonly instanceId: string
@@ -191,26 +239,72 @@ export class ResearchKernel {
 
   // ── events (append-only outbox) ──────────────────────────────────────────
 
+  /**
+   * Append one event to the durable outbox (reconstruction-contracts.md §16,
+   * EVENT-01). The canonical envelope is written atomically: `event_seq` is
+   * allocated as per-aggregate max+1 inside the write transaction (or the
+   * caller's already-open transaction — single-writer SQLite serializes the
+   * read+insert). The aggregate is derived from the payload when it carries
+   * `project_id` (+ optional numeric `revision`), otherwise NULL; request_id/
+   * session_id pass through from the payload when present.
+   */
   emit(projectId: string | null, kind: KernelEventKind, payload: Record<string, unknown> = {}): KernelEvent {
-    const event: KernelEvent = {
-      event_id: `evt_${randomUUID().replaceAll('-', '')}`,
-      project_id: projectId,
-      kind,
-      payload,
-      source: `kernel:${this.instanceId}`,
-      delivered: false,
-      created_at: nowIso(),
+    const write = (): KernelEvent => {
+      // §16 aggregate identity: project-scoped events aggregate by project.
+      const aggregateType = typeof payload.project_id === 'string' && payload.project_id !== '' ? 'project' : null
+      const aggregateId = aggregateType !== null ? String(payload.project_id) : null
+      const aggregateRevision = typeof payload.revision === 'number' ? payload.revision : null
+      const requestId = typeof payload.request_id === 'string' && payload.request_id !== '' ? payload.request_id : null
+      const sessionId = typeof payload.session_id === 'string' && payload.session_id !== '' ? payload.session_id : null
+      // max+1 within the aggregate bucket (NULL buckets allocate among
+      // aggregate-less events; SQLite treats NULLs as distinct in the unique
+      // index, so bucket-local allocation can never collide).
+      const next = (this.db.prepare(
+        'SELECT COALESCE(MAX(event_seq), 0) + 1 AS next FROM events WHERE aggregate_type IS ? AND aggregate_id IS ?',
+      ).get(aggregateType, aggregateId) as { next: number }).next
+      const event: KernelEvent = {
+        event_id: `evt_${randomUUID().replaceAll('-', '')}`,
+        project_id: projectId,
+        kind,
+        payload,
+        source: `kernel:${this.instanceId}`,
+        delivered: false,
+        created_at: nowIso(),
+        event_seq: next,
+        event_version: 1,
+        aggregate_type: aggregateType,
+        aggregate_id: aggregateId,
+        aggregate_revision: aggregateRevision,
+        request_id: requestId,
+        session_id: sessionId,
+        attempts: 0,
+        last_error: null,
+        next_attempt_at: null,
+        dead_lettered_at: null,
+      }
+      this.db.prepare(
+        `INSERT INTO events (event_id, project_id, kind, payload, source, delivered, created_at,
+           event_seq, event_version, aggregate_type, aggregate_id, aggregate_revision,
+           request_id, session_id, attempts, last_error, next_attempt_at, dead_lettered_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)`,
+      ).run(
+        event.event_id, event.project_id, event.kind, JSON.stringify(event.payload), event.source, event.created_at,
+        next, aggregateType, aggregateId, aggregateRevision,
+        requestId, sessionId,
+      )
+      return event
     }
-    this.db.prepare(
-      'INSERT INTO events (event_id, project_id, kind, payload, source, delivered, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-    ).run(event.event_id, event.project_id, event.kind, JSON.stringify(event.payload), event.source, event.created_at)
-    return event
+    // §16 "SQLite 单写事务分配 event_seq=max+1": emit already running inside
+    // a caller transaction (e.g. createProjectWithInitialGate) reuses it —
+    // node:sqlite forbids nested BEGIN, so only standalone emits open one.
+    if (this.db.isTransaction) return write()
+    return withTransaction(this.db, write)
   }
 
   listEvents(projectId?: string, delivered?: boolean): KernelEvent[] {
     const rows = projectId === undefined
-      ? this.db.prepare('SELECT * FROM events ORDER BY created_at').all() as unknown as EventRow[]
-      : this.db.prepare('SELECT * FROM events WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as EventRow[]
+      ? this.db.prepare('SELECT * FROM events ORDER BY created_at').all() as unknown as OutboxEventRow[]
+      : this.db.prepare('SELECT * FROM events WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as OutboxEventRow[]
     return rows
       .filter(row => delivered === undefined || row.delivered === (delivered ? 1 : 0))
       .map(eventFromRow)
@@ -1082,6 +1176,7 @@ export class ResearchKernel {
     const EXCLUDED_DIRS = new Set(['.git', 'node_modules', '.research-cas'])
     const files: Record<string, { sha256: string; content_base64: string; size_bytes: number }> = {}
     let totalBytes = 0
+    let fileCount = 0
     const walk = (dir: string): void => {
       let entries: string[]
       try {
@@ -1124,6 +1219,17 @@ export class ResearchKernel {
           if (rel.startsWith('..') || rel.startsWith(sep)) {
             throw new KernelError(422, 'snapshot_path_escape', `code snapshot: path escapes the archived root: ${full}`)
           }
+          // STORE-02 (§3 fixed resource limits): single-file and file-count
+          // caps are enforced BEFORE reading the content (a giant file is
+          // rejected on its stat, never buffered in full).
+          if (info.size > ResearchKernel.SNAPSHOT_MAX_FILE_BYTES) {
+            throw new KernelError(422, 'snapshot_too_large',
+              `code snapshot exceeds limits: file ${rel} is ${info.size} bytes (max_file_bytes=${ResearchKernel.SNAPSHOT_MAX_FILE_BYTES})`)
+          }
+          if (fileCount >= ResearchKernel.SNAPSHOT_MAX_FILES) {
+            throw new KernelError(422, 'snapshot_too_large',
+              `code snapshot exceeds limits: file count ${fileCount} >= max_files=${ResearchKernel.SNAPSHOT_MAX_FILES}`)
+          }
           let content: Buffer
           try {
             content = readFileSync(full)
@@ -1132,18 +1238,31 @@ export class ResearchKernel {
           }
           const sha256 = createHash('sha256').update(content).digest('hex')
           files[rel] = { sha256, content_base64: content.toString('base64'), size_bytes: content.byteLength }
+          fileCount += 1
           totalBytes += content.byteLength
+          // Total-size cap is checked as the walk accumulates, so an
+          // oversized archive fails early instead of being read to the end.
+          if (totalBytes > ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES) {
+            throw new KernelError(422, 'snapshot_too_large',
+              `code snapshot exceeds limits: total_bytes=${totalBytes} (max_total_bytes=${ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES})`)
+          }
         }
         // sockets/fifos/devices are skipped silently (never part of source).
       }
     }
     walk(absRoot)
 
+    // STORE-02 host-path hygiene: the archive's `root` field is a display
+    // placeholder, never the host path — the Runner materializes code ONLY
+    // from the `files` map (unpackCodeSnapshot/materializeCodeSnapshot), so
+    // `root` carries no materialization semantics. Same for the manifest and
+    // the registry source_json; the absolute host path never leaves the kernel.
+    const rootPlaceholder = '~'
     const archive = {
       schema_version: 1,
       project_id: projectId,
       description,
-      root: absRoot,
+      root: rootPlaceholder,
       files,
       excludes: [...EXCLUDED_DIRS],
       created_at: nowIso(),
@@ -1152,7 +1271,7 @@ export class ResearchKernel {
       project_id: projectId,
       kind: 'code',
       content: JSON.stringify(archive),
-      metadata: { kind: 'code-snapshot-archive', files: Object.keys(files).length, total_bytes: totalBytes, root: absRoot },
+      metadata: { kind: 'code-snapshot-archive', files: Object.keys(files).length, total_bytes: totalBytes },
     })
     // Lightweight manifest artifact (file list + hashes, no content) — §11.3
     // `manifest_artifact_id`. Same sha256 space; content-addressed.
@@ -1163,7 +1282,7 @@ export class ResearchKernel {
         schema_version: 1,
         project_id: projectId,
         description,
-        root: absRoot,
+        root: rootPlaceholder,
         files: Object.fromEntries(Object.entries(files).map(([rel, f]) => [rel, { sha256: f.sha256, size_bytes: f.size_bytes }])),
         excludes: [...EXCLUDED_DIRS],
         created_at: nowIso(),
@@ -1173,7 +1292,8 @@ export class ResearchKernel {
     const snapshot: CodeSnapshot = {
       snapshot_id: `code_snap_${randomUUID().slice(0, 8)}`,
       project_id: projectId,
-      path: absRoot,
+      // Display placeholder only — never the host path (STORE-02).
+      path: rootPlaceholder,
       description,
       archive_artifact_id: archiveRecord.artifact_id,
       manifest_artifact_id: manifestRecord.artifact_id,
@@ -1190,7 +1310,7 @@ export class ResearchKernel {
         (snapshot_id, project_id, archive_artifact_id, manifest_artifact_id, source_json, sha256, file_count, size_bytes, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(snapshot.snapshot_id, projectId, archiveRecord.artifact_id, manifestRecord.artifact_id,
-        JSON.stringify({ description, root: absRoot, excludes: [...EXCLUDED_DIRS] }),
+        JSON.stringify({ description, root: rootPlaceholder, excludes: [...EXCLUDED_DIRS] }),
         archiveRecord.sha256, Object.keys(files).length, totalBytes, snapshot.created_at)
     // Both artifacts already emit artifact.registered events (outbox).
     return snapshot
@@ -1322,6 +1442,37 @@ export class ResearchKernel {
         throw new KernelError(422, 'contract_not_approved', `contract ${contractId} is ${contract.status} and not frozen by a Human Gate Decision`)
       }
       contractMetricNames = [contract.metrics.primary, ...contract.metrics.secondary]
+    }
+    // P0 (acceptance-tests.md §4): every `data_artifact_ids` entry must exist,
+    // belong to the SAME project and be hash-reverifiable in CAS — a missing,
+    // cross-project or unverifiable input is 422 and the job never reaches
+    // queued. Empty array / undefined skips the check entirely.
+    const dataArtifactIds = input.data_artifact_ids ?? []
+    if (dataArtifactIds.length > 0) {
+      for (const rawId of dataArtifactIds) {
+        const id = rawId.startsWith('sha256:') ? rawId : `sha256:${rawId}`
+        // Cross-project input is a distinct error: the blob may exist in
+        // another project's registry (v2 §3.4 isolation) — never fall through
+        // to a plain "missing".
+        const anywhere = this.db.prepare('SELECT project_id FROM artifacts WHERE artifact_id = ?').get(id) as { project_id: string } | undefined
+        if (anywhere !== undefined && anywhere.project_id !== project.project_id) {
+          throw new KernelError(422, 'data_artifact_foreign',
+            `data artifact ${id} belongs to project ${anywhere.project_id}, not ${project.project_id}`)
+        }
+        let record: ArtifactRecord
+        try {
+          record = this.getArtifact(project.project_id, id)
+        } catch {
+          throw new KernelError(422, 'data_artifact_missing',
+            `data artifact ${id} is not registered in project ${project.project_id}`)
+        }
+        // Hash re-verification: the artifact record must reference a blob that
+        // is actually present in CAS (immutable content-addressed store).
+        if (!this.cas.has(record.sha256)) {
+          throw new KernelError(422, 'data_artifact_hash_unverifiable',
+            `data artifact ${id} blob ${record.sha256} is missing from CAS and cannot be re-verified`)
+        }
+      }
     }
     // §12.2 (P0, acceptance-tests.md §4): image_digest MUST equal the trusted
     // images.lock entry exactly — tags, `latest`, missing digests and

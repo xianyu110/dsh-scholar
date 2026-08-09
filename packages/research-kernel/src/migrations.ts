@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -537,6 +537,74 @@ const artifactMediaType = (db: DatabaseSync, report: MigrationReport): void => {
 }
 
 /**
+ * 0008 — outbox canonical envelope (reconstruction-contracts.md §16,
+ * EVENT-01): the append-only events table becomes a durable outbox with
+ * per-aggregate `event_seq`, `event_version`, aggregate identity and
+ * request/session tracing plus delivery bookkeeping (attempts/last_error/
+ * next_attempt_at/dead_lettered_at). Also adds the §3.1 `runs` table (run
+ * identity per job attempt — STORE-01 parity) and the durable principal +
+ * issuer columns on session_links. Additive and idempotent: fresh databases
+ * and databases created by older releases both converge here.
+ */
+const outboxEnvelope = (db: DatabaseSync, report: MigrationReport): void => {
+  // §16 outbox columns (additive; pre-existing rows keep NULLs except the
+  // NOT NULL defaults, and event_seq is backfilled below).
+  ensureColumn(db, 'events', 'event_seq', 'INTEGER')
+  ensureColumn(db, 'events', 'event_version', 'INTEGER NOT NULL DEFAULT 1')
+  ensureColumn(db, 'events', 'aggregate_type', 'TEXT')
+  ensureColumn(db, 'events', 'aggregate_id', 'TEXT')
+  ensureColumn(db, 'events', 'aggregate_revision', 'INTEGER')
+  ensureColumn(db, 'events', 'request_id', 'TEXT')
+  ensureColumn(db, 'events', 'session_id', 'TEXT')
+  ensureColumn(db, 'events', 'attempts', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'events', 'last_error', 'TEXT')
+  ensureColumn(db, 'events', 'next_attempt_at', 'TEXT')
+  ensureColumn(db, 'events', 'dead_lettered_at', 'TEXT')
+  // Backfill event_seq for rows written before the outbox envelope (one-time
+  // and idempotent: only NULL seqs are touched). Ordering by (created_at,
+  // event_id) keeps replays stable across re-runs.
+  const rows = db.prepare('SELECT event_id FROM events WHERE event_seq IS NULL ORDER BY created_at, event_id')
+    .all() as unknown as Array<{ event_id: string }>
+  const updateSeq = db.prepare('UPDATE events SET event_seq = ? WHERE event_id = ?')
+  let seq = (db.prepare('SELECT COALESCE(MAX(event_seq), 0) AS m FROM events').get() as { m: number }).m
+  for (const row of rows) {
+    seq += 1
+    updateSeq.run(seq, row.event_id)
+  }
+  // §16: same-aggregate revisions are ordered by event_seq (per-aggregate
+  // monotonic; NULL aggregates are their own bucket — SQLite treats NULLs as
+  // distinct in unique indexes, and the kernel allocates max+1 per bucket).
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_aggregate_seq ON events(aggregate_type, aggregate_id, event_seq)')
+  // §3.1 parity (STORE-01): runs identity per job attempt; the doc creates
+  // one row at claim time and keeps every retry attempt.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS runs (
+      run_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+      contract_id TEXT,
+      snapshot_sha256 TEXT NOT NULL,
+      manifest_json TEXT,
+      signature_status TEXT NOT NULL DEFAULT 'pending',
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      UNIQUE (job_id, attempt_no)
+    );
+    CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id);
+  `)
+  // §3.1 parity: session_links carry the durable principal + issuer (NULL for
+  // legacy rows whose identity cannot be proven).
+  ensureColumn(db, 'session_links', 'principal_id', 'TEXT')
+  ensureColumn(db, 'session_links', 'tenant_id', 'TEXT')
+  ensureColumn(db, 'session_links', 'issuer', 'TEXT')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.events_seq_backfilled = rows.length
+  report.rows.runs = (db.prepare('SELECT COUNT(*) AS n FROM runs').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -583,6 +651,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'Project Idempotency-Key + request hash columns (v2)',
     body: projectIdempotencyKeys.toString(),
     up: projectIdempotencyKeys,
+  },
+  {
+    id: '0008_outbox_envelope',
+    description: 'Outbox canonical envelope (EVENT-01/§16) + runs table + session_links principal (STORE-01)',
+    body: outboxEnvelope.toString(),
+    up: outboxEnvelope,
   },
 ]
 

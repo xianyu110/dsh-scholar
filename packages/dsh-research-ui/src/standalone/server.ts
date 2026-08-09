@@ -32,8 +32,10 @@ import {
   MAX_BODY_BYTES,
   SlidingWindowRateLimiter,
   constantTimeEqual,
+  createCsrfToken,
   isAllowedOrigin,
   isLoopbackHost,
+  verifyCsrfToken,
   withinBodyLimit,
 } from './security.js'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
@@ -359,6 +361,12 @@ export function loadOptions(argv: string[]): StandaloneOptions {
 }
 
 export async function startStandalone(options: StandaloneOptions): Promise<void> {
+  // SEC-UI-01: tokenless mode is only safe on an explicit loopback bind.
+  // loadOptions already rejects this; the guard here also protects
+  // programmatic callers BEFORE anything binds (stable message, no paths).
+  if (options.token === null && !isLoopbackHost(options.host)) {
+    throw new Error('--no-token requires an explicit loopback --host (127.0.0.0/8, ::1, or localhost)')
+  }
   const sidecar = new UiKernelSidecar({
     host: '127.0.0.1',
     port: options.kernelPort,
@@ -377,6 +385,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   const bundlePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
 
   const limiter = new SlidingWindowRateLimiter()
+
+  // SEC-UI-01 CSRF: one in-memory session token per process. Every
+  // state-changing /api write must echo it in `x-csrf-token`; the Origin
+  // check stays as a second layer. Never logged, never persisted.
+  const csrfToken = createCsrfToken()
+  function csrfHeader(req: IncomingMessage): string | undefined {
+    const value = req.headers['x-csrf-token']
+    return typeof value === 'string' ? value : Array.isArray(value) ? value[0] : undefined
+  }
 
   // API-01 BFF AuthZ: the loopback operator identity maps to one principal
   // (reconstruction-contracts.md §7 "standalone local identity 仅在 loopback
@@ -487,6 +504,22 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
+      // CSRF session token (SEC-UI-01): issued after bearer authentication.
+      // The client fetches it once at startup and echoes it back on every
+      // state-changing /api request via the x-csrf-token header.
+      if (method === 'GET' && url.pathname === '/api/session/csrf') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            return
+          }
+        }
+        sendJson(res, 200, { ok: true, csrf_token: csrfToken })
+        return
+      }
+
       // Model preference: the research agent's model seat. The standalone
       // persists the choice under the data dir (`model.json`, 0600) and
       // exposes it to the DSH-side plugin via the same file, so a selection
@@ -516,6 +549,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             sendJson(res, 401, { ok: false, error: 'unauthorized' })
             return
           }
+        }
+        // SEC-UI-01: session CSRF token required on /api writes.
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken)) {
+          sendJson(res, 403, { ok: false, error: 'missing or invalid csrf token' })
+          return
         }
         if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
           sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
@@ -560,6 +598,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             return
           }
         }
+        // SEC-UI-01: session CSRF token required on /api writes.
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken)) {
+          sendJson(res, 403, { ok: false, error: 'missing or invalid csrf token' })
+          return
+        }
         if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
           sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
           return
@@ -577,6 +620,13 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         }
         if (projectId === '' || query === '') {
           sendJson(res, 400, { ok: false, error: 'project_id and query required' })
+          return
+        }
+        // SEC-UI-01 fail-closed: with a loopback operator principal, membership
+        // is enforced BEFORE the connector runs or the corpus is written —
+        // unknown/foreign project -> 404, no side effects.
+        if (options.principal !== null && !(await isProjectMember(projectId))) {
+          sendJson(res, 404, { ok: false, error: 'project not found or access denied' })
           return
         }
         try {
@@ -757,7 +807,16 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
 
 // Direct execution: `node lib/standalone/server.js ...`
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const options = loadOptions(process.argv.slice(2))
+  // SEC-UI-01: startup failures (incl. argument validation) exit non-zero
+  // with the STABLE message only — never a raw stack trace that would leak
+  // internal paths into the service log.
+  let options: StandaloneOptions
+  try {
+    options = loadOptions(process.argv.slice(2))
+  } catch (error) {
+    console.error(`[research-ui-standalone] fatal: ${(error as Error).message}`)
+    process.exit(1)
+  }
   void startStandalone(options).catch(error => {
     console.error(`[research-ui-standalone] fatal: ${(error as Error).message}`)
     process.exit(1)

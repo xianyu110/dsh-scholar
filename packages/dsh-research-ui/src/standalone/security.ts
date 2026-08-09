@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 
 export const MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -50,6 +50,17 @@ export function constantTimeEqual(a: string | undefined, b: string | undefined):
 
 export function verifyBridgeToken(provided: string | undefined, expected: string | undefined): boolean {
   return expected === undefined || constantTimeEqual(provided, expected)
+}
+
+/** CSRF session token: 32 random bytes hex-encoded, one per standalone
+ * process (SEC-UI-01). Never persisted and never logged. */
+export function createCsrfToken(): string {
+  return randomBytes(32).toString('hex')
+}
+
+/** Constant-time CSRF verification; absent/empty headers never match. */
+export function verifyCsrfToken(provided: string | undefined, expected: string): boolean {
+  return typeof provided === 'string' && provided !== '' && constantTimeEqual(provided, expected)
 }
 
 export class SlidingWindowRateLimiter {

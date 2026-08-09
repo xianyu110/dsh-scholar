@@ -9,6 +9,10 @@
 #
 # Usage: bash scripts/start-standalone-ui.sh [--host 127.0.0.1] [--port 18610]
 #        [--kernel-port 17413] [--data-dir <path>] [--token <value>|--no-token]
+#
+# SEC-UI-01: a --token value is handed to the server through the 0600 token
+# file (written before spawn), never on the process argv — `ps`/`/proc`
+# must not expose the secret, and the server never prints it.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,6 +22,7 @@ KERNEL_PORT="${DSH_SCHOLAR_STANDALONE_KERNEL_PORT:-17413}"
 DATA_DIR="${DSH_SCHOLAR_STANDALONE_DATA:-$HOME/.dsh-scholar-standalone}"
 SERVER_DATA_DIR="$DATA_DIR/research-ui-standalone"
 PASSTHROUGH=()
+TOKEN_VALUE=''
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,6 +34,9 @@ while [ "$#" -gt 0 ]; do
     --kernel-port=*) KERNEL_PORT=${1#*=}; shift ;;
     --data-dir) SERVER_DATA_DIR=$2; shift 2 ;;
     --data-dir=*) SERVER_DATA_DIR=${1#*=}; shift ;;
+    --token) TOKEN_VALUE=$2; shift 2 ;;
+    --token=*) TOKEN_VALUE=${1#*=}; shift ;;
+    --no-token) PASSTHROUGH+=(--no-token); shift ;;
     *) PASSTHROUGH+=("$1"); shift ;;
   esac
 done
@@ -48,6 +56,15 @@ if [ ! -f "$BIN" ]; then
 fi
 
 mkdir -p "$DATA_DIR"
+# SEC-UI-01: pass an explicit --token through the 0600 token file (atomic
+# replace, so a pre-existing symlink cannot be followed), never via argv.
+if [ -n "$TOKEN_VALUE" ]; then
+  mkdir -p "$SERVER_DATA_DIR"
+  TMP_TOKEN="$SERVER_DATA_DIR/.standalone-token.tmp.$$"
+  printf '%s' "$TOKEN_VALUE" > "$TMP_TOKEN"
+  chmod 600 "$TMP_TOKEN"
+  mv -f "$TMP_TOKEN" "$SERVER_DATA_DIR/standalone-token"
+fi
 echo "starting standalone DSH Scholar: $WEB_URL (kernel :$KERNEL_PORT, data: $SERVER_DATA_DIR)"
 DSH_HOME="$DATA_DIR" setsid nohup node "$BIN" \
   --host "$WEB_HOST" --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$SERVER_DATA_DIR" \

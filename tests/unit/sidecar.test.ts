@@ -1,0 +1,316 @@
+/**
+ * SIDE-01 acceptance (docs/acceptance-tests.md §9) — kernel sidecar identity
+ * and port-0 endpoint resolution, exercised against the REAL kernel binary
+ * (packages/research-kernel/lib/bin/kernel.js; run the kernel build first).
+ *
+ * Covered here:
+ * - port=0: sidecar uses only the actual port published by 0600
+ *   runtime/endpoint.json; health works; the endpoint getter resolves.
+ * - reuse on the same dataDir (same instance and across instances) is
+ *   identity-verified and never spawns a second kernel.
+ * - a kernel on the same port with a different dataDir/database identity is
+ *   refused (sidecar_identity_mismatch) and never terminated.
+ * - a kernel without runtime/endpoint.json (legacy) is refused
+ *   (sidecar_identity_unknown) and never terminated.
+ * - stop() removes only the endpoint.json owned by this instance's kernel.
+ * - UiKernelSidecar (standalone) implements the same semantics.
+ *
+ * Tests run serially (vitest default within a file); every spawned kernel is
+ * tracked and force-terminated in afterEach, so no orphans survive failures.
+ */
+import { describe, expect, it, afterEach } from 'vitest'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { KernelSidecar, SidecarIdentityError } from '../../src/plugin/sidecar.js'
+import { UiKernelSidecar } from '../../packages/dsh-research-ui/src/standalone/sidecar.js'
+
+const KERNEL_BIN = fileURLToPath(new URL('../../packages/research-kernel/lib/bin/kernel.js', import.meta.url))
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.on('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const port = (probe.address() as AddressInfo).port
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
+async function waitForHealth(url: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${url}/v1/health`)
+      if (response.ok) return
+    } catch {
+      // not up yet
+    }
+    await sleep(200)
+  }
+  throw new Error(`kernel process did not become healthy in time: ${url}`)
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function terminate(pid: number): Promise<void> {
+  if (!alive(pid)) return
+  try { process.kill(pid, 'SIGTERM') } catch { return }
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline && alive(pid)) await sleep(100)
+  if (alive(pid)) {
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    await sleep(100)
+  }
+}
+
+async function waitForGone(pid: number, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline && alive(pid)) await sleep(50)
+}
+
+function readEndpoint(dataDir: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(dataDir, 'runtime', 'endpoint.json'), 'utf8')) as Record<string, unknown>
+}
+
+/** Every kernel pid spawned by the tests (sidecar or manual), swept in afterEach. */
+const allPids: number[] = []
+const tempDirs: string[] = []
+
+afterEach(async () => {
+  for (const pid of allPids.splice(0)) await terminate(pid)
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+describe('KernelSidecar (research-plugin) — SIDE-01', () => {
+  it('port=0 resolves the actual port from runtime/endpoint.json (0600), health works, second start reuses with identity verified', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-port0-'))
+    tempDirs.push(dataDir)
+    const lines: string[] = []
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port: 0, dataDir, log: line => lines.push(line) })
+    try {
+      await sidecar.start()
+      // endpoint must resolve to a real port identical to endpoint.json
+      const url = new URL(sidecar.endpoint)
+      expect(Number(url.port)).toBeGreaterThan(0)
+      const ep = readEndpoint(dataDir)
+      expect(ep.port).toBe(Number(url.port))
+      expect(ep.protocol).toBe('http')
+      expect(ep.schema).toBe('v1')
+      expect(ep.database).toBe('kernel.db')
+      expect(ep.dataDir).toBe(dataDir)
+      expect(typeof ep.pid).toBe('number')
+      expect(statSync(join(dataDir, 'runtime', 'endpoint.json')).mode & 0o777).toBe(0o600)
+      allPids.push(ep.pid as number)
+      // health must be reachable on the resolved port
+      expect((await fetch(`${sidecar.endpoint}/v1/health`)).ok).toBe(true)
+      // second start without stop: reuse (in-memory child + file identity)
+      const endpointBefore = sidecar.endpoint
+      await sidecar.start()
+      expect(sidecar.endpoint).toBe(endpointBefore)
+      expect(lines.some(l => l.includes('identity verified'))).toBe(true)
+      expect(readEndpoint(dataDir).port).toBe(Number(url.port))
+    } finally {
+      await sidecar.stop()
+    }
+  })
+
+  it('respawns a fresh kernel after its own child is killed (port=0 re-resolves from the new endpoint.json)', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-respawn-'))
+    tempDirs.push(dataDir)
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port: 0, dataDir, log: () => undefined })
+    try {
+      await sidecar.start()
+      const firstPort = Number(new URL(sidecar.endpoint).port)
+      const oldPid = readEndpoint(dataDir).pid as number
+      allPids.push(oldPid)
+      // kill the kernel out from under the sidecar (simulates a crash)
+      process.kill(oldPid, 'SIGKILL')
+      await waitForGone(oldPid)
+      // start() again must spawn a fresh kernel and re-resolve the port
+      await sidecar.start()
+      const secondPort = Number(new URL(sidecar.endpoint).port)
+      const ep = readEndpoint(dataDir)
+      expect(ep.port).toBe(secondPort)
+      expect(secondPort).toBeGreaterThan(0)
+      expect(ep.pid).not.toBe(oldPid)
+      expect((await fetch(`${sidecar.endpoint}/v1/health`)).ok).toBe(true)
+      void firstPort
+    } finally {
+      await sidecar.stop()
+    }
+  })
+
+  it('reuses a running kernel across sidecar instances on the same dataDir (identity verified, no new spawn)', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-reuse-'))
+    tempDirs.push(dataDir)
+    const port = await freePort()
+    const lines: string[] = []
+    const sidecarA = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: line => lines.push(line) })
+    await sidecarA.start()
+    const pid = readEndpoint(dataDir).pid as number
+    allPids.push(pid)
+    try {
+      const sidecarB = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: line => lines.push(line) })
+      await sidecarB.start()
+      expect(lines.some(l => l.includes('identity verified'))).toBe(true)
+      // still the same kernel process, still on the same port
+      expect(readEndpoint(dataDir).pid).toBe(pid)
+      expect(alive(pid)).toBe(true)
+      // B owns no child: stopping B must not kill or mislabel the kernel
+      await sidecarB.stop()
+      expect(alive(pid)).toBe(true)
+      expect((await fetch(`http://127.0.0.1:${port}/v1/health`)).ok).toBe(true)
+    } finally {
+      await sidecarA.stop()
+    }
+    expect(alive(pid)).toBe(false)
+  })
+
+  it('refuses reuse when a kernel with a different dataDir identity holds the port and never terminates it', async () => {
+    const dataDirA = mkdtempSync(join(tmpdir(), 'sidecar-mismatch-a-'))
+    const dataDirB = mkdtempSync(join(tmpdir(), 'sidecar-mismatch-b-'))
+    tempDirs.push(dataDirA, dataDirB)
+    const port = await freePort()
+    const sidecarA = new KernelSidecar({ host: '127.0.0.1', port, dataDir: dataDirA, log: () => undefined })
+    await sidecarA.start()
+    const pid = readEndpoint(dataDirA).pid as number
+    allPids.push(pid)
+    try {
+      // SIDE-01 mismatch branch: B's runtime dir already contains an identity
+      // record declaring the A kernel (dataDir=A, database=kernel.db) — i.e.
+      // the file is present but its dataDir disagrees with B's own dataDir.
+      mkdirSync(join(dataDirB, 'runtime'), { recursive: true })
+      writeFileSync(join(dataDirB, 'runtime', 'endpoint.json'), readFileSync(join(dataDirA, 'runtime', 'endpoint.json')))
+      const sidecarB = new KernelSidecar({ host: '127.0.0.1', port, dataDir: dataDirB, log: () => undefined })
+      let error: unknown
+      try {
+        await sidecarB.start()
+      } catch (caught) {
+        error = caught
+      }
+      expect(error).toBeInstanceOf(SidecarIdentityError)
+      const message = (error as Error).message
+      expect(message).toMatch(/sidecar_identity_mismatch/)
+      expect(message).toMatch(/dataDir/)
+      // the foreign kernel must still be alive and healthy
+      expect(alive(pid)).toBe(true)
+      expect((await fetch(`http://127.0.0.1:${port}/v1/health`)).ok).toBe(true)
+      // B must not have removed A's endpoint.json
+      expect(readEndpoint(dataDirA).pid).toBe(pid)
+    } finally {
+      await sidecarA.stop()
+    }
+  })
+
+  it('refuses to reuse a legacy kernel without runtime/endpoint.json (sidecar_identity_unknown) without killing it', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-legacy-'))
+    tempDirs.push(dataDir)
+    const port = await freePort()
+    // legacy kernel: no --endpoint-file / env var → never publishes endpoint.json
+    const kernel: ChildProcess = spawn(process.execPath, [
+      KERNEL_BIN, '--db', join(dataDir, 'kernel.db'), '--cas', join(dataDir, 'cas'),
+      '--host', '127.0.0.1', '--port', String(port),
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    const kernelPid = kernel.pid ?? -1
+    allPids.push(kernelPid)
+    await waitForHealth(`http://127.0.0.1:${port}`)
+    expect(existsSync(join(dataDir, 'runtime', 'endpoint.json'))).toBe(false)
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    await expect(sidecar.start()).rejects.toThrow(/sidecar_identity_unknown/)
+    // the legacy kernel is untouched
+    expect(alive(kernelPid)).toBe(true)
+    expect((await fetch(`http://127.0.0.1:${port}/v1/health`)).ok).toBe(true)
+  })
+
+  it('stop() removes only the endpoint.json owned by its own kernel pid', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-stop-'))
+    tempDirs.push(dataDir)
+    const port = await freePort()
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    await sidecar.start()
+    const file = join(dataDir, 'runtime', 'endpoint.json')
+    const pid = readEndpoint(dataDir).pid as number
+    allPids.push(pid)
+    expect(existsSync(file)).toBe(true)
+    await sidecar.stop()
+    expect(existsSync(file)).toBe(false)
+
+    // a file whose pid belongs to someone else must be left alone
+    const foreignDir = mkdtempSync(join(tmpdir(), 'sidecar-stop-foreign-'))
+    tempDirs.push(foreignDir)
+    const port2 = await freePort()
+    const sidecar2 = new KernelSidecar({ host: '127.0.0.1', port: port2, dataDir: foreignDir, log: () => undefined })
+    await sidecar2.start()
+    const foreignFile = join(foreignDir, 'runtime', 'endpoint.json')
+    allPids.push(readEndpoint(foreignDir).pid as number)
+    const record = JSON.parse(readFileSync(foreignFile, 'utf8')) as Record<string, unknown>
+    writeFileSync(foreignFile, JSON.stringify({ ...record, pid: 99999999 }))
+    await sidecar2.stop()
+    expect(existsSync(foreignFile)).toBe(true)
+  })
+})
+
+describe('UiKernelSidecar (research-ui standalone) — SIDE-01 parity', () => {
+  it('port=0 + identity-verified reuse behave like the plugin sidecar', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-ui-'))
+    tempDirs.push(dataDir)
+    const lines: string[] = []
+    const sidecar = new UiKernelSidecar({ host: '127.0.0.1', port: 0, dataDir, log: line => lines.push(line) })
+    try {
+      await sidecar.start()
+      const url = new URL(sidecar.endpoint)
+      expect(Number(url.port)).toBeGreaterThan(0)
+      const ep = readEndpoint(dataDir)
+      expect(ep.port).toBe(Number(url.port))
+      expect(ep.protocol).toBe('http')
+      expect(ep.schema).toBe('v1')
+      expect(ep.database).toBe('kernel.db')
+      expect(ep.dataDir).toBe(dataDir)
+      allPids.push(ep.pid as number)
+      expect((await fetch(`${sidecar.endpoint}/v1/health`)).ok).toBe(true)
+      await sidecar.start()
+      expect(sidecar.endpoint).toBe(url.origin)
+      expect(lines.some(l => l.includes('identity verified'))).toBe(true)
+    } finally {
+      await sidecar.stop()
+    }
+  })
+
+  it('refuses a foreign-dataDir kernel on the same port', async () => {
+    const dataDirA = mkdtempSync(join(tmpdir(), 'sidecar-ui-mismatch-a-'))
+    const dataDirB = mkdtempSync(join(tmpdir(), 'sidecar-ui-mismatch-b-'))
+    tempDirs.push(dataDirA, dataDirB)
+    const port = await freePort()
+    const sidecarA = new UiKernelSidecar({ host: '127.0.0.1', port, dataDir: dataDirA, log: () => undefined })
+    await sidecarA.start()
+    const pid = readEndpoint(dataDirA).pid as number
+    allPids.push(pid)
+    try {
+      // same fixture as the plugin-side mismatch test: B's runtime dir holds
+      // the identity record of the A kernel (dataDir=A), conflicting with B.
+      mkdirSync(join(dataDirB, 'runtime'), { recursive: true })
+      writeFileSync(join(dataDirB, 'runtime', 'endpoint.json'), readFileSync(join(dataDirA, 'runtime', 'endpoint.json')))
+      const sidecarB = new UiKernelSidecar({ host: '127.0.0.1', port, dataDir: dataDirB, log: () => undefined })
+      await expect(sidecarB.start()).rejects.toThrow(/sidecar_identity_mismatch/)
+      expect(alive(pid)).toBe(true)
+      expect((await fetch(`http://127.0.0.1:${port}/v1/health`)).ok).toBe(true)
+    } finally {
+      await sidecarA.stop()
+    }
+  })
+})

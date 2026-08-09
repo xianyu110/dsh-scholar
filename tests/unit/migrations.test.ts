@@ -30,25 +30,35 @@ function tableInfo(db: DatabaseSync, table: string): Array<{ name: string; pk: n
 describe('explicit migrations', () => {
   afterEach(() => {
     // The rollback test appends a failing migration; always restore.
-    while (MIGRATIONS.length > 7) MIGRATIONS.pop()
+    while (MIGRATIONS.length > 8) MIGRATIONS.pop()
   })
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(6)
+    expect(SCHEMA_VERSION).toBe(7)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('6')
+    expect(meta.schema_version).toBe('7')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope'])
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
     // All product tables exist.
-    for (const t of ['projects', 'gates', 'decisions', 'ideas', 'contracts', 'corpus_snapshots', 'artifacts', 'jobs', 'runner_keys', 'evidence', 'claims', 'events', 'session_links', 'budget', 'manuscripts', 'terminal_frames', 'terminal_retention', 'tex_documents', 'tex_files', 'tex_snapshots', 'tex_builds']) {
+    for (const t of ['projects', 'gates', 'decisions', 'ideas', 'contracts', 'corpus_snapshots', 'artifacts', 'jobs', 'runner_keys', 'evidence', 'claims', 'events', 'session_links', 'budget', 'manuscripts', 'terminal_frames', 'terminal_retention', 'tex_documents', 'tex_files', 'tex_snapshots', 'tex_builds', 'project_members', 'code_snapshots', 'runs']) {
       expect(tableInfo(db, t).length, `table ${t}`).toBeGreaterThan(0)
     }
+    // EVENT-01/§16: the events outbox carries the canonical envelope columns.
+    const eventCols = tableInfo(db, 'events').map(c => c.name)
+    for (const c of ['event_seq', 'event_version', 'aggregate_type', 'aggregate_id', 'aggregate_revision', 'request_id', 'session_id', 'attempts', 'last_error', 'next_attempt_at', 'dead_lettered_at']) {
+      expect(eventCols, `events.${c}`).toContain(c)
+    }
+    const seqIndex = db.prepare(`PRAGMA index_list('events')`).all() as Array<{ name: string; unique: number }>
+    expect(seqIndex.some(i => i.name === 'idx_events_aggregate_seq' && i.unique === 1)).toBe(true)
+    // STORE-01 parity: session_links gained the durable principal columns.
+    const sessionCols = tableInfo(db, 'session_links').map(c => c.name)
+    for (const c of ['principal_id', 'tenant_id', 'issuer']) expect(sessionCols).toContain(c)
     db.close()
   })
 
@@ -61,7 +71,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('6')
+    expect(version).toBe('7')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -105,7 +115,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('6')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('7')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -154,10 +164,47 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(7)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('6')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(8)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('7')
     db2.close()
     rmSync(path, { recursive: false, force: true })
+  })
+
+  it('upgrades a pre-outbox events table: new columns, defaults and seq backfill', () => {
+    // Simulate a database produced by the PREVIOUS release (schema v6, no
+    // outbox columns): open with the current code, then rewind the events
+    // table + migration record + schema_version to the old shape.
+    const db = openDatabase(':memory:')
+    db.prepare('INSERT INTO events (event_id, project_id, kind, payload, source, delivered, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
+      .run('evt_preoutbox_1', 'p1', 'project.created', '{}', 'kernel', '2026-01-01T00:00:00.000Z')
+    db.prepare('INSERT INTO events (event_id, project_id, kind, payload, source, delivered, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
+      .run('evt_preoutbox_2', 'p1', 'gate.created', '{}', 'kernel', '2026-01-01T00:00:01.000Z')
+    const outboxCols = ['event_seq', 'event_version', 'aggregate_type', 'aggregate_id', 'aggregate_revision',
+      'request_id', 'session_id', 'attempts', 'last_error', 'next_attempt_at', 'dead_lettered_at']
+    db.exec('DROP INDEX IF EXISTS idx_events_aggregate_seq')
+    for (const c of outboxCols) db.exec(`ALTER TABLE events DROP COLUMN ${c}`)
+    db.exec("DELETE FROM schema_migrations WHERE id = '0008_outbox_envelope'")
+    db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run()
+    runMigrations(db)
+    // Version bumped; outbox columns re-added by the new migration.
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('7')
+    const cols = tableInfo(db, 'events').map(c => c.name)
+    for (const c of outboxCols) expect(cols).toContain(c)
+    // Existing rows get default envelope values + a stable backfilled seq.
+    const rows = db.prepare('SELECT event_id, event_seq, event_version, aggregate_type, aggregate_id, aggregate_revision, attempts, last_error, next_attempt_at, dead_lettered_at FROM events ORDER BY event_id').all() as Array<Record<string, unknown>>
+    expect(rows).toEqual([
+      { event_id: 'evt_preoutbox_1', event_seq: 1, event_version: 1, aggregate_type: null, aggregate_id: null, aggregate_revision: null, attempts: 0, last_error: null, next_attempt_at: null, dead_lettered_at: null },
+      { event_id: 'evt_preoutbox_2', event_seq: 2, event_version: 1, aggregate_type: null, aggregate_id: null, aggregate_revision: null, attempts: 0, last_error: null, next_attempt_at: null, dead_lettered_at: null },
+    ])
+    // New envelope writes keep allocating past the backfilled seq.
+    db.prepare(`INSERT INTO events (event_id, project_id, kind, payload, source, delivered, created_at, event_seq, event_version, aggregate_type, aggregate_id, aggregate_revision, request_id, session_id, attempts, last_error, next_attempt_at, dead_lettered_at)
+      VALUES (?, ?, ?, '{}', 'kernel', 0, ?, ?, 1, 'project', 'p1', NULL, NULL, NULL, 0, NULL, NULL, NULL)`)
+      .run('evt_post_1', 'p1', 'project.renamed', '2026-01-01T00:00:02.000Z', 3)
+    const post = db.prepare('SELECT event_seq, aggregate_type, aggregate_id FROM events WHERE event_id = ?').get('evt_post_1') as { event_seq: number; aggregate_type: string; aggregate_id: string }
+    expect(post.event_seq).toBe(3)
+    expect(post.aggregate_type).toBe('project')
+    expect(post.aggregate_id).toBe('p1')
+    db.close()
   })
 
   it('keeps the committed v1 fixture asset present and buildable', () => {
