@@ -73,11 +73,19 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 5. 在 hardening-v0.2-status.md 记录当前实现与目标的状态；
 6. 实现、测试、文档在同一个变更集内保持一致。
 
-当前 `scripts/verify-docs.mjs` 自动检查文档结构、链接、关键契约片段和旧嵌入面否定断言；它尚未根据 git diff 自动判断每个源码行为变更是否同步了规范、验收与 hardening。该 change-aware gate 记在 hardening 的 DOC-02，在实现前由主代理/评审按上述六项逐项确认，不能把 verifier 通过等同于 docs-first 完成。
+当前 `scripts/verify-docs.mjs` 自动检查文档结构、链接、关键契约片段和旧嵌入面否定断言；`--diff-check` 只检查部分 packages/workers 源码与 eval shell 变更是否触达 hardening ledger。它不能证明负责规范、acceptance、USAGE 和状态语义已经同步，且当前实现对缺失 base ref 会 fail-open。修复 DOC-02 前，CI 必须显式 fetch/校验精确 base SHA，主代理/评审仍按上述六项逐项确认；verifier 通过绝不等同于 docs-first 或功能验收完成。
 
 代码与 Markdown 冲突时，不得静默选择代码现状；必须先确认目标并修正文档或实现。只改代码不更新规范、只记录修复建议不落入规范，均视为未完成。
 
 开发默认积极使用 subagent 提升并行度和减少主线程上下文污染。跨目录检索、独立核验、测试日志分析和文件边界互不重叠的实现应并发派发；任务必须自包含并声明范围与输出证据。基础架构文档、即将修改的确切代码、方案取舍、合并复核和最终验收由主代理亲自完成。多个 subagent 修改代码时必须声明文件所有权，禁止回滚或覆盖其他任务的改动。
+
+## 4.2 Review 基线与执行约束
+
+`hardening-v0.2-status.md` 是当前实现账本，状态只允许：未实现、部分、已实现未验收、已验收、已关闭。“已验收”必须绑定当前 commit SHA、CI run/job 和 `acceptance-tests.md` 场景或机器可读报告；历史计数、旧日期日志、手工浏览器截图和本地显式 skip 只能作背景。
+
+后续工作必须按 hardening 的硬顺序推进：Governance → Formal execution → Evidence/Release → Terminal/TeX/i18n → DSH/package → CI/docs → Final validation。前一批 P0 未验收时，不得宣称后一批完成、不得提升成熟度、不得发布。README、USAGE、hardening、acceptance、repository blueprint 或源码对当前能力有矛盾时，自动采用较低状态并阻断合并。
+
+所有 CI 阻断 job 必须零 SKIP、实际断言数大于 0；缺 Docker、TeX、DSH fixture、git base 或其他能力必须非零失败，不能以 `SKIP exit 0` 或聚合器 PASS 代替验收。
 
 ## 5. 核心不可绕过规则
 
@@ -95,7 +103,7 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 
 ## 7. 重建完成定义
 
-只有在以下命令全部通过、独立 UI 可完成 Golden Path、且 hardening-v0.2-status.md 中没有 P0 差距时，才算从文档成功重建：
+只有在以下命令从 clean checkout 全部通过、独立 UI 可完成 Golden Path、bundle-only clean-room 通过、全部阻断 job 零 SKIP，且 hardening-v0.2-status.md 中没有“未实现/部分/已实现未验收”的 P0/P1 条目时，才算从文档成功重建：
 
 ~~~bash
 pnpm install --frozen-lockfile
@@ -105,5 +113,7 @@ pnpm test
 pnpm test:security
 pnpm test:all
 ~~~
+
+完成记录必须附当前 commit、每个 CI job、skip_count=0、Golden/recovery/clean-room 报告。缺少任一证据时只能标“已实现未验收”。
 
 对外仍应标记 Security Alpha，直到真实外部项目、多人身份、长期运行和 clean-room 复现得到持续验证。

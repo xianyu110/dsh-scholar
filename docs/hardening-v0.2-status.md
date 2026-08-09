@@ -1,115 +1,108 @@
 # 当前实现与目标规范差距
 
-> 信息性文档，更新于 2026-08-09。它描述当前仓库，不覆盖规范性文档。状态必须以源码和当次 CI 复核，历史测试计数不能自动继承。
+> 信息性文档，校准于 2026-08-09，审阅基线 `main@7adc722`。本文件描述当前仓库，不覆盖规范性文档。状态必须由源码、当前提交的自动化验收和 CI 证据共同决定；历史测试计数、旧 README、手工截图和未绑定提交的日志不能继承为当前证据。
 
-## 1. 当前可复用基础
+## 1. 状态定义与证据规则
 
-| 范围 | 当前实现 |
+状态只允许使用下列值：
+
+| 状态 | 含义 |
 |---|---|
-| Kernel | TypeScript + node:sqlite；Project/Gate/Job/Artifact/Evidence/Claim/Budget/Outbox |
-| CAS | SHA-256、临时文件 + rename、项目级 Artifact record |
-| HTTP | /v1 JSON 接口、可选 bearer、32 MiB、Zod 422 |
-| Plugin | Cordis Agent tools/commands/subagents、角色 ACL、Skills、Sidecar；无 browser client/bridge |
-| UI | 完整原生 DOM Workspace UI；Chat/Overview/Approvals/Runs/Artifacts/Evidence/Budget |
-| Runner | Docker/subprocess、真实 snapshot materialize、lease、heartbeat、cancel、Ed25519 Manifest |
-| Analysis | MetricSpec/RunSet/AnalysisPlan、paired bootstrap、Holm、fixed metrics parser |
-| Orchestrator | durable SQLite ActionStore 和状态计划 |
+| 未实现 | 没有可运行实现，或只有文档/占位代码 |
+| 部分 | 已有骨架或局部能力，但存在规范缺口、已知阻断缺陷或关键验收缺失 |
+| 已实现未验收 | 代码表面完整，但当前提交尚无全部阻断验收证据 |
+| 已验收 | 当前 commit 的全部对应 acceptance 场景在目标 CI 环境通过，且零 SKIP |
+| 已关闭 | 经明确决策不再实施；必须记录责任人、日期、边界和重新开启条件 |
+
+“已实现”不等于“已验收”。标记“已验收”时必须同时记录：commit SHA、CI run/job、acceptance 场景或机器可读报告。CI 中出现 SKIP、未执行断言、缺少 Docker/TeX/DSH fixture、缺失 git base ref 或 `continue-on-error`，均不得计入 PASS。状态矩阵与“具体不一致”、USAGE、README 或源码冲突时，自动取较低状态并阻断完成声明。
+
+## 2. 当前可复用基础
+
+| 范围 | 当前可复用实现 |
+|---|---|
+| Kernel/CAS | TypeScript、node:sqlite、WAL、项目/Gate/Job/Artifact/Evidence/Claim/Budget、SHA-256 CAS |
+| HTTP | v1 主接口、局部 v2 adapter、Zod 校验、binary Artifact、Terminal SSE |
+| Plugin | Cordis Agent tools/commands/subagents、角色 ACL、四组 Skills、sidecar；无浏览器嵌入面 |
+| UI | standalone 原生 DOM Workspace；Chat/Overview/Approvals/Runs/Terminal/Artifacts/Evidence/Manuscript/Budget |
+| Runner | Docker/subprocess adapter、快照物化、lease、heartbeat、cancel、Terminal chunk、可选 Ed25519 Manifest |
+| Analysis | Metric/RunSet/AnalysisPlan 与 paired bootstrap 基础 |
 | Connectors | OpenAlex/Crossref/arXiv、缓存、Unicode 去重、部分失败透明 |
-| Release | manuscript、LaTeX 格式、bundle/clean-room eval 基础 |
-| Tests | unit、安全脚本、Docker、Golden、fault、release、LaTeX 脚本 |
+| TeX | 文件树、文本编辑、版本保存、快照、latex-compile、诊断/PDF 基础 |
+| Release | 私有 bundle 清单、脚本化 verify/clean-room 基础 |
 
-## 2. 目标差距矩阵
+这些基础不代表符合 v2 规范；以下矩阵是后续执行的约束来源。
 
-| ID | 目标 | 当前状态 | 差距/修复方向 |
+## 3. 校准后的目标差距矩阵
+
+| ID | 目标 | 当前状态 | 当前阻断与关闭条件 |
 |---|---|---|---|
-| GOV-01 | 认证 Human Principal durable | 已实现 | decisions 表新增 principal_id/tenant_id/auth_method/session_id 列(含 ensureColumn 迁移);decideGate 事务持久化;listDecisions 重建 principal;decisionSchema 透传 principal 且 rejected/revised 强制 reason;单测覆盖持久化/旧行兼容 |
-| GOV-02 | Gate target freeze | 已实现 | decideGate 事务内,contract gate 批准时对 payload.contract_id 目标原子执行 approveContract(冻结 status=approved+approval.gate_decision_id,设计 §6.6 不可变;幂等重放安全),随后同事务 CAS 迁移项目状态;单测验证冻结与决策同事务(211/211) |
-| API-01 | v2 + BFF AuthZ | 已实现 | v2 适配器:POST /v2/projects(Idempotency-Key 必填、重放同集、异 hash 409)、键集分页(无效 cursor→400)、projection+capabilities、gate-requests(拒 decision)、transitions(422);GET /v2/health(protocol/schema/database_id+6 项 capabilities,api-contracts §3);错误信封带 request_id(+X-Request-Id 回显)与 retryable(稳定 code 表);job-scoped 路由(/v1/jobs/:id/* 含 terminal SSE)经 kernel 解析属主项目后查成员,SSE 前强制(§9);standalone 验收 43/43;多 Principal 登录解析属 roadmap |
-| EVID-01 | accepted Evidence only from Worker | 已实现 | 公共 POST evidence 拒绝 verified(evidenceSchema 仅 draft/legacy);新增内部 POST /evidence/verified(ingestVerifiedEvidence);provenance_status 随 body 存储;verifyClaim 只读 verified 证据,无 verified 时返回 inconclusive(带原因);demo/standalone 脚本切换 verified 路径,14/14 绿 |
-| STAT-01 | 单一正式分析实现 | 已实现 | kernel.computeAnalysis 全部数学委托 analysis-worker computePairedAnalysis(§13.6 matched-seed 配对、seeded bootstrap CI、holm p 值);无配对→422;demo 双脚本 fixture 升级为配对设计(baseline.js 同种子 -0.05,配对效应 +0.05):demo-full-flow 与 demo-standalone-flow 均 14/14(新内核实测);clean-room 7/7、golden-v2 28/28(配对 baseline,含代码快照绑定) |
-| RUN-01 | 正式 Docker/快照/fencing | 已实现 | IntegrityConfig 新增 require_signed_manifest(默认 false)并经 createProject 持久化;项目置 true 时无签名 manifest→422 manifest_signature_required,签名后放行(单测);SECURE_KINDS 拒绝 subprocess 由 kernel+runner 双层强制;Runner CLI subprocess 默认仅用于 echo/smoke 信任夹具 |
-| RUN-02 | 完整容器基线 | 已实现 | runDocker 补齐 --read-only(根文件系统只读)+--cap-drop ALL+--security-opt no-new-privileges+--pids-limit 256;/outputs 为唯一 rw 挂载、/tmp tmpfs;latex-compile e2e 10/10 与 docker-eval 18/18 在加固 flags 下全绿(含 texlive 容器与 cancel/清理) |
-| TERM-01 | 实时有序终端 | 已实现 | 全链路落地并 e2e 验证:terminal_frames/retention 表、kernel append/list(单调 seq、幂等、lease fencing、8 MiB 有界保留)、SSE(subscribed/chunk/gap/exit、心跳)、runner onChunk 批量上报、Terminal tab(ANSI 白名单/状态栏/lastSeq 续传);单测 4 项;本轮 Playwright 注入 OSC 8 超链接+<img onerror> 帧验证渲染为纯文本(0 a[href]/0 img),§5 ansi-injection 关闭;键盘全 tab 可达(Alt+1..9)、Ctrl+K 面板、640px 响应式均验证 |
-| TEX-01 | TeX workspace/editor/version | 已实现 | 后端:tex-workspace.ts(独立 WAL、版本化文件、CAS expected_version 409、快照冻结)+ /v1/documents 全套路由 + generateTexWorkspace;UI:Manuscript 工作台(树/编辑器/dirty/conflict/构建诊断/PDF)Playwright 验证;单测 4 项 + tex-build 5 项;验收测试 CI 运行(latex-compile e2e 10/10) |
-| TEX-02 | latex-compile Job/诊断/PDF | 已实现 | 全链路落地并 e2e 验证:builds POST 冻结快照(manifest 随 job payload 携带)→ runner materializeTexWorkspace(逐文件经 kernel GET、sha256 校验、路径防护)→ texlive/texlive 容器 run.sh(pdflatex×3+bibtex,显式清单复制避免挂载点递归)→ PDF(application/pdf)/完整 log/结构化 diagnostics/aux 包 artifacts→ completeJob 将 manifest.tex_* 映射到 tex_builds(status/diagnostics/pdf/log/finished_at);latex-compile 默认镜像 texlive/texlive:latest;artifact GET 支持 HEAD;e2e evals/latex-compile-e2e.sh 10/10(真实 bibtex 引用编译出 PDF);单测 5 项;CI job tex-compile-e2e 已加(先拉固定镜像) |
-| UI-01 | standalone-only 单一 UI | 已实现 | 根轻面板/双 HTTP bridge/Cordis host/patch/client floating 分支已删除;verify-docs 强制 manifest/files allowlist 与无 host 表面;CI unit-and-build 跑 docs verifier+standalone 构建;standalone HTTP 验收 23/23;clean checkout 实跑随 CI 每次 push 自动执行 |
-| UI-02 | i18n zh/en | 已实现 | locale adapter + zh/en 字典 13 命名空间(common/shell/standalone/terminal/manuscript/overview/runs/artifacts/evidence/budget)+ 设置语言切换与即时重渲染;manuscript/tab/解锁页/Overview/Runs/Artifacts(标题、过滤、多选、预览弹窗)/Evidence(主张与证据列表、详情弹窗、预算约束弹窗)/Budget(标题、详情、创建项目弹窗)全部走 t();Playwright 逐视图验证 zh 生效;剩余硬编码为零散工具提示,随 UI-04 拆分清理 |
-| UI-03 | standalone locale/theme adapter | 已实现 | 本地 locale adapter(bind/getSnapshot/subscribe/setLocale,zh/en 8 命名空间)与主题(host data-theme+localStorage)即独立适配器;UI-02/UI-05 浏览器验证语言切换、主题、强调色、auto-refresh 全部经 adapter 持久化并即时重渲染 |
-| UI-04 | browser client strict typecheck | 已实现 | tsconfig.client.json 将 client 纳入 strict+noUncheckedIndexedAccess 检查并清零(93 个错误):TAB_GROUPS 显式 tuple 类型、modal 签名放宽 ShadowRoot|null|undefined+入口 guard、projection.project 归一化为非可选、writeTheme 接受 string、health/workspace 类型补全、tokenProvider 闭包安全、Element→HTMLElement 转型、正则索引可选链;已并入 research-ui typecheck 脚本 |
-| UI-05 | standalone settings runtime | 已实现 | 浏览器交互验证通过(Playwright,chromium headless):设置弹窗(Connection/Bridges/Auth/Appearance/Preferences/Conversation)、语言切换→dsh.locale 持久化+<html lang>+即时重渲染、主题 Toggle→dark 持久化+data-theme、强调色→violet 持久化+--accent CSS 变量、Auto refresh Toggle→'off' 持久化且 10s 内 body 零重渲染(轮询停止) |
-| ART-01 | standalone binary/SSE 流式 | 已实现 | HTTP 验收新增代理二进制 round-trip(23/23):经 18610 代理注册 PDF artifact→回读 content-type application/pdf、ETag sha256、字节级一致;SSE 由 terminal 单测(订阅/块/缺口/退出)覆盖;latex-compile e2e 提供真实 PDF 产物链路 |
-| ART-02 | media type | 已实现 | 迁移 0004 增加 media_type/file_name 列;GET /v1/artifacts/:id 按存储类型服务(pdf→application/pdf、log→text/plain)、ETag+If-None-Match 304、Content-Disposition(inline/attachment)、单区间 Range 206/416;runner 上传 run log 带 media_type;单测 3 项;真实库原地迁移验证 |
-| STORE-01 | 显式迁移版本 | 已实现 | schema_migrations 台账(每步 checksum=sha256(id+body)、applied_at、report_json)、事务化 up(失败 ROLLBACK)、幂等重开、checksum 篡改/版本超前 loud fail、schema_version=2 且仅全部成功后更新、database_id/created_at/last_migrated_at;0001 全量初始 DDL、0002 legacy v1 导入(principal 列、provenance 回填、artifacts 项目级重建+跨项目 ID 再生、jobs lease/snapshot+项目级幂等、manuscript→初始 TeX 工作区)、0003 terminal/tex/i18n 能力(早期 preview 库);真实 standalone 库原地 1→2 迁移验证(11 项目+TeX+terminal 数据保留);fixture tests/fixtures/databases/v1-kernel.db(3da1392 原版 v1 DDL)+ 可再生成脚本;单测 7 项;§3.1 列名级 DDL 对齐(如 brief_json/body_json/blob_objects/code_snapshots/runs 表)仍未实施,属 schema-parity 剩余项 |
-| STORE-02 | CodeSnapshot durable model | 已实现 | 迁移 0005 新增 code_snapshots 权威表(snapshot_id→archive/manifest artifact、source_json、sha256、file_count、size_bytes、created_at,项目索引);snapshotCodeArchive 每次调用登记一行,getCodeSnapshot 读取;SCHEMA_VERSION→4;单测验证行与 artifact/哈希一致(211/211) |
-| EVENT-01 | 正确 DSH event assumption | 已实现 | dsh-integration.md §6 记录:SessionEventMap 经 declaration merge 可扩展,插件可追加展示事件,但科研审计以 Kernel Outbox 为权威;实现一致(emit 写 events outbox 表,Session 仅存 session_links 关联) |
-| SKILL-01 | 所有 Skill 可安装发现 | 已实现 | 4 个 skill 包(research-core/两个 domain/venue)从包根 skills/ 挂载;clean tarball 安装后 4 个 SKILL.md 落盘且 name/description frontmatter 校验通过(packaging 测试);宿主内自动选择与 source/prepared hash 行为待 DSH 环境手动验收(CI-01 已按用户决定关闭 GitHub Actions 路线) |
-| PACK-01 | clean remote install | 已实现 | 根插件与 5 个子包 pnpm pack 全部可打;tarball 完整性断言(lib/、4×SKILL.md、cordis.patch.yml);声明 @deepseek-ai/dsh-* 为 optional peer(仓库 autoInstallPeers:false)+ prepare 构建步骤;clean consumer 用 overrides 解析全部 file: 依赖并安装成功,skills 落盘;发布到 registry 与宿主全量 boot 仅限本地 DSH 环境手动验收(CI-01 已按用户决定关闭 GitHub Actions 路线) |
-| SELFMOD-01 | dev-only Cordis self tools | 已实现 | verify-docs 静态否定检查:production cordis.patch.yml 与 research-web/research-headless 配置禁止 tool-cordis;start-selfmod-dev.sh 必须显式加载 dev overlay 而 start-dsh-agent-dev.sh 禁止;CI unit-and-build 自动执行;mount/unmount 运行时行为仅限本地 DSH 环境手动验收(CI-01 已按用户决定关闭 GitHub Actions 路线) |
-| SEC-UI-01 | standalone token/loopback | 已实现 | HTTP 验收 12 项全绿(tests/security/run-standalone-http-tests.sh):非 loopback+--no-token 拒绝且不监听、token 文件 0600/非 symlink/非空/与 --token 一致、token-check 401/200、/v1/* 无/bad/good bearer 401/401/200、跨源写 403、同源(127/8+同端口)放行、跨端口 loopback 403 |
-| OPS-01 | standalone 启动可靠报错 | 已实现 | 验收 6 项全绿:自定义 host/port/dataDir/token 启动并以真实 URL+token-check 就绪、kill 后 web+kernel 端口释放、占用端口启动非零退出且日志含 EADDRINUSE、--no-token 非 loopback 拒绝 |
-| CI-01 | clean DSH Agent fixture | 已决策关闭(用户) | 宿主 SDK @deepseek-ai/dsh-* 无可安装来源(registry 404、无 repository、仅随 harness 预装);用户明确决定:暂不在 GitHub Actions 做 host fixture CI。CI 维持 standalone 全链(unit/security/latex/docker/golden/clean-room/tex-compile-e2e),root build 与宿主内验收仅限本地 DSH 环境手动执行;待 SDK 有 registry/git 来源后再评估恢复 |
-| DOC-01 | Markdown 是生成权威 | 本轮建立 | 后续每个需求/修复必须同步规范、验收和本状态 |
-| DOC-02 | change-aware docs sync | 已实现 | verify-docs --diff-check:对 base...HEAD 范围检查,packages/workers src 或 evals 变更必须同时更新 hardening-v0.2-status.md,否则 CI 失败;已接入 CI unit-and-build job |
+| GOV-01 | 认证 Human Principal durable | 部分 | Decision 可持久化部分 principal 字段，但浏览器/Kernel 仍可接受未认证或伪造身份；需真实 Principal resolver、tenant/auth_method/session、角色能力和 fail-closed 验收 |
+| GOV-02 | Gate target freeze 与原子 Decision | 部分 | 局部 Gate/Contract 冻结存在；需五类 Gate、认证 Principal、target/Decision/Project/Outbox 同事务故障注入全部通过 |
+| API-01 | v2 + BFF AuthZ | 部分 | 已有局部 v2、membership 和 binary/SSE 代理；缺完整 `/bff/research`、角色能力、CSRF、service identity，缺 Principal 时可绕过 membership |
+| EVID-01 | accepted Evidence only from 受控 Worker/Verifier | 部分 | public schema 对 verified 有局部限制，Claim 读取 verified；但 verified 路由无 Worker service identity，缺 verified→accepted 转换，draft body 仍带 accepted status，Claim 未限定 accepted |
+| STAT-01 | 单一正式分析实现 | 部分 | paired analysis 基础存在；formal metrics identity、minimum_n、lower-is-better、固定 10,000 resamples、canonical output 和 Analysis→accepted Evidence 链未完整验收 |
+| RUN-01 | 正式 Docker/快照/fencing/Manifest | 部分 | secure kind 拒部分 subprocess、存在 generation/token 和可选签名；缺 approved Contract/version、严格 token fencing、Run attempt、必签 Manifest、同项目 data refs |
+| RUN-02 | 固定容器安全基线 | 已实现未验收 | Docker flags 基本具备；镜像仍允许 `node:22-alpine`、`texlive/texlive:latest`，未强制 images.lock digest，CI 仍可因脚本 SKIP 产生假绿 |
+| TERM-01 | 实时有序可恢复 Terminal | 部分 | SSE/seq/gap/reconnect/ANSI/界面已存在；缺完整日志 Artifact 下载、cwd、cancel/timeout 权威展示、严格 lease token/Run/AuthZ；DOM 渲染可无界增长，上传错误会被吞 |
+| TEX-01 | TeX workspace/editor/version | 部分 | 文件树、编辑器、CAS 保存和冲突基础存在；新建文件 `expected_version:0` 被后端拒绝，dirty 判断可能丢失清空编辑，缺 typed assets/move/history/窄屏布局 |
+| TEX-02 | latex-compile/诊断/PDF | 部分 | 容器编译、轮询、PDF/诊断基础存在；缺实时 Build Terminal、file:line:column 定位、freshness、build history，镜像可变且 engine/bibliography/max_passes/idempotency 未完整绑定 |
+| UI-01 | standalone-only 单一浏览器 UI | 已实现未验收 | 根嵌入面和旧 bridge 已删除；需当前提交的 clean package、真实 404、无 host/slot/dshClient 负向 CI 证据 |
+| UI-02 | 全页面 zh/en i18n | 部分 | locale adapter、10 个 namespace 和 key parity 存在；状态 pill、header、tooltip、aria、modal/空态仍有英文硬编码，静态 tabs/pipeline 不随 locale 完整更新，缺 approvals namespace/缺 key warning |
+| UI-03 | standalone locale/theme adapter | 部分 | locale/theme 本地持久化基础存在；首屏可能闪英文、invalid-token 仍英文、Reset preferences 与 locale 语义未完整验收 |
+| UI-04 | browser client strict typecheck/模块边界 | 部分 | UI 包声明 client typecheck，但根 CI 未调用；`client/index.ts` 超过 8,000 行，违反 7,000 行上限与目标页面边界 |
+| ART-01 | binary/SSE 真流式 | 部分 | binary round-trip 基础通过；SSE 真实 body、replay、撤权、背压和跨项目 AuthZ 未由端到端测试覆盖 |
+| ART-02 | media type/Range/hash | 已实现未验收 | media type、ETag/Range 基础存在；需 project-scoped v2/BFF、hash 重验和当前 CI 证据 |
+| STORE-01 | 显式迁移与 schema parity | 部分 | 有 migration ledger 与后续迁移；当前 schema/version/table 与规范 v2 DDL、runs/outbox/dead-letter/Principal/AuthZ 仍不一致 |
+| STORE-02 | durable CodeSnapshot | 部分 | archive/manifest/CAS 记录存在；v1 仍接受宿主绝对路径、泄露 root/source，缺文件数/单文件/总量上限与数据快照模型 |
+| EVENT-01 | 事务 Outbox | 部分 | events 基础存在；缺 canonical event_seq/version/aggregate/request/attempt/dead-letter envelope 与完整消费者恢复 |
+| DSH-01 | DSH Agent tools/commands/lifecycle | 部分 | tools/commands/subagents/Skills 已挂载；全局 `toolContextRef`、无 Agent ID ACL 放行、register disposer 丢失、canonical 工具名和 `/research` 子命令不齐 |
+| SIDE-01 | sidecar identity/ownership | 部分 | 可启动和停止自有 sidecar；只凭 health/端口复用，缺 endpoint.json、port=0 实际端口、protocol/schema/database/dataDir/config 身份校验 |
+| SKILL-01 | Skills 安装发现与确定性选择 | 部分 | 四个 Skill 文件存在；domain/venue 未按 Brief 确定性选择，宿主 clean install/source-prepared hash 未在 DSH fixture 验收 |
+| PACK-01 | clean remote install | 部分 | 可打包基础存在；根构建依赖外部 `../test-lzszq` 和本地 DSH SDK，clean host/registry 安装未验收 |
+| SELFMOD-01 | dev-only Cordis self tools | 部分 | production 静态否定和显式 overlay 基础存在；inspect/mount/unmount、冲突/HMR/shutdown、shared/headless/unattended guard 未在隔离 DSH fixture 验收 |
+| SEC-UI-01 | standalone token/Origin/CSRF/AuthZ | 部分 | token/loopback/Origin 有自动化基础；无 CSRF token、日志 secret 扫描、真实 Principal fail-closed、survey membership 与撤权 SSE 验收 |
+| REL-01 | 自包含 Release Bundle + clean-room | 部分 | hash 清单和 verify 脚本基础存在；当前 release 专项测试失败，clean-room 复用 checkout/CAS/外部 binary，不是 bundle-only，也未比较完整 analysis/PDF/provenance |
+| CI-01 | 完整阻断 CI | 部分 | packages/workers、部分 security/Docker/Golden/TeX job 已配置；缺 root plugin/full typecheck/UI i18n-a11y/DSH fixture/release 专项，多个脚本 SKIP exit 0 |
+| DOC-01 | Markdown 是生成权威 | 部分 | 文档集与 docs-first 规则存在；hardening/USAGE 曾自相矛盾，需要本次校准后的持续语义检查 |
+| DOC-02 | change-aware docs sync | 部分 | `--diff-check` 仅检查 packages/workers src 和 eval shell 是否触达本 ledger；遗漏根 src/configs/migrations/tests/规范/acceptance/USAGE，缺 base ref 时 fail-open |
 
-## 3. 当前代码中的具体不一致
+## 4. 2026-08-09 审阅证据
 
-- createProject 对 ResearchBrief parse 后仍可能保存 raw brief，默认值一致性需修；
-- approveContract 不是 Gate decision 的原子内置步骤；
-- Decision Schema 有 principal，存储和 listDecisions 丢失；
-- cancelJob 未统一发 job.updated；
-- computeAnalysis 可能重复发 artifact.registered；
-- verifyClaim 的注释要求 verified，实际读取全部 Evidence；
-- public evidence route 可声明 verified；
-- lower-is-better 的 Claim 语义未在 Kernel 简单验证中完整实现；
-- UI Job detail 先请求不存在的 /v1/jobs?job_id=... 再做昂贵 fallback；
-- standalone auth、旧 `/research-*` 404、binary/SSE 仍缺自动化真实 HTTP contract test；本轮仅完成手工 smoke；
-- standalone BFF 仍只有 `/v1` bearer/Origin，尚无 v2 Principal、Project AuthZ 和 CSRF token 注入；
-- sidecar 的 port=0 没有 endpoint handshake；配置示例已撤掉 0 的可用承诺，但目标能力仍未实现；
-- Agent/standalone sidecar 只凭端口 health 复用实例，没有核对 dataDir/database identity，存在跨实例误复用风险；
-- Agent Kernel token 已从 argv/日志移到显式清理父级污染后的子进程环境，最终目标仍是 0600 token file 或匿名通道；
-- research-ui `tsc` 不覆盖 browser client；已修两个可达 settings 作用域错误，但其余严格类型错误仍未清零；
-- survey connector 与 Kernel 4xx/5xx 已改成稳定 code/通用消息，其他外部错误响应仍需自动化泄露扫描；
-- UI package 已加发布 files allowlist，verifier 已禁止 source/ignored `host`，仍需 clean/升级工作树 pack 测试；
-- 当前 hardening shell 脚本头部宣称的部分 case 没有真正执行对应断言；
-- CI 已接入 standalone packages、standalone unit 和 docs verifier；根 plugin build/full DSH security unit 等待 clean host fixture，Docker/TeX/Golden 等 job 仍需在 GitHub 实跑后才能宣称通过；
-- CI/评测 README 的历史通过数量需每次重新验证。
+审阅快照：`main@7adc722`，当时与 `origin/main` 一致且工作区干净。
 
-## 4. 新增需求的落地状态
+| 检查 | 结果 | 解释 |
+|---|---|---|
+| `node scripts/verify-docs.mjs` | 通过，16 documents | 仅证明结构、链接、片段和删除面静态检查，不证明规范语义或实现验收 |
+| `node scripts/verify-docs.mjs --diff-check definitely_missing_ref` | 错误地退出 0 | base ref 不存在时吞掉 git 错误，DOC-02 fail-open |
+| `bash tests/security/run-standalone-http-tests.sh` | 43/43 | 证明局部 token/Origin/binary/404/membership；SSE 只验 status，未证明 frame/replay/撤权，未覆盖 CSRF token |
+| `bash tests/security/run-all-v2-blocking-tests.sh` | 汇总 7 个 PASS | lower-is-better 实际 SKIP exit 0，被聚合器计为 PASS；不能作为零 SKIP 验收 |
+| `bash tests/security/run-release-bundle-tests.sh` | 0 passed, 2 failed | analysis 阶段退出，未产生 `BUNDLE_DIR`；REL-01 当前阻断 |
+| UI typecheck/full test | 本轮未完整重跑 | 当前审阅 shell 无 `pnpm`；不得继承旧 Playwright/计数为当前证据 |
 
-### 实时终端
+## 5. 后续执行硬顺序
 
-已写入 product、domain、HTTP、execution、UI、storage、security、acceptance 和 repository 规范。当前代码未实现，P0 顺序为 Schema/DB frames → Runner chunk callback → internal batch write → SSE/BFF → Terminal UI → recovery/security tests。
+以下不是建议顺序，而是关闭状态的依赖顺序。前一批的阻断场景未通过时，不得把后一批宣称为完成或发布就绪：
 
-### TeX 编辑和编译结果
+1. **P0 Governance**：Principal、tenant、membership/role AuthZ、Human Gate、CSRF、service identity；
+2. **P0 Formal execution**：approved Contract、immutable snapshot/data、fixed image digest、strict lease/Run/Manifest、MetricsFile；
+3. **P0 Evidence/Release**：verified→accepted、Claim only accepted、Analysis provenance、bundle-only clean-room；
+4. **P1 Product surfaces**：Terminal 完整日志/cancel、TeX Build Terminal/diagnostics/freshness、全页面 i18n；
+5. **P1 DSH/package**：实例闭包/disposer、sidecar handshake、canonical tools/commands、Skill 选择、clean install、自修改隔离验收；
+6. **P1 CI/docs**：零 SKIP、root/full/browser/DSH/release jobs、diff base fail-closed、文档语义一致；
+7. **Final validation**：当前提交运行全部阻断命令、Golden Path、100 次 recovery、bundle-only clean-room，并绑定机器可读证据。
 
-已定义 TexDocument、FileRevision、Snapshot、Build、Diagnostic、latex-compile Job、三栏 Workbench 和 PDF freshness。当前只有字符串 LaTeX 和 eval 脚本，需按 repository-blueprint.md 生成模块。
+任一 P0 为“未实现/部分/已实现未验收”，产品只能保持 Security Alpha，不得用于无人值守正式研究或公开发布。
 
-### i18n
+## 6. 文档与状态更新规则
 
-已定义 zh/en、standalone locale adapter、资源完整性、fallback、Intl 和 UI 测试。当前没有 locale 模块，需先拆分巨型 client，再迁移全部 chrome；动态研究内容保持原文。
+每个实现或修复变更必须在同一变更集内：
 
-### 删除 DSH 浏览器嵌入模式
+1. 更新负责行为的规范；
+2. 更新 `acceptance-tests.md` 的自动化场景；
+3. 更新本矩阵的“当前阻断与关闭条件”，不能只改状态词；
+4. 若用户操作变化，更新 `USAGE_GUIDE.md`；
+5. 记录当前 commit/CI/报告证据，或明确写“未验收”；
+6. CI 阻断 job 零 SKIP；本地允许的显式 skip 不计入 PASS；
+7. README、USAGE、acceptance、repository blueprint 与本文件有矛盾时，合并与完成声明均阻断。
 
-规范已改为 standalone-only UI。代码已删除根 `client-panel`、`/research-api` bridge、UI Cordis host/`/research-ui-api` bridge、两个 `dshClient` manifest 面与嵌入 patch。DSH 仍保留 Agent tools、commands、subagents、Skills、Session 和 dev-only Cordis selfmod。standalone server 是唯一浏览器入口。
-
-### Cordis self-referential 开发模式
-
-生产配置仍默认关闭。新增 configs/research-dev-selfmod.cordis.yml 后，开发者可在隔离 DSH_HOME 显式启用 cordis_inspect/mount/unmount。该 VM 不是安全边界，不进入 unattended 或生产。
-
-### 文档内化与 subagent
-
-docs/README.md 与 repository-blueprint.md 已把文档同步和积极 subagent 并行写为工程 DoD。
-
-## 5. 推荐实现批次
-
-1. P0 Governance：Principal/AuthZ/BFF、Decision migration、Evidence provenance；
-2. P0 Execution observation：Terminal Schema/DB/Runner/SSE/UI；
-3. P0 Manuscript：TeX workspace/save/compile/diagnostics/PDF；
-4. P0 UI foundation：拆分 standalone client、实现 i18n/locale/theme adapter；
-5. P1 Storage/API：显式 migrations、v2、media type、binary fix；
-6. P1 Skills/package：runtime assets、domain/venue selection、clean install；
-7. P1 Full validation：security/recovery/Golden/clean-room 与文档校准。
-
-## 6. 状态更新规则
-
-每个实现变更必须修改本文件对应行：未实现、部分、基本具备、已验收。只有 acceptance-tests.md 的阻断场景在当前提交和 CI 环境通过，才能标“已验收”。不得使用旧日期的手工计数代替证据。
+只有对应 acceptance 场景在当前提交和目标 CI 环境全部通过，状态才能从“部分”进入“已实现未验收”，再进入“已验收”。修复代码但未补规范、验收或状态，视为未完成。

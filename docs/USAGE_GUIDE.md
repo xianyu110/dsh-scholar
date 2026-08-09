@@ -1,6 +1,6 @@
 # DSH Scholar 使用指南
 
-> 目标版本 2.2。浏览器 UI 仅支持 standalone。当前仓库尚未实现实时 Terminal、完整 TeX Workbench 和 i18n；实际差距见 hardening-v0.2-status.md。
+> 目标版本 2.2。浏览器 UI 仅支持 standalone。当前仓库已有实时 Terminal、TeX Workbench 和 zh/en locale adapter 的可运行骨架，但三者均为“部分”，不能按目标 v2 能力或正式科研安全边界使用；实际阻断与证据以 hardening-v0.2-status.md 为准。
 
 ## 1. 启动
 
@@ -42,7 +42,7 @@ PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预
 
 ## 5. 运行实验与查看终端
 
-> 目标 v2 行为；当前仓库只能在 Run 完成后从日志 Artifact 查看输出。
+> 当前已有 Terminal SSE、seq/gap/reconnect、stdout/stderr 筛选和安全 ANSI 文本渲染。仍缺完整日志 Artifact 下载、严格 Job/Run/lease AuthZ、cwd、cancel/timeout 权威展示和有界 DOM；以下列表含目标 v2 行为，未关闭项不能视为已验收。
 
 ~~~text
 /research run formal {"contract_id":"...","code_snapshot_id":"..."}
@@ -60,6 +60,8 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 终端内容是原始执行数据，不随页面语言翻译。
 
+当前“Download log”只导出浏览器保留窗口，不等同于完整日志 Artifact；长日志和取消/超时结果必须回到 Runs/Artifact 核对。正式使用前必须等待 TERM-01 标为“已验收”。
+
 ## 6. Evidence 与 Claim
 
 普通用户或 Agent 可以创建 draft note，但不能创建 accepted Evidence。Analysis Worker 根据合同、匹配 Seed 和 metrics file 生成 Evidence；Evidence 页面显示 provenance、effect、CI、n 和方向。
@@ -68,7 +70,7 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 ## 7. TeX Manuscript Workbench
 
-> 目标 v2 行为；当前仓库只生成一次性 LaTeX 字符串/Artifact，没有文件树、编辑器和产品化编译面板。
+> 当前已有 TeX 文件树、textarea 编辑、expected_version 保存、构建轮询、诊断列表和 PDF embed。仍缺实时 Build Terminal、诊断跳转、PDF freshness、完整 history/move/assets；新建文件和清空非空文件的 dirty 判断存在已知阻断缺陷。以下步骤描述目标 v2，TEX-01/TEX-02 未“已验收”前不得把编辑或编译结果当成正式稿件证据。
 
 ### 7.1 生成稿件
 
@@ -90,7 +92,7 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 ### 7.3 编译
 
-点击 Compile。系统先保存脏文件，冻结当前 manifest，然后创建 latex-compile Job。右侧 Build Terminal 实时显示 pdflatex/bibtex 多遍输出。
+目标行为是：点击 Compile 后先保存全部脏文件，冻结当前 manifest，再创建 latex-compile Job，并在右侧 Build Terminal 实时显示 pdflatex/bibtex 多遍输出。当前 UI 只轮询 build 状态，没有实时 Build Terminal；保存失败或 409 时必须人工确认没有创建构建 Job。
 
 Diagnostics 将错误整理为 file:line；点击可跳到编辑器。TeX 原始消息保持原文，按钮与诊断类别按页面 locale 翻译。成功后 Preview 显示 PDF。继续编辑源文件时旧 PDF 标记 Stale，直到下一次成功编译。
 
@@ -98,7 +100,7 @@ Diagnostics 将错误整理为 file:line；点击可跳到编辑器。TeX 原始
 
 ## 8. Review 与 Release
 
-> Review/Bundle 当前已有基础；与版本化 TeX Workbench、实时编译和 PDF freshness 的联动属于目标 v2。
+> Review/Bundle 当前只有基础清单和脚本。2026-08-09 审阅时 release-bundle 阻断测试为 0/2，clean-room 仍会复用 checkout/CAS/外部 binary，不是 bundle-only；不得据此声明可复现或进入 Release Gate。
 
 ~~~text
 /research review

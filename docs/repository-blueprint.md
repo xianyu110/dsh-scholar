@@ -141,6 +141,8 @@ Kernel 不依赖 DSH、UI、Runner 或 Connector。browser client 不导入 Node
 
 build 先 schemas/cas，再 kernel/client/connectors/evidence/manuscript，后 workers/plugin/UI，最后 bundle/skill verification。禁止依赖未跟踪 lib 产物运行测试。
 
+`test:security`、`test:docker`、`test:ui` 和 `test:all` 的聚合器必须区分 PASS/FAIL/SKIP。`CI=true` 时任何 SKIP、缺失依赖、断言数为 0 或子脚本未执行都必须使聚合器非零退出；只有本地非 CI 环境可以显式 `--allow-skip`，且结果不得计入 PASS 或 hardening 验收证据。
+
 ## 6. 生成顺序
 
 1. 建立 schemas 与错误 code；
@@ -202,4 +204,9 @@ configs/research-dev-selfmod.cordis.yml 只插入 @deepseek-ai/dsh-tool-cordis�
 - zh/en 资源完整，无 UI 硬编码；
 - Terminal、TeX、PDF、binary proxy 和 SSE 在 standalone 模式完整验收；
 - 根插件无 browser export/dshClient/HTTP bridge，UI 包无 Cordis host/patch；
-- docs/README.md 的所有文档链接和规范条目可达。
+- docs/README.md 的所有文档链接和规范条目可达；
+- hardening 状态没有未实现、部分或已实现未验收的 P0/P1；每个已验收条目绑定当前 commit、CI job 和 acceptance 报告；
+- CI 所有 blocking jobs `skip_count=0`、实际断言数大于 0，缺 Docker/TeX/DSH fixture/git base 必须 fail closed；
+- `verify-docs --diff-check` 使用已 fetch 的精确 base SHA，base 不可达时非零失败；
+- README、USAGE、hardening、acceptance 与源码对当前能力无矛盾；
+- Release Bundle 在删除 checkout/旧 DB/CAS、断网的空目录中只依赖 Bundle 与声明的固定 runtime 完成重跑、分析和 PDF 重建。
