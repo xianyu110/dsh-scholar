@@ -9,10 +9,14 @@
 #
 # Test path (real API, no mocks):
 #   1. register an approved contract with metrics.direction=lower_is_better
-#   2. ingest WORKER-VERIFIED evidence (POST /evidence/verified) with
-#      effect_size < 0 and CI < 0 (the improvement direction)
-#   3. verify the claim -> must be 'supported'
-#   4. control: evidence with default higher_is_better + negative effect
+#   2. ingest WORKER-VERIFIED evidence (POST /evidence/verified with
+#      x-service-principal: analysis-worker) with effect_size < 0 and CI < 0
+#      (the improvement direction)
+#   3. accept the evidence (POST /evidence/{id}/accept with
+#      x-service-principal: verifier + request_id) — §6: only accepted
+#      evidence may support a claim
+#   4. verify the claim -> must be 'supported'
+#   5. control: evidence with default higher_is_better + negative effect
 #      -> 'contradicted' (sign interpretation preserved for the default)
 #
 # Usage: bash tests/security/run-lower-is-better-tests.sh
@@ -70,11 +74,21 @@ CT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_lib","
 api -X POST "$BASE/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"lib-eval"}' > /dev/null
 ok "contract $CT registered + frozen with direction=lower_is_better"
 
+# §6: accept revalidates Analysis Artifacts -> register a REAL kind=analysis
+# artifact and reference it from every accepted evidence row.
+ART=$(api -X POST "$BASE/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\"analysis\",\"content_base64\":\"$(printf '{"loss":0.71}' | base64 -w0)\",\"metadata\":{\"metric\":\"loss\"}}" | jfield '.artifact_id')
+[[ "$ART" == sha256:* ]] || { bad "analysis artifact registration: '$ART'"; exit 1; }
+ok "analysis artifact $ART registered (accept revalidation target)"
+
 # Evidence: loss dropped from 0.83 to 0.71 -> effect_size NEGATIVE, CI < 0
 # (an improvement under lower-is-better semantics). Ingested via the
-# Analysis-Worker internal path so the claim can be supported (EVID-01).
-E1=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5,"direction":"lower_is_better"}}' | jfield '.evidence_id')
+# Analysis-Worker internal path (x-service-principal: analysis-worker) and
+# then ACCEPTED by the verifier (§6: only accepted evidence supports claims).
+E1=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -H 'x-service-principal: analysis-worker' -d '{"source_type":"analysis","run_ids":[],"artifact_refs":["'"$ART"'"],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5,"direction":"lower_is_better"}}' | jfield '.evidence_id')
 [[ "$E1" == evidence_* ]] || { bad "verified evidence id '$E1'"; exit 1; }
+A1=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/$E1/accept" -H 'x-service-principal: verifier' -d '{"request_id":"req-lib-1"}' | jfield '.provenance_status')
+[[ "$A1" == "accepted" ]] || { bad "evidence $E1 accept failed (provenance='$A1')"; exit 1; }
+ok "evidence $E1 verified -> accepted (provenance=$A1)"
 C1=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"The treatment reduces loss (lower is better)","scope":{"dataset":"d1","split":"test"}}' | jfield '.claim_id')
 S1=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C1\",\"evidence_ids\":[\"$E1\"]}" | jfield '.status')
 if [[ "$S1" == "supported" ]]; then
@@ -84,7 +98,10 @@ else
 fi
 
 say "Test (control): higher_is_better default with negative effect -> contradicted"
-E2=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5}}' | jfield '.evidence_id')
+E2=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -H 'x-service-principal: analysis-worker' -d '{"source_type":"analysis","run_ids":[],"artifact_refs":["'"$ART"'"],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5}}' | jfield '.evidence_id')
+[[ "$E2" == evidence_* ]] || { bad "verified evidence id '$E2'"; exit 1; }
+A2=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/$E2/accept" -H 'x-service-principal: verifier' -d '{"request_id":"req-lib-2"}' | jfield '.provenance_status')
+[[ "$A2" == "accepted" ]] || { bad "evidence $E2 accept failed (provenance='$A2')"; exit 1; }
 C2=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"Treatment effect (default higher-is-better direction)","scope":{"dataset":"d1","split":"test"}}' | jfield '.claim_id')
 S2=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C2\",\"evidence_ids\":[\"$E2\"]}" | jfield '.status')
 if [[ "$S2" == "contradicted" ]]; then

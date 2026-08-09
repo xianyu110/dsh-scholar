@@ -188,9 +188,9 @@ const evidenceSchema = z.object({
   analysis_method: z.string().min(1),
   result: z.record(z.unknown()),
   uncertainty: z.string().optional(),
-  // v2 §13.1: agent-facing write defaults to draft_unverified; 'verified' is
-  // the Analysis-Worker internal path (ingestVerifiedEvidence) and is REJECTED
-  // on the public route (hardening EVID-01).
+  // v2 §13.1 / §6: agent-facing write defaults to draft_unverified; 'verified'
+  // and 'accepted' are internal states (Analysis-Worker / Verifier-Auditor
+  // accept) and are REJECTED on the public route (hardening EVID-01).
   provenance_status: z.enum(['draft_unverified', 'legacy_unverified']).optional(),
 })
 
@@ -530,11 +530,39 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               return
             }
             // Analysis-Worker internal path (v2 §13.1): verified provenance is
-            // only reachable here; the public route rejects it (EVID-01).
+            // only reachable here with the Analysis-Worker service identity;
+            // the public route rejects it (EVID-01). A missing/mismatched
+            // x-service-principal is a 403 — the public cannot masquerade.
             if (method === 'POST' && sub === 'evidence' && subId === 'verified') {
+              const servicePrincipal = typeof req.headers['x-service-principal'] === 'string' ? req.headers['x-service-principal'] : ''
+              if (servicePrincipal !== 'analysis-worker') {
+                send(res, 403, { error: errorEnvelope('service_identity_required', 'verified evidence ingestion requires x-service-principal: analysis-worker') })
+                return
+              }
               const input = evidenceSchema.parse(body)
               const item = kernel.ingestVerifiedEvidence({ ...input, project_id: id } as never)
               send(res, 201, item)
+              return
+            }
+            // §6 Verifier/Auditor internal accept route:
+            // POST /v1/projects/{id}/evidence/{eid}/accept — transitions
+            // verified → accepted (provenance state machine) after full
+            // revalidation; only service principals 'verifier'/'auditor' may
+            // accept. request_id defaults to the x-request-id header.
+            if (method === 'POST' && sub === 'evidence' && subId !== undefined && subId !== 'verified' && url.pathname.endsWith('/accept')) {
+              const servicePrincipal = typeof req.headers['x-service-principal'] === 'string' ? req.headers['x-service-principal'] : ''
+              if (servicePrincipal !== 'verifier' && servicePrincipal !== 'auditor') {
+                send(res, 403, { error: errorEnvelope('service_identity_required', 'evidence accept requires x-service-principal: verifier|auditor') })
+                return
+              }
+              const input = z.object({ request_id: z.string().optional() }).parse(body)
+              const item = kernel.acceptEvidence({
+                project_id: id,
+                evidence_id: subId,
+                service_principal: servicePrincipal,
+                request_id: input.request_id ?? currentRequestId,
+              })
+              ok(res, item)
               return
             }
           }

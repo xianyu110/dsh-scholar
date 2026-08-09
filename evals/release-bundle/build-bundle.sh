@@ -14,7 +14,9 @@
 #
 # Output layout (DSH_Scholar_v2.0.md §14.4):
 #   release-bundle/
-#   ├── manifest.json          bundle_schema_version=2 + artifact hash map
+#   ├── manifest.json          bundle_schema_version=2 + artifact hash map +
+#                              runtime section (node/kernel/runner digests,
+#                              pinned images.lock digests, §12 clean-room)
 #   ├── manuscript/            paper.md + references.bib + figures/ + paper artifacts
 #   ├── source/                code artifacts + kernel bundle manifest
 #   ├── environment/           system-info.json
@@ -262,8 +264,37 @@ manifests and analysis artifacts.
 - Rerun: ./reproduce.sh (clean-room, §14.5); verify: ./verify.sh
 EOF
 
+echo "== runtime declaration (bundle-only clean-room, acceptance-tests.md §12) =="
+# The runtime section pins the exact node/kernel/runner/image identities the
+# bundle was built with. kernel_bin/runner_bin are sha256 of the binaries the
+# assembler ran with (KERNEL_BIN/RUNNER_BIN env when set, else the repo
+# defaults — the same binaries run-release-eval.sh hands to reproduce.sh), so
+# the clean-room rerun can refuse any OTHER binary (acceptance-tests.md line
+# 191: "仅允许 Bundle 文件及其中声明的固定 runtime/image digest"). The image
+# entries MUST equal configs/runner-profiles/images.lock.json (mirrors the
+# kernel's images-lock fallback when the file is unreadable).
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RT_KERNEL_BIN="${KERNEL_BIN:-}"
+if [ -z "$RT_KERNEL_BIN" ] && [ -f "$REPO_ROOT/packages/research-kernel/lib/bin/kernel.js" ]; then
+  RT_KERNEL_BIN="$REPO_ROOT/packages/research-kernel/lib/bin/kernel.js"
+fi
+RT_RUNNER_BIN="${RUNNER_BIN:-}"
+if [ -z "$RT_RUNNER_BIN" ] && [ -f "$REPO_ROOT/workers/runner-gateway/lib/bin/runner.js" ]; then
+  RT_RUNNER_BIN="$REPO_ROOT/workers/runner-gateway/lib/bin/runner.js"
+fi
+RT_KERNEL_SHA=""
+if [ -n "$RT_KERNEL_BIN" ] && [ -f "$RT_KERNEL_BIN" ]; then
+  RT_KERNEL_SHA=$(sha256sum "$RT_KERNEL_BIN" | awk '{print $1}')
+fi
+RT_RUNNER_SHA=""
+if [ -n "$RT_RUNNER_BIN" ] && [ -f "$RT_RUNNER_BIN" ]; then
+  RT_RUNNER_SHA=$(sha256sum "$RT_RUNNER_BIN" | awk '{print $1}')
+fi
+IMAGES_LOCK="$REPO_ROOT/configs/runner-profiles/images.lock.json"
+echo "  kernel_bin sha256=${RT_KERNEL_SHA:-null} runner_bin sha256=${RT_RUNNER_SHA:-null} images.lock=$IMAGES_LOCK"
+
 echo "== manifest.json (generator) =="
-OUT="$OUT" TMPD="$TMP" AN_BODY="$AN_BODY" node - <<'DHSH_NODE'
+OUT="$OUT" TMPD="$TMP" AN_BODY="$AN_BODY" RT_KERNEL_SHA="$RT_KERNEL_SHA" RT_RUNNER_SHA="$RT_RUNNER_SHA" IMAGES_LOCK="$IMAGES_LOCK" node - <<'DHSH_NODE'
 const fs = require('fs')
 const out = process.env.OUT
 const tmp = process.env.TMPD
@@ -282,6 +313,28 @@ const artifacts = {}
 for (const [id, rel, sha, kind, size, normalized] of filesRows) {
   artifacts[id] = { path: rel, sha256: sha, kind, size_bytes: Number(size), normalized: normalized === 'true' }
 }
+// §12 bundle-only clean-room: declared fixed runtime + image digests. The
+// rerun (reproduce.sh) refuses any binary/image that is not exactly this.
+let images = { node_fixture: null, texlive: null }
+try {
+  const lock = JSON.parse(fs.readFileSync(process.env.IMAGES_LOCK, 'utf8'))
+  images = {
+    node_fixture: typeof lock.node_fixture === 'string' ? lock.node_fixture : null,
+    texlive: typeof lock.texlive === 'string' ? lock.texlive : null,
+  }
+} catch { /* lock unreadable: images stay null — reproduce.sh fails closed */ }
+if (images.node_fixture === null || images.texlive === null) {
+  // Kernel-side fallback (packages/research-kernel/src/images-lock.ts) — the
+  // pinned entries are the only ones ever honored; never caller-supplied.
+  if (images.node_fixture === null) images.node_fixture = 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32'
+  if (images.texlive === null) images.texlive = 'texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4'
+}
+const runtime = {
+  node: process.version,
+  kernel_bin: process.env.RT_KERNEL_SHA || null,
+  runner_bin: process.env.RT_RUNNER_SHA || null,
+  images,
+}
 const manifest = {
   bundle_id: rb.bundle_id,
   bundle_schema_version: 2,
@@ -296,6 +349,7 @@ const manifest = {
   analysis_request: analysis !== null ? JSON.parse(process.env.AN_BODY || '{}') : null,
   manuscript,
   environment: JSON.parse(fs.readFileSync(`${out}/environment/system-info.json`, 'utf8')),
+  runtime,
   release_gate: 'unapproved',
   created_at: new Date().toISOString(),
   builder: {

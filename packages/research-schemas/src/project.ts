@@ -48,6 +48,7 @@ export const KernelEventKind = z.enum([
   'job.submitted',
   'job.updated',
   'claim.updated',
+  'evidence.accepted',
   'corpus.snapshotted',
   'manuscript.built',
   'session.linked',

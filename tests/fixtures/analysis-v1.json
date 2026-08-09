@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "_comment": "Golden vector for @dsh-scholar/analysis-worker computePairedAnalysis — docs/acceptance-tests.md §6 (\"paired bootstrap 输入相同输出字节一致\") and docs/reconstruction-contracts.md §12 (\"golden vector 存 tests/fixtures/analysis-v1.json\"). Generated ONCE by a throwaway script (node /tmp/gen-analysis-v1-golden.mjs) that imported the built worker; do not hand-edit. canonical_output is the exact byte sequence of JSON.stringify(result) — tests compare against it byte-for-byte.",
+  "rng_rule": "mulberry32 PRNG seeded with FNV-1a 32-bit over the plan identity string contract_id\\u0000metric.name\\u0000baseline_run_set_id\\u0000treatment_run_set_id (UTF-16 code units, stable across processes/platforms). The stream draws method.resamples bootstrap resamples of the n_pairs per-seed differences (with replacement); the 95% CI is the 2.5/97.5 percentiles (numpy-default linear interpolation) of the sorted bootstrap means; the two-sided p-value is (1 + count(|boot| >= |observed|)) / (resamples + 1), Holm-adjusted (identity for one comparison). Output JSON key order is the PairedAnalysisResult interface declaration order; numbers are IEEE-754 doubles serialized with JSON.stringify (shortest round-trip).",
+  "generation": {
+    "script": "node /tmp/gen-analysis-v1-golden.mjs (one-off, not committed)",
+    "module": "workers/analysis-worker/lib/index.js (built from src/index.ts)",
+    "engine": "v24.18.1",
+    "input_summary": "metric m1 higher_is_better, paired_by seed, baseline 3 runs + treatment 3 runs at seeds 11/23/47, method.resamples 1000, minimum_n 1, multiple_testing holm; additional case m2 lower_is_better with the same runs."
+  },
+  "input": {
+    "plan": {
+      "analysis_plan_id": "analysis_plan_golden_001",
+      "contract_id": "expc_golden_001",
+      "metric": {
+        "name": "m1",
+        "direction": "higher_is_better",
+        "aggregation": "mean",
+        "unit": "ratio"
+      },
+      "paired_by": "seed",
+      "baseline_run_set_id": "runset_baseline_golden",
+      "treatment_run_set_id": "runset_treatment_golden",
+      "method": {
+        "estimator": "paired_mean_difference",
+        "interval": "bootstrap_95",
+        "resamples": 1000
+      },
+      "multiple_testing": "holm",
+      "minimum_n": 1
+    },
+    "baseline_runs": [
+      {
+        "run_id": "run_baseline_seed_11",
+        "seed": 11,
+        "metric_value": 0.81
+      },
+      {
+        "run_id": "run_baseline_seed_23",
+        "seed": 23,
+        "metric_value": 0.78
+      },
+      {
+        "run_id": "run_baseline_seed_47",
+        "seed": 47,
+        "metric_value": 0.79
+      }
+    ],
+    "treatment_runs": [
+      {
+        "run_id": "run_treatment_seed_11",
+        "seed": 11,
+        "metric_value": 0.87
+      },
+      {
+        "run_id": "run_treatment_seed_23",
+        "seed": 23,
+        "metric_value": 0.82
+      },
+      {
+        "run_id": "run_treatment_seed_47",
+        "seed": 47,
+        "metric_value": 0.84
+      }
+    ]
+  },
+  "output": {
+    "result": {
+      "metric": "m1",
+      "direction": "higher_is_better",
+      "baseline_mean": 0.7933333333333333,
+      "treatment_mean": 0.8433333333333333,
+      "paired_mean_difference": 0.04999999999999993,
+      "effect_size": 0.04999999999999993,
+      "ci_low": 0.039999999999999925,
+      "ci_high": 0.05999999999999994,
+      "n_pairs": 3,
+      "adjusted_p_value": 0.6483516483516484,
+      "direction_ok": true
+    }
+  },
+  "canonical_output": "{\"metric\":\"m1\",\"direction\":\"higher_is_better\",\"baseline_mean\":0.7933333333333333,\"treatment_mean\":0.8433333333333333,\"paired_mean_difference\":0.04999999999999993,\"effect_size\":0.04999999999999993,\"ci_low\":0.039999999999999925,\"ci_high\":0.05999999999999994,\"n_pairs\":3,\"adjusted_p_value\":0.6483516483516484,\"direction_ok\":true}",
+  "additional_cases": [
+    {
+      "label": "m2 lower_is_better (same runs; direction_ok=false expected)",
+      "input": {
+        "plan": {
+          "analysis_plan_id": "analysis_plan_golden_002",
+          "contract_id": "expc_golden_001",
+          "metric": {
+            "name": "m2",
+            "direction": "lower_is_better",
+            "aggregation": "mean",
+            "unit": "ratio"
+          },
+          "paired_by": "seed",
+          "baseline_run_set_id": "runset_baseline_golden",
+          "treatment_run_set_id": "runset_treatment_golden",
+          "method": {
+            "estimator": "paired_mean_difference",
+            "interval": "bootstrap_95",
+            "resamples": 1000
+          },
+          "multiple_testing": "holm",
+          "minimum_n": 1
+        },
+        "baseline_runs": [
+          {
+            "run_id": "run_baseline_seed_11",
+            "seed": 11,
+            "metric_value": 0.81
+          },
+          {
+            "run_id": "run_baseline_seed_23",
+            "seed": 23,
+            "metric_value": 0.78
+          },
+          {
+            "run_id": "run_baseline_seed_47",
+            "seed": 47,
+            "metric_value": 0.79
+          }
+        ],
+        "treatment_runs": [
+          {
+            "run_id": "run_treatment_seed_11",
+            "seed": 11,
+            "metric_value": 0.87
+          },
+          {
+            "run_id": "run_treatment_seed_23",
+            "seed": 23,
+            "metric_value": 0.82
+          },
+          {
+            "run_id": "run_treatment_seed_47",
+            "seed": 47,
+            "metric_value": 0.84
+          }
+        ]
+      },
+      "output": {
+        "result": {
+          "metric": "m2",
+          "direction": "lower_is_better",
+          "baseline_mean": 0.7933333333333333,
+          "treatment_mean": 0.8433333333333333,
+          "paired_mean_difference": 0.04999999999999993,
+          "effect_size": 0.04999999999999993,
+          "ci_low": 0.04333333333333326,
+          "ci_high": 0.05999999999999994,
+          "n_pairs": 3,
+          "adjusted_p_value": 0.6403596403596403,
+          "direction_ok": false
+        }
+      },
+      "canonical_output": "{\"metric\":\"m2\",\"direction\":\"lower_is_better\",\"baseline_mean\":0.7933333333333333,\"treatment_mean\":0.8433333333333333,\"paired_mean_difference\":0.04999999999999993,\"effect_size\":0.04999999999999993,\"ci_low\":0.04333333333333326,\"ci_high\":0.05999999999999994,\"n_pairs\":3,\"adjusted_p_value\":0.6403596403596403,\"direction_ok\":false}"
+    }
+  ]
+}

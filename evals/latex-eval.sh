@@ -13,8 +13,9 @@
 #   2. throwaway kernel (mkdtemp DB/CAS, random port);
 #   3. project + minimal ledger: 1 analysis artifact (kind='analysis'),
 #      1 contract, 1 corpus snapshot with 1 paper (BibTeX source), 1 claim +
-#      1 verified evidence (provenance_status:'verified'), claim verified
-#      to 'supported' (abstract then carries the claim text);
+#      1 verified evidence (provenance_status:'verified') accepted by the
+#      verifier (provenance_status:'accepted'), claim verified to 'supported'
+#      (abstract then carries the claim text);
 #   4. POST /v1/projects/{id}/manuscripts/build {format:'latex',
 #      include_limitations:true} -> text (LaTeX source) + bibtex;
 #   5. assemble paper.tex + refs.bib: the builder emits \cite{...} keys in
@@ -108,8 +109,11 @@ CONTRACT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d "{\"idea_id\":\"$I
 SNAP=$(api -X POST "$BASE/v1/projects/$PROJ/corpus" -d "{\"queries\":[{\"source\":\"openalex\",\"query\":\"temporal action localization\",\"run_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}],\"papers\":[{\"paper_id\":\"doi:10.1000/example1\",\"title\":\"Temporal Action Localization: A Survey\",\"authors\":[\"A. Author\"],\"year\":2021,\"venue\":\"TPAMI\",\"source\":\"openalex\",\"identifiers\":{\"doi\":\"10.1000/example1\"},\"abstract\":\"Survey.\",\"retrieved_at\":\"2026-08-06T12:00:00Z\"}]}" | jfield '.snapshot_id')
 [[ -n "$SNAP" ]] && ok "corpus snapshot $SNAP (1 paper for BibTeX)" || bad "corpus snapshot failed"
 
-EVID=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d "{\"source_type\":\"run\",\"run_ids\":[\"run_a_seed_11\",\"run_a_seed_23\",\"run_a_seed_47\"],\"artifact_refs\":[\"$ART\"],\"analysis_method\":\"bootstrap_95_mean_difference\",\"result\":{\"primary_metric\":\"mAP@0.5\",\"value\":61.2,\"baseline_value\":58.4,\"effect_size\":2.8,\"ci_low\":1.1,\"ci_high\":4.5,\"n_seeds\":3}" | jfield '.evidence_id')
+EVID=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -H 'x-service-principal: analysis-worker' -d "{\"source_type\":\"analysis\",\"run_ids\":[],\"artifact_refs\":[\"$ART\"],\"analysis_method\":\"bootstrap_95_mean_difference\",\"result\":{\"primary_metric\":\"mAP@0.5\",\"value\":61.2,\"baseline_value\":58.4,\"effect_size\":2.8,\"ci_low\":1.1,\"ci_high\":4.5,\"n_seeds\":3}" | jfield '.evidence_id')
 [[ -n "$EVID" ]] && ok "verified evidence $EVID (provenance_status='verified')" || bad "evidence ingestion failed"
+# §6: Verifier accept transition (verified -> accepted) before Claim support.
+ACCP=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/$EVID/accept" -H 'x-service-principal: verifier' -d '{"request_id":"latex-accept-1"}' | jfield '.provenance_status')
+[[ "$ACCP" == "accepted" ]] && ok "evidence $EVID accepted by verifier (provenance_status='$ACCP')" || bad "evidence accept failed (provenance='$ACCP')"
 
 CLAIM=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"Method A improves mAP@0.5 over Baseline B on THUMOS14","scope":{"dataset":"thumos14_v2","split":"official_test"}}' | jfield '.claim_id')
 CSTATUS=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$CLAIM\",\"evidence_ids\":[\"$EVID\"],\"reason\":\"bootstrap CI excludes zero\"}" | jfield '.status')

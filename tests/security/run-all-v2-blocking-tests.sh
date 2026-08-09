@@ -13,6 +13,8 @@
 #   run-fencing-tests.sh        heartbeat/terminal/complete lease fencing (409 lease_stale)
 #   run-hardening-tests.sh      host-execution/fake-experiment defenses + durable cancel
 #   run-release-bundle-tests.sh release-bundle self-containment + clean-room rerun
+#   run-analysis-consistency-tests.sh analysis repeat byte-determinism + artifact/
+#                               chart/manuscript number consistency (§6, real docker runs)
 #   run-gate-tests.sh           agent-cannot-decide-gate (kernel-level part)
 #
 # Usage: bash tests/security/run-all-v2-blocking-tests.sh
@@ -28,6 +30,7 @@ SCRIPTS=(
   run-fencing-tests.sh
   run-hardening-tests.sh
   run-release-bundle-tests.sh
+  run-analysis-consistency-tests.sh
   run-gate-tests.sh
   run-unicode-tests.sh
   run-lower-is-better-tests.sh

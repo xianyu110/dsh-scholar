@@ -445,26 +445,52 @@ describe('§11.2 recovery & concurrency cases', () => {
 })
 
 describe('claims and evidence', () => {
-  it('verifyClaim marks supported when CIs exclude zero', () => {
+  /** Register a real analysis artifact + ingest worker-verified evidence that
+   * can pass accept revalidation (run_ids empty => no job checks; artifact
+   * refs must be real, same-project artifacts). */
+  function verifiedEvidence(kernel: ResearchKernel, projectId: string, result: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+    const artifact = kernel.registerArtifact({
+      project_id: projectId,
+      kind: 'analysis',
+      content: JSON.stringify({ analysis: result }),
+      metadata: { kind: 'analysis' },
+    })
+    const item = kernel.ingestVerifiedEvidence({
+      project_id: projectId, source_type: 'analysis', run_ids: [], artifact_refs: [artifact.artifact_id],
+      analysis_method: 'bootstrap_95', result: result as never, ...overrides,
+    })
+    return { artifact, item }
+  }
+
+  it('verifyClaim: verified-but-not-accepted evidence is inconclusive; accepted evidence is supported when CIs exclude zero', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const item = kernel.ingestVerifiedEvidence({
-      project_id: project.project_id, source_type: 'run', run_ids: ['r1'], artifact_refs: ['sha256:' + 'b'.repeat(64)],
-      analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
+    const { item } = verifiedEvidence(kernel, project.project_id, {
+      primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
     })
     const claim = kernel.createClaim({ project_id: project.project_id, statement: 'A improves B' })
+    // §6: verified alone (no Verifier/Auditor accept) must NOT support a claim.
+    const before = kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [item.evidence_id] })
+    expect(before.status).toBe('inconclusive')
+    // After accept -> supported (positive effect + CI excluding zero).
+    const accepted = kernel.acceptEvidence({
+      project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'req_accept_1',
+    })
+    expect(accepted.provenance_status).toBe('accepted')
     const verified = kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [item.evidence_id] })
     expect(verified.status).toBe('supported')
     expect(verified.history.at(-1)?.status).toBe('supported')
     kernel.close()
   })
 
-  it('verifyClaim marks contradicted on negative effects', () => {
+  it('verifyClaim marks contradicted on negative effects (accepted evidence)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const item = kernel.ingestVerifiedEvidence({
-      project_id: project.project_id, source_type: 'run', run_ids: ['r1'], artifact_refs: [],
-      analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.7, baseline_value: 0.8, effect_size: -0.1, ci_low: -0.18, ci_high: -0.02, n_seeds: 5 },
+    const { item } = verifiedEvidence(kernel, project.project_id, {
+      primary_metric: 'f1', value: 0.7, baseline_value: 0.8, effect_size: -0.1, ci_low: -0.18, ci_high: -0.02, n_seeds: 5,
+    })
+    kernel.acceptEvidence({
+      project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'auditor', request_id: 'req_accept_2',
     })
     const claim = kernel.createClaim({ project_id: project.project_id, statement: 'A improves B' })
     expect(kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [item.evidence_id] }).status).toBe('contradicted')
@@ -477,6 +503,132 @@ describe('claims and evidence', () => {
     const claim = kernel.createClaim({ project_id: project.project_id, statement: 'x' })
     expect(() => kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: ['nope'] })).toThrow(/no resolvable evidence/)
     kernel.close()
+  })
+
+  it('acceptEvidence requires a non-empty service principal (403)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const { item } = verifiedEvidence(kernel, project.project_id, {
+      primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
+    })
+    expectKernelError(
+      () => kernel.acceptEvidence({ project_id: project.project_id, evidence_id: item.evidence_id, service_principal: '', request_id: 'r' }),
+      403, 'service_identity_required')
+    kernel.close()
+  })
+
+  it('acceptEvidence rejects draft evidence with 409 provenance_not_verified', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ a: 1 }) })
+    const draft = kernel.ingestEvidence({
+      project_id: project.project_id, source_type: 'analysis', run_ids: [], artifact_refs: [artifact.artifact_id],
+      analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
+      provenance_status: 'draft_unverified',
+    })
+    expectKernelError(
+      () => kernel.acceptEvidence({ project_id: project.project_id, evidence_id: draft.evidence_id, service_principal: 'verifier', request_id: 'r' }),
+      409, 'provenance_not_verified')
+    kernel.close()
+  })
+
+  it('acceptEvidence rejects cross-project accept with 422 evidence_foreign', () => {
+    const kernel = freshKernel()
+    const a = kernel.createProject({ name: 'a', workspace: '/a', brief: makeBrief() })
+    const b = kernel.createProject({ name: 'b', workspace: '/b', brief: makeBrief() })
+    const { item } = verifiedEvidence(kernel, a.project_id, {
+      primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
+    })
+    expectKernelError(
+      () => kernel.acceptEvidence({ project_id: b.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'r' }),
+      422, 'evidence_foreign')
+    // Unknown id in a project with no such evidence -> 404.
+    expectKernelError(
+      () => kernel.acceptEvidence({ project_id: b.project_id, evidence_id: 'evidence_nope_000000', service_principal: 'verifier', request_id: 'r' }),
+      404, 'evidence_not_found')
+    kernel.close()
+  })
+
+  it('acceptEvidence revalidates run_ids against succeeded project jobs (422 when a run is unknown)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ a: 1 }) })
+    const item = kernel.ingestVerifiedEvidence({
+      project_id: project.project_id, source_type: 'run', run_ids: ['job_does_not_exist'], artifact_refs: [artifact.artifact_id],
+      analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
+    })
+    expectKernelError(
+      () => kernel.acceptEvidence({ project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'r' }),
+      422, 'evidence_revalidation_failed')
+    kernel.close()
+  })
+
+  it('acceptEvidence revalidates artifact_refs against the project CAS (422 on missing artifact)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const item = kernel.ingestVerifiedEvidence({
+      project_id: project.project_id, source_type: 'analysis', run_ids: [], artifact_refs: ['sha256:' + 'f'.repeat(64)],
+      analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
+    })
+    expectKernelError(
+      () => kernel.acceptEvidence({ project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'r' }),
+      422, 'evidence_revalidation_failed')
+    kernel.close()
+  })
+
+  it('acceptEvidence records provenance=accepted + acceptance block and emits evidence.accepted to the outbox', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const { item } = verifiedEvidence(kernel, project.project_id, {
+      primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
+    })
+    const accepted = kernel.acceptEvidence({
+      project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'req_demo_42',
+    })
+    expect(accepted.provenance_status).toBe('accepted')
+    expect(accepted.acceptance.accepted_by).toBe('verifier')
+    expect(accepted.acceptance.request_id).toBe('req_demo_42')
+    expect(typeof accepted.acceptance.accepted_at).toBe('string')
+    // Persisted body carries the acceptance block (re-read through listEvidence).
+    const reread = kernel.listEvidence(project.project_id).find(e => e.evidence_id === item.evidence_id)
+    expect((reread as { provenance_status?: string }).provenance_status).toBe('accepted')
+    expect((reread as { acceptance?: { request_id?: string } }).acceptance?.request_id).toBe('req_demo_42')
+    // Outbox event (reference pattern: filter listEvents by kind).
+    const events = kernel.listEvents(project.project_id).filter(e => e.kind === 'evidence.accepted')
+    expect(events).toHaveLength(1)
+    expect(events[0]?.payload.evidence_id).toBe(item.evidence_id)
+    expect(events[0]?.payload.accepted_by).toBe('verifier')
+    expect(events[0]?.payload.request_id).toBe('req_demo_42')
+    // listAcceptedEvidence surfaces it; listVerifiedEvidence no longer does.
+    expect(kernel.listAcceptedEvidence(project.project_id).map(e => e.evidence_id)).toContain(item.evidence_id)
+    expect(kernel.listVerifiedEvidence(project.project_id)).toHaveLength(0)
+    kernel.close()
+  })
+
+  it('public evidence route rejects a forged provenance_status=accepted body with 422 validation_error', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const body = {
+        source_type: 'analysis', run_ids: [], artifact_refs: [],
+        analysis_method: 'bootstrap_95',
+        result: { primary_metric: 'f1', value: 0.9, effect_size: 0.3, ci_low: 0.1, ci_high: 0.5, n_seeds: 5 },
+        provenance_status: 'accepted',
+      }
+      const res = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      })
+      expect(res.status).toBe(422)
+      const envelope = await res.json() as { error?: { code?: string } }
+      expect(envelope.error?.code).toBe('validation_error')
+      // The forged row must not exist.
+      expect(kernel.listEvidence(project.project_id)).toHaveLength(0)
+    } finally {
+      server.close()
+      kernel.close()
+    }
   })
 })
 
@@ -502,8 +654,12 @@ describe('corpus + ideas + manuscript', () => {
 
     const analysis = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ f1: 0.9 }) })
     const item = kernel.ingestVerifiedEvidence({
-      project_id: project.project_id, source_type: 'run', run_ids: ['r1', 'r2'], artifact_refs: [analysis.artifact_id],
+      project_id: project.project_id, source_type: 'run', run_ids: [], artifact_refs: [analysis.artifact_id],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 2 },
+    })
+    // §6: verified -> accepted (Verifier/Auditor) before the claim can be supported.
+    kernel.acceptEvidence({
+      project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'req_manuscript',
     })
     const claim = kernel.createClaim({ project_id: project.project_id, statement: 'A improves B', scope: { dataset: 'd', split: 'test' } })
     kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [item.evidence_id], analysis_artifact: analysis.artifact_id })

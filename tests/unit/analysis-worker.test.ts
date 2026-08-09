@@ -6,6 +6,7 @@
  * this repository; run `pnpm --filter @dsh-scholar/analysis-worker run build`
  * before `pnpm test`.
  */
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   computePairedAnalysis,
@@ -15,6 +16,7 @@ import {
   validateMetricSpec,
   validateRunSet,
   type AnalysisPlan,
+  type PairedAnalysisResult,
   type PerRunMetric,
 } from '../../workers/analysis-worker/lib/index.js'
 
@@ -237,5 +239,151 @@ describe('holmAdjust', () => {
   it('applies the Holm step-down adjustment', () => {
     expect(holmAdjust([0.01, 0.04])).toEqual([0.02, 0.02])
     expect(holmAdjust([0.04, 0.01])).toEqual([0.02, 0.02])
+  })
+})
+
+// ── §6 / §12 determinism + golden vector ─────────────────────────────────────
+
+interface GoldenFixture {
+  schema_version: number
+  input: { plan: AnalysisPlan; baseline_runs: PerRunMetric[]; treatment_runs: PerRunMetric[] }
+  output: { result: PairedAnalysisResult }
+  canonical_output: string
+  additional_cases?: Array<{
+    label: string
+    input: { plan: AnalysisPlan; baseline_runs: PerRunMetric[]; treatment_runs: PerRunMetric[] }
+    output: { result: PairedAnalysisResult }
+    canonical_output: string
+  }>
+}
+
+/**
+ * Loads the committed golden vector (docs/reconstruction-contracts.md §12:
+ * "golden vector 存 tests/fixtures/analysis-v1.json"). Path is resolved
+ * relative to this test file so the suite runs from any cwd.
+ */
+function loadGoldenFixture(): GoldenFixture {
+  const url = new URL('../fixtures/analysis-v1.json', import.meta.url)
+  return JSON.parse(readFileSync(url, 'utf8')) as GoldenFixture
+}
+
+describe('computePairedAnalysis — §6 byte determinism & §12 golden vector', () => {
+  const fixture = loadGoldenFixture()
+
+  it('identical input twice → JSON.stringify output byte-identical', () => {
+    const { plan, baseline_runs: baseline, treatment_runs: treatment } = fixture.input
+    const first = computePairedAnalysis(plan, baseline, treatment)
+    const second = computePairedAnalysis(plan, baseline, treatment)
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second))
+    expect(JSON.stringify(first)).toBe(JSON.stringify(first))
+  })
+
+  it('matches the committed golden vector canonical_output byte-for-byte (§12)', () => {
+    const { plan, baseline_runs: baseline, treatment_runs: treatment } = fixture.input
+    const result = computePairedAnalysis(plan, baseline, treatment)
+    expect(JSON.stringify(result)).toBe(fixture.canonical_output)
+    // every result field is present and in the interface-declared key order
+    expect(Object.keys(result)).toEqual([
+      'metric',
+      'direction',
+      'baseline_mean',
+      'treatment_mean',
+      'paired_mean_difference',
+      'effect_size',
+      'ci_low',
+      'ci_high',
+      'n_pairs',
+      'adjusted_p_value',
+      'direction_ok',
+    ])
+    expect(result).toEqual(fixture.output.result)
+  })
+
+  it('matches the golden vector additional case (m2 lower_is_better) byte-for-byte', () => {
+    const extra = fixture.additional_cases?.[0]
+    expect(extra).toBeDefined()
+    const result = computePairedAnalysis(extra!.input.plan, extra!.input.baseline_runs, extra!.input.treatment_runs)
+    expect(JSON.stringify(result)).toBe(extra!.canonical_output)
+    expect(result.direction).toBe('lower_is_better')
+    expect(result.direction_ok).toBe(false) // positive effect is bad for lower_is_better
+  })
+
+  it('run array order does not change the output bytes (canonicalized by seed)', () => {
+    const { plan, baseline_runs: baseline, treatment_runs: treatment } = fixture.input
+    const canonical = computePairedAnalysis(plan, baseline, treatment)
+    const reversedBaseline = computePairedAnalysis(plan, [...baseline].reverse(), treatment)
+    const reversedTreatment = computePairedAnalysis(plan, baseline, [...treatment].reverse())
+    const reversedBoth = computePairedAnalysis(plan, [...baseline].reverse(), [...treatment].reverse())
+    expect(JSON.stringify(reversedBaseline)).toBe(JSON.stringify(canonical))
+    expect(JSON.stringify(reversedTreatment)).toBe(JSON.stringify(canonical))
+    expect(JSON.stringify(reversedBoth)).toBe(JSON.stringify(canonical))
+  })
+
+  it('run_id assignment order does not change the output bytes (pairing is by seed)', () => {
+    const { plan, baseline_runs: baseline, treatment_runs: treatment } = fixture.input
+    const canonical = computePairedAnalysis(plan, baseline, treatment)
+    // same seeds/values, ids permuted across the array
+    const permutedBaseline = [baseline[2]!, baseline[0]!, baseline[1]!]
+    const permutedTreatment = [treatment[1]!, treatment[2]!, treatment[0]!]
+    expect(JSON.stringify(computePairedAnalysis(plan, permutedBaseline, permutedTreatment))).toBe(
+      JSON.stringify(canonical),
+    )
+  })
+
+  it('differs when the plan identity differs (RNG seed is plan-derived)', () => {
+    const { plan, baseline_runs: baseline, treatment_runs: treatment } = fixture.input
+    const otherContract = computePairedAnalysis({ ...plan, contract_id: 'expc_other_contract' }, baseline, treatment)
+    const otherMetric = computePairedAnalysis(
+      { ...plan, metric: { ...plan.metric, name: 'other_metric' } },
+      baseline,
+      treatment,
+    )
+    expect(JSON.stringify(otherContract)).not.toBe(fixture.canonical_output)
+    expect(JSON.stringify(otherMetric)).not.toBe(fixture.canonical_output)
+  })
+})
+
+describe('computePairedAnalysis — §12 rejection of non-finite / missing / duplicate seeds', () => {
+  const plan = makePlan({ minimum_n: 1 })
+
+  it('rejects NaN metric_value in baseline runs', () => {
+    const baseline = [run('b1', 1, Number.NaN), run('b2', 2, 20)]
+    const treatment = [run('t1', 1, 15), run('t2', 2, 23)]
+    expect(() => computePairedAnalysis(plan, baseline, treatment)).toThrow(/finite number/)
+  })
+
+  it('rejects Infinity metric_value in treatment runs', () => {
+    const baseline = [run('b1', 1, 10), run('b2', 2, 20)]
+    const treatment = [run('t1', 1, Number.POSITIVE_INFINITY), run('t2', 2, 23)]
+    expect(() => computePairedAnalysis(plan, baseline, treatment)).toThrow(/finite number/)
+  })
+
+  it('rejects -Infinity metric_value in baseline runs', () => {
+    const baseline = [run('b1', 1, Number.NEGATIVE_INFINITY), run('b2', 2, 20)]
+    const treatment = [run('t1', 1, 15), run('t2', 2, 23)]
+    expect(() => computePairedAnalysis(plan, baseline, treatment)).toThrow(/finite number/)
+  })
+
+  it('rejects a run entry without a seed', () => {
+    const baseline = [{ run_id: 'b1', metric_value: 10 }, run('b2', 2, 20)]
+    const treatment = [run('t1', 1, 15), run('t2', 2, 23)]
+    expect(() => computePairedAnalysis(plan, baseline as PerRunMetric[], treatment)).toThrow(/seed/)
+  })
+
+  it('rejects an empty-string seed', () => {
+    const baseline = [{ run_id: 'b1', seed: '', metric_value: 10 }, run('b2', 2, 20)]
+    const treatment = [run('t1', 1, 15), run('t2', 2, 23)]
+    expect(() => computePairedAnalysis(plan, baseline as PerRunMetric[], treatment)).toThrow(/seed/)
+  })
+
+  it('rejects duplicate seeds within one side (seeds_unique invariant)', () => {
+    const baseline = [run('b1', 1, 10), run('b1dup', 1, 99), run('b2', 2, 20)]
+    const treatment = [run('t1', 1, 15), run('t2', 2, 23)]
+    expect(() => computePairedAnalysis(plan, baseline, treatment)).toThrow(/duplicate seed/)
+  })
+
+  it('rejects non-finite method.resamples in the plan', () => {
+    expect(() => computePairedAnalysis({ ...plan, method: { ...plan.method, resamples: Number.NaN } }, baselineFive(), treatmentFive())).toThrow(/resamples/)
+    expect(() => computePairedAnalysis({ ...plan, method: { ...plan.method, resamples: Number.POSITIVE_INFINITY } }, baselineFive(), treatmentFive())).toThrow(/resamples/)
   })
 })

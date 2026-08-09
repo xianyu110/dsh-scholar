@@ -154,17 +154,21 @@ for _ in $(seq 1 150); do
 done
 [[ "$N" == "3" ]] && ok "3/3 正式作业成功(seed 11/23/47 真实执行)" || bad "formal 完成 $N/3"
 
-# ── 9. 统计 → 可信 Evidence → Claim 验证 ─────────────────────────────────
-say "9. 确定性分析 → verified Evidence → Claim"
+# ── 9. 统计 → verified Evidence → accept(Verifier)→ Claim 验证 ────────────
+say "9. 确定性分析 → verified Evidence → accepted → Claim"
 ANA=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/analysis" -d '{"metric":"macro_f1"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(JSON.stringify({artifact:a.artifact_id,mean:a.mean,effect:a.effect_size,ci:[a.ci_low,a.ci_high]}))})")
 EV=$(printf '%s' "$ANA" | node -e "
 let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{
   const a=JSON.parse(d);
   const body={source_type:'analysis',run_ids:['formal:demo:11','formal:demo:23','formal:demo:47'],artifact_refs:[a.artifact],analysis_method:'bootstrap_95_mean_difference',result:{primary_metric:'macro_f1',value:a.mean,baseline_value:0.6,effect_size:a.effect,ci_low:a.ci[0],ci_high:a.ci[1],n_seeds:3}};
   try {
-    const r=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/verified',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/verified',{method:'POST',headers:{'content-type':'application/json','x-service-principal':'analysis-worker'},body:JSON.stringify(body)});
     const j=await r.json();
-    console.log(j.evidence_id||'');
+    if(!j.evidence_id){console.log('');return;}
+    // §6: Verifier accept transition (verified -> accepted) before Claim support.
+    const a2=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/'+j.evidence_id+'/accept',{method:'POST',headers:{'content-type':'application/json','x-service-principal':'verifier'},body:JSON.stringify({request_id:'demo-accept-1'})});
+    const aj=await a2.json();
+    console.log(aj.evidence_id||'');
   } catch(e) { console.log(''); }
 })" "$KPORT" "$PROJ")
 CL=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/claims" -d '{"statement":"Treatment A improves macro_f1 over baseline on the fixture dataset","scope":{"dataset":"fixture_v1","split":"official"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).claim_id))")

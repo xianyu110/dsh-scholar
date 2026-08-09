@@ -1912,13 +1912,17 @@ export class ResearchKernel {
     result: EvidenceItem['result']
     uncertainty?: string
     /** v2 §13.1: agent-written notes are draft_unverified; verified is
-     * reserved for the Analysis Worker internal path (ingestVerifiedEvidence). */
-    provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified'
+     * reserved for the Analysis Worker internal path (ingestVerifiedEvidence);
+     * accepted is written only by the internal Verifier/Auditor path
+     * (acceptEvidence) — never via the public HTTP route. */
+    provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified' | 'accepted'
   }): import('@dsh-scholar/research-schemas').EvidenceItem {
     this.getProject(input.project_id)
-    // Note: the PUBLIC HTTP route rejects 'verified' (evidenceSchema);
+    // Note: the PUBLIC HTTP route rejects 'verified'/'accepted' (evidenceSchema);
     // ingestVerifiedEvidence is the internal Analysis-Worker path that sets
-    // it here. Kernel-level callers are trusted internal surfaces.
+    // 'verified' here, and acceptEvidence is the internal Verifier/Auditor
+    // path that sets 'accepted'. Kernel-level callers are trusted internal
+    // surfaces.
     const item = {
       evidence_id: `evidence_${randomUUID().slice(0, 12)}`,
       project_id: input.project_id,
@@ -1946,12 +1950,136 @@ export class ResearchKernel {
     return this.ingestEvidence({ ...input, provenance_status: 'verified' })
   }
 
-  /** v2: only verified (Analysis-Worker) evidence may support a Claim. */
+  /**
+   * §6 (acceptance-tests.md): Verifier/Auditor accept transition of the
+   * provenance state machine draft_unverified → verified → accepted. Only
+   * `accepted` evidence may support a Claim; the transition re-validates the
+   * RunManifest, Contract, RunSet and Analysis Artifacts behind the evidence,
+   * records the service principal + request_id in the body, and emits
+   * `evidence.accepted` to the outbox.
+   */
+  acceptEvidence(input: {
+    project_id: string
+    evidence_id: string
+    service_principal: string
+    request_id: string
+  }): import('@dsh-scholar/research-schemas').EvidenceItem & {
+    provenance_status: string
+    acceptance: { accepted_by: string; accepted_at: string; request_id: string }
+  } {
+    // Service identity: only Verifier/Auditor service principals may accept.
+    if (typeof input.service_principal !== 'string' || input.service_principal === '') {
+      throw new KernelError(403, 'service_identity_required',
+        'accept requires a non-empty service principal (x-service-principal: verifier|auditor)')
+    }
+    const inProject = this.listEvidence(input.project_id).find(e => e.evidence_id === input.evidence_id)
+    if (inProject === undefined) {
+      // Distinguish 404 (unknown id) from 422 (exists in ANOTHER project).
+      const anywhere = this.db.prepare('SELECT body FROM evidence WHERE evidence_id = ?').get(input.evidence_id) as { body?: string } | undefined
+      if (anywhere?.body !== undefined) {
+        throw new KernelError(422, 'evidence_foreign',
+          `evidence ${input.evidence_id} belongs to another project (cross-project accept is rejected)`)
+      }
+      throw new KernelError(404, 'evidence_not_found', `evidence ${input.evidence_id} not found`)
+    }
+    if (inProject.project_id !== input.project_id) {
+      throw new KernelError(422, 'evidence_foreign',
+        `evidence ${input.evidence_id} belongs to project ${inProject.project_id}, not ${input.project_id}`)
+    }
+    const provenance = (inProject as { provenance_status?: string }).provenance_status
+    if (provenance !== 'verified') {
+      throw new KernelError(409, 'provenance_not_verified',
+        `evidence ${input.evidence_id} has provenance_status '${provenance ?? 'unknown'}'; only verified evidence may transition to accepted (verified → accepted)`)
+    }
+    // ── Revalidation (acceptance-tests.md §6) ──────────────────────────────
+    // RunManifest: every run_id must resolve to a same-project SUCCEEDED job
+    // with a run manifest, and the manifest must re-verify against the job.
+    const jobs = this.listJobs(input.project_id)
+    for (const runId of inProject.run_ids) {
+      const job = jobs.find(j =>
+        j.job_id === runId
+        || j.idempotency_key === runId
+        || (j.run_manifest !== null && typeof j.run_manifest.run_id === 'string' && j.run_manifest.run_id === runId),
+      )
+      if (job === undefined) {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: run_id ${runId} does not resolve to a job of project ${input.project_id}`)
+      }
+      if (job.status !== 'succeeded' || job.run_manifest === null) {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: run_id ${runId} resolves to job ${job.job_id} in status '${job.status}' without a run manifest`)
+      }
+      this.verifyRunManifest(job.run_manifest, job)
+      // Contract: the job's (or manifest's) contract must exist and be approved.
+      const contractId = job.contract_id ?? (typeof job.run_manifest.contract_id === 'string' ? job.run_manifest.contract_id : null)
+      if (contractId === null || contractId === '') {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: job ${job.job_id} (run ${runId}) has no bound contract`)
+      }
+      let contract: ExperimentContract
+      try {
+        contract = this.getContract(contractId)
+      } catch {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: contract ${contractId} of run ${runId} not found`)
+      }
+      if (contract.status !== 'approved') {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: contract ${contractId} of run ${runId} is '${contract.status}', not approved`)
+      }
+      // RunSet: the succeeded run must carry a metrics artifact.
+      if (typeof job.run_manifest.metrics_artifact !== 'string' || job.run_manifest.metrics_artifact === '') {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: run ${runId} has no metrics_artifact in its run manifest`)
+      }
+    }
+    // Analysis Artifact: non-empty artifact_refs, every ref registered in THIS project.
+    if (!Array.isArray(inProject.artifact_refs) || inProject.artifact_refs.length === 0) {
+      throw new KernelError(422, 'evidence_revalidation_failed',
+        'accept revalidation failed: evidence has no artifact_refs (an analysis artifact is required)')
+    }
+    for (const ref of inProject.artifact_refs) {
+      try {
+        this.getArtifact(input.project_id, ref)
+      } catch {
+        throw new KernelError(422, 'evidence_revalidation_failed',
+          `accept revalidation failed: artifact ref ${ref} is not registered in project ${input.project_id}`)
+      }
+    }
+    // ── Transition: record acceptance + flip provenance in the SAME body ──
+    const acceptance = {
+      accepted_by: input.service_principal,
+      accepted_at: nowIso(),
+      request_id: input.request_id,
+    }
+    const updated = { ...inProject, provenance_status: 'accepted', acceptance }
+    this.db.prepare("UPDATE evidence SET body = ?, provenance_status = 'accepted' WHERE evidence_id = ?")
+      .run(JSON.stringify(updated), input.evidence_id)
+    this.emit(input.project_id, 'evidence.accepted', {
+      evidence_id: input.evidence_id,
+      request_id: input.request_id,
+      accepted_by: input.service_principal,
+    })
+    return updated
+  }
+
+  /** v2 §13.1: only verified (Analysis-Worker) evidence is listed; kept for
+   * compatibility — claim support now requires `accepted` (see
+   * listAcceptedEvidence). */
   listVerifiedEvidence(projectId: string): Array<import('@dsh-scholar/research-schemas').EvidenceItem> {
     const rows = this.db.prepare(
       "SELECT * FROM evidence WHERE project_id = ? AND provenance_status = 'verified' ORDER BY created_at",
     ).all(projectId) as unknown as Array<{ body: string }>
     return rows.map(row => JSON.parse(row.body) as import('@dsh-scholar/research-schemas').EvidenceItem)
+  }
+
+  /** §6: only accepted (Verifier/Auditor-accepted) evidence may support a
+   * Claim; UI/tests use this to list claim-eligible evidence. */
+  listAcceptedEvidence(projectId: string): Array<import('@dsh-scholar/research-schemas').EvidenceItem & { provenance_status: string; acceptance?: { accepted_by: string; accepted_at: string; request_id: string } }> {
+    const rows = this.db.prepare(
+      "SELECT * FROM evidence WHERE project_id = ? AND provenance_status = 'accepted' ORDER BY created_at",
+    ).all(projectId) as unknown as Array<{ body: string }>
+    return rows.map(row => JSON.parse(row.body) as import('@dsh-scholar/research-schemas').EvidenceItem & { provenance_status: string })
   }
 
   listEvidence(projectId: string): import('@dsh-scholar/research-schemas').EvidenceItem[] {
@@ -1967,30 +2095,32 @@ export class ResearchKernel {
     reason?: string
   }): Claim {
     const current = this.getClaim(input.claim_id)
-    // hardening EVID-01: only WORKER-verified evidence may support a claim;
-    // draft notes and legacy rows are excluded from the verdict.
+    // hardening EVID-01 + §6: only ACCEPTED evidence (draft_unverified →
+    // verified → accepted, the last step by a Verifier/Auditor) may support a
+    // claim; draft notes, legacy rows and worker-verified-but-not-accepted
+    // rows are all excluded from the verdict.
     const resolved = input.evidence_ids
       .map(id => this.listEvidence(current.project_id).find(e => e.evidence_id === id))
       .filter((e): e is NonNullable<typeof e> => e !== undefined)
     if (resolved.length === 0) {
       throw new KernelError(422, 'no_evidence', `claim ${input.claim_id} has no resolvable evidence`)
     }
-    const evidence = resolved.filter(e => (e as { provenance_status?: string }).provenance_status === 'verified')
+    const evidence = resolved.filter(e => (e as { provenance_status?: string }).provenance_status === 'accepted')
     if (evidence.length === 0) {
-      // Resolvable but not worker-verified: the verdict is inconclusive with
-      // an explicit reason (no 422 — the ids exist, provenance is lacking).
+      // Resolvable but not accepted: the verdict is inconclusive with an
+      // explicit reason (no 422 — the ids exist, provenance is lacking).
       const update = this.db.prepare('UPDATE claims SET body = ?, updated_at = ? WHERE claim_id = ?')
       const currentBody = JSON.parse(JSON.stringify(current)) as Claim
       const inconclusive: Claim = {
         ...currentBody,
         status: 'inconclusive',
-        history: [...(currentBody.history ?? []), { status: 'inconclusive' as Claim['status'], at: nowIso(), reason: 'requires worker-verified evidence' }],
+        history: [...(currentBody.history ?? []), { status: 'inconclusive' as Claim['status'], at: nowIso(), reason: 'requires accepted evidence (verified → accepted by Verifier/Auditor)' }],
       }
       update.run(JSON.stringify(inconclusive), nowIso(), input.claim_id)
       return inconclusive
     }
     // v2 §13.5: deterministic strict rules. Default is inconclusive.
-    // supported requires: verified evidence, effect size present, CI present,
+    // supported requires: accepted evidence, effect size present, CI present,
     // n >= contract minimum (n_seeds or run count), CI excludes zero, and
     // effect direction consistent with the claim (no direction info -> at
     // most inconclusive).
@@ -2033,7 +2163,7 @@ export class ResearchKernel {
       evidence: { evidence_ids: input.evidence_ids, analysis_artifact: input.analysis_artifact ?? current.evidence.analysis_artifact },
       status,
       confidence: status === 'supported' ? 'high' : status === 'contradicted' ? 'high' : 'medium',
-      history: [...current.history, { status, at: nowIso(), reason: input.reason ?? `verified against ${evidence.length} evidence item(s)` }],
+      history: [...current.history, { status, at: nowIso(), reason: input.reason ?? `verified against ${evidence.length} accepted evidence item(s)` }],
       updated_at: nowIso(),
     }
     this.db.prepare('UPDATE claims SET body = ?, updated_at = ? WHERE claim_id = ?').run(JSON.stringify(next), next.updated_at, input.claim_id)
@@ -2415,7 +2545,9 @@ export class ResearchKernel {
     const evidence = this.listEvidence(projectId)
     const artifacts = this.listArtifacts(projectId)
     const checks: Array<{ check: string; status: 'pass' | 'warn' | 'fail'; detail: string }> = []
-    const unsupported = claims.filter(c => c.status === 'proposed' || c.status === 'inconclusive')
+    // §6: contradicted is NOT a positive conclusion — the reviewer must warn
+    // on proposed/inconclusive/contradicted claims alike.
+    const unsupported = claims.filter(c => c.status === 'proposed' || c.status === 'inconclusive' || c.status === 'contradicted')
     checks.push({
       check: 'claim-evidence binding',
       status: claims.length === 0 ? 'fail' : unsupported.length === 0 ? 'pass' : 'warn',

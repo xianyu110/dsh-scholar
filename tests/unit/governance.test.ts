@@ -92,13 +92,14 @@ describe('governance: gate target freeze (GOV-02)', () => {
 })
 
 describe('governance: evidence provenance (EVID-01)', () => {
-  it('claim verification ignores draft/legacy evidence and needs worker-verified rows', () => {
+  it('claim verification ignores draft/legacy/verified evidence and needs accepted rows (§6)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ f1: 0.9 }) })
     // Draft (public) evidence: must NOT support a claim.
     const draft = kernel.ingestEvidence({
-      project_id: project.project_id, source_type: 'analysis', run_ids: ['r1'],
-      artifact_refs: [], analysis_method: 'bootstrap_95',
+      project_id: project.project_id, source_type: 'analysis', run_ids: [],
+      artifact_refs: [artifact.artifact_id], analysis_method: 'bootstrap_95',
       result: { primary_metric: 'f1', value: 0.9, effect_size: 0.3, ci_low: 0.1, ci_high: 0.5, n_seeds: 3 },
       provenance_status: 'draft_unverified',
     })
@@ -108,40 +109,76 @@ describe('governance: evidence provenance (EVID-01)', () => {
       scope: { dataset: 'd', split: 'official' },
     })
     const verdictDraft = kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [draft.evidence_id] })
-    expect(verdictDraft.status).not.toBe('supported')
-    // Worker-verified evidence: supports the claim.
+    expect(verdictDraft.status).toBe('inconclusive')
+    // Worker-verified evidence alone (no Verifier/Auditor accept): STILL
+    // inconclusive — only accepted evidence may support a Claim (§6).
     const verified = kernel.ingestVerifiedEvidence({
-      project_id: project.project_id, source_type: 'analysis', run_ids: ['r1'],
-      artifact_refs: [], analysis_method: 'bootstrap_95',
+      project_id: project.project_id, source_type: 'analysis', run_ids: [],
+      artifact_refs: [artifact.artifact_id], analysis_method: 'bootstrap_95',
       result: { primary_metric: 'f1', value: 0.9, effect_size: 0.3, ci_low: 0.1, ci_high: 0.5, n_seeds: 3 },
     })
     const verdictVerified = kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [verified.evidence_id] })
-    expect(verdictVerified.status).toBe('supported')
+    expect(verdictVerified.status).toBe('inconclusive')
+    // After the Verifier/Auditor accept transition the claim is supported.
+    const accepted = kernel.acceptEvidence({
+      project_id: project.project_id, evidence_id: verified.evidence_id, service_principal: 'auditor', request_id: 'req_gov_1',
+    })
+    expect(accepted.provenance_status).toBe('accepted')
+    const verdictAccepted = kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: [verified.evidence_id] })
+    expect(verdictAccepted.status).toBe('supported')
     kernel.close()
   })
 
-  it('public HTTP route rejects verified; the worker route accepts it', async () => {
+  it('public HTTP route rejects verified/accepted; the worker route needs the analysis-worker service identity', async () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ f1: 0.9 }) })
     const { server, port } = await startKernelServer({ kernel, port: 0 })
     try {
       const body = {
-        source_type: 'analysis', run_ids: ['r1'], artifact_refs: [],
+        source_type: 'analysis', run_ids: [],
+        artifact_refs: [artifact.artifact_id],
         analysis_method: 'bootstrap_95',
         result: { primary_metric: 'f1', value: 0.9, effect_size: 0.3, ci_low: 0.1, ci_high: 0.5, n_seeds: 3 },
-        provenance_status: 'verified',
       }
-      const publicRes = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence`, {
+      // Forged provenance_status=verified on the public route -> 422.
+      const publicVerified = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, provenance_status: 'verified' }),
+      })
+      expect(publicVerified.status).toBe(422)
+      // Forged provenance_status=accepted on the public route -> 422.
+      const publicAccepted = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, provenance_status: 'accepted' }),
+      })
+      expect(publicAccepted.status).toBe(422)
+      // The worker route WITHOUT the service identity -> 403 (public cannot masquerade).
+      const noIdentity = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence/verified`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       })
-      expect(publicRes.status).toBe(422)
+      expect(noIdentity.status).toBe(403)
+      const noIdentityBody = await noIdentity.json() as { error?: { code?: string } }
+      expect(noIdentityBody.error?.code).toBe('service_identity_required')
+      // With x-service-principal: analysis-worker -> 201 verified.
       const workerRes = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence/verified`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...body, provenance_status: undefined }),
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-service-principal': 'analysis-worker' },
+        body: JSON.stringify(body),
       })
       expect(workerRes.status).toBe(201)
       const item = await workerRes.json() as { provenance_status?: string; evidence_id?: string }
       expect(item.provenance_status).toBe('verified')
+      // Accept without a service identity -> 403; with verifier -> 200 accepted.
+      const acceptNoIdentity = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence/${item.evidence_id}/accept`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: 'req_gov_2' }),
+      })
+      expect(acceptNoIdentity.status).toBe(403)
+      const acceptRes = await fetch(`http://127.0.0.1:${port}/v1/projects/${project.project_id}/evidence/${item.evidence_id}/accept`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-service-principal': 'verifier' },
+        body: JSON.stringify({ request_id: 'req_gov_2' }),
+      })
+      expect(acceptRes.status).toBe(200)
+      const accepted = await acceptRes.json() as { provenance_status?: string; acceptance?: { request_id?: string } }
+      expect(accepted.provenance_status).toBe('accepted')
+      expect(accepted.acceptance?.request_id).toBe('req_gov_2')
     } finally {
       server.close()
       kernel.close()
