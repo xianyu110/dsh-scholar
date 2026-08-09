@@ -20,8 +20,42 @@ export class TexError extends Error {
   }
 }
 
+/**
+ * File kind classification (reconstruction-contracts.md §11 TexFileKind).
+ * Text content lives inline (v1); binary assets are planned via the CAS.
+ */
+export type TexFileKind = 'tex' | 'bib' | 'sty' | 'cls' | 'image' | 'generated' | 'other'
+
+/** RFC 2046 media type derived from the file extension (tree/GET 'media'). */
+export function fileMediaType(path: string): string {
+  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
+  switch (ext) {
+    case 'tex': return 'text/x-tex'
+    case 'bib': return 'text/x-bibtex'
+    case 'sty': return 'text/x-tex'
+    case 'cls': return 'text/x-tex'
+    case 'png': case 'jpg': case 'jpeg': case 'gif': case 'pdf': case 'eps': case 'svg': return 'application/octet-stream'
+    default: return 'text/plain'
+  }
+}
+
+/** File kind derived from the extension (reconstruction-contracts.md §11). */
+export function fileKindOf(path: string): TexFileKind {
+  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
+  switch (ext) {
+    case 'tex': return 'tex'
+    case 'bib': return 'bib'
+    case 'sty': return 'sty'
+    case 'cls': return 'cls'
+    case 'png': case 'jpg': case 'jpeg': case 'gif': case 'pdf': case 'eps': case 'svg': return 'image'
+    default: return 'other'
+  }
+}
+
 export interface TexFileEntry {
   path: string
+  kind: TexFileKind
+  media: string
   version: number
   content_hash: string
   content?: string
@@ -175,19 +209,35 @@ export class TexWorkspaceStore {
       .all(documentId) as unknown as Array<{ path: string; version: number; content: string; content_hash: string; created_at: string }>
     return {
       document,
-      files: rows.map(r => ({ path: r.path, version: r.version, content_hash: r.content_hash, created_at: r.created_at })),
+      // tree/GET contract (acceptance-tests.md §7): each entry carries
+      // path/kind/media/version so the UI can classify and version files.
+      files: rows.map(r => ({
+        path: r.path,
+        kind: fileKindOf(r.path),
+        media: fileMediaType(r.path),
+        version: r.version,
+        content_hash: r.content_hash,
+        created_at: r.created_at,
+      })),
     }
   }
 
-  readFile(documentId: string, path: string): { path: string; version: number; content: string; content_hash: string } | null {
+  readFile(documentId: string, path: string): { path: string; kind: TexFileKind; media: string; version: number; content: string; content_hash: string } | null {
     const row = this.db.prepare('SELECT path, version, content, content_hash FROM tex_files WHERE document_id = ? AND path = ?')
       .get(documentId, normalizePath(path)) as { path: string; version: number; content: string; content_hash: string } | undefined
-    return row ?? null
+    if (row === null || row === undefined) return null
+    return { ...row, kind: fileKindOf(row.path), media: fileMediaType(row.path) }
   }
 
   /**
-   * CAS write: expected_version must match the stored version (or be
-   * undefined for create-if-absent). Conflict → TexError 409.
+   * CAS write. expected_version semantics (acceptance-tests.md §7):
+   *   - undefined  → unchecked write (create or overwrite);
+   *   - 0          → create-if-absent: the file must NOT exist yet (the UI
+   *     "new file" flow sends 0); missing → create at version 1, existing →
+   *     409 document_version_conflict (0 never equals a stored version >= 1);
+   *   - N > 0      → must match the stored version, else 409; missing file
+   *     with N > 0 is also a 409 (cannot write a nonexistent version).
+   * Conflict → TexError 409.
    */
   writeFile(documentId: string, path: string, content: string, expectedVersion?: number): { version: number; content_hash: string } {
     const clean = normalizePath(path)
@@ -215,6 +265,11 @@ export class TexWorkspaceStore {
     return { version: existing.version + 1, content_hash: hash }
   }
 
+  /**
+   * Delete requires the file to exist. expected_version semantics: undefined
+   * = unchecked delete; 0 = never matches a stored version (>= 1) → 409
+   * document_version_conflict ("reload before deleting"); N > 0 must match.
+   */
   deleteFile(documentId: string, path: string, expectedVersion?: number): void {
     const clean = normalizePath(path)
     const existing = this.db.prepare('SELECT version FROM tex_files WHERE document_id = ? AND path = ?')
@@ -227,6 +282,12 @@ export class TexWorkspaceStore {
     this.bumpRevision(documentId)
   }
 
+  /**
+   * Move = write the destination (create-if-absent, no expected version) plus
+   * delete the source. expected_version guards the SOURCE: undefined =
+   * unchecked; 0 = never matches a stored version (>= 1) → 409; N > 0 must
+   * match the source version.
+   */
   moveFile(documentId: string, fromPath: string, toPath: string, expectedVersion?: number): void {
     const from = normalizePath(fromPath)
     const to = normalizePath(toPath)

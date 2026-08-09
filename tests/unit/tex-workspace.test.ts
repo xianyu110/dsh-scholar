@@ -49,8 +49,88 @@ describe('tex workspace', () => {
     const tree = kernel.texTree(doc.document_id)
     expect(tree.files).toHaveLength(1)
     expect(tree.files[0]!.version).toBe(3)
+    // tree/GET contract (acceptance-tests.md §7): path/kind/media/version.
+    expect(tree.files[0]).toMatchObject({ path: 'paper.tex', kind: 'tex', media: 'text/x-tex', version: 3 })
     const read = kernel.texReadFile(doc.document_id, 'paper.tex')
     expect(read?.content).toBe('\\end{document}\n')
+    expect(read).toMatchObject({ path: 'paper.tex', kind: 'tex', media: 'text/x-tex', version: 3 })
+    kernel.close()
+  })
+
+  it('expected_version=0 is create-if-absent: creates at version 1, conflicts when the file exists', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    // Fresh path with expected_version=0 → created (version 1, no 422).
+    const created = kernel.texWriteFile(doc.document_id, 'sections/intro.tex', '\\section{Intro}\n', 0)
+    expect(created.version).toBe(1)
+    const createdBib = kernel.texWriteFile(doc.document_id, 'main.bib', '@misc{x}\n', 0)
+    expect(createdBib.version).toBe(1)
+    const tree = kernel.texTree(doc.document_id)
+    expect(tree.files.find(f => f.path === 'sections/intro.tex')).toMatchObject({
+      path: 'sections/intro.tex', kind: 'tex', media: 'text/x-tex', version: 1,
+    })
+    expect(tree.files.find(f => f.path === 'main.bib')).toMatchObject({
+      path: 'main.bib', kind: 'bib', media: 'text/x-bibtex', version: 1,
+    })
+    for (const f of tree.files) {
+      expect(f.path.startsWith('/')).toBe(false) // tree only holds root-relative paths
+      expect(f.path).not.toContain('..')
+      expect(f.version).toBeGreaterThanOrEqual(1)
+      expect(f.content_hash).toMatch(/^[0-9a-f]{64}$/)
+      expect(typeof f.kind).toBe('string')
+      expect(typeof f.media).toBe('string')
+    }
+    // Same path again with 0 → create-if-absent conflict (0 never matches a
+    // stored version >= 1).
+    try {
+      kernel.texWriteFile(doc.document_id, 'sections/intro.tex', 'x', 0)
+      throw new Error('expected TexError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(TexError)
+      expect((error as TexError).code).toBe('document_version_conflict')
+    }
+    // Existing paper.tex with expected_version=0 → conflict as well.
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n')
+    try {
+      kernel.texWriteFile(doc.document_id, 'paper.tex', 'x', 0)
+      throw new Error('expected TexError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(TexError)
+      expect((error as TexError).code).toBe('document_version_conflict')
+    }
+    kernel.close()
+  })
+
+  it('expected_version=0 on delete/move never matches a stored version (409)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    const w = kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n')
+    expect(w.version).toBe(1)
+    // Delete with 0 → conflict (must reload first).
+    try {
+      kernel.texDeleteFile(doc.document_id, 'paper.tex', 0)
+      throw new Error('expected TexError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(TexError)
+      expect((error as TexError).code).toBe('document_version_conflict')
+    }
+    // Move with 0 → conflict on the source version.
+    try {
+      kernel.texMoveFile(doc.document_id, 'paper.tex', 'renamed.tex', 0)
+      throw new Error('expected TexError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(TexError)
+      expect((error as TexError).code).toBe('document_version_conflict')
+    }
+    // The file is untouched by the conflicts.
+    expect(kernel.texReadFile(doc.document_id, 'paper.tex')?.version).toBe(1)
+    // Correct source version moves; unchecked delete removes.
+    kernel.texMoveFile(doc.document_id, 'paper.tex', 'renamed.tex', 1)
+    expect(kernel.texReadFile(doc.document_id, 'renamed.tex')?.version).toBe(1)
+    kernel.texDeleteFile(doc.document_id, 'renamed.tex')
+    expect(kernel.texTree(doc.document_id).files).toHaveLength(0)
     kernel.close()
   })
 

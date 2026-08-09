@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { ResearchKernel } from '@dsh-scholar/research-kernel'
+import { ResearchKernel, startKernelServer } from '@dsh-scholar/research-kernel'
 import {
   materializeTexWorkspace, parseLatexDiagnostics, buildLatexRunScript,
   type TexSnapshotManifest,
@@ -142,6 +142,85 @@ describe('latex-compile chain (TEX-02)', () => {
     expect(script).toContain('cp "$ROOT.pdf" "$OUT/paper.pdf"')
     expect(script).toContain('cp "$ROOT.log" "$OUT/tex.log"')
     expect(script).toContain('"$ROOT.aux"')
+  })
+
+  it('HTTP routes accept expected_version=0 as create-if-absent (acceptance-tests.md §7 ui-new-file)', async () => {
+    const kernel = freshKernel()
+    const { server, url } = await startKernelServer({ kernel, host: '127.0.0.1', port: 0 })
+    try {
+      // Project + TeX workspace.
+      const projResp = await fetch(`${url}/v1/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 't', workspace: '/w', brief: makeBrief() }),
+      })
+      expect(projResp.status).toBe(201)
+      const project = (await projResp.json()) as { project_id: string }
+      const docResp = await fetch(`${url}/v1/projects/${project.project_id}/manuscript-drafts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      })
+      expect(docResp.status).toBe(200)
+      const doc = (await docResp.json()) as { document_id: string }
+
+      // PUT with expected_version=0 on a fresh path: must NOT be 422 — the UI
+      // "new file" flow sends 0 (create-if-absent) and a positive-only schema
+      // would reject it.
+      const createResp = await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'sections/notes.tex', content: '\\section{Notes}\n', expected_version: 0 }),
+      })
+      expect(createResp.status).toBe(200)
+      const created = (await createResp.json()) as { version: number; content_hash: string }
+      expect(created.version).toBe(1)
+
+      // tree/GET: path/kind/media/version present and correct.
+      const treeResp = await fetch(`${url}/v1/documents/${doc.document_id}/tree`)
+      expect(treeResp.status).toBe(200)
+      const tree = (await treeResp.json()) as { files: Array<{ path: string; kind: string; media: string; version: number }> }
+      expect(tree.files.find(f => f.path === 'sections/notes.tex')).toMatchObject({
+        path: 'sections/notes.tex', kind: 'tex', media: 'text/x-tex', version: 1,
+      })
+
+      // Same path again with 0 → 409 create-if-absent conflict.
+      const conflictResp = await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'sections/notes.tex', content: 'x', expected_version: 0 }),
+      })
+      expect(conflictResp.status).toBe(409)
+      expect(((await conflictResp.json()) as { error: { code: string } }).error.code).toBe('document_version_conflict')
+
+      // expected_version = current version → 200, new revision (version 2).
+      const saveResp = await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'sections/notes.tex', content: '\\section{Notes v2}\n', expected_version: 1 }),
+      })
+      expect(saveResp.status).toBe(200)
+      expect(((await saveResp.json()) as { version: number }).version).toBe(2)
+
+      // expected_version = stale version → 409.
+      const staleResp = await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'sections/notes.tex', content: 'x', expected_version: 1 }),
+      })
+      expect(staleResp.status).toBe(409)
+      expect(((await staleResp.json()) as { error: { code: string } }).error.code).toBe('document_version_conflict')
+
+      // DELETE ?expected_version=0 must survive the query parse (0 never
+      // matches a stored version ≥ 1) → 409, not an unchecked delete.
+      const delResp = await fetch(`${url}/v1/documents/${doc.document_id}/file?path=${encodeURIComponent('sections/notes.tex')}&expected_version=0`, { method: 'DELETE' })
+      expect(delResp.status).toBe(409)
+      expect(((await delResp.json()) as { error: { code: string } }).error.code).toBe('document_version_conflict')
+      // The conflict left the file intact at version 2.
+      const after = await fetch(`${url}/v1/documents/${doc.document_id}/file?path=${encodeURIComponent('sections/notes.tex')}`)
+      expect(((await after.json()) as { version: number }).version).toBe(2)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+    }
   })
 
   it('finalizes the tex_builds row on latex-compile completion', () => {

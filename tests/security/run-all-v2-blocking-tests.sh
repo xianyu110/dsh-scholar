@@ -28,6 +28,9 @@
 #                               resume + cross-project 404 on the kernel,
 #                               and the same through the standalone BFF
 #                               proxy (401/404, no token leak)
+#   run-selfmod-tests.sh        SELFMOD-01 production static negation
+#                               (no cordis_inspect/tool-cordis/dump-config
+#                               in the published plugin; dev overlay opt-in)
 #
 # Usage: bash tests/security/run-all-v2-blocking-tests.sh
 set -u
@@ -49,6 +52,7 @@ SCRIPTS=(
   run-unicode-tests.sh
   run-lower-is-better-tests.sh
   run-malformed-path-tests.sh
+  run-selfmod-tests.sh
   run-dsh-plugin-tests.sh
 )
 

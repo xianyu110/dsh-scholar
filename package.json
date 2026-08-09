@@ -22,7 +22,7 @@
     "build": "pnpm run build:plugin && pnpm -r --filter './packages/*' --filter './workers/*' run build",
     "build:plugin": "tsc -p tsconfig.json",
     "verify:docs": "node scripts/verify-docs.mjs",
-    "test": "vitest run",
+    "test": "vitest run && pnpm --filter @dsh-scholar/research-ui typecheck",
     "test:watch": "vitest",
     "test:fault": "bash tests/fault-injection/run-fault-tests.sh",
     "test:security": "bash tests/security/run-hardening-tests.sh && bash tests/security/run-all-v2-blocking-tests.sh",

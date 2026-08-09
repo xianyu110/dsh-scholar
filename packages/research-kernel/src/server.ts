@@ -770,27 +770,41 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (id !== undefined && sub === 'file' && method === 'PUT') {
+            // expected_version is the CAS guard: undefined = unchecked write,
+            // 0 = create-if-absent (the UI "new file" path sends 0; the file
+            // must NOT already exist), N>0 = must match the stored version.
+            // 0 must be accepted here — a positive-only schema would 422 the
+            // create-if-absent call (acceptance-tests.md §7 ui-new-file).
             const input = z.object({
               path: z.string().min(1),
               content: z.string(),
-              expected_version: z.number().int().positive().optional(),
+              expected_version: z.number().int().nonnegative().optional(),
             }).parse(body)
             ok(res, kernel.texWriteFile(id, input.path, input.content, input.expected_version))
             return
           }
           if (id !== undefined && sub === 'file' && method === 'DELETE') {
             const path = url.searchParams.get('path')
-            const expected = Number(url.searchParams.get('expected_version') ?? '') || undefined
             if (path === null) throw new KernelError(422, 'missing_path', '?path= is required')
+            // Same CAS semantics as PUT: 0 is a legal value (never matches a
+            // stored version >= 1 → 409), so it must survive the query parse.
+            const raw = url.searchParams.get('expected_version')
+            const expected = raw === null || raw === '' ? undefined : Number(raw)
+            if (expected !== undefined && (!Number.isInteger(expected) || expected < 0)) {
+              throw new KernelError(422, 'invalid_expected_version', 'expected_version must be a non-negative integer')
+            }
             kernel.texDeleteFile(id, path, expected)
             ok(res, { ok: true })
             return
           }
           if (id !== undefined && sub === 'moves' && method === 'POST') {
+            // expected_version = CAS guard on the source file: 0 is accepted
+            // by the schema but never matches a stored version (>= 1), so it
+            // answers 409 — reload before moving (acceptance-tests.md §7).
             const input = z.object({
               from_path: z.string().min(1),
               to_path: z.string().min(1),
-              expected_version: z.number().int().positive().optional(),
+              expected_version: z.number().int().nonnegative().optional(),
             }).parse(body)
             kernel.texMoveFile(id, input.from_path, input.to_path, input.expected_version)
             ok(res, { ok: true })

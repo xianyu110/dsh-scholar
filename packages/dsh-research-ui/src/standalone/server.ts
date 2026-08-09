@@ -133,11 +133,11 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title data-i18n="page.title">Research OS — DSH Scholar</title>
+<title data-i18n="standalone.pageTitle">Research OS — DSH Scholar</title>
 <script>
-  // Unlock-page locale (gui-plugin-plan §13.4): pick BEFORE first paint,
-  // same choice order as the client adapter: persisted dsh.locale →
-  // navigator.languages → navigator.language → zh.
+  // Unlock-page locale (gui-plugin-plan §13.4 / acceptance §8): pick BEFORE
+  // first paint, same choice order as the client adapter: persisted
+  // dsh.locale → navigator.languages → navigator.language → zh.
   (function () {
     var LOCALE_KEY = 'dsh.locale';
     function pickLocale() {
@@ -159,39 +159,57 @@ const BOOTSTRAP_HTML = `<!doctype html>
     }
     window.__BOOT_LOCALE__ = pickLocale();
     document.documentElement.lang = window.__BOOT_LOCALE__;
-    // Inline zh dictionary for the token gate (server-rendered page).
-    var DICT = {
-      'page.title': '研究 OS — DSH Scholar',
-      'brand.name': '研究',
-      'brand.meta': '工作区',
-      'eyebrow': '操作员访问',
-      'welcome': '欢迎回来。',
-      'intro': '打开你的证据工作区。人类门控决策将记录你的操作员身份。',
-      'label.token': '访问令牌',
-      'placeholder.token': '访问令牌',
-      'submit.open': '打开工作区',
-      'err.invalid': '令牌无效',
-      'err.unreachable': '服务器不可达',
-      'err.bundle': '客户端加载失败',
-      'hint': '你的令牌在本地服务器启动时生成,只保留在本机。',
-      'theme.dark': '深色',
-      'theme.light': '浅色',
+    // Inline zh/en dictionaries for the token gate (server-rendered page).
+    // Keys mirror the client standalone namespace (i18n/locales/standalone.ts)
+    // so the unlock page and the locale dictionaries stay in lockstep.
+    var ZH = {
+      'standalone.pageTitle': '研究 OS — DSH Scholar',
+      'standalone.brand.name': '研究',
+      'standalone.brand.meta': '工作区',
+      'standalone.operatorAccess': '操作员访问',
+      'standalone.welcomeBack': '欢迎回来。',
+      'standalone.intro': '打开你的证据工作区。人类门控决策将记录你的操作员身份。',
+      'standalone.accessToken': '访问令牌',
+      'standalone.openWorkspace': '打开工作区',
+      'standalone.invalidToken': '令牌无效',
+      'standalone.serverUnreachable': '服务器不可达',
+      'standalone.bundleFailed': '客户端加载失败',
+      'standalone.tokenHint': '你的令牌在本地服务器启动时生成,只保留在本机。',
+      'standalone.theme.dark': '深色',
+      'standalone.theme.light': '浅色',
     };
-    if (window.__BOOT_LOCALE__ === 'zh') {
-      // The swap needs the body; run now if present, else on first paint.
-      function applyI18n() {
-        document.querySelectorAll('[data-i18n]').forEach(function (n) {
-          var key = n.getAttribute('data-i18n');
-          if (key && DICT[key]) n.textContent = DICT[key];
-        });
-        var ph = document.getElementById('token-input');
-        if (ph) ph.placeholder = DICT['placeholder.token'];
-      }
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', applyI18n);
-      } else {
-        applyI18n();
-      }
+    var EN = {
+      'standalone.pageTitle': 'Research OS — DSH Scholar',
+      'standalone.brand.name': 'Research',
+      'standalone.brand.meta': 'Workspace',
+      'standalone.operatorAccess': 'Operator access',
+      'standalone.welcomeBack': 'Welcome back.',
+      'standalone.intro': 'Open your evidence workspace. Human gate decisions are recorded with your operator identity.',
+      'standalone.accessToken': 'Access token',
+      'standalone.openWorkspace': 'Open workspace',
+      'standalone.invalidToken': 'Invalid token',
+      'standalone.serverUnreachable': 'Server unreachable',
+      'standalone.bundleFailed': 'Client bundle failed to load',
+      'standalone.tokenHint': 'Your token is generated when the local server starts and remains on this machine.',
+      'standalone.theme.dark': 'Dark',
+      'standalone.theme.light': 'Light',
+    };
+    var DICT = window.__BOOT_LOCALE__ === 'zh' ? ZH : EN;
+    window.__BOOT_DICT__ = DICT;
+    window.__BOOT_MSG__ = function (key) { return DICT[key] || key; };
+    // The swap needs the body; run now if present, else on first paint.
+    function applyI18n() {
+      document.querySelectorAll('[data-i18n]').forEach(function (n) {
+        var key = n.getAttribute('data-i18n');
+        if (key && DICT[key]) n.textContent = DICT[key];
+      });
+      var ph = document.getElementById('token-input');
+      if (ph) ph.placeholder = DICT['standalone.accessToken'];
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', applyI18n);
+    } else {
+      applyI18n();
     }
   })();
 </script>
@@ -229,15 +247,15 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <button id="theme-toggle" class="theme-toggle">Dark</button>
 <div id="boot-screen">
   <div class="card">
-    <div class="brand"><span class="brand-mark">dsh</span><span class="brand-name" data-i18n="brand.name">Research</span><span class="brand-meta" data-i18n="brand.meta">Workspace</span></div>
-    <div class="eyebrow" data-i18n="eyebrow">Operator access</div>
-    <h1 data-i18n="welcome">Welcome back.</h1>
-    <p data-i18n="intro">Open your evidence workspace. Human gate decisions are recorded with your operator identity.</p>
-    <label class="field-label" for="token-input" data-i18n="label.token">Access token</label>
+    <div class="brand"><span class="brand-mark">dsh</span><span class="brand-name" data-i18n="standalone.brand.name">Research</span><span class="brand-meta" data-i18n="standalone.brand.meta">Workspace</span></div>
+    <div class="eyebrow" data-i18n="standalone.operatorAccess">Operator access</div>
+    <h1 data-i18n="standalone.welcomeBack">Welcome back.</h1>
+    <p data-i18n="standalone.intro">Open your evidence workspace. Human gate decisions are recorded with your operator identity.</p>
+    <label class="field-label" for="token-input" data-i18n="standalone.accessToken">Access token</label>
     <input id="token-input" type="password" placeholder="Access token" autocomplete="off">
-    <button id="token-submit" data-i18n="submit.open">Open workspace</button>
+    <button id="token-submit" data-i18n="standalone.openWorkspace">Open workspace</button>
     <div class="err" id="token-err"></div>
-    <div class="hint"><span class="hint-dot"></span><span data-i18n="hint">Your token is generated when the local server starts and remains on this machine.</span></div>
+    <div class="hint"><span class="hint-dot"></span><span data-i18n="standalone.tokenHint">Your token is generated when the local server starts and remains on this machine.</span></div>
   </div>
 </div>
 <script>
@@ -258,11 +276,10 @@ const BOOTSTRAP_HTML = `<!doctype html>
     var root = document.documentElement;
     var toggle = document.getElementById('theme-toggle');
     function readTheme() { try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'; } catch (e) { return 'light'; } }
-    var zh = window.__BOOT_LOCALE__ === 'zh';
     function paintTheme() {
       var dark = readTheme() === 'dark';
       root.setAttribute('data-theme', dark ? 'dark' : 'light');
-      toggle.textContent = dark ? (zh ? '浅色' : 'Light') : (zh ? '深色' : 'Dark');
+      toggle.textContent = dark ? window.__BOOT_MSG__('standalone.theme.light') : window.__BOOT_MSG__('standalone.theme.dark');
     }
     toggle.addEventListener('click', function () {
       var next = readTheme() === 'dark' ? 'light' : 'dark';
@@ -285,10 +302,13 @@ const BOOTSTRAP_HTML = `<!doctype html>
             boot.style.display = 'none';
             startPanel(token);
           } else {
-            err.textContent = j.error || (zh ? '令牌无效' : 'Invalid token');
+            // Known server error codes map to the localized dictionary;
+            // unknown wire text is shown verbatim (acceptance §8 raw text).
+            var errKey = j.error === 'invalid token' ? 'standalone.invalidToken' : null;
+            err.textContent = errKey !== null ? window.__BOOT_MSG__(errKey) : (j.error || window.__BOOT_MSG__('standalone.invalidToken'));
           }
         })
-        .catch(function () { err.textContent = zh ? '服务器不可达' : 'Server unreachable'; });
+        .catch(function () { err.textContent = window.__BOOT_MSG__('standalone.serverUnreachable'); });
     }
     function startPanel(token) {
       if (window.__DSH_SCHOLAR_UI__ && window.__DSH_SCHOLAR_UI__.apply) {
@@ -298,7 +318,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
         });
         window.__DSH_SCHOLAR_UI__.apply();
       } else {
-        err.textContent = zh ? '客户端加载失败' : 'Client bundle failed to load';
+        err.textContent = window.__BOOT_MSG__('standalone.bundleFailed');
         boot.style.display = 'flex';
       }
     }
