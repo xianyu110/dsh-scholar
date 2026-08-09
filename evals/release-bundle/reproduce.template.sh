@@ -86,13 +86,34 @@ for i in $(seq 0 $((NC - 1))); do
 done
 echo "reproduce.sh: re-registered $NC contract(s)"
 
+# Re-register every bundle artifact into the fresh kernel's CAS so job
+# materialization (code snapshot archives) and metrics lookups resolve.
+NA=$(MANIFEST="$MANIFEST" BUNDLE_DIR="$BUNDLE_DIR" BASE="$BASE" PROJ="$PROJ" node -e '
+  const fs=require("fs")
+  const m=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"))
+  const base=process.env.BUNDLE_DIR
+  const entries=Object.entries(m.artifacts ?? {})
+  let n=0
+  const post=(id,kind)=>{
+    const file=base+"/"+m.artifacts[id].path
+    if(!fs.existsSync(file)) return
+    const content=fs.readFileSync(file).toString("base64")
+    fetch(process.env.BASE+"/v1/artifacts",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({project_id:process.env.PROJ,kind,content_base64:content})})
+      .then(r=>{if(!r.ok)throw new Error("artifact "+r.status);n++;if(n===entries.length)console.log(String(n))})
+      .catch(e=>{console.error(e.message);process.exit(1)})
+  }
+  for(const [id,info] of entries) post(id,info.kind ?? "data")
+') || true
+[ -n "$NA" ] && [ "$NA" -gt 0 ] && echo "reproduce.sh: re-registered $NA artifact(s)" || echo "reproduce.sh: WARNING no artifacts re-registered"
+
 # Replay the succeeded jobs with their original idempotency keys, kinds,
 # commands and payloads (contract_id is intentionally NOT carried over: the
 # fresh kernel assigns new ids; smoke/echo jobs are contract-independent).
 KEYS=$(node -e "const m=require('$MANIFEST');console.log(m.jobs.filter(j=>j.status==='succeeded').map(j=>j.idempotency_key).join(' '))")
 NKEYS=0
 for KEY in $KEYS; do
-  BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" node -e 'const m=require(process.env.MANIFEST);const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY);console.log(JSON.stringify({idempotency_key:j.idempotency_key,kind:j.kind,command:j.command,payload:j.payload}))')
+  BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" node -e 'const m=require(process.env.MANIFEST);const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY);console.log(JSON.stringify({idempotency_key:j.idempotency_key,kind:j.kind,command:j.command,payload:j.payload,...(j.code_snapshot_id?{code_snapshot_id:j.code_snapshot_id}:{})}))')
   api -X POST "$BASE/v1/projects/$PROJ/jobs" -d "$BODY" > /dev/null
   NKEYS=$((NKEYS + 1))
 done

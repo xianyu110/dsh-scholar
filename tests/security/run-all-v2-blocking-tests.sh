@@ -27,13 +27,26 @@ SCRIPTS=(
 )
 
 echo "=== §19.2 v0.2 blocking tests ==="
+# repository-blueprint.md: CI=true must FAIL on SKIP / zero-assertion /
+# unexecuted sub-scripts. Local non-CI runs may pass --allow-skip; skipped
+# scripts never count toward PASS or hardening evidence.
+ALLOW_SKIP=0
+for a in "$@"; do [ "$a" = "--allow-skip" ] && ALLOW_SKIP=1; done
+
 PASSED=()
 FAILED=()
 for s in "${SCRIPTS[@]}"; do
   LOG=$(mktemp)
   bash "$s" > "$LOG" 2>&1
   RC=$?
-  if [[ "$RC" -eq 0 ]]; then
+  SKIPPED=0
+  if grep -qE "SKIP|skip" "$LOG"; then SKIPPED=1; fi
+  ZERO=0
+  if grep -qE "0 passed" "$LOG"; then ZERO=1; fi
+  if [[ "$RC" -eq 0 && ( "$SKIPPED" -eq 1 || "$ZERO" -eq 1 ) && ( -n "${CI:-}" || "$ALLOW_SKIP" -eq 0 ) ]]; then
+    FAILED+=("$s")
+    echo "FAIL  $s  (exit 0 but SKIP/zero-assertion detected; CI=true requires fail-closed)"
+  elif [[ "$RC" -eq 0 ]]; then
     PASSED+=("$s")
     echo "PASS  $s"
   else

@@ -130,6 +130,8 @@ if (startAgent.includes('research-dev-selfmod.cordis.yml')) {
 // Usage: node scripts/verify-docs.mjs --diff-check [<base-ref>]
 if (process.argv.includes('--diff-check')) {
   const base = process.argv[process.argv.indexOf('--diff-check') + 1] ?? 'origin/main'
+  // Fail closed when the base ref does not exist (repository-blueprint.md).
+  runGit(['rev-parse', '--verify', '--quiet', `${base}^{commit}`])
   const changed = runGit(['diff', '--name-only', `${base}...HEAD`])
   const sourceChanged = changed.some((file) =>
     /^(?:packages|workers)\/[^/]+\/src\/.+\.(?:ts|tsx)$/.test(file) && !file.endsWith('.test.ts'))
@@ -145,9 +147,10 @@ function runGit(args) {
     const { execFileSync } = requireNode('node:child_process')
     const out = execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     return out.split('\n').filter(Boolean)
-  } catch {
-    // No base ref available (e.g. first commit) — nothing to diff against.
-    return []
+  } catch (error) {
+    // repository-blueprint.md §DoD / DOC-02: an unreachable base ref is a
+    // FAIL-CLOSED condition — never silently skip the diff contract.
+    throw new Error(`verify-docs --diff-check: git ${args.join(' ')} failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 

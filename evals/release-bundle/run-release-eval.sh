@@ -56,7 +56,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-say "kernel + runner (subprocess mode) on random port"
+say "kernel + runner (docker mode) on random port"
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KERNEL_PID=$!
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/v1/health" >/dev/null 2>&1 && break; sleep 0.1; done
@@ -65,10 +65,10 @@ if curl -sf "http://127.0.0.1:$PORT/v1/health" >/dev/null 2>&1; then
 else
   bad "kernel failed to start"; tail -5 "$WORK/kernel.log" >&2; exit 1
 fi
-nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner release-eval --poll-ms 200 --timeout-ms 30000 > "$WORK/runner.log" 2>&1 &
+nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner release-eval --poll-ms 200 --mode docker --timeout-ms 30000 > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
 sleep 0.5
-ok "runner started (subprocess mode)"
+ok "runner started (docker mode)"
 
 say "project + contract"
 BRIEF='{"problem":"release-bundle evaluation","scope":"smoke","questions":[],"primary_metrics":["m1"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"machine-learning"}'
@@ -78,15 +78,24 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"release-
 CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_release_bundle","data":{"dataset_id":"synth-smoke-v1","version":"1.0.0","split":"official","preprocessing_hash":"sha256:eval"},"methods":{"baseline":"no-treatment","treatment":"smoke-treatment"},"metrics":{"primary":"m1","secondary":["n_samples"]},"seeds":[1,2],"analysis":{"effect_size":"cohens_d","interval":"bootstrap-95","multiple_testing":"none"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 [[ "$CONTRACT" == expc_* ]] && ok "contract $CONTRACT registered" || bad "contract id '$CONTRACT'"
 
+say "baseline jobs (kind=baseline, seeds 1/2, matched-seed design §13.6)"
+mkdir -p "$WORK/fixture"
+printf '#!/bin/sh\necho "release-bundle fixture"\n' > "$WORK/fixture/run.sh"
+SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/fixture\",\"description\":\"release-bundle fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
+[ -n "$SNAP" ] || { echo "failed to create code snapshot"; exit 1; }
+B11=$(node -e "const m=JSON.stringify({metric:'m1',value:0.450,seed:1});console.log(JSON.stringify({idempotency_key:'rel-base-1',kind:'baseline',code_snapshot_id:'$SNAP',command:['sh','-c','echo '+JSON.stringify(m)],payload:{}}))")
+B12=$(node -e "const m=JSON.stringify({metric:'m1',value:0.550,seed:2});console.log(JSON.stringify({idempotency_key:'rel-base-2',kind:'baseline',code_snapshot_id:'$SNAP',command:['sh','-c','echo '+JSON.stringify(m)],payload:{}}))")
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$B11" > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$B12" > /dev/null
 say "2 smoke jobs (kind=smoke + payload.script emitting metrics JSON lines)"
-submit_smoke() { # <idempotency-key> <m1-value>
-  KEY="$1" VAL="$2" PORT="$PORT" PROJ="$PROJ" node -e '
-    const body = JSON.stringify({ idempotency_key: process.env.KEY, kind: "smoke", payload: { script: `echo \u0027{"metric":"m1","value":${process.env.VAL}}\u0027` } })
+submit_smoke() { # <idempotency-key> <m1-value> <seed>
+  KEY="$1" VAL="$2" SEED="$3" PORT="$PORT" PROJ="$PROJ" node -e '
+    const body = JSON.stringify({ idempotency_key: process.env.KEY, kind: "smoke", payload: { script: `echo \u0027{"metric":"m1","value":${process.env.VAL},"seed":${process.env.SEED}}\u0027` } })
     fetch(`http://127.0.0.1:${process.env.PORT}/v1/projects/${process.env.PROJ}/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body })
       .then(r => r.json()).then(j => console.log(j.job_id))'
 }
-J1=$(submit_smoke "rel-smoke-1" "0.500")
-J2=$(submit_smoke "rel-smoke-2" "0.600")
+J1=$(submit_smoke "rel-smoke-1" "0.500" "1")
+J2=$(submit_smoke "rel-smoke-2" "0.600" "2")
 ok "submitted $J1 (m1=0.500) and $J2 (m1=0.600)"
 
 wait_job() { # <idempotency-key> — echoes terminal status
@@ -98,6 +107,12 @@ wait_job() { # <idempotency-key> — echoes terminal status
   echo "timeout"
   return 1
 }
+B1=$(wait_job "rel-base-1"); B2=$(wait_job "rel-base-2")
+if [[ "$B1" == "succeeded" && "$B2" == "succeeded" ]]; then
+  ok "baseline jobs succeeded ($B1/$B2, matched seeds 1/2)"
+else
+  bad "baseline job statuses $B1/$B2"; tail -5 "$WORK/runner.log" >&2 || true
+fi
 S1=$(wait_job "rel-smoke-1"); S2=$(wait_job "rel-smoke-2")
 if [[ "$S1" == "succeeded" && "$S2" == "succeeded" ]]; then
   ok "both smoke jobs succeeded ($S1/$S2)"
