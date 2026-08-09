@@ -70,14 +70,18 @@ const gateSchema = z.object({
 
 const decisionSchema = z.object({
   actor: z.string().min(1),
-  // hardening GOV-01: the authenticated human principal (BFF injects it from
-  // the login identity; the UI no longer sends a bare actor).
+  // hardening GOV-01 (fail-closed): the authenticated human principal is
+  // REQUIRED — the BFF injects it from the login identity and a bare actor
+  // (unauthenticated or forged identity) is rejected with 422
+  // principal_required. The only actor-based exception is the internal
+  // orchestrator approve route (contracts/{id}/approve), which is not a
+  // Human Gate decision.
   principal: z.object({
     principal_id: z.string().min(1),
     tenant_id: z.string().optional(),
     auth_method: z.string().optional(),
     session_id: z.string().nullable().optional(),
-  }).optional(),
+  }),
   decision: z.enum(['approved', 'rejected', 'revised']),
   // gui-plugin-plan §6: reject/revise must carry the operator's rationale.
   reason: z.string().optional().superRefine((value, ctx) => {
@@ -414,6 +418,10 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
             if (method === 'GET' && sub === 'jobs') {
               ok(res, kernel.listJobs(id))
+              return
+            }
+            if (method === 'GET' && sub === 'runs') {
+              ok(res, kernel.listRuns(id))
               return
             }
             if (method === 'GET' && sub === 'artifacts') {
@@ -1053,6 +1061,25 @@ async function handleV2(ctx: {
 }): Promise<void> {
   const { req, res, method, url, id, sub, subId, body, kernel } = ctx
   const principal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
+  // API-01 role capabilities: the BFF injects x-principal-role from ITS OWN
+  // membership lookup (client-supplied values are never trusted). When
+  // present, the role gates the surface: viewer/auditor are read-only and
+  // researcher cannot perform governance writes. A present-but-invalid role
+  // is 403 role_required (fail-closed); an absent header means the caller
+  // has no BFF identity and the route falls back to principal/member checks.
+  const role = typeof req.headers['x-principal-role'] === 'string' ? req.headers['x-principal-role'] : undefined
+  const roleOk = role === undefined || role === 'pi' || role === 'researcher' || role === 'operator' || role === 'auditor' || role === 'viewer'
+  const governanceWrite = /(?:transitions|gates|decisions|budget|approve|accept)/.test(url.pathname)
+  if (!roleOk) {
+    send(res, 403, { error: { code: 'role_required', message: 'invalid x-principal-role; BFF must inject pi|researcher|operator|auditor|viewer' } })
+    return
+  }
+  if (role !== undefined && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && governanceWrite)) {
+      send(res, 403, { error: { code: 'role_forbidden', message: 'role forbidden for this operation' } })
+      return
+    }
+  }
   const memberOr404 = (projectId: string): void => {
     if (principal === undefined) return
     const members = kernel.listProjectMembers(projectId)

@@ -280,9 +280,115 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
   done
 fi
 
-kill "$MEM_PID" "$MEM2_PID" 2>/dev/null || true
+# ── API-01/v2: BFF role resolution + x-principal-role injection ─────────────
+# Kernel v2 semantics: x-principal-role ∈ {pi,researcher,operator,auditor,
+# viewer}; viewer/auditor read-only, researcher no governance writes
+# (transitions/gates/decisions/budget/approve/accept), pi/operator full.
+# The BFF resolves the loopback operator's role from project membership and
+# injects x-principal-id + x-principal-role on project-scoped /v2 requests —
+# the client never sends either header. Behavioral proof of the injection:
+# the viewer write 403 only appears when the BFF resolved+enforced the role.
+if [ "$memready" = 1 ] && [ -n "$MP" ]; then
+  # Memberships are created on the KERNEL directly (actor = PI ops-1).
+  for ROLE_MEMBER in "viewer-1:viewer" "researcher-1:researcher" "auditor-1:auditor"; do
+    MID=${ROLE_MEMBER%%:*}
+    MROLE=${ROLE_MEMBER##*:}
+    R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+      -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$MP/members" \
+      -d "{\"principal_id\":\"$MID\",\"role\":\"$MROLE\",\"actor\":\"ops-1\"}")
+    [ "$R" = "200" ] && ok "API-01: kernel member $MID/$MROLE added" || fail "API-01: add member $MID -> $R"
+  done
+  # One BFF per role (each BFF maps one loopback operator identity); all
+  # reuse the same kernel sidecar (identity-verified, SIDE-01).
+  VROLE_WEB=$((MEM_WEB + 3)); RROLE_WEB=$((MEM_WEB + 4)); AROLE_WEB=$((MEM_WEB + 5))
+  node "$SERVER_BIN" --host 127.0.0.1 --port "$VROLE_WEB" --kernel-port "$MEM_KERNEL" \
+    --data-dir "$MEM_DATA" --token "$TOKEN" --principal viewer-1 > "$WORK/viewer.log" 2>&1 &
+  VROLE_PID=$!
+  node "$SERVER_BIN" --host 127.0.0.1 --port "$RROLE_WEB" --kernel-port "$MEM_KERNEL" \
+    --data-dir "$MEM_DATA" --token "$TOKEN" --principal researcher-1 > "$WORK/researcher.log" 2>&1 &
+  RROLE_PID=$!
+  node "$SERVER_BIN" --host 127.0.0.1 --port "$AROLE_WEB" --kernel-port "$MEM_KERNEL" \
+    --data-dir "$MEM_DATA" --token "$TOKEN" --principal auditor-1 > "$WORK/auditor.log" 2>&1 &
+  AROLE_PID=$!
+  for P in "$VROLE_WEB" "$RROLE_WEB" "$AROLE_WEB"; do
+    for _ in $(seq 1 60); do
+      if curl -sf -m 2 -X POST "http://127.0.0.1:$P/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then break; fi
+      sleep 0.5
+    done
+  done
+  ok "API-01: role BFFs (viewer/researcher/auditor) started"
+  # PI (ops-1): non-project-scoped passthrough + v2 reads + governance writes.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v2/health")
+  [ "$R" = "200" ] && ok "API-01: /v2/health passthrough (no project scope) -> 200" || fail "API-01: v2 health -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v2/projects/$MP")
+  [ "$R" = "200" ] && ok "API-01: PI v2 project read -> 200" || fail "API-01: PI v2 read -> $R"
+  PROJ=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v2/projects/$MP/projection")
+  case "$PROJ" in
+    *'"membership":"pi"'*) ok "API-01: projection membership=pi proves x-principal-id reached the kernel" ;;
+    *) fail "API-01: projection membership -> $PROJ" ;;
+  esac
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$MEM_WEB/v2/projects/$MP/gate-requests" \
+    -d '{"type":"idea","title":"role matrix idea"}')
+  [ "$R" = "201" ] && ok "API-01: PI v2 gate-request -> 201" || fail "API-01: PI v2 gate-request -> $R"
+  # Wrong expected_revision: the BFF must let the PI through so the KERNEL
+  # answers 409 — proves governance writes are not blocked at the BFF.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$MEM_WEB/v2/projects/$MP/transitions" -d '{"to":"active","expected_revision":999999}')
+  [ "$R" = "409" ] && ok "API-01: PI v2 transition reaches the kernel (409 revision_conflict)" || fail "API-01: PI v2 transition -> $R"
+  # viewer-1: read-only. The 403 for a client request WITHOUT any role header
+  # is the behavioral proof that the BFF resolved the role and enforced it.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$VROLE_WEB/v2/projects/$MP")
+  [ "$R" = "200" ] && ok "API-01: viewer v2 read -> 200" || fail "API-01: viewer v2 read -> $R"
+  VBODY=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$VROLE_WEB/v2/projects/$MP/gate-requests" -d '{"type":"idea","title":"viewer write"}')
+  case "$VBODY" in
+    *'"ok":false'*'role forbidden'*) ok "API-01: viewer v2 write -> 403 role forbidden (BFF-injected role)" ;;
+    *) fail "API-01: viewer v2 write body -> $VBODY" ;;
+  esac
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$VROLE_WEB/v2/projects/$MP/transitions" -d '{"to":"active","expected_revision":0}')
+  [ "$R" = "403" ] && ok "API-01: viewer v2 transition -> 403" || fail "API-01: viewer v2 transition -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$VROLE_WEB/v1/projects/$MP/archive")
+  [ "$R" = "403" ] && ok "API-01: viewer v1 write -> 403 (BFF defense in depth)" || fail "API-01: viewer v1 write -> $R"
+  L=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$VROLE_WEB/v2/projects" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a.items&&a.items.some(p=>p.project_id==='$MP')&&!a.items.some(p=>p.project_id==='$PB')?'filtered':'leaked')})")
+  [ "$L" = "filtered" ] && ok "API-01: v2 list filtered to viewer memberships (no foreign project)" || fail "API-01: viewer v2 list -> $L"
+  # researcher-1: reads OK, governance writes 403, other writes pass.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$RROLE_WEB/v2/projects/$MP")
+  [ "$R" = "200" ] && ok "API-01: researcher v2 read -> 200" || fail "API-01: researcher v2 read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$RROLE_WEB/v2/projects/$MP/transitions" -d '{"to":"active","expected_revision":0}')
+  [ "$R" = "403" ] && ok "API-01: researcher governance write (transitions) -> 403" || fail "API-01: researcher transition -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$RROLE_WEB/v2/projects/$MP/gate-requests" -d '{"type":"idea","title":"researcher gate request"}')
+  [ "$R" = "201" ] && ok "API-01: researcher gate-request (non-governance write) -> 201" || fail "API-01: researcher gate-request -> $R"
+  # auditor-1: read-only like viewer.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$AROLE_WEB/v2/projects/$MP")
+  [ "$R" = "200" ] && ok "API-01: auditor v2 read -> 200" || fail "API-01: auditor v2 read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$AROLE_WEB/v2/projects/$MP/gate-requests" -d '{"type":"idea","title":"auditor write"}')
+  [ "$R" = "403" ] && ok "API-01: auditor v2 write -> 403" || fail "API-01: auditor v2 write -> $R"
+  # non-member (other-user BFF): v2 404 — membership precedes role, no enumeration.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v2/projects/$MP")
+  [ "$R" = "404" ] && ok "API-01: non-member v2 read -> 404" || fail "API-01: non-member v2 read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$((MEM_WEB + 2))/v2/projects/$MP/gate-requests" -d '{"type":"idea","title":"x"}')
+  [ "$R" = "404" ] && ok "API-01: non-member v2 write -> 404 (membership first)" || fail "API-01: non-member v2 write -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v2/projects/rsp_nonexistent")
+  [ "$R" = "404" ] && ok "API-01: unknown v2 project -> 404" || fail "API-01: unknown v2 project -> $R"
+  # Stable error body: the role-forbidden response never leaks internal detail.
+  for NEEDLE in '/home/' '/dev/' '/usr/' 'http://' 'env' ' at '; do
+    if printf '%s' "$VBODY" | grep -qF "$NEEDLE"; then
+      fail "API-01: role-forbidden body leaks '$NEEDLE' -> $VBODY"
+    else
+      ok "API-01: role-forbidden body has no '$NEEDLE'"
+    fi
+  done
+fi
+
+kill ${VROLE_PID:-} ${RROLE_PID:-} ${AROLE_PID:-} "$MEM_PID" "$MEM2_PID" 2>/dev/null || true
 for _ in $(seq 1 15); do
-  if ! ss -ltn 2>/dev/null | grep -qE ":$MEM_WEB |:$((MEM_WEB + 2)) "; then break; fi
+  if ! ss -ltn 2>/dev/null | grep -qE ":$MEM_WEB |:$((MEM_WEB + 2)) |:$((MEM_WEB + 3)) |:$((MEM_WEB + 4)) |:$((MEM_WEB + 5)) "; then break; fi
   sleep 0.5
 done
 ok "API-01: BFF instances cleaned up"

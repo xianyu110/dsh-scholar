@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -605,6 +605,43 @@ const outboxEnvelope = (db: DatabaseSync, report: MigrationReport): void => {
 }
 
 /**
+ * 0009 — runs.snapshot_sha256 nullable (RUN-01): the §3.1 runs row is written
+ * at CLAIM time, and non-snapshot jobs (echo/smoke) legitimately have no code
+ * snapshot. SQLite cannot DROP a NOT NULL constraint in place, so the table
+ * is rebuilt with the same shape minus NOT NULL on snapshot_sha256. The
+ * rebuild is transactional and idempotent (only runs the first time the
+ * constraint is detected).
+ */
+const runsSnapshotNullable = (db: DatabaseSync, report: MigrationReport): void => {
+  const has = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").get() as { sql?: string } | undefined
+  if (has?.sql !== undefined && /snapshot_sha256\s+TEXT\s+NOT NULL/.test(has.sql)) {
+    db.exec(`
+      CREATE TABLE runs_new (
+        run_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+        contract_id TEXT,
+        snapshot_sha256 TEXT,
+        manifest_json TEXT,
+        signature_status TEXT NOT NULL DEFAULT 'pending',
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        UNIQUE (job_id, attempt_no)
+      );
+      INSERT INTO runs_new (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, manifest_json, signature_status, started_at, finished_at)
+        SELECT run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, manifest_json, signature_status, started_at, finished_at FROM runs;
+      DROP TABLE runs;
+      ALTER TABLE runs_new RENAME TO runs;
+    `)
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, started_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id)')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.runs = (db.prepare('SELECT COUNT(*) AS n FROM runs').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -657,6 +694,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'Outbox canonical envelope (EVENT-01/§16) + runs table + session_links principal (STORE-01)',
     body: outboxEnvelope.toString(),
     up: outboxEnvelope,
+  },
+  {
+    id: '0009_runs_snapshot_nullable',
+    description: 'RUN-01: runs.snapshot_sha256 nullable (echo/smoke jobs have no code snapshot)',
+    body: runsSnapshotNullable.toString(),
+    up: runsSnapshotNullable,
   },
 ]
 

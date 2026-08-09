@@ -421,6 +421,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     if (members === null) return false
     return members.some(m => m.principal_id === options.principal)
   }
+  /** API-01: the loopback operator's role in a project, or null (not a
+   * member / lookup failed). Feeds the role capability layer and the
+   * x-principal-role header injected for kernel v2. */
+  async function projectRole(projectId: string): Promise<string | null> {
+    if (options.principal === null) return null
+    const members = await projectMembers(projectId)
+    if (members === null) return null
+    return members.find(m => m.principal_id === options.principal)?.role ?? null
+  }
   // Job-scoped routes (/v1/jobs/:id/*, e.g. the terminal SSE) resolve the
   // job's project through the kernel first — the BFF checks membership
   // BEFORE streaming (api-contracts.md §9: job_log_read + membership).
@@ -676,21 +685,20 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           }
         }
         // API-01 BFF AuthZ: project-scoped routes require membership of the
-        // loopback operator identity; unknown project OR non-member -> 404.
+        // loopback operator identity; unknown project OR non-member -> 404
+        // (no enumeration, api-contracts §1). Job-scoped routes resolve the
+        // owning project through the kernel first — the BFF checks membership
+        // BEFORE streaming (api-contracts.md §9: job_log_read + membership).
+        let memberProjectId: string | null = null
         if (options.principal !== null) {
-          const projectId = projectIdFromPath(url.pathname)
-          if (projectId !== null && !(await isProjectMember(projectId))) {
+          memberProjectId = projectIdFromPath(url.pathname)
+          if (memberProjectId === null) {
+            const jobId = jobIdFromPath(url.pathname)
+            if (jobId !== null) memberProjectId = await jobProjectId(jobId)
+          }
+          if (memberProjectId !== null && !(await isProjectMember(memberProjectId))) {
             sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
             return
-          }
-          // Job-scoped routes: resolve the owning project before streaming.
-          const jobId = jobIdFromPath(url.pathname)
-          if (jobId !== null) {
-            const ownerProject = await jobProjectId(jobId)
-            if (ownerProject === null || !(await isProjectMember(ownerProject))) {
-              sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
-              return
-            }
           }
           // The projects LIST is filtered to the operator's memberships.
           if (url.pathname === '/v1/projects' && method === 'GET') {
@@ -708,6 +716,23 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             sendJson(res, 200, allowed)
             return
           }
+          // API-01 role capabilities (defense in depth, kernel v2 semantics):
+          // viewer/auditor are read-only; researcher cannot perform governance
+          // writes (transitions/gates/decisions/budget/approve/accept);
+          // pi/operator are unrestricted. Enforced BEFORE forwarding with a
+          // stable body ({ok:false,error:'role forbidden'}) that never leaks
+          // internal detail. The role comes from the BFF's own membership
+          // lookup — the client never supplies it.
+          if (memberProjectId !== null && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            const role = await projectRole(memberProjectId)
+            if (role !== null) {
+              const governanceWrite = /(?:transitions|gates|decisions|budget|approve|accept)/.test(url.pathname)
+              if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && governanceWrite)) {
+                sendJson(res, 403, { ok: false, error: 'role forbidden' })
+                return
+              }
+            }
+          }
         }
         let body: string | undefined
         if (method !== 'GET' && method !== 'HEAD') {
@@ -719,12 +744,30 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           body = read.body
         }
         // api-contracts.md §1: mutation/creation headers pass through
-        // (Idempotency-Key, X-Request-Id); the BFF identity is never
-        // forwarded — the standalone enforces membership itself.
+        // (Idempotency-Key, X-Request-Id). Client-supplied identity is never
+        // trusted on any surface: on /v1 the standalone enforces membership
+        // itself, and on /v2 the identity headers below are overwritten with
+        // the server-derived principal/role (never taken from the client).
         const proxyHeaders: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' }
         for (const name of ['idempotency-key', 'x-request-id']) {
           const value = req.headers[name]
           if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
+        }
+        // API-01 v2 identity forwarding: on /v2/* the BFF injects the
+        // loopback operator identity (x-principal-id) plus the role it
+        // resolved from project membership (x-principal-role:
+        // pi|researcher|operator|auditor|viewer) so kernel handleV2 can
+        // enforce membership and apply the role policy. Both headers are
+        // derived server-side from the BFF's own membership lookup — a
+        // client-supplied value is never trusted. Non-project-scoped v2
+        // routes (e.g. /v2/health) still pass through; the identity header
+        // is inert there and lets the kernel filter the /v2 list.
+        if (options.principal !== null && url.pathname.startsWith('/v2/')) {
+          proxyHeaders['x-principal-id'] = options.principal
+          if (memberProjectId !== null) {
+            const role = await projectRole(memberProjectId)
+            if (role !== null) proxyHeaders['x-principal-role'] = role
+          }
         }
         const upstream = await fetch(`${endpoint}${url.pathname}${url.search}`, {
           method,

@@ -23,6 +23,11 @@
 #                               retention-gap, overflow, exit-replay,
 #                               log-authz (cross-project 404), cancel-timeout-
 #                               distinct
+#   run-sse-tests.sh            ART-01 SSE true streaming (§5/§11): real
+#                               streamed bodies + live tail + after_seq
+#                               resume + cross-project 404 on the kernel,
+#                               and the same through the standalone BFF
+#                               proxy (401/404, no token leak)
 #
 # Usage: bash tests/security/run-all-v2-blocking-tests.sh
 set -u
@@ -40,6 +45,7 @@ SCRIPTS=(
   run-analysis-consistency-tests.sh
   run-gate-tests.sh
   run-terminal-tests.sh
+  run-sse-tests.sh
   run-unicode-tests.sh
   run-lower-is-better-tests.sh
   run-malformed-path-tests.sh

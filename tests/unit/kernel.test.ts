@@ -1481,3 +1481,68 @@ describe('§16 outbox canonical envelope (EVENT-01)', () => {
     kernel.close()
   })
 })
+
+describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
+  it('claim records a runs row; complete finalizes manifest/signature/finished_at', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'runs', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'r1', kind: 'echo', payload: { message: 'x' } })
+    const [claimed] = kernel.claimJobs('runner-1', 60, 8)
+    expect(claimed).toBeDefined()
+    let runs = kernel.listRuns(project.project_id)
+    expect(runs.length).toBe(1)
+    expect(runs[0]!.job_id).toBe(job.job_id)
+    expect(runs[0]!.attempt_no).toBe(1)
+    expect(runs[0]!.signature_status).toBe('pending')
+    expect(runs[0]!.finished_at).toBeNull()
+    kernel.completeJob({
+      job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
+      lease_generation: claimed!.lease_generation!, lease_token: claimed!.lease_token!,
+      run_manifest: { run_id: 'run_x', job_id: job.job_id, code_commit: 'c', started_at: new Date().toISOString(), finished_at: new Date().toISOString(), exit_code: 0 },
+    })
+    runs = kernel.listRuns(project.project_id)
+    expect(runs.length).toBe(1)
+    expect(runs[0]!.signature_status).toBe('unsigned')
+    expect(runs[0]!.finished_at).not.toBeNull()
+    expect(runs[0]!.manifest_json).toContain('run_x')
+    kernel.close()
+  })
+
+  it('retry bumps attempt_no on the runs ledger', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'runs2', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'r2', kind: 'echo', payload: { message: 'x' } })
+    kernel.claimJobs('runner-2', 1, 8)
+    // expire + recover + re-claim (mirrors run-fencing flows)
+    kernel.recoverExpiredLeases(Date.now() + 5000)
+    kernel.claimJobs('runner-2', 60, 8)
+    const runs = kernel.listRuns(project.project_id)
+    expect(runs.length).toBe(2)
+    expect(runs.map(r => r.attempt_no).sort()).toEqual([1, 2])
+    kernel.close()
+  })
+
+  it('kernel-level decideGate keeps actor-only compat; HTTP schema requires principal (covered in run-gate-tests.sh)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'gov', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
+    // Kernel-internal callers (orchestrator) may pass actor without a full
+    // principal; the HTTP surface (decisionSchema) rejects those with 422
+    // principal_required — asserted by tests/security/run-gate-tests.sh.
+    expect(() => kernel.decideGate({ gate_id: gate.gate_id, actor: 'anon', decision: 'approved' } as never)).not.toThrow()
+    kernel.close()
+  })
+
+  it('gate decision with principal persists tenant/auth_method/session (GOV-01 durable)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'gov2', workspace: '/w', brief: makeBrief() })
+    const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
+    kernel.decideGate({
+      gate_id: gate.gate_id, actor: 'web-user', decision: 'approved', reason: 'ok',
+      principal: { principal_id: 'pi-7', tenant_id: 'acme', auth_method: 'dsh-session', session_id: 'sess-7' },
+    })
+    const decisions = kernel.listDecisions(project.project_id)
+    expect(decisions[0]!.principal).toMatchObject({ principal_id: 'pi-7', tenant_id: 'acme', auth_method: 'dsh-session', session_id: 'sess-7' })
+    kernel.close()
+  })
+})

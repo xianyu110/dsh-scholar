@@ -91,7 +91,7 @@ else
 fi
 
 say "Test 2: agent-like actor is accepted and recorded verbatim (actual behavior)"
-CODE_AGENT=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"actor":"agent-tool-1","decision":"approved"}')
+CODE_AGENT=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"actor":"agent-tool-1","principal":{"principal_id":"agent-tool-1","auth_method":"agent-session"},"decision":"approved"}')
 ACTOR=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '[0].actor')
 GATE_STATUS=$(api "$BASE/v1/projects/$PROJ/gates" | jfield '[0].status')
 if [[ "$CODE_AGENT" == "200" && "$ACTOR" == "agent-tool-1" && "$GATE_STATUS" == "approved" ]]; then
@@ -101,7 +101,7 @@ else
 fi
 
 say "Test 3: second decision on the same gate -> rejected (409, exactly-once)"
-CODE2=$(curl -s -o "$WORK/second.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"actor":"browser-x","decision":"approved"}')
+CODE2=$(curl -s -o "$WORK/second.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"actor":"browser-x","principal":{"principal_id":"browser-x","auth_method":"dsh-session"},"decision":"approved"}')
 ERR2=$(jfield '.error.code' < "$WORK/second.json")
 N_DEC=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '.length')
 if [[ "$CODE2" == "409" && "$ERR2" == "gate_already_decided" && "$N_DEC" == "1" ]]; then
@@ -261,6 +261,24 @@ if [[ "$CODE" == "200" && "$PID" == "ops-42" && "$TEN" == "acme" && "$AUTH" == "
   ok "decision re-read via GET /projects/{id}/decisions keeps principal_id=$PID tenant_id=$TEN auth_method=$AUTH session_id=$SID"
 else
   bad "durable principal: expected ops-42/acme/dsh-session/sess-ops-42, got ($PID/$TEN/$AUTH/$SID) HTTP $CODE"
+fi
+
+say "Test 9: principal-required fail-closed (GOV-01) — bare actor rejected on the HTTP surface"
+P9=$(api -X POST "$BASE/v1/projects" -d '{"name":"gov-principal","workspace":"/w","mode":"gate-only","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' | jfield '.project_id')
+G9=$(api -X POST "$BASE/v1/projects/$P9/gates" -d '{"type":"scope","title":"principal gate"}' | jfield '.gate_id')
+CODE=$(curl -s -o "$WORK/gov9.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$G9/decisions" -H 'content-type: application/json' -d '{"actor":"anon","decision":"approved"}')
+ERR=$(jfield '.error.code' < "$WORK/gov9.json")
+if [[ "$CODE" == "422" && "$ERR" == "validation_error" ]]; then
+  ok "bare-actor gate decision -> HTTP 422 validation_error (GOV-01 fail-closed, principal required)"
+else
+  bad "bare-actor decision: expected 422 validation_error, got HTTP $CODE (error=$ERR)"
+fi
+# Control: with a principal the same gate decides fine (and the state moves).
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$G9/decisions" -H 'content-type: application/json' -d '{"actor":"web-user","principal":{"principal_id":"pi-gov","auth_method":"dsh-session"},"decision":"approved"}')
+if [[ "$CODE" == "200" ]]; then
+  ok "principal-bearing decision on the same gate -> HTTP 200"
+else
+  bad "principal decision: expected 200, got HTTP $CODE"
 fi
 
 say "Summary: $PASS passed, $FAIL failed"

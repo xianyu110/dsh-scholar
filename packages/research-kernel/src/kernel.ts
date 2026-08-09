@@ -1547,6 +1547,30 @@ export class ResearchKernel {
     return rows.map(jobFromRow)
   }
 
+  /** §3.1 / RUN-01: durable per-attempt run rows of a project (claim-time
+   * identity + completion manifest/signature status), newest first. */
+  listRuns(projectId: string): Array<{
+    run_id: string; project_id: string; job_id: string; attempt_no: number
+    contract_id: string | null; snapshot_sha256: string | null
+    manifest_json: string | null; signature_status: string
+    started_at: string; finished_at: string | null
+  }> {
+    this.getProject(projectId)
+    const rows = this.db.prepare('SELECT * FROM runs WHERE project_id = ? ORDER BY started_at DESC').all(projectId) as unknown as Array<Record<string, unknown>>
+    return rows.map(row => ({
+      run_id: row.run_id as string,
+      project_id: row.project_id as string,
+      job_id: row.job_id as string,
+      attempt_no: Number(row.attempt_no),
+      contract_id: row.contract_id as string | null,
+      snapshot_sha256: row.snapshot_sha256 as string | null,
+      manifest_json: row.manifest_json as string | null,
+      signature_status: row.signature_status as string,
+      started_at: row.started_at as string,
+      finished_at: row.finished_at as string | null,
+    }))
+  }
+
   /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3, §12.6).
    * Every claim bumps `lease_generation` and issues a fresh opaque
    * `lease_token`; runners must echo both on heartbeat/complete, and stale
@@ -1566,7 +1590,21 @@ export class ResearchKernel {
       const leaseToken = `lt_${randomUUID().replaceAll('-', '')}${randomUUID().slice(0, 8)}`
       payload.__lease_token = leaseToken
       const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
-      if (Number(result.changes) === 1) claimed.push(jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow))
+      if (Number(result.changes) === 1) {
+        const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow)
+        // §3.1 / RUN-01 (Run attempt): every claim records a runs row — the
+        // durable per-attempt identity (attempt_no = attempts after claim).
+        this.db.prepare(
+          `INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, signature_status, started_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        ).run(
+          `run_${randomUUID().slice(0, 12)}`, claimedJob.project_id, claimedJob.job_id, claimedJob.attempts,
+          claimedJob.contract_id,
+          typeof claimedJob.code_snapshot_id === 'string' && claimedJob.code_snapshot_id !== '' ? claimedJob.code_snapshot_id : null,
+          now,
+        )
+        claimed.push(claimedJob)
+      }
     }
     return claimed
   }
@@ -1671,6 +1709,18 @@ export class ResearchKernel {
     this.db.prepare(
       'UPDATE jobs SET status = ?, failure_class = ?, run_manifest = ?, error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE job_id = ?',
     ).run(input.status, input.failure_class ?? null, input.run_manifest !== undefined ? JSON.stringify(input.run_manifest) : null, input.error ?? '', now, input.job_id)
+    // §3.1 / RUN-01 (Run attempt): finalize the attempt's runs row (the one
+    // recorded at claim time for this attempt_no). Manifest + signature
+    // status come from the completed run; legacy completions without a
+    // manifest keep signature_status 'pending'.
+    const manifestRow = input.run_manifest !== undefined ? input.run_manifest : undefined
+    const signatureStatus = manifestRow !== undefined && (manifestRow as Record<string, unknown>).signature !== undefined ? 'signed' : 'unsigned'
+    this.db.prepare(
+      'UPDATE runs SET manifest_json = ?, signature_status = ?, finished_at = ? WHERE job_id = ? AND attempt_no = ?',
+    ).run(
+      manifestRow !== undefined ? JSON.stringify(manifestRow) : null,
+      signatureStatus, now, input.job_id, job.attempts,
+    )
     const jobRecord = this.getJob(input.job_id)
     this.emit(job.project_id, 'job.updated', {
       job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,

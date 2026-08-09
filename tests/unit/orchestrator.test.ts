@@ -479,7 +479,11 @@ describe('integration — Engine against a real Kernel process', () => {
     const response = await fetch(`${kernelUrl}/v1/gates/${gateId}/decisions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ actor: 'human', decision: 'approved' }),
+      body: JSON.stringify({
+        actor: 'human',
+        principal: { principal_id: 'orch-human', auth_method: 'dsh-session' },
+        decision: 'approved',
+      }),
     })
     expect(response.ok).toBe(true)
   }
