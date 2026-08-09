@@ -73,10 +73,13 @@ PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"manifest\",\"workspace\":
 
 say "Test: manifest-missing-artifact-rejected"
 J1=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"mfa-1","kind":"echo","payload":{"message":"x"}}' | jfield '.job_id')
-CLAIMED=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-mfa","lease_ttl_seconds":60,"limit":8}' | jfield '[0].job_id')
+CLAIM1=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-mfa","lease_ttl_seconds":60,"limit":8}')
+CLAIMED=$(printf '%s' "$CLAIM1" | jfield '[0].job_id')
+G1=$(printf '%s' "$CLAIM1" | jfield '[0].lease_generation')
+T1=$(printf '%s' "$CLAIM1" | jfield '[0].lease_token')
 [[ "$CLAIMED" == "$J1" ]] || { echo "claim setup broken: expected $J1 got $CLAIMED"; exit 1; }
 
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J1/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"run_manifest\":{\"metrics_artifact\":\"$MISSING_SHA\"}}")
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J1/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"lease_generation\":$G1,\"lease_token\":\"$T1\",\"run_manifest\":{\"metrics_artifact\":\"$MISSING_SHA\"}}")
 ERR_CODE=$(jfield '.error.code' < "$WORK/resp.json")
 S1=$(api "$BASE/v1/jobs/$J1" | jfield '.status')
 if [[ "$CODE" == "422" && "$ERR_CODE" == "manifest_refs_missing" ]]; then
@@ -89,9 +92,12 @@ say "Test (control): manifest referencing a REAL artifact is accepted"
 META_B64=$(printf '{"metrics":[{"metric":"m","value":0.5,"seed":1}]}' | base64 -w0)
 ART=$(api -X POST "$BASE/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\"data\",\"content_base64\":\"$META_B64\"}" | jfield '.artifact_id')
 J2=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"mfa-2","kind":"echo","payload":{"message":"y"}}' | jfield '.job_id')
-CLAIMED2=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-mfa","lease_ttl_seconds":60,"limit":8}' | jfield '[0].job_id')
+CLAIM2=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-mfa","lease_ttl_seconds":60,"limit":8}')
+CLAIMED2=$(printf '%s' "$CLAIM2" | jfield '[0].job_id')
+G2=$(printf '%s' "$CLAIM2" | jfield '[0].lease_generation')
+T2=$(printf '%s' "$CLAIM2" | jfield '[0].lease_token')
 [[ "$CLAIMED2" == "$J2" ]] || { echo "claim setup broken: expected $J2 got $CLAIMED2"; exit 1; }
-CODE2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J2/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"run_manifest\":{\"metrics_artifact\":\"$ART\"}}")
+CODE2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J2/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-mfa\",\"status\":\"succeeded\",\"lease_generation\":$G2,\"lease_token\":\"$T2\",\"run_manifest\":{\"metrics_artifact\":\"$ART\"}}")
 S2=$(api "$BASE/v1/jobs/$J2" | jfield '.status')
 if [[ "$CODE2" == "200" && "$S2" == "succeeded" ]]; then
   ok "control: manifest with real artifact -> HTTP 200, job succeeded"
@@ -187,8 +193,9 @@ ART2=$(api -X POST "$BASE/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\
 J4=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"sig-1","kind":"echo","payload":{"message":"sig"}}' | jfield '.job_id')
 C4=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-sig","lease_ttl_seconds":60,"limit":8}')
 G4=$(printf '%s' "$C4" | jfield '[0].lease_generation')
+T4=$(printf '%s' "$C4" | jfield '[0].lease_token')
 BAD=$(node "$WORK/sign-manifest.mjs" "$J4" "$PROJ" "$ART2" "$WORK/runner-key.pem" "runner-key-shell" "$G4" bad)
-CODE5=$(curl -s -o "$WORK/resp5.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J4/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-sig\",\"status\":\"succeeded\",\"run_manifest\":$BAD}")
+CODE5=$(curl -s -o "$WORK/resp5.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J4/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-sig\",\"status\":\"succeeded\",\"lease_generation\":$G4,\"lease_token\":\"$T4\",\"run_manifest\":$BAD}")
 ERR5=$(jfield '.error.code' < "$WORK/resp5.json")
 S5=$(api "$BASE/v1/jobs/$J4" | jfield '.status')
 if [[ "$CODE5" == "422" && "$ERR5" == "manifest_signature_invalid" && "$S5" == "running" ]]; then
@@ -197,7 +204,7 @@ else
   bad "expected 422 manifest_signature_invalid, got HTTP $CODE5 (error=$ERR5), job status '$S5'"
 fi
 GOOD=$(node "$WORK/sign-manifest.mjs" "$J4" "$PROJ" "$ART2" "$WORK/runner-key.pem" "runner-key-shell" "$G4" good)
-CODE6=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J4/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-sig\",\"status\":\"succeeded\",\"run_manifest\":$GOOD}")
+CODE6=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/jobs/$J4/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-sig\",\"status\":\"succeeded\",\"lease_generation\":$G4,\"lease_token\":\"$T4\",\"run_manifest\":$GOOD}")
 S6=$(api "$BASE/v1/jobs/$J4" | jfield '.status')
 if [[ "$CODE6" == "200" && "$S6" == "succeeded" ]]; then
   ok "correct manifest signature -> HTTP 200, job succeeded"

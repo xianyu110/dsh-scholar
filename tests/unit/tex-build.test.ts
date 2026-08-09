@@ -21,6 +21,11 @@ function freshKernel(): ResearchKernel {
   return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
 }
 
+function fenceArgs(kernel: ResearchKernel, jobId: string): { lease_generation: number | null; lease_token: string | null } {
+  const j = kernel.getJob(jobId)
+  return { lease_generation: j.lease_generation, lease_token: j.lease_token }
+}
+
 function makeBrief() {
   return {
     problem: 'p', scope: 's', questions: [], primary_metrics: ['m'],
@@ -32,6 +37,9 @@ function makeBrief() {
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
+
+/** P0 (acceptance-tests.md §4): the exact texlive digest pinned by configs/runner-profiles/images.lock.json. */
+const TEXLIVE_IMAGE_DIGEST = 'texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4'
 
 describe('latex-compile chain (TEX-02)', () => {
   it('submitJob carries the frozen snapshot manifest for latex-compile', () => {
@@ -51,7 +59,8 @@ describe('latex-compile chain (TEX-02)', () => {
     expect(job.kind).toBe('latex-compile')
     const payload = job.payload as Record<string, unknown>
     expect(payload.tex_document_id).toBe(doc.document_id)
-    expect(payload.image_digest).toBe('texlive/texlive:latest')
+    // P0: the kernel injects the LOCKED texlive digest — never a tag.
+    expect(payload.image_digest).toBe(TEXLIVE_IMAGE_DIGEST)
     const manifest = payload.tex_snapshot as TexSnapshotManifest
     expect(manifest.document_id).toBe(doc.document_id)
     expect(manifest.files[0]!.path).toBe('paper.tex')
@@ -157,6 +166,7 @@ describe('latex-compile chain (TEX-02)', () => {
     const done = kernel.completeJob({
       job_id: job.job_id,
       owner: 'test-runner',
+      ...fenceArgs(kernel, job.job_id),
       status: 'succeeded',
       run_manifest: {
         run_id: 'run_test1',
@@ -190,6 +200,7 @@ describe('latex-compile chain (TEX-02)', () => {
     kernel.completeJob({
       job_id: job2.job_id,
       owner: 'test-runner',
+      ...fenceArgs(kernel, job2.job_id),
       status: 'failed',
       failure_class: 'code_error',
       error: 'pdflatex halted on error',

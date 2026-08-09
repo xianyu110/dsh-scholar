@@ -26,6 +26,8 @@ sleep 1
 ok "kernel :$KPORT + docker runner 就绪"
 
 # 真实 fixture 代码:train.js 读数据文件并计算确定性指标
+# §12.5 (P0): writes the fixed-schema MetricsFileV1 to --output; run identity
+# (DSH_RUN_ID / DSH_CONTRACT_ID) is injected by the runner.
 mkdir -p "$WORK/repo"
 cat > "$WORK/repo/train.js" <<'EOF'
 // Real deterministic training script (fixture): reads data, computes metric.
@@ -33,9 +35,20 @@ const fs = require('fs')
 const args = process.argv.slice(2)
 const seed = Number(args[args.indexOf('--seed') + 1] || 0)
 const dataPath = args[args.indexOf('--data') + 1] || '/work/data.json'
+const output = args[args.indexOf('--output') + 1] || '/outputs/metrics.json'
+const contractId = args[args.indexOf('--contract-id') + 1] || process.env.DSH_CONTRACT_ID || ''
 const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'))
 const base = data.baseline.reduce((a, b) => a + b, 0) / data.baseline.length
 const value = Math.round((base + seed * 0.01) * 10000) / 10000
+const report = {
+  schema_version: 1,
+  run_id: process.env.DSH_RUN_ID ?? `demo-train-${seed}`,
+  contract_id: contractId,
+  seed,
+  metrics: [{ name: 'macro_f1', value, unit: '' }],
+}
+fs.mkdirSync(require('path').dirname(output), { recursive: true })
+fs.writeFileSync(output, JSON.stringify(report) + '\n', 'utf8')
 console.log(JSON.stringify({ metric: 'macro_f1', value, seed }))
 EOF
 cat > "$WORK/repo/data.json" <<'EOF'
@@ -48,9 +61,20 @@ const fs = require('fs')
 const args = process.argv.slice(2)
 const seed = Number(args[args.indexOf('--seed') + 1] || 0)
 const dataPath = args[args.indexOf('--data') + 1] || '/work/data.json'
+const output = args[args.indexOf('--output') + 1] || '/outputs/metrics.json'
+const contractId = args[args.indexOf('--contract-id') + 1] || process.env.DSH_CONTRACT_ID || ''
 const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'))
 const base = data.baseline.reduce((a, b) => a + b, 0) / data.baseline.length
 const value = Math.round((base + seed * 0.01 - 0.05) * 10000) / 10000
+const report = {
+  schema_version: 1,
+  run_id: process.env.DSH_RUN_ID ?? `demo-baseline-${seed}`,
+  contract_id: contractId,
+  seed,
+  metrics: [{ name: 'macro_f1', value, unit: '' }],
+}
+fs.mkdirSync(require('path').dirname(output), { recursive: true })
+fs.writeFileSync(output, JSON.stringify(report) + '\n', 'utf8')
 console.log(JSON.stringify({ metric: 'macro_f1', value, seed }))
 EOF
 ok "fixture 代码就绪(train.js + data.json)"
@@ -93,14 +117,20 @@ S5=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process
 say "6. Baseline 复现(代码快照归档 + 容器执行)"
 CODE=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/repo\",\"description\":\"fixture train.js\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
 api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
-B_JOB=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo\",\"kind\":\"baseline\",\"code_snapshot_id\":\"$CODE\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"0\",\"--data\",\"/work/data.json\"],\"payload\":{}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+# P0 (acceptance-tests.md §4): baseline jobs MUST bind an APPROVED contract —
+# register + freeze it BEFORE submission via the internal approval route (the
+# Contract Gate in step 7 re-confirms the freeze and drives the state machine).
+CT=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/contracts" -d "{\"idea_id\":\"$I1\",\"data\":{\"dataset_id\":\"fixture\",\"version\":\"v1\",\"split\":\"official\"},\"methods\":{\"baseline\":\"b\",\"treatment\":\"a\"},\"metrics\":{\"primary\":\"macro_f1\",\"secondary\":[]},\"seeds\":[11,23,47],\"analysis\":{\"effect_size\":\"mean_difference\",\"interval\":\"bootstrap_95\",\"multiple_testing\":\"holm\"},\"ablations\":[],\"stop_conditions\":{\"max_gpu_hours\":2,\"min_completed_seeds\":3,\"stop_on_data_leakage\":true}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"demo-orchestrator"}' > /dev/null
+ok "contract $CT registered + frozen (P0 binding for baseline/formal)"
+B_JOB=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo\",\"kind\":\"baseline\",\"contract_id\":\"$CT\",\"code_snapshot_id\":\"$CODE\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"0\",\"--data\",\"/work/data.json\",\"--output\",\"/outputs/metrics.json\",\"--contract-id\",\"$CT\"],\"payload\":{},\"output_contract\":{\"metrics\":\"/outputs/metrics.json\",\"logs\":\"/outputs/run.log\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 # §13.6 paired design: baseline runs at the SAME seeds as the formals.
 for BSEED in 11 23 47; do
-  api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo-$BSEED\",\"kind\":\"baseline\",\"code_snapshot_id\":\"$CODE\",\"command\":[\"node\",\"/work/baseline.js\",\"--seed\",\"$BSEED\",\"--data\",\"/work/data.json\"],\"payload\":{}}" > /dev/null
+  api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo-$BSEED\",\"kind\":\"baseline\",\"contract_id\":\"$CT\",\"code_snapshot_id\":\"$CODE\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"node\",\"/work/baseline.js\",\"--seed\",\"$BSEED\",\"--data\",\"/work/data.json\",\"--output\",\"/outputs/metrics.json\",\"--contract-id\",\"$CT\"],\"payload\":{},\"output_contract\":{\"metrics\":\"/outputs/metrics.json\",\"logs\":\"/outputs/run.log\"}}" > /dev/null
 done
 for _ in $(seq 1 60); do BS=$(api "http://127.0.0.1:$KPORT/v1/jobs/$B_JOB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))"); [[ "$BS" == "succeeded" ]] && break; sleep 0.5; done
 BVAL=$(api "http://127.0.0.1:$KPORT/v1/jobs/$B_JOB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const m=(JSON.parse(d).run_manifest||{}).metrics_artifact;console.log(m||'')})")
-BACT=$(curl -s "http://127.0.0.1:$KPORT/v1/artifacts/$BVAL?project_id=$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const m=JSON.parse(d).metrics.find(x=>x.metric==='macro_f1');console.log(m?m.value:'')})")
+BACT=$(curl -s "http://127.0.0.1:$KPORT/v1/artifacts/$BVAL?project_id=$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const m=JSON.parse(d).metrics.find(x=>(x.name??x.metric)==='macro_f1');console.log(m?m.value:'')})")
 [[ "$BS" == "succeeded" && "$BACT" == "0.6" ]] && ok "Baseline 容器执行成功:macro_f1=$BACT(代码从 CAS 物化,期望 0.6)" || bad "baseline $BS value=$BACT"
 
 # ── 7. 实验合同 + Contract Gate(冻结)────────────────────────────────────
@@ -115,7 +145,7 @@ api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":
 # ── 8. 正式实验:3 seeds 容器执行 ─────────────────────────────────────────
 say "8. 正式实验(3 seeds,容器真实执行)"
 for seed in 11 23 47; do
-  api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"formal:demo:$seed\",\"kind\":\"formal\",\"contract_id\":\"$CT\",\"code_snapshot_id\":\"$CODE\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"$seed\",\"--data\",\"/work/data.json\"],\"payload\":{}}" > /dev/null
+  api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"formal:demo:$seed\",\"kind\":\"formal\",\"contract_id\":\"$CT\",\"code_snapshot_id\":\"$CODE\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"$seed\",\"--data\",\"/work/data.json\",\"--output\",\"/outputs/metrics.json\",\"--contract-id\",\"$CT\"],\"payload\":{},\"output_contract\":{\"metrics\":\"/outputs/metrics.json\",\"logs\":\"/outputs/run.log\"}}" > /dev/null
 done
 for _ in $(seq 1 150); do
   N=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.filter(x=>x.status==='succeeded'&&x.idempotency_key.startsWith('formal:')).length)})")

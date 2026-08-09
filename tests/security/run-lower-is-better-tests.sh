@@ -1,32 +1,24 @@
 #!/usr/bin/env bash
-# §19.2 P0 blocking test: lower-is-better-claim-direction — SKELETON.
+# §19.2 P0 blocking test: lower-is-better-claim-direction.
 #
-# v2 rule (§4.7 / §11.3): the metric direction (higher-is-better vs
-# lower-is-better) comes from a MetricSpec on the contract/analysis plan.
-# When a metric is declared lower-is-better, an improvement is a NEGATIVE
-# effect_size, and such evidence must be able to SUPPORT a claim.
+# v2 rule (§4.7 / §11.3 / §12): the metric direction (higher_is_better vs
+# lower_is_better) comes from the contract's MetricSpec
+# (metrics.direction). When a metric is declared lower-is-better, an
+# improvement is a NEGATIVE effect_size, and such evidence must SUPPORT a
+# claim (the sign interpretation is inverted vs higher-is-better).
 #
-# Current kernel: there is NO MetricSpec / metric-direction support anywhere
-# in research-schemas or the kernel (grep MetricSpec/direction -> empty), and
-# verifyClaim() hardcodes the higher-is-better rule (negative effect_size ->
-# contradicted). The direction-aware rule cannot even be expressed through
-# the current API.
-#
-# SKIP by default — enable with:  RUN_LOWER_IS_BETTER=1 bash tests/security/run-lower-is-better-tests.sh
-# Once kernel v2 implements MetricSpec, flip the default to run.
+# Test path (real API, no mocks):
+#   1. register an approved contract with metrics.direction=lower_is_better
+#   2. ingest WORKER-VERIFIED evidence (POST /evidence/verified) with
+#      effect_size < 0 and CI < 0 (the improvement direction)
+#   3. verify the claim -> must be 'supported'
+#   4. control: evidence with default higher_is_better + negative effect
+#      -> 'contradicted' (sign interpretation preserved for the default)
 #
 # Usage: bash tests/security/run-lower-is-better-tests.sh
 set -eu
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-
-if [[ "${RUN_LOWER_IS_BETTER:-0}" != "1" ]]; then
-  echo "SKIP lower-is-better-claim-direction: kernel v2 MetricSpec not implemented"
-  echo "  (assertion recorded for later: lower-is-better metric + negative effect_size must be 'supported')"
-  echo "  (enable with RUN_LOWER_IS_BETTER=1 — expects FAIL on the current kernel)"
-  exit 0
-fi
-
 KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js"
 WORK=$(mktemp -d)
 PORT=""
@@ -72,19 +64,33 @@ BASE="http://127.0.0.1:$PORT"
 PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"lower-better\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 
-say "Test: lower-is-better-claim-direction (RUN_LOWER_IS_BETTER=1)"
-say "  NOTE: kernel v2 MetricSpec absent — direction cannot be declared via any current API;"
-say "  contract/brief carry no metric_direction field. This run asserts the v2 rule anyway."
+say "Test: lower-is-better-claim-direction"
+# Contract declares the primary metric lower-is-better (MetricSpec direction).
+CT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_lib","data":{"dataset_id":"d1"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"loss","secondary":[],"direction":"lower_is_better"},"seeds":[1,2,3,4,5]}' | jfield '.contract_id')
+api -X POST "$BASE/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"lib-eval"}' > /dev/null
+ok "contract $CT registered + frozen with direction=lower_is_better"
 
 # Evidence: loss dropped from 0.83 to 0.71 -> effect_size NEGATIVE, CI < 0
-# (an improvement under lower-is-better semantics).
-E1=$(api -X POST "$BASE/v1/projects/$PROJ/evidence" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5}}' | jfield '.evidence_id')
+# (an improvement under lower-is-better semantics). Ingested via the
+# Analysis-Worker internal path so the claim can be supported (EVID-01).
+E1=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5,"direction":"lower_is_better"}}' | jfield '.evidence_id')
+[[ "$E1" == evidence_* ]] || { bad "verified evidence id '$E1'"; exit 1; }
 C1=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"The treatment reduces loss (lower is better)","scope":{"dataset":"d1","split":"test"}}' | jfield '.claim_id')
 S1=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C1\",\"evidence_ids\":[\"$E1\"]}" | jfield '.status')
 if [[ "$S1" == "supported" ]]; then
   ok "lower-is-better improvement (effect_size=-0.12, CI<0) -> supported"
 else
-  bad "lower-is-better improvement became '$S1' (expected supported once MetricSpec lands; current kernel hardcodes higher-is-better and marks negative effects contradicted) — 待 kernel v2 实现后启用"
+  bad "lower-is-better improvement became '$S1' (expected supported)"
+fi
+
+say "Test (control): higher_is_better default with negative effect -> contradicted"
+E2=$(api -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d '{"source_type":"analysis","run_ids":[],"artifact_refs":[],"analysis_method":"bootstrap-95","result":{"primary_metric":"loss","value":0.71,"baseline_value":0.83,"effect_size":-0.12,"ci_low":-0.20,"ci_high":-0.04,"n_seeds":5}}' | jfield '.evidence_id')
+C2=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"Treatment effect (default higher-is-better direction)","scope":{"dataset":"d1","split":"test"}}' | jfield '.claim_id')
+S2=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C2\",\"evidence_ids\":[\"$E2\"]}" | jfield '.status')
+if [[ "$S2" == "contradicted" ]]; then
+  ok "higher-is-better default + negative effect -> contradicted"
+else
+  bad "higher-is-better control became '$S2' (expected contradicted)"
 fi
 
 say "Summary: $PASS passed, $FAIL failed"

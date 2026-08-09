@@ -27,6 +27,8 @@ export const ExperimentContract = z.object({
   metrics: z.object({
     primary: z.string().min(1),
     secondary: z.array(z.string()).default([]),
+    /** MetricSpec direction (§12): higher-is-better or lower-is-better. */
+    direction: z.enum(['higher_is_better', 'lower_is_better']).default('higher_is_better'),
   }),
   seeds: z.array(z.number().int()).default([11, 23, 47, 89, 101]),
   analysis: z.object({
@@ -89,7 +91,7 @@ export type CodeSnapshot = z.infer<typeof CodeSnapshot>
 export const JobSpecBinding = z.object({
   code_snapshot_id: z.string().nullable().default(null),
   data_artifact_ids: z.array(z.string()).default([]),
-  image_digest: z.string().default(''), // default resolved by the kernel: 'node:22-alpine'
+  image_digest: z.string().default(''), // P0 (acceptance-tests.md §4): pinned to the trusted images.lock entry by the kernel; tags/latest/missing are 422
   output_contract: z.object({
     metrics: z.string().default('/outputs/metrics.json'),
     logs: z.string().default('/outputs/run.log'),

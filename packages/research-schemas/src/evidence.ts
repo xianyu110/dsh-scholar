@@ -23,6 +23,10 @@ export const EvidenceItem = z.object({
     ci_high: z.number().optional(),
     p_value: z.number().optional(),
     n_seeds: z.number().int().nonnegative().default(0),
+    /** MetricSpec direction (§12): claim verification interprets the sign of
+     * the effect relative to this direction (lower-is-better => negative
+     * effect is the improvement). */
+    direction: z.enum(['higher_is_better', 'lower_is_better']).optional(),
   }),
   uncertainty: z.string().default(''),
   status: z.enum(['accepted', 'conflicted', 'flagged']).default('accepted'),

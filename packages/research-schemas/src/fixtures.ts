@@ -150,7 +150,7 @@ export function fixtureContract(projectId = 'rsp_20260806_001'): ExperimentContr
     code_snapshot: 'sha256:abcdef',
     data: { dataset_id: 'thumos14', version: 'v2', split: 'official' },
     methods: { baseline: 'baseline_b', treatment: 'method_a' },
-    metrics: { primary: 'mAP@0.5', secondary: ['accuracy'] },
+    metrics: { primary: 'mAP@0.5', secondary: ['accuracy'], direction: 'higher_is_better' },
     seeds: [11, 23, 47, 89, 101],
     analysis: { effect_size: 'mean_difference', interval: 'bootstrap_95', multiple_testing: 'holm' },
     ablations: ['component_x'],

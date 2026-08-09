@@ -93,6 +93,11 @@ BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m1"],"resou
 PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"golden-path-v2\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"local-docker-cpu\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 ok "project $PROJ"
 
+echo "== contract: P0 binding for baseline/formal jobs (approval required) =="
+CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_gpv2","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"m1","secondary":["n_samples","m2"]},"seeds":[1,2,3,4],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"golden-v2-eval"}' > /dev/null
+[[ "$CT" == expc_* ]] && ok "contract $CT registered + frozen (P0 binding)" || bad "contract id '$CT'"
+
 echo "== fixture-repo -> code snapshot archive (actual contents into CAS, §11.3) =="
 SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$FIXTURE\",\"description\":\"golden-path-v2 fixture\"}")
 CODE_ART=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
@@ -200,7 +205,10 @@ check_log_contains() {
 run_sh() {
   local js="$1" seed="$2"
   { printf 'set -e\n'
-    printf 'node /work/%s --seed %s --data /work/data/seed-data.json --output /outputs/metrics.json\n' "$js" "$seed"
+    # §12.5 (P0): the metrics file must name THIS run + the bound contract —
+    # both are injected into the container by the runner (DSH_RUN_ID /
+    # DSH_CONTRACT_ID), and --contract-id keeps the file's contract_id aligned.
+    printf 'node /work/%s --seed %s --data /work/data/seed-data.json --output /outputs/metrics.json --contract-id "$DSH_CONTRACT_ID"\n' "$js" "$seed"
     printf 'cat /outputs/metrics.json\n'
     printf 'head -n1 /work/%s\n' "$js"
   }
@@ -213,7 +221,7 @@ submit_job() {
   local key="$1" kind="$2" js="$3" snap="$4" seed="$5"
   local run_sh
   run_sh=$(run_sh "$js" "$seed")
-  KEY="$key" KIND="$kind" SNAP="$snap" RUN_SH="$run_sh" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,image_digest:"node:22-alpine",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c",process.env.RUN_SH]}))' \
+  KEY="$key" KIND="$kind" SNAP="$snap" CT="$CT" RUN_SH="$run_sh" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,contract_id:process.env.CT,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c",process.env.RUN_SH]}))' \
     | api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d @-
 }
 

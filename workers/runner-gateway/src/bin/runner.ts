@@ -142,7 +142,12 @@ while (!stopping) {
         }).catch(() => undefined)
       }, cancelPollMs)
       try {
-        const { job: completed } = await executeJob(job, { client, owner, mode, timeoutMs, signal: executeAc.signal, signingKey })
+        const { job: completed } = await executeJob(job, {
+          client, owner, mode, timeoutMs, signal: executeAc.signal, signingKey,
+          // §12.6 (P0): terminal frames must carry the claim's generation —
+          // the kernel rejects frames without it (409 lease_stale).
+          leaseGeneration: job.lease_generation,
+        })
         console.error(`[runner-gateway] job ${job.job_id} → ${completed.status}`)
       } catch (error) {
         console.error(`[runner-gateway] job ${job.job_id} failed at gateway level:`, (error as Error).message)
@@ -152,6 +157,10 @@ while (!stopping) {
           status: 'failed',
           failure_class: 'unknown',
           error: `gateway error: ${(error as Error).message}`,
+          // §12.6 fencing (P0): the job is leased — completion MUST carry the
+          // claim's generation/token or the kernel rejects it (409 lease_stale).
+          lease_generation: job.lease_generation,
+          lease_token: job.lease_token,
         }).catch(() => undefined)
       } finally {
         clearInterval(cancelWatcher)

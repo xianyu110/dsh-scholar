@@ -76,7 +76,7 @@ function main() {
   // Fixed-schema metrics file (design §12.5).
   const report = {
     schema_version: 1,
-    run_id: `baseline-seed-${seed}`,
+    run_id: process.env.DSH_RUN_ID ?? `baseline-seed-${seed}`,
     contract_id: contractId,
     seed,
     metrics,

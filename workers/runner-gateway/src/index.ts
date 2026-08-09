@@ -133,7 +133,15 @@ export function materializeCodeSnapshot(files: Map<string, Buffer>, workDir: str
       throw new Error(`code snapshot path escapes workDir: ${rel}`)
     }
     mkdirSync(resolve(target, '..'), { recursive: true })
+    // The container mounts /work read-only as uid 65534: directories need
+    // traversal (+x) for ALL — mkdirSync honors umask (0077 → 0700), so force
+    // 0755 on every created directory.
+    chmodSync(resolve(target, '..'), 0o755)
     writeFileSync(target, buf)
+    // The container runs as uid 65534 against a READ-ONLY /work mount:
+    // umask (e.g. 0077) must not strip the world-read bits, or the
+    // container cannot open the materialized files (EACCES).
+    chmodSync(target, 0o644)
     count++
   }
   return count
@@ -191,7 +199,11 @@ export async function materializeTexWorkspace(
       }
     }
     mkdirSync(resolve(target, '..'), { recursive: true })
+    chmodSync(resolve(target, '..'), 0o755) // umask defense: dirs need +x for uid 65534
     writeFileSync(target, file.content)
+    // Same umask defense as materializeCodeSnapshot (§11.3): the container
+    // user (65534) must be able to read the materialized TeX sources.
+    chmodSync(target, 0o644)
     count++
   }
   return count
@@ -530,12 +542,14 @@ async function runSubprocess(
   command: string[], cwd: string, timeoutMs: number, maxLogBytes: number, jobId: string, signal?: AbortSignal,
   onChunk?: (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number) => void,
   runId = `run_${randomUUID().slice(0, 12)}`,
+  runEnv: Record<string, string> = {},
 ): Promise<RunOutcome> {
   const startedAt = new Date().toISOString()
   const env = {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     HOME: cwd,
     TMPDIR: cwd,
+    ...runEnv,
   }
   const result = await spawnCaptured(command, { cwd, env, timeoutMs, maxLogBytes, jobId, signal, onChunk })
   return { run_id: runId, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
@@ -545,12 +559,15 @@ async function runDocker(
   command: string[], cwd: string, timeoutMs: number, jobId: string, signal?: AbortSignal, image = 'node:22-alpine',
   onChunk?: (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number) => void,
   runId = `run_${randomUUID().slice(0, 12)}`,
+  runEnv: Record<string, string> = {},
 ): Promise<RunOutcome> {
   const startedAt = new Date().toISOString()
   const container = `dsh-scholar-${randomUUID().slice(0, 8)}`
   // §3.2/§12.3 (RUN-02): full container baseline — read-only rootfs,
   // capability drop, no-new-privileges, pids cap. /tmp is a tmpfs and
   // /outputs is the only rw mount, so job payloads must write there.
+  const envArgs: string[] = []
+  for (const [k, v] of Object.entries(runEnv)) envArgs.push('-e', `${k}=${v}`)
   const args = [
     'run', '--rm', '--name', container,
     '--network', 'none',
@@ -561,6 +578,7 @@ async function runDocker(
     '--pids-limit', '256',
     '--memory', '1g', '--cpus', '1',
     '--workdir', '/work',
+    ...envArgs,
     '-v', `${cwd}:/work:ro`,
     // §12.2/§12.5 (SCH-EXEC-002): output contract — the container writes the
     // fixed-schema metrics file into /outputs (host: <cwd>/outputs, rw; the
@@ -641,6 +659,10 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       status: 'failed',
       failure_class: 'environment',
       error: `job kind ${job.kind} requires container execution (runner mode=docker); host subprocess is prohibited (v2 §3.2)`,
+      // §12.6 fencing (P0): a leased job's completion MUST carry the claim's
+      // generation/token or the kernel rejects it (409 lease_stale).
+      lease_generation: job.lease_generation,
+      lease_token: job.lease_token,
     }).catch(() => null)
     if (rejected !== null) return { job: rejected, run: {
       run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: -1,
@@ -698,6 +720,9 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       const engine = typeof job.payload.engine === 'string' && job.payload.engine !== '' ? job.payload.engine : 'pdflatex'
       const fileList = manifest.files.map((f: { path: string }) => f.path)
       writeFileSync(join(workDir, 'run.sh'), buildLatexRunScript(manifest.root_file, engine, fileList), { mode: 0o755 })
+      // umask may strip the world bits (e.g. 0077 → 0700): the container user
+      // (65534) must be able to READ the script — force the mode explicitly.
+      chmodSync(join(workDir, 'run.sh'), 0o755)
     } catch (error) {
       rmSync(workDir, { recursive: true, force: true })
       throw error
@@ -710,6 +735,15 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     : (job.kind === 'latex-compile' ? 'texlive/texlive:latest' : 'node:22-alpine')
 
   let run: RunOutcome
+  // §12.5 (P0): the in-container execution receives its run identity so the
+  // metrics FILE it writes back can prove run/contract/seed provenance.
+  const runEnv: Record<string, string> = {
+    DSH_RUN_ID: runId,
+    DSH_CONTRACT_ID: job.contract_id ?? '',
+    DSH_SEED: typeof (job.payload as Record<string, unknown> | undefined)?.seed === 'number'
+      ? String((job.payload as Record<string, unknown>).seed)
+      : '',
+  }
   if (job.kind === 'echo') {
     // Echo jobs execute nothing: pure in-process fixture (the ONLY kind that
     // may succeed without executing code — §3.2 invariant 1).
@@ -738,20 +772,23 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   } else if (job.kind === 'smoke' && job.payload.script !== undefined && typeof job.payload.script === 'string') {
     // Injected smoke script runs inside the isolated workdir.
     writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
+    // umask may strip the world bits (e.g. 0077 → 0700): the container user
+    // (65534) must be able to READ the script — force the mode explicitly.
+    chmodSync(join(workDir, 'run.sh'), 0o755)
     run = mode === 'docker'
-      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
-      : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
+      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image, onChunk, runId, runEnv)
+      : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
   } else if (texSnapshot !== undefined) {
     // TEX-02: the frozen-workspace build script is the only thing executed.
     const command = ['sh', '/work/run.sh']
     run = mode === 'docker'
-      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
-      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
+      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId, runEnv)
+      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
   } else {
     const command = job.command.length > 0 ? job.command : ['true']
     run = mode === 'docker'
-      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId)
-      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId)
+      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId, runEnv)
+      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
   }
 
   // §6 terminal exit frame: the process-side facts (exit code, truncation).
@@ -871,10 +908,13 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     // §12.5 (SCH-EXEC-002): formal metrics come from the fixed-schema metrics
     // FILE written in-container to the output contract path (host mirror:
     // <workDir>/outputs/<file>). The file is authoritative — stdout is only
-    // logs. Legacy stdout JSON-line extraction remains as a fallback for old
-    // fixtures that never write the file.
+    // logs. Legacy stdout JSON-line extraction remains as a fallback ONLY for
+    // non-secure kinds (smoke/echo/analysis): P0 (acceptance-tests.md §4)
+    // forbids stdout fallback for baseline/pilot/formal/reproduce.
+    const SECURE_METRICS_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
     let metrics: Array<{ metric: string; value: number; seed?: number }> = []
     let metricsFromFile: MetricsFileRecord | null = null
+    let metricsFileError: string | null = null
     const outputContract = job.payload.output_contract
     const metricsPath = typeof outputContract === 'object' && outputContract !== null
       ? (outputContract as Record<string, unknown>).metrics
@@ -884,7 +924,44 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       try {
         const fileContent = readFileSync(join(outputsDir, rel), 'utf8')
         metricsFromFile = parseMetricsFile(fileContent)
-      } catch { /* no metrics file written — fall back below */ }
+        if (metricsFromFile === null) {
+          metricsFileError = `metrics file ${metricsPath} is missing or not a MetricsFileV1 (schema_version=1 + non-empty metrics)`
+        }
+      } catch {
+        metricsFileError = `metrics file ${metricsPath} not found after execution (output contract violated)`
+      }
+    } else if (SECURE_METRICS_KINDS.includes(job.kind)) {
+      metricsFileError = 'secure job must declare output_contract.metrics (MetricsFileV1 path)'
+    }
+    // P0 §12.5: strict provenance validation of the metrics FILE.
+    if (metricsFromFile !== null && SECURE_METRICS_KINDS.includes(job.kind)) {
+      const problems: string[] = []
+      if (metricsFromFile.run_id !== undefined && metricsFromFile.run_id !== run.run_id) {
+        problems.push(`run_id mismatch: file '${metricsFromFile.run_id}' != execution '${run.run_id}'`)
+      }
+      if (job.contract_id !== null && metricsFromFile.contract_id !== undefined && metricsFromFile.contract_id !== job.contract_id) {
+        problems.push(`contract_id mismatch: file '${metricsFromFile.contract_id}' != job '${job.contract_id}'`)
+      }
+      if (metricsFromFile.seed === undefined || !Number.isFinite(metricsFromFile.seed)) {
+        problems.push('seed missing or not a finite number')
+      } else if (runEnv.DSH_SEED !== '' && metricsFromFile.seed !== Number(runEnv.DSH_SEED)) {
+        problems.push(`seed mismatch: file ${metricsFromFile.seed} != job seed ${runEnv.DSH_SEED}`)
+      }
+      for (const m of metricsFromFile.metrics) {
+        if (m.value === undefined || !Number.isFinite(m.value)) {
+          problems.push(`non-finite metric value for '${m.name ?? m.metric ?? '?'}'`)
+        }
+      }
+      const names = metricsFromFile.metrics.map(m => m.name ?? m.metric ?? '')
+      const dupes = names.filter((n, i) => names.indexOf(n) !== i)
+      if (dupes.length > 0) problems.push(`duplicate metric name(s): ${[...new Set(dupes)].join(', ')}`)
+      const contractMetrics = (job.payload as Record<string, unknown>).contract_metrics
+      if (Array.isArray(contractMetrics)) {
+        const allowed = new Set(contractMetrics.filter((x): x is string => typeof x === 'string'))
+        const foreign = names.filter(n => n !== '' && !allowed.has(n))
+        if (foreign.length > 0) problems.push(`metric(s) not in contract: ${foreign.join(', ')}`)
+      }
+      if (problems.length > 0) metricsFileError = `MetricsFileV1 validation failed: ${problems.join('; ')}`
     }
     if (metricsFromFile !== null) {
       // Map the §12.5 record into the artifact, injecting the top-level seed
@@ -894,7 +971,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
         value: m.value,
         ...(m.seed !== undefined ? { seed: m.seed } : metricsFromFile!.seed !== undefined ? { seed: metricsFromFile!.seed } : {}),
       }))
-    } else {
+    } else if (!SECURE_METRICS_KINDS.includes(job.kind)) {
       metrics = extractMetrics(run.stdout)
     }
     if (metrics.length > 0 || run.exit_code === 0) {
@@ -927,6 +1004,12 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     }
 
     const { failure_class, error: failureError } = classifyFailure(run)
+    // P0 (acceptance-tests.md §4): a secure job whose metrics file is
+    // missing/invalid must NEVER be marked succeeded — force a failed
+    // completion even when the process exited 0.
+    const metricsFailure = metricsFileError !== null && failure_class === null
+      ? { failure_class: 'code_error' as const, error: metricsFileError }
+      : null
     // §12.6 fencing: record the claim's generation inside the manifest so the
     // kernel can reject stale runners that somehow complete late.
     manifest.lease = { generation: job.lease_generation, token: job.lease_token }
@@ -936,7 +1019,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     const finalManifest = signingKey !== undefined
       ? signManifest({ ...manifest, signed_by: owner }, signingKey)
       : { ...manifest, signed_by: owner }
-    if (run.exit_code === 0 && failure_class === null) {
+    if (run.exit_code === 0 && failure_class === null && metricsFailure === null) {
       const completed = await client.completeJob({
         job_id: job.job_id,
         owner,
@@ -951,8 +1034,8 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       job_id: job.job_id,
       owner,
       status: 'failed',
-      failure_class,
-      error: failureError || run.error || `exit code ${run.exit_code}`,
+      failure_class: metricsFailure?.failure_class ?? failure_class,
+      error: metricsFailure?.error ?? (failureError || run.error || `exit code ${run.exit_code}`),
       run_manifest: finalManifest,
       lease_generation: job.lease_generation,
       lease_token: job.lease_token,

@@ -26,7 +26,7 @@ if ! docker info > /dev/null 2>&1; then
   echo "SKIP latex-compile-e2e: docker unavailable"
   exit 0
 fi
-IMAGE="${TEX_BUILD_IMAGE:-texlive/texlive:latest}"
+IMAGE="${TEX_BUILD_IMAGE:-texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4}"
 if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
   echo "SKIP latex-compile-e2e: image $IMAGE not present (CI job pulls it first)"
   exit 0

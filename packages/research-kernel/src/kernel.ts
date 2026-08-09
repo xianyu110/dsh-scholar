@@ -21,6 +21,7 @@ import { ArtifactCas } from './cas.js'
 import { openDatabase, type EventRow, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
+import { validateImageDigest, type SecureJobKind } from './images-lock.js'
 
 export interface KernelOptions {
   /** SQLite database path (defaults to `:memory:`). */
@@ -965,11 +966,16 @@ export class ResearchKernel {
       created_at: nowIso(),
       updated_at: nowIso(),
     }
-    ExperimentContract.parse(contract)
+    // Zod defaults (seeds, analysis, metrics.secondary, metrics.direction,
+    // stop_conditions …) must be MATERIALIZED into the stored body — parsing
+    // then re-inserting the PARSED value (not the raw input) guarantees the
+    // runner's contract_metrics injection and direction resolution always see
+    // the defaulted fields.
+    const parsed = ExperimentContract.parse(contract)
     this.db.prepare('INSERT INTO contracts (contract_id, project_id, body, updated_at) VALUES (?, ?, ?, ?)')
-      .run(contract.contract_id, contract.project_id, JSON.stringify(contract), contract.updated_at)
-    this.emit(input.project_id, 'contract.registered', { contract_id: contract.contract_id })
-    return contract
+      .run(parsed.contract_id, parsed.project_id, JSON.stringify(parsed), parsed.updated_at)
+    this.emit(input.project_id, 'contract.registered', { contract_id: parsed.contract_id })
+    return parsed
   }
 
   getContract(contractId: string): ExperimentContract {
@@ -1292,10 +1298,48 @@ export class ResearchKernel {
         }
       }
     }
-    // §12.2: image digest default; the rest of the binding travels in payload.
+    // P0 (acceptance-tests.md §4): formal-class jobs MUST bind an approved
+    // contract of the SAME project, frozen by a Human Gate Decision.
+    // draft/foreign/missing contracts are 422, never queued.
+    const CONTRACT_BOUND_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+    let contractMetricNames: string[] | undefined
+    if (CONTRACT_BOUND_KINDS.includes(input.kind)) {
+      const contractId = input.contract_id ?? null
+      if (contractId === null || contractId === '') {
+        throw new KernelError(422, 'contract_required', `job kind ${input.kind} requires an approved contract binding`)
+      }
+      let contract: ExperimentContract
+      try {
+        contract = this.getContract(contractId)
+      } catch {
+        throw new KernelError(422, 'contract_unknown', `contract ${contractId} not found for ${input.kind} job`)
+      }
+      if (contract.project_id !== project.project_id) {
+        throw new KernelError(422, 'contract_foreign', `contract ${contractId} belongs to another project (cannot bind to ${project.project_id})`)
+      }
+      if (contract.status !== 'approved' || contract.approval?.gate_decision_id === undefined || contract.approval.gate_decision_id === '') {
+        throw new KernelError(422, 'contract_not_approved', `contract ${contractId} is ${contract.status} and not frozen by a Human Gate Decision`)
+      }
+      contractMetricNames = [contract.metrics.primary, ...contract.metrics.secondary]
+    }
+    // §12.2 (P0, acceptance-tests.md §4): image_digest MUST equal the trusted
+    // images.lock entry exactly — tags, `latest`, missing digests and
+    // post-commit digest swaps are 422. latex-compile is kernel-owned: a
+    // missing digest is injected with the locked texlive entry. An explicit
+    // digest inside payload (the HTTP TeX builds route forwards it there) is
+    // validated too, so it can never silently diverge from the lock.
     const payload = {
       ...(input.payload ?? {}),
-      image_digest: input.image_digest ?? (input.kind === 'latex-compile' ? 'texlive/texlive:latest' : (SECURE_KINDS.includes(input.kind) ? 'node:22-alpine' : '')),
+      // §12.5 (P0): the Runner validates the metrics FILE against the bound
+      // contract's metric names (primary + secondary) — injected here so the
+      // runner never trusts client-supplied names.
+      ...(contractMetricNames !== undefined ? { contract_metrics: contractMetricNames } : {}),
+      image_digest: SECURE_KINDS.includes(input.kind)
+        ? validateImageDigest(
+            input.kind as SecureJobKind,
+            input.image_digest ?? (typeof input.payload?.image_digest === 'string' && input.payload.image_digest !== '' ? input.payload.image_digest : undefined),
+          )
+        : (input.image_digest ?? ''),
       ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
       ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
     }
@@ -1386,10 +1430,18 @@ export class ResearchKernel {
     if (job.lease_owner !== null && job.lease_owner !== owner) {
       throw new KernelError(409, 'lease_conflict', `job ${jobId} leased by ${job.lease_owner}`)
     }
-    const fenced = (generation !== undefined && generation !== null) || (token !== undefined && token !== null)
-    if (fenced && (job.lease_generation !== (generation ?? null) || job.lease_token !== (token ?? null))) {
+    // P0 fencing (acceptance-tests.md §4): a leased job's heartbeat MUST
+    // carry the current owner's generation AND token — missing fields are
+    // stale, not "unfenced" (no owner-only compatibility pass).
+    if (job.lease_owner !== null && (generation === undefined || generation === null || token === undefined || token === null)) {
       throw new KernelError(409, 'lease_stale',
-        `job ${jobId} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${generation ?? 'n/a'} token ${token ?? 'n/a'}`)
+        `job ${jobId} heartbeat missing lease fencing fields: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}`)
+    }
+    if ((generation !== undefined && generation !== null) || (token !== undefined && token !== null)) {
+      if (job.lease_generation !== (generation ?? null) || job.lease_token !== (token ?? null)) {
+        throw new KernelError(409, 'lease_stale',
+          `job ${jobId} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${generation ?? 'n/a'} token ${token ?? 'n/a'}`)
+      }
     }
     const now = nowIso()
     const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
@@ -1433,9 +1485,13 @@ export class ResearchKernel {
     if (job.status !== 'running') {
       throw new KernelError(409, 'job_not_running', `job ${input.job_id} is ${job.status}, not running`)
     }
-    // §12.6 strict lease fencing when generation/token are supplied.
-    const fence = (input.lease_generation !== undefined && input.lease_generation !== null) || (input.lease_token !== undefined && input.lease_token !== null)
-    if (fence && (job.lease_generation !== (input.lease_generation ?? null) || job.lease_token !== (input.lease_token ?? null))) {
+    // §12.6 strict lease fencing (P0): completion of a leased job MUST carry
+    // the current generation AND token — missing fields are rejected 409.
+    if ((input.lease_generation === undefined || input.lease_generation === null) || (input.lease_token === undefined || input.lease_token === null)) {
+      throw new KernelError(409, 'lease_stale',
+        `job ${input.job_id} completion missing lease fencing fields: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}`)
+    }
+    if (job.lease_generation !== input.lease_generation || job.lease_token !== input.lease_token) {
       throw new KernelError(409, 'lease_stale',
         `job ${input.job_id} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${input.lease_generation ?? 'n/a'} token ${input.lease_token ?? 'n/a'}`)
     }
@@ -1641,10 +1697,21 @@ export class ResearchKernel {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       for (const frame of input.frames) {
         if (frame.seq <= cursor) continue // idempotent replay / out-of-order skip
-        const generation = frame.lease_generation ?? job.lease_generation ?? 0
-        if (job.lease_generation !== null && job.lease_generation !== undefined && generation < job.lease_generation) {
-          throw new KernelError(409, 'lease_stale', `frame lease_generation ${generation} < job generation ${job.lease_generation}`)
+        // P0 (acceptance-tests.md §4): Terminal frames MUST carry the current
+        // owner generation/token — a frame with a MISSING generation is
+        // rejected 409 (fail-closed, no owner-only/defaulting pass), and a
+        // stale or future generation is rejected too.
+        if (job.lease_generation !== null && job.lease_generation !== undefined) {
+          if (frame.lease_generation === undefined || frame.lease_generation === null) {
+            throw new KernelError(409, 'lease_stale',
+              `frame lease_generation missing (job generation ${job.lease_generation}) — terminal frames must carry the claim's generation (P0)`)
+          }
+          if (frame.lease_generation !== job.lease_generation) {
+            throw new KernelError(409, 'lease_stale',
+              `frame lease_generation ${frame.lease_generation} != job generation ${job.lease_generation}`)
+          }
         }
+        const generation = frame.lease_generation ?? 0
         if (frame.frame_kind === 'chunk' && (frame.channel === null || frame.channel === undefined || frame.text === null || frame.text === undefined)) {
           throw new KernelError(422, 'invalid_chunk_frame', 'chunk frames require channel + text')
         }
@@ -1935,10 +2002,25 @@ export class ResearchKernel {
       && (e.result.n_seeds ?? e.run_ids.length) > 0,
     )
     if (!conflicted && complete.length > 0) {
+      // §12 MetricSpec direction: lower-is-better inverts the sign
+      // interpretation — a NEGATIVE effect (CI < 0) is the improvement and
+      // supports the claim; a positive effect contradicts it. Evidence that
+      // declares no direction defaults to higher_is_better.
+      const directions = new Set(complete.map(e => e.result.direction ?? 'higher_is_better'))
+      const lowerIsBetter = directions.size === 1 && directions.has('lower_is_better')
       const allCiExcludeZero = complete.every(e => e.result.ci_low! > 0 || e.result.ci_high! < 0)
       const anyNegativeEffect = complete.some(e => (e.result.effect_size ?? 0) < 0)
       const allPositiveEffect = complete.every(e => (e.result.effect_size ?? 0) > 0)
-      if (allCiExcludeZero && allPositiveEffect) {
+      const allNegativeEffect = complete.every(e => (e.result.effect_size ?? 0) < 0)
+      if (allCiExcludeZero && lowerIsBetter) {
+        if (allNegativeEffect) {
+          status = 'supported'
+        } else if (allPositiveEffect) {
+          status = 'contradicted'
+        } else {
+          status = 'inconclusive' // mixed directions
+        }
+      } else if (allCiExcludeZero && allPositiveEffect) {
         status = 'supported'
       } else if (allCiExcludeZero && anyNegativeEffect && !allPositiveEffect) {
         status = 'contradicted'
@@ -2094,10 +2176,21 @@ export class ResearchKernel {
       const hit = treatmentRuns.find(t => t.seed === s)!
       return hit.value
     })
+    // §12 MetricSpec direction: resolved from the bound contract (explicit
+    // contract_id, else the project's first approved contract); defaults to
+    // higher_is_better when the contract declares none.
+    let direction: 'higher_is_better' | 'lower_is_better' = 'higher_is_better'
+    const approvedContracts = this.listContracts(projectId).filter(c => c.status === 'approved')
+    const boundContract = contractId !== undefined
+      ? approvedContracts.find(c => c.contract_id === contractId)
+      : approvedContracts[0]
+    if (boundContract !== undefined && boundContract.metrics.direction !== undefined) {
+      direction = boundContract.metrics.direction
+    }
     const worker = computePairedAnalysis(
       {
         contract_id: contractId ?? 'auto',
-        metric: { name: metric ?? 'auto', direction: 'higher_is_better', aggregation: 'mean' },
+        metric: { name: metric ?? 'auto', direction, aggregation: 'mean' },
         paired_by: 'seed',
         baseline_run_set_id: 'kernel-baseline',
         treatment_run_set_id: 'kernel-treatment',
@@ -2114,6 +2207,7 @@ export class ResearchKernel {
     const result = {
       contract_id: contractId ?? null,
       metric: metric ?? 'auto',
+      direction,
       runs: metricValues
         .filter(v => v.kind !== 'baseline' && v.seed !== undefined && paired.includes(v.seed!))
         .map(({ kind: _kind, ...rest }) => rest),

@@ -80,7 +80,9 @@ function main() {
   ]
 
   // Fixed-schema metrics file (design §12.5).
-  const runId = `train-seed-${seed}`
+  // §12.5 (P0): the runner injects DSH_RUN_ID so the file proves it belongs
+  // to THIS execution; keep the seed-derived id as a readable fallback.
+  const runId = process.env.DSH_RUN_ID ?? `train-seed-${seed}`
   const report = {
     schema_version: 1,
     run_id: runId,

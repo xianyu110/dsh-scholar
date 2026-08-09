@@ -22,11 +22,17 @@
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
-if [ ! -f "$REPO/packages/research-kernel/lib/bin/kernel.js" ] && [ -f "$PWD/packages/research-kernel/lib/bin/kernel.js" ]; then
+if [ ! -f "$REPO/packages/research-kernel/lib/bin/kernel.js" ]; then
+  # Robust root detection: `dirname $0/..` may land one level shallow when
+  # invoked via an absolute path from another working directory (e.g. the
+  # tests/security aggregator) — climb until the kernel bin is found.
   REPO=$PWD
+  while [ ! -f "$REPO/packages/research-kernel/lib/bin/kernel.js" ] && [ "$REPO" != "/" ]; do
+    REPO=$(dirname "$REPO")
+  done
 fi
 if [ ! -f "$REPO/packages/research-kernel/lib/bin/kernel.js" ]; then
-  echo "run-release-eval: cannot locate repo root (tried '$REPO' and '$PWD')" >&2
+  echo "run-release-eval: cannot locate repo root (tried '$REPO')" >&2
   exit 1
 fi
 KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js"
@@ -77,14 +83,23 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"release-
 # Contract — feeds data/dataset-manifest.json and the manuscript methods section.
 CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_release_bundle","data":{"dataset_id":"synth-smoke-v1","version":"1.0.0","split":"official","preprocessing_hash":"sha256:eval"},"methods":{"baseline":"no-treatment","treatment":"smoke-treatment"},"metrics":{"primary":"m1","secondary":["n_samples"]},"seeds":[1,2],"analysis":{"effect_size":"cohens_d","interval":"bootstrap-95","multiple_testing":"none"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 [[ "$CONTRACT" == expc_* ]] && ok "contract $CONTRACT registered" || bad "contract id '$CONTRACT'"
+# P0 (acceptance-tests.md §4): baseline jobs must bind an APPROVED contract —
+# freeze via the internal approval route (evals/orchestrator path).
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CONTRACT/approve" -d '{"actor":"release-eval"}' > /dev/null
+ok "contract $CONTRACT frozen (approval recorded)"
 
 say "baseline jobs (kind=baseline, seeds 1/2, matched-seed design §13.6)"
 mkdir -p "$WORK/fixture"
 printf '#!/bin/sh\necho "release-bundle fixture"\n' > "$WORK/fixture/run.sh"
 SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/fixture\",\"description\":\"release-bundle fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
 [ -n "$SNAP" ] || { echo "failed to create code snapshot"; exit 1; }
-B11=$(node -e "const m=JSON.stringify({metric:'m1',value:0.450,seed:1});console.log(JSON.stringify({idempotency_key:'rel-base-1',kind:'baseline',code_snapshot_id:'$SNAP',command:['sh','-c','echo '+JSON.stringify(m)],payload:{}}))")
-B12=$(node -e "const m=JSON.stringify({metric:'m1',value:0.550,seed:2});console.log(JSON.stringify({idempotency_key:'rel-base-2',kind:'baseline',code_snapshot_id:'$SNAP',command:['sh','-c','echo '+JSON.stringify(m)],payload:{}}))")
+# §12.5 (P0): baseline jobs MUST produce a MetricsFileV1 at the output
+# contract path — the command writes it from the runner-injected run identity.
+mfile() { # <value> <seed> — emits the in-container `node -e` script body
+  node -e 'console.log(JSON.stringify(`const fs=require("fs");const m={schema_version:1,run_id:process.env.DSH_RUN_ID,contract_id:process.env.DSH_CONTRACT_ID,seed:'"$2"',metrics:[{name:"m1",value:'"$1"',unit:""}]};fs.writeFileSync("/outputs/metrics.json",JSON.stringify(m))`))'
+}
+B11=$(KEY="rel-base-1" CT="$CONTRACT" SNAP="$SNAP" INNER="$(mfile 0.450 1)" node -e 'console.log(JSON.stringify({idempotency_key:process.env.KEY,kind:"baseline",contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],payload:{},output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))')
+B12=$(KEY="rel-base-2" CT="$CONTRACT" SNAP="$SNAP" INNER="$(mfile 0.550 2)" node -e 'console.log(JSON.stringify({idempotency_key:process.env.KEY,kind:"baseline",contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],payload:{},output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))')
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$B11" > /dev/null
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$B12" > /dev/null
 say "2 smoke jobs (kind=smoke + payload.script emitting metrics JSON lines)"

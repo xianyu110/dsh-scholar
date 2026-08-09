@@ -13,6 +13,10 @@ import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { fixtureCorpus, fixtureIdea } from '@dsh-scholar/research-schemas'
 import { materializeCodeSnapshot, unpackCodeSnapshot } from '@dsh-scholar/runner-gateway'
 
+/** P0 (acceptance-tests.md §4): the exact digests pinned by configs/runner-profiles/images.lock.json. */
+const NODE_IMAGE_DIGEST = 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32'
+const TEXLIVE_IMAGE_DIGEST = 'texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4'
+
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-test-'))
   return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
@@ -45,6 +49,28 @@ function makeBrief(overrides: Record<string, unknown> = {}) {
 }
 
 /** Assert a KernelError with an exact HTTP status + error code. */
+/** P0: register + freeze an approved contract for secure-kind job tests. */
+function approvedContract(kernel: ResearchKernel, projectId: string): string {
+  const contract = kernel.registerContract({
+    project_id: projectId,
+    idea_id: 'idea_x', data: { dataset_id: 'd', version: 'v1' }, methods: { baseline: 'b', treatment: 'a' },
+    metrics: { primary: 'f1', secondary: [] }, seeds: [1, 2], analysis: {},
+    ablations: [], stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 1, stop_on_data_leakage: true },
+  })
+  kernel.approveContract(contract.contract_id, 'dec_test_gate', 'test-pi')
+  return contract.contract_id
+}
+
+/** P0: current lease fencing fields of a job (generation, token). */
+function fenceArgs(kernel: ResearchKernel, jobId: string): { lease_generation: number | null; lease_token: string | null } {
+  const j = kernel.getJob(jobId)
+  return { lease_generation: j.lease_generation, lease_token: j.lease_token }
+}
+function fencePair(kernel: ResearchKernel, jobId: string): [number | null, string | null] {
+  const j = kernel.getJob(jobId)
+  return [j.lease_generation, j.lease_token]
+}
+
 function expectKernelError(fn: () => unknown, status: number, code: string): void {
   try {
     fn()
@@ -271,11 +297,11 @@ describe('durable jobs', () => {
     expect(claimed).toHaveLength(1)
     expect(claimed[0]?.status).toBe('running')
     expect(claimed[0]?.lease_owner).toBe('runner-1')
-    const heartbeated = kernel.heartbeatJob(job.job_id, 'runner-1')
+    const heartbeated = kernel.heartbeatJob(job.job_id, 'runner-1', ...fencePair(kernel, job.job_id))
     expect(heartbeated.heartbeat_at).not.toBeNull()
     // Manifest referencing a missing artifact must be rejected.
     expect(() => kernel.completeJob({
-      job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
+      job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded',
       run_manifest: { metrics_artifact: 'sha256:' + 'a'.repeat(64) },
     })).toThrow(/missing artifacts/)
     kernel.close()
@@ -305,7 +331,7 @@ describe('durable jobs', () => {
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k4', kind: 'echo' })
     const [claimed] = kernel.claimJobs('runner-a', 60, 8)
-    expect(() => kernel.completeJob({ job_id: claimed!.job_id, owner: 'intruder', status: 'succeeded' }))
+    expect(() => kernel.completeJob({ job_id: claimed!.job_id, owner: 'intruder', ...fenceArgs(kernel, claimed!.job_id), status: 'succeeded' }))
       .toThrow(/lease/)
     kernel.close()
   })
@@ -325,16 +351,16 @@ describe('analysis pipeline (E5)', () => {
         project_id: project.project_id, kind: 'analysis',
         content: JSON.stringify({ metrics: [{ metric: 'f1', value: 0.8, seed }] }),
       })
-      const baseJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: `b${i}`, kind: 'baseline', payload: {}, code_snapshot_id: code.artifact_id })
+      const baseJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: `b${i}`, kind: 'baseline', contract_id: approvedContract(kernel, project.project_id), payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
       kernel.claimJobs('r1', 60, 8)
-      kernel.completeJob({ job_id: baseJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseArt.artifact_id, run_id: `run_base_${i}` } })
+      kernel.completeJob({ job_id: baseJob.job_id, owner: 'r1', ...fenceArgs(kernel, baseJob.job_id), status: 'succeeded', run_manifest: { metrics_artifact: baseArt.artifact_id, run_id: `run_base_${i}` } })
       const art = kernel.registerArtifact({
         project_id: project.project_id, kind: 'analysis',
         content: JSON.stringify({ metrics: [{ metric: 'f1', value: values[i], seed }] }),
       })
-      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `f${i}`, kind: 'formal', contract_id: approvedContract(kernel, project.project_id), payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
       kernel.claimJobs('r1', 60, 8)
-      kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id, run_id: `run_${i}` } })
+      kernel.completeJob({ job_id: job.job_id, owner: 'r1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id, run_id: `run_${i}` } })
     }
     const analysis = kernel.computeAnalysis(project.project_id, undefined, 'f1')
     expect(analysis.n).toBe(5)
@@ -557,13 +583,16 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
     kernel.close()
   })
 
-  it('legacy heartbeat/complete without generation/token keep the owner-only check', () => {
+  it('P0: heartbeat/complete without generation/token are rejected (fail-closed)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f4', kind: 'smoke' })
     kernel.claimJobs('runner-1', 60, 8)
-    expect(kernel.heartbeatJob(job.job_id, 'runner-1').heartbeat_at).not.toBeNull()
-    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded' })
+    expectKernelError(() => kernel.heartbeatJob(job.job_id, 'runner-1'), 409, 'lease_stale')
+    expectKernelError(() => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', lease_generation: 99, lease_token: 'wrong-token', status: 'succeeded' }), 409, 'lease_stale')
+    const h = kernel.heartbeatJob(job.job_id, 'runner-1', ...fencePair(kernel, job.job_id))
+    expect(h.heartbeat_at).not.toBeNull()
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded' })
     expect(done.status).toBe('succeeded')
     kernel.close()
   })
@@ -580,7 +609,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
     const code = codeArtifact(kernel, project.project_id)
-    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
     kernel.claimJobs('runner-1', 60, 8)
     const { publicKey, privateKey } = generateKeyPairSync('ed25519')
     const keyId = 'runner-key-test-1'
@@ -598,11 +627,11 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     expect(project.integrity.require_signed_manifest).toBe(true)
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
     const code = codeArtifact(kernel, project.project_id)
-    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'run01', kind: 'formal', payload: {}, code_snapshot_id: code.artifact_id })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'run01', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
     kernel.claimJobs('runner-1', 60, 8)
     // Unsigned manifest -> rejected with the enforcement code.
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: makeManifest(job, metrics.artifact_id) }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: makeManifest(job, metrics.artifact_id) }),
       422, 'manifest_signature_required',
     )
     expect(kernel.getJob(job.job_id).status).toBe('running')
@@ -611,7 +640,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const keyId = 'run01-key'
     kernel.registerRunnerKey({ key_id: keyId, public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() })
     const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
-    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed })
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: signed })
     expect(done.status).toBe('succeeded')
     kernel.close()
   })
@@ -629,7 +658,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const { signature: _sig, runner_key_id: _rid, payload_sha256: _ph, ...payloadOnly } = forged
     forged.payload_sha256 = createHash('sha256').update(canonical(payloadOnly)).digest('hex')
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: forged }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: forged }),
       422, 'manifest_signature_invalid',
     )
     expect(kernel.getJob(job.job_id).status).toBe('running')
@@ -637,12 +666,12 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const otherKey = generateKeyPairSync('ed25519')
     const crossSigned = signManifest(makeManifest(job, metrics.artifact_id), otherKey.privateKey, keyId)
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: crossSigned }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: crossSigned }),
       422, 'manifest_signature_invalid',
     )
     // Correct signature -> accepted.
     const good = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
-    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: good })
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: good })
     expect(done.status).toBe('succeeded')
     expect(done.run_manifest?.signature).toBe(good.signature)
     kernel.close()
@@ -653,7 +682,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
     signed.payload_sha256 = '0'.repeat(64)
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: signed }),
       422, 'manifest_hash_mismatch',
     )
     kernel.close()
@@ -663,7 +692,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const { kernel, job, metrics, privateKey } = signedJobSetup()
     const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, 'runner-key-never-registered')
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: signed }),
       422, 'manifest_key_unknown',
     )
     kernel.close()
@@ -686,7 +715,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
   it('requireSignedManifest (kernel option) rejects unsigned manifests', () => {
     const { kernel, job } = signedJobSetup({ requireSignedManifest: true })
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
       422, 'manifest_signature_required',
     )
     kernel.close()
@@ -698,7 +727,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     kernel.db.prepare('UPDATE projects SET integrity = ? WHERE project_id = ?')
       .run(JSON.stringify({ require_signed_manifest: true }), job.project_id)
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: { run_id: 'run_x', exit_code: 0 } }),
       422, 'manifest_signature_required',
     )
     kernel.close()
@@ -709,7 +738,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     const manifest = makeManifest(job, metrics.artifact_id)
     manifest.job_id = 'job_some_other'
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: manifest }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: manifest }),
       422, 'manifest_job_mismatch',
     )
     kernel.close()
@@ -721,7 +750,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     manifest.lease = { generation: 99 }
     const signed = signManifest(manifest, privateKey, keyId)
     expectKernelError(
-      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', run_manifest: signed }),
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: signed }),
       422, 'manifest_lease_mismatch',
     )
     kernel.close()
@@ -765,7 +794,9 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
       project_id: project.project_id,
       idempotency_key: 'snap-bound',
       kind: 'baseline',
+      contract_id: approvedContract(kernel, project.project_id),
       code_snapshot_id: snap.snapshot_id,
+      image_digest: NODE_IMAGE_DIGEST,
     })
     expect(bound.code_snapshot_id).toBe(snap.archive_artifact_id)
     expect(bound.code_snapshot_id).not.toBe(snap.snapshot_id)
@@ -831,31 +862,31 @@ describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     expectKernelError(
-      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap', kind: 'baseline' }),
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap', kind: 'baseline', contract_id: approvedContract(kernel, project.project_id) }),
       422, 'code_snapshot_required',
     )
     expectKernelError(
-      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap2', kind: 'formal' }),
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap2', kind: 'formal', contract_id: approvedContract(kernel, project.project_id) }),
       422, 'code_snapshot_required',
     )
     expectKernelError(
-      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap3', kind: 'pilot' }),
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap3', kind: 'pilot', contract_id: approvedContract(kernel, project.project_id) }),
       422, 'code_snapshot_required',
     )
     expectKernelError(
-      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap4', kind: 'reproduce' }),
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap4', kind: 'reproduce', contract_id: approvedContract(kernel, project.project_id) }),
       422, 'code_snapshot_required',
     )
     // Unknown snapshot id -> 422 code_snapshot_unknown.
     expectKernelError(
-      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bad-snap', kind: 'formal', code_snapshot_id: 'sha256:' + 'a'.repeat(64) }),
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bad-snap', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: 'sha256:' + 'a'.repeat(64) }),
       422, 'code_snapshot_unknown',
     )
     // A snapshot from ANOTHER project is also unknown here.
     const other = kernel.createProject({ name: 'o', workspace: '/o', brief: makeBrief() })
     const foreignCode = codeArtifact(kernel, other.project_id)
     expectKernelError(
-      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'foreign-snap', kind: 'formal', code_snapshot_id: foreignCode.artifact_id }),
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'foreign-snap', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: foreignCode.artifact_id }),
       422, 'code_snapshot_unknown',
     )
     // smoke/echo stay binding-free.
@@ -872,25 +903,103 @@ describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
       project_id: project.project_id,
       idempotency_key: 'bound-1',
       kind: 'formal',
+      contract_id: approvedContract(kernel, project.project_id),
       code_snapshot_id: code.artifact_id,
       data_artifact_ids: ['sha256:' + 'b'.repeat(64)],
-      image_digest: 'node:22-alpine',
+      image_digest: NODE_IMAGE_DIGEST,
       output_contract: { metrics: '/outputs/metrics.json', logs: '/outputs/run.log' },
     })
     expect(job.code_snapshot_id).toBe(code.artifact_id)
-    expect(job.image_digest).toBe('node:22-alpine')
+    expect(job.image_digest).toBe(NODE_IMAGE_DIGEST)
     expect(job.output_contract?.metrics).toBe('/outputs/metrics.json')
     expect(job.payload.data_artifact_ids).toEqual(['sha256:' + 'b'.repeat(64)])
 
     // Survives a read-back from the DB (jobFromRow).
     const reloaded = kernel.getJob(job.job_id)
     expect(reloaded.code_snapshot_id).toBe(code.artifact_id)
-    expect(reloaded.image_digest).toBe('node:22-alpine')
+    expect(reloaded.image_digest).toBe(NODE_IMAGE_DIGEST)
     expect(reloaded.output_contract?.logs).toBe('/outputs/run.log')
 
-    // Secure kinds default image_digest to node:22-alpine.
-    const defaulted = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bound-2', kind: 'formal', code_snapshot_id: code.artifact_id })
-    expect(defaulted.image_digest).toBe('node:22-alpine')
+    // P0: secure kinds require the trusted images.lock digest — missing input
+    // is rejected, never defaulted to a tag; the exact locked digest binds.
+    const defaulted = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bound-2', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
+    expect(defaulted.image_digest).toBe(NODE_IMAGE_DIGEST)
+    kernel.close()
+  })
+})
+
+describe('P0 image digest lock (acceptance-tests.md §4)', () => {
+  it('rejects secure jobs with a missing image_digest (422 image_digest_required)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
+      expectKernelError(
+        () => kernel.submitJob({ project_id: project.project_id, idempotency_key: `no-digest-${kind}`, kind, contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id }),
+        422, 'image_digest_required',
+      )
+    }
+    // An explicitly empty digest counts as missing too.
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'empty-digest', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: '' }),
+      422, 'image_digest_required',
+    )
+    kernel.close()
+  })
+
+  it('rejects tags, latest and foreign digests (422 image_digest_untrusted)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    // tag / latest / well-formed but NOT the locked entry — all must be 422.
+    const untrusted = [
+      'node:22-alpine',
+      'latest',
+      'node:latest',
+      'node@sha256:' + '0'.repeat(64),
+      'node@sha256:' + 'a'.repeat(63) + 'b',
+    ]
+    for (const digest of untrusted) {
+      expectKernelError(
+        () => kernel.submitJob({ project_id: project.project_id, idempotency_key: `untrusted-${digest}`, kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: digest }),
+        422, 'image_digest_untrusted',
+      )
+    }
+    kernel.close()
+  })
+
+  it('latex-compile injects the locked texlive digest and rejects explicit mismatches', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\begin{document}hi\\end{document}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    // Explicit tag → rejected (never silently replaced).
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'latex-tag', kind: 'latex-compile', image_digest: 'texlive/texlive:latest', payload: { tex_document_id: doc.document_id, tex_revision: snap.revision } }),
+      422, 'image_digest_untrusted',
+    )
+    // Missing digest → the kernel injects the locked texlive entry (the
+    // kernel owns the TeX pipeline; injection is not a "missing digest").
+    const injected = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'latex-inject', kind: 'latex-compile', payload: { tex_document_id: doc.document_id, tex_revision: snap.revision } })
+    expect(injected.image_digest).toBe(TEXLIVE_IMAGE_DIGEST)
+    expect((injected.payload as Record<string, unknown>).image_digest).toBe(TEXLIVE_IMAGE_DIGEST)
+    // Exact locked digest → accepted.
+    const explicit = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'latex-exact', kind: 'latex-compile', image_digest: TEXLIVE_IMAGE_DIGEST, payload: { tex_document_id: doc.document_id, tex_revision: snap.revision } })
+    expect(explicit.image_digest).toBe(TEXLIVE_IMAGE_DIGEST)
+    kernel.close()
+  })
+
+  it('accepts the exact trusted lock digest (P0 success path)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ok-${kind}`, kind, contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
+      expect(job.status).toBe('queued')
+      expect(job.image_digest).toBe(NODE_IMAGE_DIGEST)
+      expect((job.payload as Record<string, unknown>).image_digest).toBe(NODE_IMAGE_DIGEST)
+    }
     kernel.close()
   })
 })
@@ -942,13 +1051,13 @@ describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
     for (let i = 0; i < values.length; i++) {
       const seed = 11 + i
       const baseline = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(seed, 0.8) })
-      const bJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: `fb${i}`, kind: 'baseline', code_snapshot_id: code.artifact_id })
+      const bJob = kernel.submitJob({ project_id: project.project_id, idempotency_key: `fb${i}`, kind: 'baseline', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
       kernel.claimJobs('r1', 60, 8)
-      kernel.completeJob({ job_id: bJob.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id } })
+      kernel.completeJob({ job_id: bJob.job_id, owner: 'r1', ...fenceArgs(kernel, bJob.job_id), status: 'succeeded', run_manifest: { metrics_artifact: baseline.artifact_id } })
       const art = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: fileSchema(seed, values[i]!) })
-      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ff${i}`, kind: 'formal', code_snapshot_id: code.artifact_id })
+      const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ff${i}`, kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
       kernel.claimJobs('r1', 60, 8)
-      kernel.completeJob({ job_id: job.job_id, owner: 'r1', status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id } })
+      kernel.completeJob({ job_id: job.job_id, owner: 'r1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: { metrics_artifact: art.artifact_id } })
     }
     const analysis = kernel.computeAnalysis(project.project_id, undefined, 'f1')
     expect(analysis.n).toBe(3)

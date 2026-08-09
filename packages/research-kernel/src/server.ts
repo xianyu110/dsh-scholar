@@ -5,7 +5,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { ResearchKernel, KernelError } from './kernel.js'
 import { TexError } from './tex-workspace.js'
@@ -118,7 +118,7 @@ const contractSchema = z.object({
   code_snapshot: z.string().optional(),
   data: z.object({ dataset_id: z.string().min(1), version: z.string().optional(), split: z.string().optional(), preprocessing_hash: z.string().optional() }),
   methods: z.object({ baseline: z.string().min(1), treatment: z.string().min(1) }),
-  metrics: z.object({ primary: z.string().min(1), secondary: z.array(z.string()).optional() }),
+  metrics: z.object({ primary: z.string().min(1), secondary: z.array(z.string()).optional(), direction: z.enum(['higher_is_better', 'lower_is_better']).optional() }),
   seeds: z.array(z.number().int()).optional(),
   analysis: z.record(z.unknown()).optional(),
   ablations: z.array(z.string()).optional(),
@@ -381,6 +381,15 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
             if (method === 'GET' && sub === 'contracts') {
               ok(res, kernel.listContracts(id))
+              return
+            }
+            // Internal automation path: freeze a contract by a simulated
+            // Human Gate Decision (approveContract). The token-protected
+            // route is used by evals/orchestrator; interactive flows use the
+            // contract gate decision route instead (GOV-02 atomic freeze).
+            if (sub === 'contracts' && subId !== undefined && method === 'POST' && url.pathname.endsWith('/approve')) {
+              const input = z.object({ actor: z.string().min(1) }).parse(body)
+              ok(res, kernel.approveContract(subId, `dec_${randomUUID().slice(0, 12)}`, input.actor))
               return
             }
             if (sub === 'members' && method === 'GET') {

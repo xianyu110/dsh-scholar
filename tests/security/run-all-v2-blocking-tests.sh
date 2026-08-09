@@ -5,10 +5,14 @@
 #   run-isolation-tests.sh      cross-project-idempotency-isolated
 #                               cross-project-shared-blob-artifacts-isolated
 #   run-evidence-tests.sh       evidence-missing-effect-is-inconclusive
-#   run-lower-is-better-tests.sh lower-is-better-claim-direction (SKIP by
-#                               default; enable with RUN_LOWER_IS_BETTER=1)
+#   run-lower-is-better-tests.sh lower-is-better-claim-direction (runs by
+#                               default; MetricSpec direction implemented)
 #   run-unicode-tests.sh        unicode-title-dedup
 #   run-manifest-tests.sh       manifest-missing-artifact-rejected
+#   run-formal-binding-tests.sh formal-job-contract-{required,unknown,foreign,not-approved,approved}
+#   run-fencing-tests.sh        heartbeat/terminal/complete lease fencing (409 lease_stale)
+#   run-hardening-tests.sh      host-execution/fake-experiment defenses + durable cancel
+#   run-release-bundle-tests.sh release-bundle self-containment + clean-room rerun
 #   run-gate-tests.sh           agent-cannot-decide-gate (kernel-level part)
 #
 # Usage: bash tests/security/run-all-v2-blocking-tests.sh
@@ -20,6 +24,10 @@ SCRIPTS=(
   run-isolation-tests.sh
   run-evidence-tests.sh
   run-manifest-tests.sh
+  run-formal-binding-tests.sh
+  run-fencing-tests.sh
+  run-hardening-tests.sh
+  run-release-bundle-tests.sh
   run-gate-tests.sh
   run-unicode-tests.sh
   run-lower-is-better-tests.sh

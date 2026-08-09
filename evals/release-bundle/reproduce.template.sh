@@ -80,11 +80,18 @@ PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"$PNAME-rerun\",\"workspac
 echo "reproduce.sh: rerun project $PROJ created from bundle manifest"
 
 NC=$(node -e "console.log(require('$MANIFEST').contracts.length)")
+# old_contract_id=new_contract_id pairs for P0 contract rebinding below.
+CT_MAP=""
 for i in $(seq 0 $((NC - 1))); do
   BODY=$(IDX="$i" MANIFEST="$MANIFEST" node -e 'const c=require(process.env.MANIFEST).contracts[Number(process.env.IDX)];const {idea_id,baseline_run,code_snapshot,data,methods,metrics,seeds,analysis,ablations,stop_conditions}=c;console.log(JSON.stringify({idea_id,baseline_run,code_snapshot,data,methods,metrics,seeds,analysis,ablations,stop_conditions}))')
-  api -X POST "$BASE/v1/projects/$PROJ/contracts" -d "$BODY" > /dev/null
+  OLD=$(IDX="$i" MANIFEST="$MANIFEST" node -e 'console.log(require(process.env.MANIFEST).contracts[Number(process.env.IDX)].contract_id)')
+  NEW=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d "$BODY" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+  # P0 (acceptance-tests.md §4): secure jobs must bind an APPROVED contract —
+  # freeze each re-registered contract via the internal approval route.
+  api -X POST "$BASE/v1/projects/$PROJ/contracts/$NEW/approve" -d '{"actor":"reproduce-sh"}' > /dev/null
+  CT_MAP="$CT_MAP $OLD=$NEW"
 done
-echo "reproduce.sh: re-registered $NC contract(s)"
+echo "reproduce.sh: re-registered + frozen $NC contract(s)"
 
 # Re-register every bundle artifact into the fresh kernel's CAS so job
 # materialization (code snapshot archives) and metrics lookups resolve.
@@ -108,12 +115,19 @@ NA=$(MANIFEST="$MANIFEST" BUNDLE_DIR="$BUNDLE_DIR" BASE="$BASE" PROJ="$PROJ" nod
 [ -n "$NA" ] && [ "$NA" -gt 0 ] && echo "reproduce.sh: re-registered $NA artifact(s)" || echo "reproduce.sh: WARNING no artifacts re-registered"
 
 # Replay the succeeded jobs with their original idempotency keys, kinds,
-# commands and payloads (contract_id is intentionally NOT carried over: the
-# fresh kernel assigns new ids; smoke/echo jobs are contract-independent).
+# commands and payloads. P0 (acceptance-tests.md §4): secure jobs must bind an
+# APPROVED contract — the original contract id (from the run manifest) is
+# mapped to the freshly re-registered one via CT_MAP.
 KEYS=$(node -e "const m=require('$MANIFEST');console.log(m.jobs.filter(j=>j.status==='succeeded').map(j=>j.idempotency_key).join(' '))")
 NKEYS=0
 for KEY in $KEYS; do
-  BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" node -e 'const m=require(process.env.MANIFEST);const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY);console.log(JSON.stringify({idempotency_key:j.idempotency_key,kind:j.kind,command:j.command,payload:j.payload,...(j.code_snapshot_id?{code_snapshot_id:j.code_snapshot_id}:{})}))')
+  BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" CT_MAP="$CT_MAP" node -e '
+    const m=require(process.env.MANIFEST)
+    const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY)
+    const pairs=process.env.CT_MAP.trim().split(/\s+/).filter(Boolean).map(p=>p.split("="))
+    const oldRef=j.run_manifest && typeof j.run_manifest.contract_id==="string" ? j.run_manifest.contract_id : null
+    const pair=oldRef!==null?pairs.find(p=>p[0]===oldRef):undefined
+    console.log(JSON.stringify({idempotency_key:j.idempotency_key,kind:j.kind,command:j.command,payload:j.payload,...(j.code_snapshot_id?{code_snapshot_id:j.code_snapshot_id}:{}),...(pair!==undefined?{contract_id:pair[1]}:{})}))')
   api -X POST "$BASE/v1/projects/$PROJ/jobs" -d "$BODY" > /dev/null
   NKEYS=$((NKEYS + 1))
 done

@@ -36,13 +36,20 @@ ok "project $PROJ on container profile"
 CODE_ART=$(api -X POST "http://127.0.0.1:$PORT/v1/artifacts" -d "{\"project_id\":\"$PROJ\",\"kind\":\"code\",\"content_base64\":\"$(printf 'x=1' | base64 -w0)\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).artifact_id))")
 ok "code snapshot artifact registered: $CODE_ART"
 
+# P0 (acceptance-tests.md §4): formal-class jobs must bind an approved
+# contract — register + freeze one so the runner-layer rejection tests below
+# exercise EXECUTION failure, not submission rejection.
+CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_harden","data":{"dataset_id":"harden"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"m"},"seeds":[1]}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"hardening-eval"}' > /dev/null
+ok "contract $CT registered + approved (P0 binding)"
+
 echo "== kernel-submit-rejects-subprocess =="
 P2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-sub\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$P2/jobs" -H 'content-type: application/json' -d "{\"idempotency_key\":\"f1\",\"kind\":\"formal\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}")
 [[ "$CODE" == "422" ]] && ok "kernel rejects formal job on isolated-subprocess profile (422)" || bad "expected 422 got $CODE"
 
 echo "== formal-run-rejects-subprocess (runner layer) =="
-J1=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"f2\",\"kind\":\"formal\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+J1=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"f2\",\"kind\":\"formal\",\"contract_id\":\"$CT\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 for _ in $(seq 1 60); do
   S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J1" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
   [[ "$S" == "failed" ]] && break

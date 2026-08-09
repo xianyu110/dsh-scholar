@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "node_fixture": "node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",
+  "texlive": "texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4"
+}
