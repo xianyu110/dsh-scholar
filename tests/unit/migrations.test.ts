@@ -30,24 +30,34 @@ function tableInfo(db: DatabaseSync, table: string): Array<{ name: string; pk: n
 describe('explicit migrations', () => {
   afterEach(() => {
     // The rollback test appends a failing migration; always restore.
-    while (MIGRATIONS.length > 10) MIGRATIONS.pop()
+    while (MIGRATIONS.length > 11) MIGRATIONS.pop()
   })
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(9)
+    expect(SCHEMA_VERSION).toBe(10)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('9')
+    expect(meta.schema_version).toBe('10')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace'])
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
     // All product tables exist.
-    for (const t of ['projects', 'gates', 'decisions', 'ideas', 'contracts', 'corpus_snapshots', 'artifacts', 'jobs', 'runner_keys', 'evidence', 'claims', 'events', 'session_links', 'budget', 'manuscripts', 'terminal_frames', 'terminal_retention', 'tex_documents', 'tex_files', 'tex_snapshots', 'tex_builds', 'project_members', 'code_snapshots', 'runs']) {
+    for (const t of ['projects', 'gates', 'decisions', 'ideas', 'contracts', 'corpus_snapshots', 'artifacts', 'jobs', 'runner_keys', 'evidence', 'claims', 'events', 'session_links', 'budget', 'manuscripts', 'terminal_frames', 'terminal_retention', 'tex_documents', 'tex_files', 'tex_snapshots', 'tex_builds', 'project_members', 'code_snapshots', 'runs', 'pty_sessions', 'pty_frames', 'workspaces', 'workspace_nodes', 'workspace_ops']) {
       expect(tableInfo(db, t).length, `table ${t}`).toBeGreaterThan(0)
+    }
+    // 0011 (PTY-01/WORK-01): the pty + workspace tables carry the interface
+    // layer columns (state machine, client_seq idempotency, retention).
+    const ptySessionCols = tableInfo(db, 'pty_sessions').map(c => c.name)
+    for (const c of ['pty_session_id', 'principal_id', 'workspace_id', 'profile', 'target', 'preset', 'cwd', 'config_hash', 'state', 'generation', 'lease_token', 'idle_ttl_s', 'retention_bytes', 'retained_from_seq', 'last_client_seq', 'last_event_seq', 'closed_at']) {
+      expect(ptySessionCols, `pty_sessions.${c}`).toContain(c)
+    }
+    const workspaceNodeCols = tableInfo(db, 'workspace_nodes').map(c => c.name)
+    for (const c of ['workspace_id', 'path', 'version', 'binary', 'media', 'size_bytes', 'content', 'blob_sha256', 'content_hash']) {
+      expect(workspaceNodeCols, `workspace_nodes.${c}`).toContain(c)
     }
     // EVENT-01/§16: the events outbox carries the canonical envelope columns.
     const eventCols = tableInfo(db, 'events').map(c => c.name)
@@ -76,7 +86,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('9')
+    expect(version).toBe('10')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -120,7 +130,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('9')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('10')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -169,8 +179,8 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(10)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('9')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(11)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('10')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -192,7 +202,7 @@ describe('explicit migrations', () => {
     db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run()
     runMigrations(db)
     // Version bumped; outbox columns re-added by the new migration.
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('9')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('10')
     const cols = tableInfo(db, 'events').map(c => c.name)
     for (const c of outboxCols) expect(cols).toContain(c)
     // Existing rows get default envelope values + a stable backfilled seq.

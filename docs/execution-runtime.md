@@ -81,6 +81,8 @@ Runner Gateway 只依赖 `ExecutionTarget` port：prepare(plan)、start(plan)、
 
 远端配置中的 address、certificate、SSH bootstrap 等只由服务端 Config/SecretRef 解析；Job/UI 永远只见 opaque profile/target ID 与安全健康摘要。生产执行不支持“输入 hostname + shell command 即运行”的任意 SSH 模式。
 
+**接口层现状（RUN-REMOTE-01，schema/interface 阶段）**：ExecutionTarget port 与 LocalDockerAdapter 已实现（workers/runner-gateway/src/execution-target.ts）——docker 执行路径收敛到 port（prepare 校验/深度冻结 plan + fingerprint 断言，start 复算对账，plan 不可变；command/run_id 一律取自 plan；buildLocalDockerArgs 纯函数映射参数，与既有容器基线一致）；subprocess 明确不是 ExecutionTarget，仅为 trusted-smoke-fixture 专用兼容层（§1）。ExecutionPlan/RemoteAgentRegistration/调度决策纯函数位于 research-schemas execution-target.ts：plan 固定 project/job/run/lease/profile/config/image digest/snapshot/artifact refs/limits/network/output contract 并签名（Ed25519，payload_sha256 复算），`.strict()` 拒绝连接信息字段；scheduledTarget 实现 capability 匹配、offline/draining 拒绝、无匹配 → 明确 retryable 错误（offline/draining/capability_mismatch/no_capable_target/policy_blocked），bound target 不可用时不回退 LocalDocker、更不回退 subprocess，除非 policy 显式 allow_bound_fallback_to_local；内存 Agent 注册表（注册/心跳更新 health/offline 判定）与 RemoteRunnerAgent fail-closed stub（任何执行调用抛 NotImplemented，绝不静默降级）在 runner-gateway（agent-registry.ts、remote-agent.ts）。真实 mTLS 传输、远端 sandbox、CAS resume/partition spool、Remote PTY 与浏览器 UI 未实现（hardening-v0.2-status.md §3 RUN-REMOTE-01）。
+
 ## 6. 实时 Terminal
 
 现有“任务结束后拼接 stdout/stderr”不足以满足产品。Execution adapter 必须接受 onChunk 回调，并同时保留有界本地 spool。
@@ -103,6 +105,18 @@ Runner Gateway 只依赖 `ExecutionTarget` port：prepare(plan)、start(plan)、
 Interactive Terminal 与本节 Run Terminal 是两个 Interface。PTY open 固定 Principal、Project、Workspace、Runner profile/target、allowlisted shell preset、relative cwd、config hash 和 session lease。PTY Adapter 必须分配真实 pseudo-terminal，支持 bytes input、resize、INT/TERM/KILL、detach/reconnect 和显式 close；每个 control frame 使用 client_seq 幂等，输出使用 server seq/gap/retention。
 
 PTY 连接断开不自动结束进程，idle TTL 和 retention 从 Config Schema 读取；权限撤销立即 detach/close。LocalDockerPty 与 RemoteRunnerPty 共享同一 wire，不得向浏览器暴露 Docker socket、SSH credential、Kernel token 或 host path。PTY 输出可审计和有限保留，但不是正式 Job log，不能生成 Metrics、Manifest、accepted Evidence 或 Gate Decision。
+
+### 6.2 PTY/WORK 深 Interface 层（PTY-01/WORK-01，接口与数据层已落地，adapter/UI 剩余）
+
+交互 Terminal 与通用 Workspace 的**深 Interface/Schema/migrations 层**已实现（本轮，见 hardening-v0.2-status.md §3 PTY-01/WORK-01 行与 §4 第 96 行）：
+
+- **Schema（research-schemas `pty.ts`/`workspace.ts`）**：`PtySession`（pty_session_id/principal/project/workspace/profile/target/preset/cwd/config_hash/state/lease/idle_ttl_s/retention_bytes/retained_from_seq/last_client_seq…）、`PtyControlFrame`（client_seq 幂等键；bytes/resize/signal/close）、`PtyOutputFrame`（server_seq；output/exit/gap + retention 语义）、`WorkspaceNode`（path/kind/media/size/revision/etag/hash）、`WorkspaceRevision`、`WorkspaceOp`（create/write/delete/move，target version CAS）与上传关联（二进制节点 `blob_sha256` 复用 artifact CAS，服务端计算 hash）。
+- **Kernel 状态机（`pty-session.ts`，纯逻辑无真实 tty）**：`open → attached → detached → closed`；attach/detach 递增 generation（重连 fencing 用 generation+after_seq）；权限撤销→detach（进程存活）；idle TTL/lease 过期/显式 close→closed；控制帧 client_seq 幂等（重复 seq 回放、乱序/跳号 409 `pty_client_seq_out_of_order`）；输出 server_seq 单调、retention_bytes 有界淘汰并以 gap frame 报告（不静默丢弃）。`PtyAdapter` 接口（spawn/write/resize/signal/kill）+ 默认 `NullPtyAdapter` 是 LocalDockerPty/RemoteRunnerPty 的挂载点（`kernel.setPtyAdapter`）；spawn 失败以 `adapter_failed` 关闭会话并保留审计行。
+- **Workspace store（`workspace-store.ts`）**：统一 code/scratch/manuscript 树——list/read/write/delete/move + workspace revision/每路径 version/strong etag（`"<version>-<sha256[0..12]>"`）；预期 version/etag 不匹配一律 409（无静默 last-write-wins）；文本内联、二进制走 artifact CAS（服务端计算 sha256，`blob_sha256` 引用，文本写二进制节点 422 `workspace_binary_read_only`）；路径安全复用 snapshot-walk 契约（root-relative、无 `..`/NUL/反斜杠/空段）；op ledger 提供 move/history 投影；`dir` 节点由路径前缀投影。**TeX 作为 facade（`tex-facade.ts`）**：`TexWorkspaceFacade` 把既有 TexWorkspaceStore 映射到同一 `WorkspaceStoreLike` 契约（workspace_id=`ws_<document_id>`、kind=manuscript、版本/etag/hash 一一对应），TeX 路由仍直接调用 tex store——不存在第二套 bytes/revision 权威；顺带修复 tex history 对不存在 `revision` 列的查询（历史为死代码，facade 为首个调用者）。
+- **迁移 0011_pty_workspace（SCHEMA_VERSION 10，幂等）**：`pty_sessions`（含 state CHECK、client_seq 唯一索引 idempotency、retained_from_seq/dropped_bytes 保留记账）、`pty_frames`（控制+输出同一 append-only ledger）、`workspaces`、`workspace_nodes`（binary/blob_sha256/content_hash）、`workspace_ops`。
+- **HTTP（server.ts /v1/pty/*，schema 校验层）**：`POST /v1/pty/sessions` 参数校验（422 validation_error/404 project/workspace/422 cwd），**adapter 未注册时一律 501 `pty_adapter_not_implemented`，不创建惰性会话行**；`POST /v1/pty/sessions/{id}/control` 与 `GET /v1/pty/sessions/{id}/frames?after_seq=` 在 kernel-created 会话上完整可用（控制幂等 + `delivered=false` 如实标注无真实 tty；frames 带 seq/gap/retention）。BFF 双向 attach（api-contracts.md §18 WebSocket）属 adapter/UI 轮。
+
+**明确剩余（adapter/UI 轮）**：真实 PTY adapter（node-pty / `docker exec -it`）、远程 wire（LocalDockerPty/RemoteRunnerPty 共享 wire）、浏览器 TUI 双向验收、workspace 的本地/远程文件系统 adapter、tabs/search/watch/upload/move/history/Problems UI 与桌面/窄屏/冲突/路径/二进制浏览器验收；PTY idle TTL/retention 的 Config Schema registry 键（当前取 `PtyOpenRequest` 或 kernel 常量默认，会话行始终固化解析值）。PTY 输出永不进入 Metrics/Manifest/Evidence/Gate（代码注释 + tests/unit/pty-session.test.ts `pty-not-evidence` 断言）。
 
 ## 7. 指标与 RunManifest
 

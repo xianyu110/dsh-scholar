@@ -85,6 +85,16 @@
 - no-silent-fallback：remote 失败不自动转 LocalDocker/subprocess；显式新 attempt 才能换 target；
 - remote-cas-resume：断点拉取/上传重试后 hash/size 一致，跨项目或 stale generation 拒绝。
 
+### 4.1 RUN-REMOTE-01 接口层（ExecutionTarget/plan/注册表/调度 schema；真实 mTLS 传输未实现）
+
+- execution-plan-schema：ExecutionPlan 固定 project/job/run/lease/profile/config/image digest/snapshot/artifact refs/limits/network/output contract 并签名（signature/payload_sha256/signed_by；Ed25519 验签 + payload_sha256 复算，篡改或未签名一律 fail closed，不执行）；plan `.strict()` 拒绝计划外字段——address/certificate/SSH bootstrap 等连接信息不得进入 plan/注册记录（只由服务端 Config/SecretRef 解析，Job/UI 只见 opaque profile/target ID 与安全健康摘要）；
+- execution-plan-immutable：target 不得改写 plan——prepare() zod 校验 + 深度冻结 + fingerprint，start() 复算 fingerprint 对账，plan 变异或未先 prepare → ExecutionPlanMutationError（execution-target.test.ts）；
+- local-docker-adapter-contract：LocalDockerAdapter 实现 ExecutionTarget port（prepare(plan)/start(plan)/attach(run)/cancel(run)/wait(run)）；docker 参数由 plan 纯函数映射（buildLocalDockerArgs：--network none、--user 65534:65534、--read-only、--cap-drop ALL、--security-opt no-new-privileges、--pids-limit/--memory/--cpus 取自 plan.limits、输入只读 + outputs 唯一 rw 挂载、--tmpfs、固定 image digest），与既有容器基线逐项一致；command/run_id 一律取自 plan，dockerRun 引擎行为不变；
+- remote-agent-registry：注册/心跳更新 health.last_seen/offline 判定（status 非 online 或 last_seen 超时即 offline，未注册 fail closed）；注册记录只含 opaque target_id/agent_id/capabilities{os,arch,runner_ver,images}/labels/health/cert_fingerprint，`.strict()` 拒绝 address/certificate（remote-fleet.test.ts）；
+- scheduled-target-pure：scheduledTarget(plan, registrations, policy) 纯函数——capability 匹配（images/os/arch/runner_ver 下限）、offline/draining 拒绝、无匹配 → 明确 retryable 错误（offline/draining/capability_mismatch/no_capable_target/policy_blocked 可区分），任务留在队列/标记 retryable；bound target 不可用时默认不回退 LocalDocker（policy.allow_bound_fallback_to_local 显式开启才回退），结果面永不出现 subprocess；policy 可配置（prefer local/local_only/allow_remote）；
+- remote-not-implemented-fail-closed：真实 mTLS 传输未实现——createRemoteRunnerAgent 的任何执行/注册方法抛 RemoteRunnerAgentNotImplementedError（明确环境错误，绝不静默降级）；
+- 上述场景的端到端形态（remote-mtls-capability/remote-partition-fencing/no-silent-fallback/remote-cas-resume 的真实 mTLS 传输验收）待远端传输实现后关闭，本轮仅接口层（hardening-v0.2-status.md §3 RUN-REMOTE-01）。
+
 ## 5. Terminal
 
 - interleaved-output：stdout/stderr 按全局 seq 重放，单通道仍完整；
@@ -106,6 +116,9 @@
 - pty-control-authz：跨项目、无 terminal_write、撤权、旧 generation、重复/乱序 client_seq 拒绝；
 - pty-safe-open：任意 endpoint/SSH credential/Docker socket/host cwd/argv 被 schema 拒绝，只能 preset + relative cwd；
 - pty-not-evidence：PTY output 不能被 Metrics/RunManifest/Evidence/Decision 路径引用；Run Terminal 永远没有 input route。
+- pty-interface-state-machine（PTY-01 接口层，无真实 tty，adapter 未实现——tests/unit/pty-session.test.ts 13/13）：open→attached→detached→closed 状态机（closed 终态、close 幂等、attach/detach generation 递增供重连 fencing）；idle TTL 超时→close（activity 重置 TTL）；权限撤销立即 detach（进程存活）；client_seq 幂等（重复 seq 回放 no-op、乱序/跳号 409 pty_client_seq_out_of_order）；输出 server_seq 单调、after_seq 重放无重复无缺失；retention_bytes 有界淘汰先发 gap（含 dropped_bytes/gap_from_seq）；lease token/expiry 固定；spawn 失败→adapter_failed 关闭并保留审计行；closed 后 control/appendOutput 均拒绝；
+- pty-http-validation（PTY-01 接口层，同上）：POST /v1/pty/sessions 参数校验（坏 preset/extra key/非法 config_hash→422 validation_error、未知 project/workspace→404、host cwd→422），**adapter 未注册一律 501 pty_adapter_not_implemented 且不创建惰性会话行**；kernel-created 会话可经 HTTP 驱动（control 200 幂等 + delivered=false 如实标注、GET 会话、frames?after_seq= 200 seq/gap 投影、close control 生效）；未知会话 control/frames→404、after_seq 非整数→422；控制帧不泄漏进输出流；
+- pty-not-evidence-kernel（PTY-01 接口层）：pty 活动（input/resize/signal/output/exit/close）后 Jobs/Runs/Evidence/Claims/Gates/Artifacts 计数全 0，帧只落 pty_frames（terminal_frames 为 0）——接口层无任何 pty→业务表写路径（tests/unit/pty-session.test.ts）。
 
 ## 6. Analysis、Evidence 与 Claim
 
@@ -149,6 +162,8 @@
 - workspace-vscode-flow：Explorer/create/open/tabs/search/edit/move/delete/upload/download/history/snapshot 全部走 Workspace Revision/CAS；
 - workspace-binary-and-conflict：图片/PDF/随机 bytes hash 一致；大/未知文件只读；并发保存/上传给 base/current/local 且不覆盖；
 - workspace-watch：change seq 重连无重复，retention gap 触发 resync；跨项目/路径越界拒绝；
+- workspace-interface（WORK-01 接口层，无真实文件系统 adapter，UI 未实现——tests/unit/workspace-store.test.ts 8/8）：list/read/write/delete/move + workspace revision/每路径 version/strong etag（`"<version>-<sha256[0..12]>"`）；预期 version/etag 不匹配一律 409 workspace_version_conflict/workspace_etag_conflict（无静默 last-write-wins）；expected_version=0 create-if-absent（存在→409）、缺文件 + N>0→409；二进制 CAS（服务端计算 sha256、CAS blob 回读字节一致、相同 bytes 幂等复用同一 blob、文本写二进制节点 422 workspace_binary_read_only、二进制 move 按 blob 引用）；路径安全（绝对/`..`/`.`/NUL/反斜杠/Windows 盘符/空段拒绝，tree 只含 root-relative 路径）；move 目标已存在→409 workspace_move_destination_exists；history op ledger（create/write/delete/move + workspace revision）；`dir` 节点由路径前缀投影；
+- workspace-tex-facade（WORK-01 接口层，同上）：TeX 文档作为 `manuscript` workspace 经同一 WorkspaceStoreLike 契约读写（workspace_id=`ws_<document_id>`、版本/etag/hash 与 tex 权威一致、写后 tex store 直接可见且 document revision 前进——无第二套字节/revision 权威）；CAS 冲突穿透 facade；删除/移动经 facade 生效；二进制写→422；history 映射 tex 历史；
 - live-preview：保存成功后（POST /v1/documents/{id}/preview-builds，或 kernel previewAutoTrigger 自动路径）进入 server 端 debounce（默认 800ms 可配置），Kernel 持有定时器并写持久化 tex_preview_pending；合并窗口内多次保存只产生一个 preview build，编译结束前 UI 已见日志/诊断；新 revision 使旧 PDF stale（build.revision < document.revision → build 记录 stale=true）并 supersede 旧 preview；preview build 记录状态 queued/running/superseded/succeeded/failed（queued 被取代时标 cancelled），带 preview=true 与 superseded_by/superseded_at；preview 提交响应携带 job_id 与输入 revision（同一 Job 的 live Terminal SSE 与 stale 判定）；UI 重连/内核重启后 GET preview-builds 投影（pending+builds）可恢复，preview 状态不只在浏览器 debounce timer（tex-preview.test.ts：debounce 合并、取消 queued、running→superseded、stale、权威 supersede、去重、重启持久化、previewAutoTrigger）；
 - preview-vs-compile：preview 运行同一固定 TeX image/禁网/no-shell-escape（复用 latex-compile runner 路径，payload.preview=true），但不产 Evidence、不冻结/不参与权威 manifest 链；显式 Compile 固定 manifest/config/image，创建权威 latex-compile Job 时 supersede 该 document 全部非终态 preview，且不被后续 preview 取消/取代（活跃权威编译期间 preview flush 跳过，不排队冗余容器）。
 

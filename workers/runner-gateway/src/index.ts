@@ -20,6 +20,8 @@ import { promisify } from 'node:util'
 import { createHash, randomUUID, sign, type KeyObject } from 'node:crypto'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { JobRecord } from '@dsh-scholar/research-schemas'
+import { buildExecutionPlan, signExecutionPlan, type ExecutionPlan } from '@dsh-scholar/research-schemas'
+import { LocalDockerAdapter, buildLocalDockerArgs, type DockerExecContext, type RunOutcome } from './execution-target.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -129,15 +131,45 @@ export interface RunnerOptions {
   leaseGeneration?: number | null
 }
 
-export interface RunOutcome {
-  run_id: string
-  exit_code: number
-  started_at: string
-  finished_at: string
-  stdout: string
-  stderr: string
-  error?: string
-}
+/**
+ * 一次执行的确定性结果（RunOutcome 定义与 ExecutionTarget port 同文件，
+ * 见 execution-target.ts——port 的 wait() 返回同一形状）。
+ * 兼容 re-export 保持既有导入路径不变。
+ */
+export type { RunOutcome } from './execution-target.js'
+
+/**
+ * RUN-REMOTE-01（接口层）——ExecutionTarget port 与远端 fleet 的
+ * gateway 侧实现。调度/注册表/远端接口见：
+ * - execution-target.ts：port + LocalDockerAdapter + buildLocalDockerArgs；
+ * - agent-registry.ts：远端 Agent 注册表（注册/心跳/offline 判定）；
+ * - remote-agent.ts：RemoteRunnerAgent 接口（真实 mTLS 传输未实现，
+ *   fail-closed stub）。
+ */
+export {
+  LocalDockerAdapter,
+  buildLocalDockerArgs,
+  deepFreezePlan,
+  ExecutionPlanMutationError,
+  ExecutionTargetError,
+  type ExecutionTarget,
+  type ExecutionPreparation,
+  type ExecutionRunHandle,
+  type ExecutionAttachment,
+  type LocalRunHandle,
+  type DockerRunFn,
+  type CancelRunFn,
+  type DockerExecContext,
+  type OnChunkFn,
+} from './execution-target.js'
+export { InMemoryAgentRegistry, localDockerRegistration, type AgentRegistry } from './agent-registry.js'
+export {
+  createRemoteRunnerAgent,
+  RemoteRunnerAgentError,
+  RemoteRunnerAgentNotImplementedError,
+  type RemoteRunnerAgent,
+  type RemoteTransport,
+} from './remote-agent.js'
 
 /** Deterministic metrics extraction from stdout JSON-lines (`{"metric":...,"value":...}`). */
 export function extractMetrics(stdout: string): Array<{ metric: string; value: number; seed?: number }> {
@@ -654,44 +686,26 @@ async function runSubprocess(
   return { run_id: runId, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
 }
 
-async function runDocker(
-  command: string[], cwd: string, timeoutMs: number, jobId: string, signal?: AbortSignal, image = 'node:22-alpine',
-  onChunk?: (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number) => void,
-  runId = `run_${randomUUID().slice(0, 12)}`,
-  runEnv: Record<string, string> = {},
-): Promise<RunOutcome> {
+/**
+ * Docker 执行引擎（RUN-REMOTE-01 适配层边界：被 LocalDockerAdapter 包装，
+ * 行为与既有 runDocker 完全一致）。参数从固定 ExecutionPlan 映射——
+ * buildLocalDockerArgs（纯函数，可单测）；超时/取消杀进程树、activeRuns
+ * 注册、finally docker rm -f 兜底均不变。
+ */
+async function runDocker(plan: ExecutionPlan, exec: DockerExecContext): Promise<RunOutcome> {
+  const { command, cwd, jobId, signal, onChunk, runId, runEnv } = exec
   const startedAt = new Date().toISOString()
   const container = `dsh-scholar-${randomUUID().slice(0, 8)}`
   // §3.2/§12.3 (RUN-02): full container baseline — read-only rootfs,
   // capability drop, no-new-privileges, pids cap. /tmp is a tmpfs and
   // /outputs is the only rw mount, so job payloads must write there.
-  const envArgs: string[] = []
-  for (const [k, v] of Object.entries(runEnv)) envArgs.push('-e', `${k}=${v}`)
-  const args = [
-    'run', '--rm', '--name', container,
-    '--network', 'none',
-    '--user', '65534:65534',
-    '--read-only',
-    '--cap-drop', 'ALL',
-    '--security-opt', 'no-new-privileges',
-    '--pids-limit', '256',
-    '--memory', '1g', '--cpus', '1',
-    '--workdir', '/work',
-    ...envArgs,
-    '-v', `${cwd}:/work:ro`,
-    // §12.2/§12.5 (SCH-EXEC-002): output contract — the container writes the
-    // fixed-schema metrics file into /outputs (host: <cwd>/outputs, rw; the
-    // runner reads it back after execution).
-    '-v', `${cwd}/outputs:/outputs`,
-    '--tmpfs', '/tmp:size=64m',
-    image,
-    ...command,
-  ]
+  // 参数由 plan 固定（limits/image/network），target 不得改写。
+  const args = buildLocalDockerArgs({ plan, cwd, containerName: container, env: runEnv, command })
   let result: SpawnResult
   try {
     result = await spawnCaptured(['docker', ...args], {
-      timeoutMs,
-      maxLogBytes: 32 * 1024 * 1024,
+      timeoutMs: plan.limits.timeout_ms,
+      maxLogBytes: plan.limits.max_log_bytes,
       jobId,
       signal,
       container,
@@ -879,29 +893,56 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       stderr: '',
       error: 'empty command: non-echo jobs must execute real code (v2 §3.2)',
     }
-  } else if (job.kind === 'smoke' && job.payload.script !== undefined && typeof job.payload.script === 'string') {
-    // Injected smoke script runs inside the isolated workdir. Reaching this
-    // branch in subprocess mode requires payload.trusted_fixture === true —
-    // the untrusted smoke gate above rejects everything else (RUN-02,
-    // execution-runtime.md §1).
-    writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
-    // umask may strip the world bits (e.g. 0077 → 0700): the container user
-    // (65534) must be able to READ the script — force the mode explicitly.
-    chmodSync(join(workDir, 'run.sh'), 0o755)
-    run = mode === 'docker'
-      ? await runDocker(['sh', '/work/run.sh'], workDir, timeoutMs, job.job_id, signal, image, onChunk, runId, runEnv)
-      : await runSubprocess(['sh', 'run.sh'], workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
-  } else if (texSnapshot !== undefined) {
-    // TEX-02: the frozen-workspace build script is the only thing executed.
-    const command = ['sh', '/work/run.sh']
-    run = mode === 'docker'
-      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId, runEnv)
-      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
   } else {
-    const command = job.command.length > 0 ? job.command : ['true']
+    // 解析实际执行命令（smoke 注入脚本 / TeX 冻结构建脚本 / job.command），
+    // 再收敛到执行路径。docker 分支走 ExecutionTarget port（RUN-REMOTE-01
+    // 接口层：LocalDockerAdapter = prepare 校验/冻结 plan + fingerprint
+    // 断言 → start → wait，底层仍是既有 runDocker 引擎，行为不变）。
+    // subprocess 分支是 trusted-smoke-fixture 专用的非 target 兼容层
+    // （execution-runtime.md §1）——远端/调度路径永不产生 subprocess。
+    let command: string[]
+    let trustedSubprocessCommand: string[]
+    if (job.kind === 'smoke' && job.payload.script !== undefined && typeof job.payload.script === 'string') {
+      // Injected smoke script runs inside the isolated workdir. Reaching this
+      // branch in subprocess mode requires payload.trusted_fixture === true —
+      // the untrusted smoke gate above rejects everything else (RUN-02,
+      // execution-runtime.md §1).
+      writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
+      // umask may strip the world bits (e.g. 0077 → 0700): the container user
+      // (65534) must be able to READ the script — force the mode explicitly.
+      chmodSync(join(workDir, 'run.sh'), 0o755)
+      command = ['sh', '/work/run.sh']
+      trustedSubprocessCommand = ['sh', 'run.sh']
+    } else if (texSnapshot !== undefined) {
+      // TEX-02: the frozen-workspace build script is the only thing executed.
+      command = ['sh', '/work/run.sh']
+      trustedSubprocessCommand = ['sh', 'run.sh']
+    } else {
+      command = job.command.length > 0 ? job.command : ['true']
+      trustedSubprocessCommand = command
+    }
+    // RUN-REMOTE-01（接口层）：ExecutionPlan 由 Kernel 固定字段派生并签名
+    // （有 signingKey 时），target 不得改写（adapter 冻结 + fingerprint 断言）。
+    const plan = buildExecutionPlan(job, {
+      run_id: runId,
+      command,
+      lease: {
+        owner,
+        generation: job.lease_generation ?? 0,
+        token: job.lease_token,
+        expires_at: job.lease_expires_at,
+      },
+      image_digest: image,
+      timeout_ms: timeoutMs,
+      config_pin: null,
+      target_id: 'local-docker',
+      profile_id: 'local-docker',
+    })
+    const planForExecution = signingKey !== undefined ? signExecutionPlan(plan, signingKey) : plan
+    const dockerTarget = new LocalDockerAdapter({ jobId: job.job_id, dockerRun: runDocker, cancel: cancelRun })
     run = mode === 'docker'
-      ? await runDocker(command, workDir, timeoutMs, job.job_id, signal, image, onChunk, runId, runEnv)
-      : await runSubprocess(command, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
+      ? await dockerTarget.execute(planForExecution, { cwd: workDir, signal, onChunk, runEnv })
+      : await runSubprocess(trustedSubprocessCommand, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)
   }
 
   // §6 terminal exit frame: the process-side facts (exit code, truncation).

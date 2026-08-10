@@ -9,6 +9,9 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
 import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from './kernel.js'
 import { TexError } from './tex-workspace.js'
+import { PtyError } from './pty-session.js'
+import { WorkspaceError } from './workspace-store.js'
+import { PtyOpenRequest, PtyControlRequest } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -436,6 +439,21 @@ function fail(res: ServerResponse, error: unknown): void {
   } else if (error instanceof TexError) {
     // CAS write conflicts and invalid TeX paths map to HTTP semantics.
     const status = error.code === 'document_version_conflict' ? 409 : 422
+    send(res, status, { error: errorEnvelope(error.code, error.message) })
+  } else if (error instanceof PtyError) {
+    // PTY-01 wire mapping: not found → 404, idempotency/state conflicts →
+    // 409, open/param validation → 422, adapter absence → 501/503.
+    const status = error.code === 'pty_session_not_found' ? 404
+      : error.code === 'pty_state_conflict' || error.code === 'pty_client_seq_out_of_order' || error.code === 'pty_session_closed' ? 409
+        : error.code === 'pty_adapter_failed' ? 503
+          : 422
+    send(res, status, { error: errorEnvelope(error.code, error.message) })
+  } else if (error instanceof WorkspaceError) {
+    // WORK-01 wire mapping: version/etag/destination conflicts → 409,
+    // missing nodes/workspaces → 404, path/binary/kind validation → 422.
+    const status = error.code === 'workspace_not_found' || error.code === 'workspace_file_not_found' ? 404
+      : error.code === 'workspace_version_conflict' || error.code === 'workspace_etag_conflict' || error.code === 'workspace_move_destination_exists' ? 409
+        : 422
     send(res, status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof z.ZodError) {
     const issues = error.issues.map(i => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ')
@@ -1154,6 +1172,58 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             // stale flag (build.revision < document.revision).
             ok(res, kernel.texPreviewStatus(id))
             return
+          }
+          break
+        }
+        case 'pty': {
+          // PTY-01 (execution-runtime.md §6.1, api-contracts.md §18) —
+          // Interactive Terminal interface layer. Wire shape: the client
+          // never sends endpoint/SSH credential/Docker socket/host path —
+          // only opaque profile/target ids, a preset and a relative cwd
+          // (pty-safe-open). The REAL tty allocation is the adapter
+          // (LocalDockerPty/RemoteRunnerPty, later round): while no adapter
+          // is registered the HTTP open route is 501 and control frames are
+          // applied to the state machine with delivered=false. Sessions are
+          // created through the kernel API (kernel.ptyOpen — the adapter
+          // injection point) and then driven over these routes.
+          if (id === 'sessions') {
+            if (sub === undefined && method === 'POST') {
+              // Open: schema + semantics validation ONLY — a session row is
+              // intentionally NOT created until an adapter can serve a real
+              // pseudo-terminal (an inert session would mislead the UI).
+              const input = PtyOpenRequest.parse(body)
+              kernel.getProject(input.project_id) // 404 project_not_found
+              kernel.resolveWorkspace(input.workspace_id) // 404 workspace_not_found
+              send(res, 501, {
+                error: errorEnvelope('pty_adapter_not_implemented',
+                  'no PTY adapter is registered (LocalDockerPty/RemoteRunnerPty pending) — the interface layer state machine is exercised via the kernel API'),
+              })
+              return
+            }
+            if (sub !== undefined && subId === undefined && method === 'GET') {
+              // Session state + lease summary (api-contracts.md §18 GET).
+              ok(res, kernel.ptyGet(sub))
+              return
+            }
+            if (sub !== undefined && subId === 'control' && method === 'POST') {
+              // Control with client_seq idempotency: 422 on schema failure,
+              // 404 on unknown session, 409 on reorder/closed, 200 with
+              // delivered=false while no adapter is attached.
+              const input = PtyControlRequest.parse(body)
+              const result = kernel.ptyControl(sub, input)
+              ok(res, result)
+              return
+            }
+            if (sub !== undefined && subId === 'frames' && method === 'GET') {
+              // Output replay with server seq / gap / retention.
+              const raw = url.searchParams.get('after_seq')
+              const afterSeq = raw === null ? 0 : Number(raw)
+              if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+                throw new KernelError(422, 'pty_after_seq_invalid', 'after_seq must be a non-negative integer')
+              }
+              ok(res, kernel.ptyFrames(sub, afterSeq))
+              return
+            }
           }
           break
         }

@@ -390,10 +390,13 @@ export class TexWorkspaceStore {
 
   history(documentId: string): Array<{ revision: number; at: string }> {
     this.getDocument(documentId)
-    const rows = this.db.prepare('SELECT DISTINCT revision, created_at FROM tex_files WHERE document_id = ? ORDER BY version DESC LIMIT 20')
-      .all(documentId) as unknown as Array<{ revision: number; created_at: string }>
+    // Per-file history, newest first. tex_files has no `revision` column —
+    // the file VERSION is the per-file CAS counter (bug fix surfaced by the
+    // WORK-01 facade, which maps this onto workspace revisions).
+    const rows = this.db.prepare('SELECT DISTINCT version, created_at FROM tex_files WHERE document_id = ? ORDER BY version DESC LIMIT 20')
+      .all(documentId) as unknown as Array<{ version: number; created_at: string }>
     const doc = this.getDocument(documentId)
-    return rows.length > 0 ? rows.map(r => ({ revision: r.revision, at: r.created_at })) : [{ revision: doc.revision, at: doc.updated_at }]
+    return rows.length > 0 ? rows.map(r => ({ revision: r.version, at: r.created_at })) : [{ revision: doc.revision, at: doc.updated_at }]
   }
 
   /**

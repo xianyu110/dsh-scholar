@@ -12,9 +12,11 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
+import { PTY_DDL } from './pty-session.js'
+import { WORKSPACE_DDL } from './workspace-store.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 10
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -695,6 +697,26 @@ const previewBuilds = (db: DatabaseSync, report: MigrationReport): void => {
 }
 
 /**
+ * 0011 — PTY-01 + WORK-01 (execution-runtime.md §6.1, api-contracts.md
+ * §17/§18): durable Interactive Terminal sessions/frames and the generic
+ * VS Code-style workspace (nodes + op ledger). The DDL is shared with the
+ * store modules (pty-session.ts / workspace-store.ts) so the kernel
+ * migration runner and the stores' own WAL connections converge on the same
+ * shape — CREATE IF NOT EXISTS + additive columns keep it idempotent on
+ * databases from older releases.
+ */
+const ptyAndWorkspaceTables = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(PTY_DDL)
+  db.exec(WORKSPACE_DDL)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.pty_sessions = (db.prepare('SELECT COUNT(*) AS n FROM pty_sessions').get() as { n: number }).n
+  report.rows.pty_frames = (db.prepare('SELECT COUNT(*) AS n FROM pty_frames').get() as { n: number }).n
+  report.rows.workspaces = (db.prepare('SELECT COUNT(*) AS n FROM workspaces').get() as { n: number }).n
+  report.rows.workspace_nodes = (db.prepare('SELECT COUNT(*) AS n FROM workspace_nodes').get() as { n: number }).n
+  report.rows.workspace_ops = (db.prepare('SELECT COUNT(*) AS n FROM workspace_ops').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -759,6 +781,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'TEX-03: tex_builds preview/superseded_by/superseded_at + tex_preview_pending (live LaTeX preview)',
     body: previewBuilds.toString(),
     up: previewBuilds,
+  },
+  {
+    id: '0011_pty_workspace',
+    description: 'PTY-01 + WORK-01: pty_sessions/pty_frames + workspaces/workspace_nodes/workspace_ops (interface layer)',
+    body: ptyAndWorkspaceTables.toString(),
+    up: ptyAndWorkspaceTables,
   },
 ]
 

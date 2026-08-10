@@ -19,6 +19,9 @@ import {
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
+import { openPtySessionStore, NullPtyAdapter, PtyError, type PtyAdapter, type PtyAppendResult, type PtyControlResult, type PtySessionStore } from './pty-session.js'
+import { openWorkspaceStore, WorkspaceError, type WorkspaceExpected, type WorkspaceStore } from './workspace-store.js'
+import { TexWorkspaceFacade } from './tex-facade.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
 import { IMAGES_LOCK } from './images-lock.js'
@@ -49,6 +52,21 @@ function assertSafeTexBuildPath(path: string): void {
   if (TEX_SHELL_META.test(path)) {
     throw new KernelError(422, 'tex_path_invalid', `tex build path contains shell metacharacters: ${path}`)
   }
+}
+
+/**
+ * PTY-01 (execution-runtime.md §6.1): the PTY cwd must be a RELATIVE path
+ * inside the workspace — never a host path. Rejects absolute paths (and
+ * Windows drive prefixes), `..` segments, NUL bytes and backslash
+ * ambiguity; `''`/'.' normalize to '.'. Throws 422-shaped PtyError.
+ */
+function validatePtyCwd(cwd: string): string {
+  if (cwd.includes('\u0000')) throw new PtyError('pty_open_invalid', 'pty cwd must not contain NUL')
+  if (cwd.includes('\\')) throw new PtyError('pty_open_invalid', `pty cwd must use '/' separators: ${cwd}`)
+  if (cwd.startsWith('/')) throw new PtyError('pty_open_invalid', `pty cwd must be root-relative inside the workspace: ${cwd}`)
+  if (/^[A-Za-z]:/.test(cwd)) throw new PtyError('pty_open_invalid', `pty cwd must not carry a Windows drive prefix: ${cwd}`)
+  if (cwd.split('/').some(part => part === '..')) throw new PtyError('pty_open_invalid', `pty cwd must not contain '..' segments: ${cwd}`)
+  return cwd === '' ? '.' : cwd
 }
 
 /**
@@ -397,6 +415,23 @@ export class ResearchKernel {
   readonly stagedUploadsRoot: string
   /** TeX workspace store (execution-runtime.md §12). */
   readonly tex: import('./tex-workspace.js').TexWorkspaceStore
+  /**
+   * PTY-01 (execution-runtime.md §6.1): durable Interactive Terminal session
+   * store — state machine + control idempotency + frame seq/retention
+   * (interface layer; the real tty adapter is injected via setPtyAdapter).
+   */
+  readonly pty: PtySessionStore
+  /**
+   * WORK-01 (api-contracts.md §17): generic VS Code-style workspace store —
+   * revision/etag/CAS + binary artifact CAS (interface layer).
+   */
+  readonly workspaces: WorkspaceStore
+  /**
+   * WORK-01: the TeX store viewed through the generic workspace contract
+   * (kind='manuscript') — the mapping layer, not a second authority
+   * (tex-facade.ts). The existing TeX routes keep calling `tex` directly.
+   */
+  readonly texFacade: TexWorkspaceFacade
   /** §12.7: when true, unsigned run manifests are rejected at completion. */
   requireSignedManifest: boolean
   /** §4 P0 (API-01/EVID-01): service identity for internal HTTP routes. */
@@ -417,6 +452,13 @@ export class ResearchKernel {
   readonly previewAutoTrigger: boolean
   /** §12.1 (TEX-03): in-flight debounce timers, one per document. */
   private readonly previewTimers = new Map<string, NodeJS.Timeout>()
+  /**
+   * PTY-01: the registered PTY adapter (null = no real tty yet). The
+   * interface layer ships NullPtyAdapter; LocalDockerPty/RemoteRunnerPty
+   * replace it in the adapter round. PTY output never becomes Job log,
+   * Metrics, Manifest, Evidence or Gate Decision regardless of adapter.
+   */
+  private ptyAdapter: PtyAdapter | null = null
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
@@ -424,6 +466,9 @@ export class ResearchKernel {
     this.stagedUploadsRoot = join(this.cas.root, 'staged-uploads')
     mkdirSync(this.stagedUploadsRoot, { recursive: true })
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
+    this.pty = openPtySessionStore(options.dbPath ?? ':memory:')
+    this.workspaces = openWorkspaceStore(options.dbPath ?? ':memory:', options.casRoot ?? join(process.cwd(), '.research-cas'))
+    this.texFacade = new TexWorkspaceFacade(this.tex)
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
     this.serviceToken = options.serviceToken
     // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
@@ -461,6 +506,8 @@ export class ResearchKernel {
     for (const timer of this.previewTimers.values()) clearTimeout(timer)
     this.previewTimers.clear()
     this.tex.close()
+    this.pty.close()
+    this.workspaces.close()
     this.db.close()
   }
 
@@ -2883,6 +2930,242 @@ export class ResearchKernel {
     this.texWriteFile(document.document_id, 'main.bib', bibtex)
     const tree = this.texTree(document.document_id)
     return { document_id: document.document_id, revision: tree.document.revision, files: tree.files.map(f => f.path) }
+  }
+
+  // ── Interactive Terminal PTY-01 (execution-runtime.md §6.1) ─────────────
+  //
+  // Interface layer: durable sessions, the open→attached→detached→closed
+  // state machine, client_seq idempotent control, server seq/gap/retention
+  // output and the pinned lease. The real tty allocation is the ADAPTER
+  // (LocalDockerPty/RemoteRunnerPty — later round); until one is registered
+  // the kernel ships NullPtyAdapter and the HTTP open route answers 501.
+  //
+  // SECURITY: pty frames live only in pty_frames. Nothing here touches
+  // jobs/runs/evidence/gates/metrics — PTY output can never become a formal
+  // Job log, Metrics, RunManifest, accepted Evidence or Gate Decision
+  // (enforced by pty-session.test.ts `pty-not-evidence`).
+
+  /** Register (or replace) the PTY adapter; null detaches all adapters. */
+  setPtyAdapter(adapter: PtyAdapter | null): void {
+    this.ptyAdapter = adapter
+  }
+
+  /** The active adapter (NullPtyAdapter when none is registered). */
+  getPtyAdapter(): PtyAdapter {
+    return this.ptyAdapter ?? new NullPtyAdapter()
+  }
+
+  /**
+   * PTY-01 open: validate the pinned request (project, workspace, relative
+   * cwd), create the durable session (state 'open', lease pinned) and hand
+   * the spawn plan to the adapter. A failed spawn closes the session with
+   * close_reason='adapter_failed' (the row stays for audit) and this call
+   * throws PtyError('pty_adapter_failed'). `principal` is REQUIRED
+   * (fail-closed — the HTTP layer injects the authenticated principal).
+   */
+  ptyOpen(request: import('@dsh-scholar/research-schemas').PtyOpenRequest, opts: {
+    principal: { principal_id: string; tenant_id?: string }
+    adapter?: PtyAdapter | null
+  }): import('@dsh-scholar/research-schemas').PtySession {
+    this.getProject(request.project_id)
+    this.resolveWorkspace(request.workspace_id)
+    const cwd = validatePtyCwd(request.cwd)
+    const session = this.pty.createSession({ ...request, cwd }, opts.principal, {
+      config_hash: request.config_hash ?? this.configPinHash,
+      idle_ttl_s: request.idle_ttl_s,
+      retention_bytes: request.retention_bytes,
+      adapter_id: (opts.adapter ?? this.ptyAdapter)?.id ?? 'none',
+    })
+    const adapter = opts.adapter !== undefined ? opts.adapter : this.ptyAdapter
+    if (adapter !== null && adapter !== undefined) {
+      const result = adapter.spawn({
+        pty_session_id: session.pty_session_id,
+        project_id: session.project_id,
+        workspace_id: session.workspace_id,
+        preset: session.preset,
+        cwd: session.cwd,
+        cols: request.cols ?? 80,
+        rows: request.rows ?? 24,
+        profile: session.profile,
+        target: session.target,
+        config_hash: session.config_hash,
+        lease_token: session.lease_token,
+      })
+      if (!result.ok) {
+        this.pty.closeSession(session.pty_session_id, 'adapter_failed')
+        throw new PtyError('pty_adapter_failed', `pty adapter ${adapter.id} failed to spawn: ${result.error}`)
+      }
+    }
+    return session
+  }
+
+  ptyGet(sessionId: string): import('@dsh-scholar/research-schemas').PtySession {
+    return this.pty.getSession(sessionId)
+  }
+
+  ptyList(projectId?: string): import('@dsh-scholar/research-schemas').PtySession[] {
+    return this.pty.listSessions(projectId)
+  }
+
+  /** Attach a wire (open|detached → attached); generation bumps for
+   * reconnect fencing (generation + after_seq). */
+  ptyAttach(sessionId: string): import('@dsh-scholar/research-schemas').PtySession {
+    return this.pty.attach(sessionId)
+  }
+
+  /** Detach the wire — the process keeps running (a PTY disconnect never
+   * ends the process, execution-runtime.md §6.1). */
+  ptyDetach(sessionId: string): import('@dsh-scholar/research-schemas').PtySession {
+    return this.pty.detach(sessionId)
+  }
+
+  /** Permission revocation: detach immediately (or no-op when already
+   * detached); the session stays until close/TTL. */
+  ptyRevoke(sessionId: string): import('@dsh-scholar/research-schemas').PtySession {
+    return this.pty.revoke(sessionId)
+  }
+
+  /** Explicit close (idempotent). */
+  ptyClose(sessionId: string, reason: import('@dsh-scholar/research-schemas').PtyCloseReason = 'explicit'): import('@dsh-scholar/research-schemas').PtySession {
+    return this.pty.closeSession(sessionId, reason)
+  }
+
+  /**
+   * Apply one control frame with client_seq idempotency (duplicate → replay
+   * no-op, reordered/gapped → 409 pty_client_seq_out_of_order). Frames are
+   * audited in pty_frames; delivery to the real tty happens only when an
+   * adapter is attached (`delivered` in the result).
+   */
+  ptyControl(sessionId: string, request: import('@dsh-scholar/research-schemas').PtyControlRequest, adapter?: PtyAdapter | null): PtyControlResult {
+    return this.pty.applyControl(sessionId, request, adapter !== undefined ? adapter : this.ptyAdapter)
+  }
+
+  /** Append adapter output (output/exit frames) with monotonic server seq
+   * and bounded retention (eviction reports a gap, never silence). */
+  ptyAppendOutput(sessionId: string, frames: Parameters<PtySessionStore['appendOutput']>[1]): PtyAppendResult {
+    return this.pty.appendOutput(sessionId, frames)
+  }
+
+  /** Read output frames after a cursor; gap=true when retention evicted
+   * seqs the client missed (pty-reconnect-seq / retention-gap). */
+  ptyFrames(sessionId: string, afterSeq: number): ReturnType<PtySessionStore['frames']> {
+    return this.pty.frames(sessionId, afterSeq)
+  }
+
+  /** Idle TTL sweep — closes every session idle longer than its
+   * idle_ttl_s (read from the Config Schema / session row). */
+  ptySweepIdle(now = Date.now()): string[] {
+    return this.pty.sweepIdle(now)
+  }
+
+  /** Touch activity (a reconnecting wire resets the idle TTL). */
+  ptyTouch(sessionId: string): import('@dsh-scholar/research-schemas').PtySession {
+    return this.pty.touch(sessionId)
+  }
+
+  // ── generic Workspace WORK-01 (api-contracts.md §17) ────────────────────
+
+  /**
+   * Resolve a workspace id across the generic store and the TeX facade
+   * (a `manuscript` workspace may be backed by either). Throws 404-shaped
+   * errors when neither knows the id.
+   */
+  resolveWorkspace(workspaceId: string): import('@dsh-scholar/research-schemas').WorkspaceInfo {
+    try {
+      return this.workspaces.get(workspaceId)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+    }
+    try {
+      return this.texFacade.get(workspaceId)
+    } catch {
+      throw new WorkspaceError('workspace_not_found', `workspace ${workspaceId} not found`)
+    }
+  }
+
+  workspaceEnsure(projectId: string, kind: import('@dsh-scholar/research-schemas').WorkspaceKind, name: string): import('@dsh-scholar/research-schemas').WorkspaceInfo {
+    this.getProject(projectId)
+    return this.workspaces.ensure(projectId, kind, name)
+  }
+
+  workspaceGet(workspaceId: string): import('@dsh-scholar/research-schemas').WorkspaceInfo {
+    return this.resolveWorkspace(workspaceId)
+  }
+
+  workspaceTree(workspaceId: string): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[] } {
+    try {
+      return this.workspaces.tree(workspaceId)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.tree(workspaceId)
+    }
+  }
+
+  workspaceRead(workspaceId: string, path: string): import('@dsh-scholar/research-schemas').WorkspaceNode | null {
+    try {
+      return this.workspaces.read(workspaceId, path)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.read(workspaceId, path)
+    }
+  }
+
+  workspaceWrite(workspaceId: string, path: string, content: string, expected?: WorkspaceExpected): import('@dsh-scholar/research-schemas').WorkspaceNode {
+    try {
+      return this.workspaces.write(workspaceId, path, content, expected)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.write(workspaceId, path, content, expected)
+    }
+  }
+
+  /** Binary write — bytes go to the artifact CAS (server-computed sha256).
+   * The generic store owns binary nodes; the TeX facade rejects them
+   * (text-only, workspace_binary_read_only). */
+  workspaceWriteBinary(workspaceId: string, path: string, bytes: Uint8Array, media: string, expected?: WorkspaceExpected): import('@dsh-scholar/research-schemas').WorkspaceNode {
+    try {
+      return this.workspaces.writeBinary(workspaceId, path, bytes, media, expected)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.writeBinary(workspaceId, path, bytes, media, expected)
+    }
+  }
+
+  workspaceDelete(workspaceId: string, path: string, expected?: WorkspaceExpected): void {
+    try {
+      this.workspaces.deleteNode(workspaceId, path, expected)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      this.texFacade.deleteNode(workspaceId, path, expected)
+    }
+  }
+
+  workspaceMove(workspaceId: string, fromPath: string, toPath: string, expected?: WorkspaceExpected): import('@dsh-scholar/research-schemas').WorkspaceNode {
+    try {
+      return this.workspaces.moveNode(workspaceId, fromPath, toPath, expected)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.moveNode(workspaceId, fromPath, toPath, expected)
+    }
+  }
+
+  workspaceHistory(workspaceId: string): import('@dsh-scholar/research-schemas').WorkspaceRevision[] {
+    try {
+      return this.workspaces.history(workspaceId)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.history(workspaceId)
+    }
+  }
+
+  /** Binary node bytes (artifact CAS); null for text/missing nodes. */
+  workspaceBlob(workspaceId: string, path: string): Buffer | null {
+    try {
+      return this.workspaces.blob(workspaceId, path)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.blob(workspaceId, path)
+    }
   }
 
   // ── evidence & claims (design §4.7) ──────────────────────────────────────
