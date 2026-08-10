@@ -480,4 +480,160 @@ export class ResearchClient {
   listEvents(projectId?: string): Promise<KernelEvent[]> {
     return this.request('GET', projectId === undefined ? '/v1/events' : `/v1/projects/${projectId}/events`)
   }
+
+  // ── trajectory & subagent topology (TRAJ-01/SUBAGENT-01) ────────────────
+
+  /** Read-only, redacted outbox projection (keyset pagination; single page
+   * ≤ 500). `lane` filters Research vs Session; pass `next_after_seq` +
+   * `next_after_event_id` from the previous page to continue. */
+  projectTrajectory(projectId: string, opts: {
+    after_seq?: number
+    after_event_id?: string
+    limit?: number
+    lane?: 'research' | 'session'
+  } = {}): Promise<{
+    project_id: string
+    entries: Array<{
+      entry_id: string
+      event_seq: number
+      event_version: number
+      project_id: string
+      aggregate_type: string | null
+      aggregate_id: string | null
+      kind: string
+      lane: 'research' | 'session'
+      source: string
+      occurred_at: string
+      session_id: string | null
+      summary: string
+      status: string | null
+    }>
+    next_after_seq: number | null
+    next_after_event_id: string | null
+    has_more: boolean
+    total: number
+    limit: number
+    lane: 'research' | 'session' | null
+  }> {
+    const query = new URLSearchParams()
+    if (opts.after_seq !== undefined) query.set('after_seq', String(opts.after_seq))
+    if (opts.after_event_id !== undefined) query.set('after_event_id', opts.after_event_id)
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit))
+    if (opts.lane !== undefined) query.set('lane', opts.lane)
+    const suffix = query.size > 0 ? `?${query.toString()}` : ''
+    return this.request('GET', `/v1/projects/${projectId}/trajectory${suffix}`)
+  }
+
+  /** Research + Session lanes for one project (both always returned). */
+  projectTrajectoryLanes(projectId: string, opts: { limit?: number } = {}): Promise<Record<string, unknown>> {
+    const query = opts.limit !== undefined ? `?limit=${opts.limit}` : ''
+    return this.request('GET', `/v1/projects/${projectId}/trajectory-lanes${query}`)
+  }
+
+  /** Exact direct children of a parent (or roots when parent_id omitted). */
+  projectTopology(projectId: string, opts: {
+    parent_id?: string | null
+    after_seq?: number
+    limit?: number
+  } = {}): Promise<{
+    project_id: string
+    parent_id: string | null
+    items: Array<{
+      child_id: string
+      project_id: string
+      parent_id: string | null
+      label: string | null
+      summary: string
+      kind: 'subagent' | 'task'
+      mode: 'one-shot' | 'continuable' | 'read-only'
+      state: string
+      role: string | null
+      started_at: string
+      ended_at: string | null
+      has_children: boolean
+      children_count: number
+      seq: number
+      refs: Array<{ kind: string; id: string }>
+    }>
+    total: number
+    next_after_seq: number | null
+    has_more: boolean
+  }> {
+    const query = new URLSearchParams()
+    if (opts.parent_id !== undefined && opts.parent_id !== null) query.set('parent_id', opts.parent_id)
+    if (opts.after_seq !== undefined) query.set('after_seq', String(opts.after_seq))
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit))
+    const suffix = query.size > 0 ? `?${query.toString()}` : ''
+    return this.request('GET', `/v1/projects/${projectId}/topology${suffix}`)
+  }
+
+  /** Exact parent + breadcrumb for one child (opaque deep-link id). */
+  childDetail(childId: string): Promise<{
+    child_id: string
+    project_id: string
+    node: Record<string, unknown>
+    parent: Record<string, unknown> | null
+    breadcrumb: Array<Record<string, unknown>>
+  }> {
+    return this.request('GET', `/v1/topology/${encodeURIComponent(childId)}`)
+  }
+
+  /** Read-only per-child history (started/state/followup) — never activates
+   * the child. */
+  childHistory(childId: string, opts: { after_seq?: number; limit?: number } = {}): Promise<{
+    child_id: string
+    project_id: string
+    items: Array<{
+      seq: number
+      event_id: string
+      child_id: string
+      type: string
+      occurred_at: string
+      summary: string
+    }>
+    next_after_seq: number | null
+    has_more: boolean
+    total: number
+  }> {
+    const query = new URLSearchParams()
+    if (opts.after_seq !== undefined) query.set('after_seq', String(opts.after_seq))
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit))
+    const suffix = query.size > 0 ? `?${query.toString()}` : ''
+    return this.request('GET', `/v1/topology/${encodeURIComponent(childId)}/history${suffix}`)
+  }
+
+  /** One-shot READ-ONLY followup: records the message and returns
+   * message_id WITHOUT executing it — child state never changes. */
+  childFollowup(childId: string, message: string): Promise<{
+    message_id: string
+    child_id: string
+    project_id: string
+    accepted: boolean
+    read_only: boolean
+    state_unchanged: boolean
+    note: string
+  }> {
+    return this.request('POST', `/v1/topology/${encodeURIComponent(childId)}/followup`, { message })
+  }
+
+  /** Record a spawned subagent child (research_panel wiring; the kernel
+   * surface + unit tests cover the contract this round). */
+  registerChildLink(input: {
+    child_id: string
+    parent_id?: string | null
+    label?: string | null
+    summary?: string
+    kind?: 'subagent' | 'task'
+    mode?: 'one-shot' | 'continuable' | 'read-only'
+    role?: string | null
+    state?: 'running' | 'inactive' | 'diagnostic' | 'succeeded' | 'failed' | 'redacted' | 'unknown'
+  } & { project_id: string }): Promise<Record<string, unknown>> {
+    const { project_id: projectId, ...body } = input
+    return this.request('POST', `/v1/projects/${projectId}/topology/children`, body)
+  }
+
+  /** Transition a child's state (append-only history + outbox). */
+  updateChildState(childId: string, state: 'running' | 'inactive' | 'diagnostic' | 'succeeded' | 'failed' | 'redacted' | 'unknown'): Promise<Record<string, unknown>> {
+    return this.request('PATCH', `/v1/topology/${encodeURIComponent(childId)}/state`, { state })
+  }
 }

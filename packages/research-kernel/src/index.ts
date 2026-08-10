@@ -29,6 +29,12 @@ export {
 } from './pty-local.js'
 export {
   openWorkspaceStore, WorkspaceStore, WorkspaceError, normalizeWorkspacePath, mediaTypeOf, withImpliedDirs, EMPTY_CONTENT_HASH,
+  matchWorkspaceGlob, HISTORY_KEEP_VERSIONS, WORKSPACE_MAX_FILE_BYTES,
   type WorkspaceStoreLike, type WorkspaceExpected,
 } from './workspace-store.js'
 export { TexWorkspaceFacade, texWorkspaceId, texDocumentId, texInfoToWorkspaceInfo, texEntryToWorkspaceNode } from './tex-facade.js'
+export {
+  TrajectoryStore, laneForKind, redactTrajectorySummary, summaryForKind, statusForKind,
+  TRAJECTORY_DDL, TRAJECTORY_PAGE_LIMIT_DEFAULT, TRAJECTORY_PAGE_LIMIT_MAX, TRAJECTORY_SUMMARY_MAX_CHARS,
+  BREADCRUMB_MAX_DEPTH,
+} from './trajectory.js'

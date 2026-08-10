@@ -32,7 +32,7 @@
 
 import { workspaceEtag, type WorkspaceInfo, type WorkspaceKind, type WorkspaceNode, type WorkspaceRevision } from '@dsh-scholar/research-schemas'
 import { TexWorkspaceStore, TexError, fileMediaType, type TexDocumentInfo, type TexFileEntry } from './tex-workspace.js'
-import { WorkspaceError, withImpliedDirs, type WorkspaceExpected, type WorkspaceStoreLike } from './workspace-store.js'
+import { WorkspaceError, matchWorkspaceGlob, withImpliedDirs, type WorkspaceExpected, type WorkspaceStoreLike } from './workspace-store.js'
 
 /**
  * Translate a TexError into the generic workspace error contract (409/404/
@@ -241,6 +241,57 @@ export class TexWorkspaceFacade implements WorkspaceStoreLike {
   blob(workspaceId: string, _path: string): Buffer | null {
     texDocumentId(workspaceId) // unknown ids still 404
     return null // tex is text-only
+  }
+
+  /**
+   * Watch feed over the tex store. The tex store keeps no per-op ledger, so
+   * the facade reports CONSERVATIVELY: `sinceRevision >= current revision`
+   * → empty (nothing changed since the caller's cursor); otherwise the whole
+   * current tree as "changed" (a caller can never miss a change, it only
+   * re-reads more than strictly necessary). Deleted paths cannot be
+   * projected — the tex store drops rows (documented limitation).
+   */
+  listSince(workspaceId: string, sinceRevision: number): { info: WorkspaceInfo; nodes: WorkspaceNode[]; deleted: string[] } {
+    try {
+      const tree = this.tree(workspaceId)
+      if (sinceRevision >= tree.info.revision) return { info: tree.info, nodes: [], deleted: [] }
+      return { info: tree.info, nodes: tree.nodes, deleted: [] }
+    } catch (error) {
+      return translateTexError(error)
+    }
+  }
+
+  /** PATH search (prefix and/or `*`/`?` glob) over the tex tree — same
+   * semantics as the generic store; content search is not implemented. */
+  search(workspaceId: string, query: { prefix?: string; glob?: string }): { info: WorkspaceInfo; nodes: WorkspaceNode[] } {
+    try {
+      const tree = this.tree(workspaceId)
+      let nodes = tree.nodes
+      if (query.prefix !== undefined && query.prefix !== '') {
+        const prefix = query.prefix.replace(/\/+$/, '')
+        nodes = nodes.filter(n => n.path.startsWith(prefix))
+      }
+      if (query.glob !== undefined && query.glob !== '') {
+        const glob = query.glob
+        nodes = nodes.filter(n => matchWorkspaceGlob(n.path, glob))
+      }
+      return { info: tree.info, nodes }
+    } catch (error) {
+      return translateTexError(error)
+    }
+  }
+
+  /** Rollback read: only the CURRENT per-file version is retained by the
+   * tex store (no per-file version history) — any other version → null
+   * (documented limitation of the manuscript facade). */
+  readVersion(workspaceId: string, path: string, version: number): WorkspaceNode | null {
+    try {
+      const file = this.tex.readFile(texDocumentId(workspaceId), path)
+      if (file === null || file.version !== version) return null
+      return texEntryToWorkspaceNode(file)
+    } catch (error) {
+      return translateTexError(error)
+    }
   }
 
   /** Media type helper (exposed for facade callers). */

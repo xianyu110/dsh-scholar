@@ -36,6 +36,14 @@
 #                               curl -F success + server-side hash binding,
 #                               33 MiB 413, path traversal 422, idempotent
 #                               reuse, BFF passthrough + BFF authz negatives
+#   run-workspace-tests.sh      WORK-01 generic workspace disk adapter (§7.1):
+#                               create/list, node write/read with hash
+#                               binding, revision/etag monotonicity, CAS
+#                               409s, move/delete, binary asset upload + blob,
+#                               413 caps, path traversal + symlink 422, watch
+#                               (listSince), search, history rollback,
+#                               cross-project 404, manuscript facade list,
+#                               BFF passthrough + authz negatives
 #   run-selfmod-tests.sh        SELFMOD-01 production static negation
 #                               (no cordis_inspect/tool-cordis/dump-config
 #                               in the published plugin; dev overlay opt-in)
@@ -62,6 +70,7 @@ SCRIPTS=(
   run-terminal-tests.sh
   run-sse-tests.sh
   run-upload-tests.sh
+  run-workspace-tests.sh
   run-unicode-tests.sh
   run-lower-is-better-tests.sh
   run-malformed-path-tests.sh

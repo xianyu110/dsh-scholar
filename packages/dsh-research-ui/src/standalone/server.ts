@@ -642,6 +642,32 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'jobs') return parts[2] ?? null
     return null
   }
+  // SUBAGENT-01 (trajectory-subagents.md §7): child-scoped topology routes
+  // (/v1/topology/{child_id}*) resolve the child's project through the
+  // kernel first — the BFF checks membership BEFORE forwarding, mirroring
+  // the job-scoped rule (trajectory/topology reads require project
+  // membership; unknown child AND non-member are the same 404).
+  const childProjectCache = new Map<string, Promise<string | null>>()
+  async function childProjectId(childId: string): Promise<string | null> {
+    const key = `c:${childId}`
+    let hit = childProjectCache.get(key)
+    if (hit === undefined) {
+      hit = fetch(`${endpoint}/v1/topology/${encodeURIComponent(childId)}`, {
+        headers: { accept: 'application/json', ...options.principal !== null ? { 'x-principal-id': options.principal } : {} },
+      }).then(async (r) => {
+        if (!r.ok) return null
+        const detail = await r.json() as { project_id?: string }
+        return typeof detail.project_id === 'string' ? detail.project_id : null
+      }).catch(() => null)
+      childProjectCache.set(key, hit)
+    }
+    return hit
+  }
+  function childIdFromPath(pathname: string): string | null {
+    const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'topology') return parts[2] ?? null
+    return null
+  }
   function projectIdFromPath(pathname: string): string | null {
     const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
     // Only /v1|v2/projects/{id} carries a PROJECT id in this position — gate
@@ -905,6 +931,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             const jobId = jobIdFromPath(url.pathname)
             if (jobId !== null) memberProjectId = await jobProjectId(jobId)
           }
+          if (memberProjectId === null) {
+            const childId = childIdFromPath(url.pathname)
+            if (childId !== null) memberProjectId = await childProjectId(childId)
+          }
           if (memberProjectId === null && url.pathname.startsWith('/v1/gates/') && url.pathname.includes('/decisions')) {
             // GOV-01/API-01: a gate DECISION is project-scoped via the gate's
             // owning project — resolve it through the kernel (the gate id is
@@ -1055,6 +1085,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             sendJson(res, 403, { ok: false, error: 'role forbidden' })
             return
           }
+          proxyHeaders['x-principal-id'] = options.principal
+        }
+        // SUBAGENT-01 (trajectory-subagents.md §7): the kernel demands the
+        // authenticated principal on /v1/topology/* (fail-closed) — the BFF
+        // injects the loopback operator identity (server-derived, never a
+        // client-supplied value). Membership was already enforced above via
+        // childProjectId; viewer/auditor write attempts (followup) are
+        // rejected by the role policy (read-only roles block all writes).
+        if (options.principal !== null && url.pathname.startsWith('/v1/topology/')) {
           proxyHeaders['x-principal-id'] = options.principal
         }
         // GOV-01 principal resolver: the authenticated operator session is a

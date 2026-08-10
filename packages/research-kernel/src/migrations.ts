@@ -15,9 +15,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { PTY_DDL } from './pty-session.js'
 import { WORKSPACE_DDL } from './workspace-store.js'
 import { INTAKE_DDL } from './intake.js'
+import { TRAJECTORY_DDL } from './trajectory.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -734,6 +735,26 @@ const intakeTables = (db: DatabaseSync, report: MigrationReport): void => {
 }
 
 /**
+ * 0013 — TRAJ-01/SUBAGENT-01 (trajectory-subagents.md): standalone safe
+ * trajectory projection + subagent topology storage. `child_links` records
+ * the durable parent/child topology (research_panel spawns); `child_history`
+ * is the append-only per-child ledger (started/state/followup);
+ * `child_followups` holds one-shot read-only followup receipts; the
+ * `events(project_id,event_seq,event_id)` index keeps 10k-event keyset
+ * pagination stable. The projection itself reads the existing `events`
+ * outbox — no trajectory copy of business state (Kernel Outbox stays the
+ * only authority). DDL shared with trajectory.ts (CREATE IF NOT EXISTS +
+ * additive = idempotent on older databases).
+ */
+const trajectoryAndTopologyTables = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(TRAJECTORY_DDL)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.child_links = (db.prepare('SELECT COUNT(*) AS n FROM child_links').get() as { n: number }).n
+  report.rows.child_history = (db.prepare('SELECT COUNT(*) AS n FROM child_history').get() as { n: number }).n
+  report.rows.child_followups = (db.prepare('SELECT COUNT(*) AS n FROM child_followups').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -810,6 +831,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'ONBOARD-01: intake_sessions/intake_artifacts/intake_observations/intake_questions (Research Intake)',
     body: intakeTables.toString(),
     up: intakeTables,
+  },
+  {
+    id: '0013_trajectory_topology',
+    description: 'TRAJ-01/SUBAGENT-01: child_links/child_history/child_followups + events(project_id,event_seq,event_id) index (trajectory projection & subagent topology)',
+    body: trajectoryAndTopologyTables.toString(),
+    up: trajectoryAndTopologyTables,
   },
 ]
 

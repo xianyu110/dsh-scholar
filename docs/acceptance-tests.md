@@ -170,10 +170,29 @@
 - workspace-vscode-flow：Explorer/create/open/tabs/search/edit/move/delete/upload/download/history/snapshot 全部走 Workspace Revision/CAS；
 - workspace-binary-and-conflict：图片/PDF/随机 bytes hash 一致；大/未知文件只读；并发保存/上传给 base/current/local 且不覆盖；
 - workspace-watch：change seq 重连无重复，retention gap 触发 resync；跨项目/路径越界拒绝；
-- workspace-interface（WORK-01 接口层，无真实文件系统 adapter，UI 未实现——tests/unit/workspace-store.test.ts 8/8）：list/read/write/delete/move + workspace revision/每路径 version/strong etag（`"<version>-<sha256[0..12]>"`）；预期 version/etag 不匹配一律 409 workspace_version_conflict/workspace_etag_conflict（无静默 last-write-wins）；expected_version=0 create-if-absent（存在→409）、缺文件 + N>0→409；二进制 CAS（服务端计算 sha256、CAS blob 回读字节一致、相同 bytes 幂等复用同一 blob、文本写二进制节点 422 workspace_binary_read_only、二进制 move 按 blob 引用）；路径安全（绝对/`..`/`.`/NUL/反斜杠/Windows 盘符/空段拒绝，tree 只含 root-relative 路径）；move 目标已存在→409 workspace_move_destination_exists；history op ledger（create/write/delete/move + workspace revision）；`dir` 节点由路径前缀投影；
+- workspace-interface（WORK-01 接口层已升级为磁盘 adapter，见 §7.1——tests/unit/workspace-store.test.ts 15/15）：list/read/write/delete/move + workspace revision/每路径 version/strong etag（`"<version>-<sha256[0..12]>"`）；预期 version/etag 不匹配一律 409 workspace_version_conflict/workspace_etag_conflict（无静默 last-write-wins）；expected_version=0 create-if-absent（存在→409）、缺文件 + N>0→409；二进制 CAS（服务端计算 sha256、CAS blob 回读字节一致、相同 bytes 幂等复用同一 blob、文本写二进制节点 422 workspace_binary_read_only、二进制 move 按 blob 引用）；路径安全（绝对/`..`/`.`/NUL/反斜杠/Windows 盘符/空段拒绝，tree 只含 root-relative 路径）；move 目标已存在→409 workspace_move_destination_exists；history op ledger（create/write/delete/move + workspace revision）；`dir` 节点由路径前缀投影；
 - workspace-tex-facade（WORK-01 接口层，同上）：TeX 文档作为 `manuscript` workspace 经同一 WorkspaceStoreLike 契约读写（workspace_id=`ws_<document_id>`、版本/etag/hash 与 tex 权威一致、写后 tex store 直接可见且 document revision 前进——无第二套字节/revision 权威）；CAS 冲突穿透 facade；删除/移动经 facade 生效；二进制写→422；history 映射 tex 历史；
 - live-preview：保存成功后（POST /v1/documents/{id}/preview-builds，或 kernel previewAutoTrigger 自动路径）进入 server 端 debounce（默认 800ms 可配置），Kernel 持有定时器并写持久化 tex_preview_pending；合并窗口内多次保存只产生一个 preview build，编译结束前 UI 已见日志/诊断；新 revision 使旧 PDF stale（build.revision < document.revision → build 记录 stale=true）并 supersede 旧 preview；preview build 记录状态 queued/running/superseded/succeeded/failed（queued 被取代时标 cancelled），带 preview=true 与 superseded_by/superseded_at；preview 提交响应携带 job_id 与输入 revision（同一 Job 的 live Terminal SSE 与 stale 判定）；UI 重连/内核重启后 GET preview-builds 投影（pending+builds）可恢复，preview 状态不只在浏览器 debounce timer（tex-preview.test.ts：debounce 合并、取消 queued、running→superseded、stale、权威 supersede、去重、重启持久化、previewAutoTrigger）；
 - preview-vs-compile：preview 运行同一固定 TeX image/禁网/no-shell-escape（复用 latex-compile runner 路径，payload.preview=true），但不产 Evidence、不冻结/不参与权威 manifest 链；显式 Compile 固定 manifest/config/image，创建权威 latex-compile Job 时 supersede 该 document 全部非终态 preview，且不被后续 preview 取消/取代（活跃权威编译期间 preview flush 跳过，不排队冗余容器）。
+
+### 7.1 通用 Workspace 磁盘 Adapter（WORK-01 adapter 轮，api-contracts.md §17）
+
+通用 workspace 的**真实磁盘 adapter**（替换接口层的 DB-only 文本内联实现；tests/unit/workspace-store.test.ts 15/15 + tests/security/run-workspace-tests.sh 38/38，详见 hardening-v0.2-status.md §3 WORK-01 行）：
+
+- ws-disk-layout：每个项目一个 workspace 根 `dataDir/workspaces/{project_id}/{workspace_id}/`（目录链 chmod 0750、文件 0640），节点字节是树内真实文件（规范化路径）；元数据（path/kind/media/size/version/hash/etag/updated_at）存 `workspace_nodes`（磁盘 adapter 不再写 `content` 列）；`ensure` 即建根；
+- ws-atomic-write：写入先落目标目录内临时文件（`<name>.ws-tmp-<rand>`）再原子 rename——读方永远看不到半写文件，写后无临时残留；
+- ws-revision-etag：每次 mutation 前进 workspace revision 与每路径 version，etag=`"<version>-<sha256[0..12]>"` 随之变化（单调、确定性）；
+- ws-cas-conflict：预期 version/etag 不匹配一律 409 `workspace_version_conflict`/`workspace_etag_conflict`（无静默 last-write-wins）；`expected_version=0` create-if-absent（已存在→409）；move 目标已存在→409 `workspace_move_destination_exists`；delete/move 均走 source CAS；
+- ws-move-delete：move 原子 rename 磁盘文件（hash 保持、旧路径消失、目标 version 重置为 1）；delete 移除磁盘文件并保留历史；
+- ws-binary：任意字节节点（不强制 UTF-8）——multipart `assets` 上传（≤32 MiB 复用 UPLOAD-01 上限，服务端 sha256，路径字段走同一规范化）；GET `blobs?path=` 返回原始字节 + media type（扩展名映射或 octet-stream）+ 强 etag 头；`blob_sha256` 同时注册进 artifact CAS（按内容幂等），工作字节以树文件为准；
+- ws-size-cap：单节点 >32 MiB（`WORKSPACE_MAX_FILE_BYTES`，复用 upload limits）→ 413 `workspace_file_too_large`（multipart 路径为 413 `payload_too_large`）；超过 readJson 32 MiB 上限的 JSON 文本写请走 assets 路径；
+- ws-path-safety：绝对路径/`..`/`.`/NUL/反斜杠/Windows 盘符/空段 → 422 `invalid_path`；磁盘层额外拒绝路径上**任意** symlink（读、写、删、移动前 lstat 每个已存在组件，→ 422 `workspace_symlink`）——通用 workspace 树只含普通文件，是 snapshot-walk“symlink 不得逃出根”的严格超集；宿主在树内埋 link 指向根外也不能被读写穿透（负向：escape target 字节不变）；
+- ws-history：每路径保留最近 `HISTORY_KEEP_VERSIONS`=8 个版本字节于 `dataDir/workspaces/.ws-meta/{workspace_id}/history/{path}@{version}`（树外，用户路径不可达）；GET nodes `?path=&version=N` 回退读（当前版本读活文件，旧版本读历史字节，删除后版本仍可读——undo）；超出保留窗口 → 404 `workspace_file_not_found`；history op ledger 不变；
+- ws-watch：GET nodes `?after_revision=N` → 该 revision 之后被触碰路径的当前节点 + `deleted` tombstone 列表（`since >= 当前 revision` → 空集），watch/change 重连 feed（TeX facade 无 per-op ledger，保守整树上报）；
+- ws-search：POST search（`prefix` 和/或 `glob`，AND）——路径前缀与 `*`/`?` glob（`*` 不跨 `/`）匹配，`dir` 节点投影参与；**内容搜索未实现**（无全文索引，如实记录）；
+- ws-http-routes：`POST/GET /v1/projects/{id}/workspaces`（创建/列出 code/manuscript/scratch，manuscript 含 TeX facade 工作区）、`GET .../workspaces/{wsid}/tree`、`GET/POST/DELETE .../workspaces/{wsid}/nodes`（读/写/删 + watch/rollback）、`POST .../workspaces/{wsid}/moves`、`POST .../workspaces/{wsid}/search`、`POST .../workspaces/{wsid}/assets`（multipart）、`GET .../workspaces/{wsid}/blobs?path=`（原始字节）；跨项目 workspace → 404 `workspace_not_found`（路径项目绑定，BFF membership/role 检查同其它 /v1 写）；BFF multipart 原始字节/原 boundary 透传 + bearer/Origin/CSRF/membership 与既有 /v1 写一致；
+- ws-facade：TeX 文档经同一接口可读/写（workspace_id=`ws_<document_id>`、kind=manuscript、版本/etag/hash 与 tex 权威一致——无第二套字节/revision 权威）；facade search/listSince/readVersion 语义与取舍见 execution-runtime.md §12.2；
+- 浏览器编辑器 UI（tabs/search/watch/upload、move/history 面板、Problems、集成 PTY）与桌面/窄屏/冲突/路径/二进制**浏览器**验收：无 Playwright 类环境，如实保留（§4 行 96 剩余）。
 
 ## 8. UI 与 i18n
 
@@ -225,6 +244,21 @@
 - 剩余（如实记录，属 UI/浏览器与后续轮次）：拖拽/向导 Intake UI、quarantine/scan 进度展示、分块 offset/hash 恢复上传（研究包/大文件 intake staged upload，research-onboarding.md §4.1）、archive 解包扫描、TeX workspace/CodeSnapshot 的采用物化（当前按 §6.1 映射为 paper/code Artifact 并记录 gap）、merge 冲突 keep/current/import/rename 交互、BFF /v2+accept 面与 Agent tool 面（begin/stage/scan/grill/propose/status）、GUIDE-01 投影的 Intake/Grill 覆盖动作（`intake_continue`，本轮按“不动 next-action 已提交代码”约束未扩展，提案内 next_actions 已复用 NextAction schema）——上述均为 kernel/服务端层已就绪、UI 或后续阶段剩余。
 
 ### 8.2 Trajectory 与 Subagent Topology
+
+**standalone 投影与拓扑 API 层已实现（TRAJ-01/SUBAGENT-01 kernel/服务端轮，tests/unit/trajectory.test.ts 12/12、migration 0013 SCHEMA_VERSION 12、research-schemas `trajectory.ts`、research-kernel `trajectory.ts`、BFF child 路由解析；commit 待定——见 hardening-v0.2-status.md §3 TRAJ-01/SUBAGENT-01 行）**：
+
+- trajectory-projection-redacted：`GET /v1/projects/{id}/trajectory`（kernel 只读投影，`after_seq`/`after_event_id`/`limit`/`lane` 查询参数）按 `(event_seq, event_id)` keyset 分页——outbox event_seq 是 per-aggregate 单调，跨 bucket 数值相等由 event_id 续传（断言 5 条含 seq 平局的记录分页不丢不重）；单页上限 500、total 计数、has_more 稳定；`projectTrajectoryLanes`（`GET .../trajectory-lanes`）同时返回 research/session 两条泳道（各自游标），`lane=research|session` 过滤生效；
+- trajectory-redaction（断言）：投影 entry 只有白名单 `summary`（无 payload 字段）；token（sk-/ghp_/xoxb-/Bearer…）、secret 赋值、绝对宿主路径（/home//Users//tmp//var//etc//opt/C:\…）在 summary 中一律不出现（`[redacted]`）；statement 服务端截断 ≤240 字符（长标题以 `…` 结尾且恰好 240）；child summary 写入与读取双次脱敏；
+- trajectory-scale-10k：造 10_000 事件后 `limit=500` 分页 21 页无重复无丢失（10_001 total）、页大小上限即使请求 5000 也强制 500、全程 <10s 且内存有界（DOM 虚拟化属浏览器轮剩余）；
+- topology-direct-child：`GET /v1/projects/{id}/topology?parent_id=` 只返回 exact direct children（孙节点不出现在父列表）、`has_children`/`children_count`/`seq` 游标/`total` 正确；`parent_id` 省略 = 顶层根列表；
+- topology-enter-breadcrumb：`GET /v1/topology/{child_id}` 返回 exact-parent + breadcrumb（root→parent 路径，自节点不含）；root 无 parent；orphan（parent 未注册）fail-soft parent=null；cycle（a→b→a）深度有界不悬挂；未知 child 与无权限统一 404 child_not_found（无存在性泄漏）；
+- subagent-read-no-activate：`GET /v1/topology/{child_id}/history` 只读（started/registered/state/followup 追加账本，`after_seq` 每 child 单调分页）——读取前后 child state 不变（断言）；history 永不激活 Agent；
+- subagent-followup-authz：`POST /v1/topology/{child_id}/followup` 需要 project membership（BFF 先解析 child→project 再查成员，kernel 侧 x-principal-id fail-closed 422 principal_required、非成员 404）；standalone kernel 只记录 message 并返回 `message_id`（`msg_…`），`read_only=true`、`state_unchanged=true`、不冒充已执行（trajectory-subagents.md §3）；followup 进入 child_history 与 outbox（`trajectory.child.followup`，session 泳道）；execution 需 DSH host + exact live-parent 校验（剩余）；
+- topology-register-state：`POST /v1/projects/{id}/topology/children` 记录 child（child_id/parent_id/label/summary/mode/role/state），re-register 不复活已终态 child（state 只经 `PATCH /v1/topology/{child_id}/state` 变更，ended_at 首次终态钉定）；outbox 事件 `trajectory.child.started/updated/followup` 均为 session（observational）泳道；
+- topology-permissions：trajectory/topology 全部路由（含 PATCH state、POST followup）要求认证 principal + project membership；缺 principal 422 principal_required、非成员/未知 child 404（HTTP 断言）；
+- 剩余（如实记录，属 UI/DSH 集成轮）：浏览器拓扑渲染/进入 child/breadcrumb 导航、trajectory/topology 的 SSE 实时流（after_seq replay/gap/revoke）、10k node 浏览器 DOM 虚拟化与键盘/ARIA/zh-en 验收（Playwright 类环境不可用）、token 四桶/cost/permissions/retention 详情（需 DSH session adapter）、research_panel 插件侧调用 registerChildLink/updateChildState 接线（本轮 kernel/服务端已就绪，插件代码未动）。
+
+UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 
 - research-vs-session：UI 明确 authoritative Outbox 与 observational Session，Session 事件不能推进 Project；
 - topology-direct-child：树只用 exact direct child；orphan/cycle fail-soft，普通 fork 停止 subagent 聚合；

@@ -62,6 +62,14 @@ export const KernelEventKind = z.enum([
   'intake.accepted',
   'intake.rejected',
   'intake.expired',
+  // TRAJ-01/SUBAGENT-01 (trajectory-subagents.md §3/§4): subagent topology
+  // outbox events — emitted by the kernel topology store (child_links) on
+  // child start / state change / followup. Session-lane (observational)
+  // events in the trajectory projection; the Kernel Outbox stays the
+  // authoritative ledger and child state is never derived from the UI.
+  'trajectory.child.started',
+  'trajectory.child.updated',
+  'trajectory.child.followup',
 ])
 export type KernelEventKind = z.infer<typeof KernelEventKind>
 

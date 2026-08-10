@@ -1,6 +1,6 @@
 /**
  * WORK-01 (hardening-v0.2-status.md §3/§4, api-contracts.md §17) — generic
- * VS Code-style Workspace store (interface layer).
+ * VS Code-style Workspace store with a REAL filesystem adapter.
  *
  * One unified store for code/scratch/manuscript trees with the same
  * revision/etag/CAS semantics the TeX workspace already implements
@@ -15,32 +15,76 @@
  *   - rejects stale CAS with 409 (`workspace_version_conflict` /
  *     `workspace_etag_conflict`) — no silent last-write-wins.
  *
- * Text content is stored inline; binary content lives in the artifact CAS
- * (ArtifactCas, blob_sha256) — the server computes sha256 over the bytes and
- * CAS put is idempotent by content. Binary nodes are read-only for text
- * writes (replaced only via the binary upload path).
+ * ── disk adapter (this round) ─────────────────────────────────────────────
  *
- * Path safety follows the snapshot-walk contract (execution-runtime.md §4):
- * root-relative only, no `..`, no NUL, no backslash ambiguity, no empty
- * segments. `dir` nodes are projected from path prefixes (implied); only
- * file nodes are stored.
+ *   - Every node's BYTES live on disk under
+ *     `{workspacesRoot}/{project_id}/{workspace_id}/{normalized-path}`
+ *     (directory chain chmod 0750, files 0640; the root is created on
+ *     `ensure`). `workspace_nodes` holds the METADATA only
+ *     (path/kind/media/size/version/hash/etag/updated_at; the legacy
+ *     `content` column is unused by the adapter and stays NULL).
+ *   - Writes are atomic: bytes go to a temp file in the TARGET directory
+ *     (`<name>.ws-tmp-<rand>`) and are `rename()`d over the target — a
+ *     reader never observes a partial file.
+ *   - Binary nodes keep their artifact-CAS reference: `writeBinary` also
+ *     puts the bytes into the CAS (idempotent by content, server-computed
+ *     sha256) so `blob_sha256` stays a real CAS link; the WORKING bytes are
+ *     the tree file (read back from disk by `blob`/`read`).
+ *   - Size cap: one node ≤ `WORKSPACE_MAX_FILE_BYTES` (32 MiB — reuses the
+ *     upload limit; see upload-limits.ts). Oversized writes → 413-shaped
+ *     `workspace_file_too_large` (server maps it to HTTP 413).
+ *   - History: the last `HISTORY_KEEP_VERSIONS` (8) per-path versions are
+ *     kept under `{workspacesRoot}/.ws-meta/{workspace_id}/history/` as
+ *     `{path}@{version}` (bytes, not DB rows) — `readVersion(path, N)`
+ *     rolls a node back to a stored version (delete keeps the deleted
+ *     version too, so undo works). Older versions are pruned on write.
+ *   - watch/search: `listSince(revision)` returns the current nodes of every
+ *     path mutated after a workspace revision (plus `deleted` tombstones —
+ *     the watch/change feed); `search` is PATH matching only (prefix and/or
+ *     `*`/`?` glob, `*` does not cross `/`) — content search is NOT
+ *     implemented (documented limitation, no full-text index).
  *
- * The real filesystem adapter (a host/container tree behind this interface)
- * and the browser UI are NOT part of this round — this store is the durable
- * interface layer the adapter will back.
+ * ── path safety (execution-runtime.md §4 snapshot-walk contract) ──────────
+ *
+ * Root-relative POSIX paths only; absolute paths, Windows drive prefixes,
+ * `..`/`.` segments, NUL bytes, backslashes and empty segments are rejected
+ * (`normalizeWorkspacePath`, shared with the interface layer). On disk the
+ * adapter additionally refuses to cross ANY symbolic link (each existing
+ * path component is `lstat`ed; a symlink anywhere → 422 `workspace_symlink`)
+ * — the generic workspace tree is regular files only, which implies the
+ * snapshot-walk rule "no symlink escapes the root" (a strict superset).
+ *
+ * The browser editor UI (tabs/search/watch/upload/move/history panels) is
+ * NOT part of this round — this store is the real durable adapter the UI
+ * will call through the server routes (server.ts `/v1/projects/{id}/
+ * workspaces*`).
  * @module @dsh-scholar/research-kernel/workspace-store
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { workspaceEtag, type WorkspaceInfo, type WorkspaceKind, type WorkspaceNode, type WorkspaceOp, type WorkspaceRevision } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
+import { UPLOAD_MAX_FILE_BYTES } from './upload-limits.js'
 
 /** sha256 of the empty string — carried by synthesized `dir` nodes where a
  * hash is structurally required but semantically meaningless. */
 export const EMPTY_CONTENT_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+
+/** Per-path history retention: the last N versions of every path (bytes
+ * under `{workspacesRoot}/.ws-meta/{workspace_id}/history/`). Documented in
+ * execution-runtime.md §12.2 — older versions are pruned on every write. */
+export const HISTORY_KEEP_VERSIONS = 8
+
+/**
+ * Hard cap for ONE workspace node (any kind). Reuses the upload limit
+ * (upload-limits.ts `UPLOAD_MAX_FILE_BYTES`) so every byte that can enter
+ * the research system through a browser path shares one bound. Writes
+ * beyond it → `workspace_file_too_large` (HTTP 413).
+ */
+export const WORKSPACE_MAX_FILE_BYTES = UPLOAD_MAX_FILE_BYTES
 
 /** Error raised by the workspace store. `code` is the stable wire code. */
 export class WorkspaceError extends Error {
@@ -70,6 +114,15 @@ export interface WorkspaceStoreLike {
   history(workspaceId: string): WorkspaceRevision[]
   /** Binary node bytes (null for text/missing nodes). */
   blob(workspaceId: string, path: string): Buffer | null
+  /** Watch feed: current nodes of every path mutated after `sinceRevision`,
+   * plus paths deleted after it. `sinceRevision >= info.revision` → empty. */
+  listSince(workspaceId: string, sinceRevision: number): { info: WorkspaceInfo; nodes: WorkspaceNode[]; deleted: string[] }
+  /** PATH search (prefix and/or `*`/`?` glob — `*` never crosses `/`).
+   * Content search is NOT implemented (documented limitation). */
+  search(workspaceId: string, query: { prefix?: string; glob?: string }): { info: WorkspaceInfo; nodes: WorkspaceNode[] }
+  /** Rollback read: node bytes at a stored per-path version (history), or
+   * null when that version is not retained. */
+  readVersion(workspaceId: string, path: string, version: number): WorkspaceNode | null
 }
 
 /** CAS expectation of a mutation: either the version or the etag (or both —
@@ -108,10 +161,25 @@ export function normalizeWorkspacePath(path: string): string {
   return path
 }
 
+/** Simple `*`/`?` glob matcher over workspace paths. `*` matches within ONE
+ * segment (`[^/]*` — it never crosses `/`); `?` matches one non-`/` char.
+ * The pattern itself must be a valid normalized path (globs may contain
+ * `*`/`?` characters which the normalizer otherwise allows). */
+export function matchWorkspaceGlob(path: string, glob: string): boolean {
+  let re = ''
+  for (const ch of glob) {
+    if (ch === '*') re += '[^/]*'
+    else if (ch === '?') re += '[^/]'
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }
+  return new RegExp(`^${re}$`).test(path)
+}
+
 /**
  * Table DDL — parity copy of migration 0011 (the store opens its own WAL
  * connection, exactly like tex-workspace.ts; CREATE IF NOT EXISTS keeps both
- * connections in sync).
+ * connections in sync). The disk adapter writes the `content` column as NULL
+ * (bytes live on disk); the column is kept for migration parity.
  */
 export const WORKSPACE_DDL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -192,29 +260,135 @@ interface WorkspaceOpRow {
 }
 
 /** Open the generic workspace store on the kernel database path. */
-export function openWorkspaceStore(dbPath: string, casRoot: string): WorkspaceStore {
-  return new WorkspaceStore(dbPath, casRoot)
+export function openWorkspaceStore(dbPath: string, casRoot: string, workspacesRoot: string): WorkspaceStore {
+  return new WorkspaceStore(dbPath, casRoot, workspacesRoot)
 }
 
 export class WorkspaceStore implements WorkspaceStoreLike {
   private readonly db: DatabaseSync
   private readonly cas: ArtifactCas
+  /** Host root holding every workspace tree + history (`{workspacesRoot}`). */
+  readonly workspacesRoot: string
 
-  constructor(dbPath: string, casRoot: string) {
+  constructor(dbPath: string, casRoot: string, workspacesRoot: string) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true })
     this.db = new DatabaseSync(dbPath)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(WORKSPACE_DDL)
     this.cas = new ArtifactCas(casRoot)
+    this.workspacesRoot = workspacesRoot
+    mkdirSync(workspacesRoot, { recursive: true, mode: 0o750 })
   }
 
   close(): void {
     this.db.close()
   }
 
-  /** The artifact CAS backing binary nodes (kernel passes the same root). */
+  /** The artifact CAS backing binary node references (kernel passes the
+   * same root). */
   get casRef(): ArtifactCas {
     return this.cas
+  }
+
+  /** Host directory holding the tree of one workspace (0750). */
+  workspaceRoot(workspaceId: string): string {
+    const info = this.getInfoRow(workspaceId)
+    return join(this.workspacesRoot, info.project_id, workspaceId)
+  }
+
+  /** Host directory holding per-path version history of one workspace. */
+  historyRoot(workspaceId: string): string {
+    const info = this.getInfoRow(workspaceId)
+    return join(this.workspacesRoot, '.ws-meta', workspaceId, 'history')
+  }
+
+  /** Absolute host path of a normalized workspace path inside the tree root
+   * (never exposed to callers — internal helper). */
+  private absPath(workspaceId: string, cleanPath: string): string {
+    return join(this.workspaceRoot(workspaceId), ...cleanPath.split('/'))
+  }
+
+  /** History file of `{path}@{version}` (internal): the last segment carries
+   * `@<version>` so one path = one file (nested paths keep their dirs). */
+  private historyPath(workspaceId: string, cleanPath: string, version: number): string {
+    const segments = cleanPath.split('/')
+    const last = segments.at(-1) ?? 'file'
+    return join(this.historyRoot(workspaceId), ...segments.slice(0, -1), `${last}@${version}`)
+  }
+
+  /**
+   * Symlink policy (execution-runtime.md §4 / snapshot-walk contract): the
+   * workspace tree is regular files only — any symbolic link on the path
+   * (existing component or final target) is rejected with 422
+   * `workspace_symlink`. This is a strict superset of "no symlink escapes
+   * the root" (a link that stays inside the root is still rejected, because
+   * a generic workspace tree must be a plain directory of files).
+   */
+  private assertNoSymlink(workspaceId: string, cleanPath: string): void {
+    const root = this.workspaceRoot(workspaceId)
+    const segments = cleanPath.split('/')
+    let current = root
+    for (const segment of segments) {
+      current = join(current, segment)
+      let st
+      try {
+        st = lstatSync(current)
+      } catch {
+        return // first missing component — the rest will be created fresh
+      }
+      if (st.isSymbolicLink()) {
+        throw new WorkspaceError('workspace_symlink',
+          `workspace path crosses a symbolic link (rejected): ${cleanPath}`)
+      }
+    }
+  }
+
+  /** Size guard shared by every byte write (text + binary). */
+  private assertSize(workspaceId: string, cleanPath: string, bytes: number): void {
+    if (bytes > WORKSPACE_MAX_FILE_BYTES) {
+      throw new WorkspaceError('workspace_file_too_large',
+        `workspace file ${cleanPath} is ${bytes} bytes (max_file_bytes=${WORKSPACE_MAX_FILE_BYTES})`)
+    }
+  }
+
+  /** Atomic byte write: temp file in the target directory + rename. */
+  private writeBytesAtomic(target: string, bytes: Uint8Array): void {
+    const dir = dirname(target)
+    mkdirSync(dir, { recursive: true, mode: 0o750 })
+    const tmp = join(dir, `${target.split('/').at(-1) ?? 'file'}.ws-tmp-${randomBytes(4).toString('hex')}`)
+    writeFileSync(tmp, bytes, { mode: 0o640 })
+    try {
+      renameSync(tmp, target)
+    } catch (error) {
+      try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
+      throw error
+    }
+  }
+
+  /** Copy `{path}@{version}` into the workspace history (retention-pruned).
+   * The bytes are COPYIED (not moved) so a crash between history write and
+   * the node write never loses the current file. */
+  private keepHistory(workspaceId: string, cleanPath: string, version: number): void {
+    const source = this.absPath(workspaceId, cleanPath)
+    if (!existsSync(source)) return
+    const target = this.historyPath(workspaceId, cleanPath, version)
+    this.writeBytesAtomic(target, readFileSync(source))
+    // Prune to HISTORY_KEEP_VERSIONS newest per path.
+    const dir = dirname(target)
+    const base = target.split('/').at(-1) as string
+    let entries: string[]
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      return
+    }
+    const versions = entries
+      .filter(e => e.startsWith(`${base.slice(0, base.lastIndexOf('@'))}@`) && /^@\d+$/.test(e.slice(base.lastIndexOf('@'))))
+      .map(e => ({ e, v: Number(e.slice(base.lastIndexOf('@') + 1)) }))
+      .sort((a, b) => b.v - a.v)
+    for (const entry of versions.slice(HISTORY_KEEP_VERSIONS)) {
+      try { unlinkSync(join(dir, entry.e)) } catch { /* raced */ }
+    }
   }
 
   private infoFromRow(row: WorkspaceInfoRow): WorkspaceInfo {
@@ -229,7 +403,9 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }
   }
 
-  private nodeFromRow(row: WorkspaceNodeRow): WorkspaceNode {
+  /** Metadata → wire node. `content` is passed explicitly: tree/search/
+   * listSince never read bytes (null), read() supplies them. */
+  private nodeFromRow(row: WorkspaceNodeRow, content: string | null): WorkspaceNode {
     return {
       path: row.path,
       kind: 'file',
@@ -239,7 +415,7 @@ export class WorkspaceStore implements WorkspaceStoreLike {
       version: row.version,
       etag: workspaceEtag(row.version, row.content_hash),
       hash: row.content_hash,
-      content: row.binary === 1 ? null : row.content,
+      content: row.binary === 1 ? null : content,
       blob_sha256: row.binary === 1 ? row.blob_sha256 : null,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -256,7 +432,15 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     return this.infoFromRow(this.getInfoRow(workspaceId))
   }
 
-  /** Create (or open) a workspace for a project. */
+  /** Every workspace of a project (generic kinds; manuscript workspaces are
+   * served by the TeX facade and listed by the kernel). */
+  listByProject(projectId: string): WorkspaceInfo[] {
+    const rows = this.db.prepare('SELECT * FROM workspaces WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as WorkspaceInfoRow[]
+    return rows.map(r => this.infoFromRow(r))
+  }
+
+  /** Create (or open) a workspace for a project. The tree root is created
+   * on disk with a 0750 chain. */
   ensure(projectId: string, kind: WorkspaceKind, name: string): WorkspaceInfo {
     const existing = this.db.prepare('SELECT * FROM workspaces WHERE project_id = ? AND kind = ? AND name = ?').get(projectId, kind, name) as WorkspaceInfoRow | undefined
     if (existing !== undefined) return this.infoFromRow(existing)
@@ -272,6 +456,11 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }
     this.db.prepare('INSERT INTO workspaces (workspace_id, project_id, kind, name, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(info.workspace_id, info.project_id, info.kind, info.name, info.revision, info.created_at, info.updated_at)
+    const root = this.workspaceRoot(info.workspace_id)
+    mkdirSync(root, { recursive: true, mode: 0o750 })
+    try {
+      chmodSync(root, 0o750)
+    } catch { /* best-effort (some filesystems ignore modes) */ }
     return info
   }
 
@@ -314,26 +503,53 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }
   }
 
+  /** Disk bytes of a node, with a tamper guard (a file larger than the cap
+   * could only have appeared through external tampering — reject). */
+  private readBytes(workspaceId: string, cleanPath: string, row: WorkspaceNodeRow): Buffer {
+    this.assertNoSymlink(workspaceId, cleanPath)
+    const target = this.absPath(workspaceId, cleanPath)
+    let st
+    try {
+      st = statSync(target)
+    } catch {
+      throw new WorkspaceError('workspace_file_missing',
+        `workspace file ${cleanPath} is missing from disk (row exists) — host tampering`)
+    }
+    if (st.size > WORKSPACE_MAX_FILE_BYTES) {
+      throw new WorkspaceError('workspace_file_missing',
+        `workspace file ${cleanPath} is ${st.size} bytes on disk (max_file_bytes=${WORKSPACE_MAX_FILE_BYTES}) — host tampering`)
+    }
+    return readFileSync(target)
+  }
+
   /**
    * The file tree at the current workspace revision. `dir` nodes are
    * projected from path prefixes (never stored) with version 0 and the
-   * empty-content hash — they carry no content semantics.
+   * empty-content hash — they carry no content semantics. Tree nodes never
+   * carry content (metadata only — bytes are read via `read`).
    */
   tree(workspaceId: string): { info: WorkspaceInfo; nodes: WorkspaceNode[] } {
     const info = this.get(workspaceId)
     const rows = this.db.prepare('SELECT * FROM workspace_nodes WHERE workspace_id = ? ORDER BY path').all(workspaceId) as unknown as WorkspaceNodeRow[]
-    return { info, nodes: withImpliedDirs(info, rows.map(r => this.nodeFromRow(r))) }
+    return { info, nodes: withImpliedDirs(info, rows.map(r => this.nodeFromRow(r, null))) }
   }
 
+  /** Read one node WITH its text content (metadata + bytes from disk).
+   * Binary nodes return content null (bytes via `blob`). */
   read(workspaceId: string, path: string): WorkspaceNode | null {
     const clean = normalizeWorkspacePath(path)
     const row = this.getNodeRow(workspaceId, clean)
-    return row === undefined ? null : this.nodeFromRow(row)
+    if (row === undefined) return null
+    if (row.binary === 1) return this.nodeFromRow(row, null)
+    const content = this.readBytes(workspaceId, clean, row).toString('utf8')
+    return this.nodeFromRow(row, content)
   }
 
   /** Text write with CAS (expected version/etag → 409 on conflict).
    * expected_version=0 creates at version 1; missing path + no expectation
-   * also creates. Binary nodes reject text writes (422 binary_read_only). */
+   * also creates. Binary nodes reject text writes (422 binary_read_only).
+   * Bytes land on disk atomically (temp + rename); the previous version is
+   * kept in history (retention-pruned). */
   write(workspaceId: string, path: string, content: string, expected?: WorkspaceExpected): WorkspaceNode {
     const clean = normalizeWorkspacePath(path)
     this.get(workspaceId)
@@ -342,24 +558,30 @@ export class WorkspaceStore implements WorkspaceStoreLike {
       throw new WorkspaceError('workspace_binary_read_only', `${clean} is a binary node — text writes are read-only; replace via the binary upload path`)
     }
     this.assertCas(workspaceId, clean, existing, expected, 'write')
-    const hash = sha256Hex(content)
+    const bytes = Buffer.from(content, 'utf8')
+    this.assertSize(workspaceId, clean, bytes.byteLength)
+    this.assertNoSymlink(workspaceId, clean)
+    const hash = sha256Hex(bytes)
     const at = nowIso()
+    if (existing !== undefined) this.keepHistory(workspaceId, clean, existing.version)
+    this.writeBytesAtomic(this.absPath(workspaceId, clean), bytes)
     if (existing === undefined) {
-      this.db.prepare('INSERT INTO workspace_nodes (workspace_id, path, version, binary, media, size_bytes, content, blob_sha256, content_hash, created_at, updated_at) VALUES (?, ?, 1, 0, ?, ?, ?, NULL, ?, ?, ?)')
-        .run(workspaceId, clean, mediaTypeOf(clean), Buffer.byteLength(content, 'utf8'), content, hash, at, at)
+      this.db.prepare('INSERT INTO workspace_nodes (workspace_id, path, version, binary, media, size_bytes, content, blob_sha256, content_hash, created_at, updated_at) VALUES (?, ?, 1, 0, ?, ?, NULL, NULL, ?, ?, ?)')
+        .run(workspaceId, clean, mediaTypeOf(clean), bytes.byteLength, hash, at, at)
       this.recordOp(workspaceId, 'create', clean, this.bumpRevision(workspaceId), { version: 1, sha256: hash })
     } else {
-      this.db.prepare('UPDATE workspace_nodes SET version = version + 1, media = ?, size_bytes = ?, content = ?, blob_sha256 = NULL, content_hash = ?, updated_at = ? WHERE workspace_id = ? AND path = ?')
-        .run(mediaTypeOf(clean), Buffer.byteLength(content, 'utf8'), content, hash, at, workspaceId, clean)
+      this.db.prepare('UPDATE workspace_nodes SET version = version + 1, media = ?, size_bytes = ?, content = NULL, blob_sha256 = NULL, content_hash = ?, updated_at = ? WHERE workspace_id = ? AND path = ?')
+        .run(mediaTypeOf(clean), bytes.byteLength, hash, at, workspaceId, clean)
       this.recordOp(workspaceId, 'write', clean, this.bumpRevision(workspaceId), { version: existing.version + 1, sha256: hash })
     }
     const row = this.getNodeRow(workspaceId, clean)
-    return this.nodeFromRow(row as WorkspaceNodeRow)
+    return this.nodeFromRow(row as WorkspaceNodeRow, content)
   }
 
   /**
-   * Binary write: bytes go into the artifact CAS (idempotent by content,
-   * server-computed sha256 — the client never declares the hash), the node
+   * Binary write: bytes land on the workspace tree atomically (temp +
+   * rename) AND are registered in the artifact CAS (idempotent by content,
+   * server-computed sha256 — the client never declares the hash); the node
    * records blob_sha256 + media + size. Replaces a text node when CAS
    * matches; binary nodes are replaced via this path only.
    */
@@ -368,36 +590,52 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     this.get(workspaceId)
     const existing = this.getNodeRow(workspaceId, clean)
     this.assertCas(workspaceId, clean, existing, expected, 'writeBinary')
-    const { sha256, size_bytes } = this.cas.put(bytes)
+    this.assertSize(workspaceId, clean, bytes.byteLength)
+    this.assertNoSymlink(workspaceId, clean)
+    const { sha256 } = this.cas.put(bytes)
     const at = nowIso()
+    if (existing !== undefined) this.keepHistory(workspaceId, clean, existing.version)
+    this.writeBytesAtomic(this.absPath(workspaceId, clean), bytes)
     if (existing === undefined) {
       this.db.prepare('INSERT INTO workspace_nodes (workspace_id, path, version, binary, media, size_bytes, content, blob_sha256, content_hash, created_at, updated_at) VALUES (?, ?, 1, 1, ?, ?, NULL, ?, ?, ?, ?)')
-        .run(workspaceId, clean, media, size_bytes, sha256, sha256, at, at)
+        .run(workspaceId, clean, media, bytes.byteLength, sha256, sha256, at, at)
       this.recordOp(workspaceId, 'create', clean, this.bumpRevision(workspaceId), { version: 1, sha256 })
     } else {
       this.db.prepare('UPDATE workspace_nodes SET version = version + 1, binary = 1, media = ?, size_bytes = ?, content = NULL, blob_sha256 = ?, content_hash = ?, updated_at = ? WHERE workspace_id = ? AND path = ?')
-        .run(media, size_bytes, sha256, sha256, at, workspaceId, clean)
+        .run(media, bytes.byteLength, sha256, sha256, at, workspaceId, clean)
       this.recordOp(workspaceId, 'write', clean, this.bumpRevision(workspaceId), { version: existing.version + 1, sha256 })
     }
     const row = this.getNodeRow(workspaceId, clean)
-    return this.nodeFromRow(row as WorkspaceNodeRow)
+    return this.nodeFromRow(row as WorkspaceNodeRow, null)
   }
 
+  /** Delete with version CAS. The deleted bytes stay in history (undo), the
+   * disk file is removed and the row dropped. */
   deleteNode(workspaceId: string, path: string, expected?: WorkspaceExpected): void {
     const clean = normalizeWorkspacePath(path)
     this.get(workspaceId)
     const existing = this.getNodeRow(workspaceId, clean)
     if (existing === undefined) throw new WorkspaceError('workspace_file_not_found', `file ${clean} not found`)
     this.assertCas(workspaceId, clean, existing, expected, 'delete')
+    this.assertNoSymlink(workspaceId, clean)
+    this.keepHistory(workspaceId, clean, existing.version)
+    try {
+      unlinkSync(this.absPath(workspaceId, clean))
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT') throw error // ENOENT: already gone — row is the authority
+    }
     this.db.prepare('DELETE FROM workspace_nodes WHERE workspace_id = ? AND path = ?').run(workspaceId, clean)
     this.recordOp(workspaceId, 'delete', clean, this.bumpRevision(workspaceId), { version: existing.version, sha256: existing.content_hash })
   }
 
   /**
-   * Move = copy the bytes to the destination (create-if-absent) + delete the
-   * source. The CAS expectation guards the SOURCE; the destination must not
-   * exist (409 workspace_move_destination_exists — no silent overwrite).
-   * Binary nodes move by blob reference (no byte copy).
+   * Move = atomically rename the disk file to the destination (create-if-
+   * absent) + delete the source row. The CAS expectation guards the SOURCE;
+   * the destination must not exist (409 workspace_move_destination_exists —
+   * no silent overwrite). The source's last version stays in history under
+   * its OLD path. Binary nodes move the same way (their blob reference is
+   * content-addressed, so the destination row keeps the same hash).
    */
   moveNode(workspaceId: string, fromPath: string, toPath: string, expected?: WorkspaceExpected): WorkspaceNode {
     const from = normalizeWorkspacePath(fromPath)
@@ -408,15 +646,22 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     this.assertCas(workspaceId, from, source, expected, 'move')
     const dest = this.getNodeRow(workspaceId, to)
     if (dest !== undefined) throw new WorkspaceError('workspace_move_destination_exists', `move destination ${to} already exists — reload`)
+    this.assertNoSymlink(workspaceId, from)
+    this.assertNoSymlink(workspaceId, to)
+    this.keepHistory(workspaceId, from, source.version)
+    const fromAbs = this.absPath(workspaceId, from)
+    const toAbs = this.absPath(workspaceId, to)
+    mkdirSync(dirname(toAbs), { recursive: true, mode: 0o750 })
+    renameSync(fromAbs, toAbs)
     const at = nowIso()
     this.db.prepare(`INSERT INTO workspace_nodes (workspace_id, path, version, binary, media, size_bytes, content, blob_sha256, content_hash, created_at, updated_at)
-      VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(workspaceId, to, source.binary, source.media, source.size_bytes, source.content, source.blob_sha256, source.content_hash, at, at)
+      VALUES (?, ?, 1, ?, ?, ?, NULL, ?, ?, ?, ?)`)
+      .run(workspaceId, to, source.binary, source.media, source.size_bytes, source.blob_sha256, source.content_hash, at, at)
     this.db.prepare('DELETE FROM workspace_nodes WHERE workspace_id = ? AND path = ?').run(workspaceId, from)
     const revision = this.bumpRevision(workspaceId)
     this.recordOp(workspaceId, 'move', to, revision, { from_path: from, version: 1, sha256: source.content_hash })
     const row = this.getNodeRow(workspaceId, to)
-    return this.nodeFromRow(row as WorkspaceNodeRow)
+    return this.nodeFromRow(row as WorkspaceNodeRow, null)
   }
 
   /** History projection (newest first): every op with the workspace revision
@@ -440,12 +685,86 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }))
   }
 
-  /** Binary node bytes from the artifact CAS (null for text/missing). */
+  /** Binary node bytes (null for text/missing nodes). The WORKING bytes are
+   * the tree file (the CAS copy is the immutable reference). */
   blob(workspaceId: string, path: string): Buffer | null {
     const clean = normalizeWorkspacePath(path)
     const row = this.getNodeRow(workspaceId, clean)
-    if (row === undefined || row.binary !== 1 || row.blob_sha256 === null) return null
-    return this.cas.read(row.blob_sha256)
+    if (row === undefined || row.binary !== 1) return null
+    return this.readBytes(workspaceId, clean, row)
+  }
+
+  /** Watch feed: current nodes of every path touched after `sinceRevision`
+   * plus `deleted` tombstones (paths removed after it). `sinceRevision >=
+   * current` → empty result. */
+  listSince(workspaceId: string, sinceRevision: number): { info: WorkspaceInfo; nodes: WorkspaceNode[]; deleted: string[] } {
+    const info = this.get(workspaceId)
+    if (sinceRevision >= info.revision) return { info, nodes: [], deleted: [] }
+    const rows = this.db.prepare(
+      'SELECT DISTINCT path FROM workspace_ops WHERE workspace_id = ? AND workspace_revision > ? ORDER BY path',
+    ).all(workspaceId, sinceRevision) as unknown as Array<{ path: string }>
+    const nodes: WorkspaceNode[] = []
+    const deleted: string[] = []
+    for (const { path } of rows) {
+      const row = this.getNodeRow(workspaceId, path)
+      if (row === undefined) deleted.push(path)
+      else nodes.push(this.nodeFromRow(row, null))
+    }
+    return { info, nodes, deleted }
+  }
+
+  /** PATH search: prefix and/or `*`/`?` glob over the current tree (AND when
+   * both are given). Content search is NOT implemented (documented
+   * limitation). */
+  search(workspaceId: string, query: { prefix?: string; glob?: string }): { info: WorkspaceInfo; nodes: WorkspaceNode[] } {
+    const tree = this.tree(workspaceId)
+    let nodes = tree.nodes
+    if (query.prefix !== undefined && query.prefix !== '') {
+      const prefix = normalizeWorkspacePath(query.prefix.replace(/\/+$/, ''))
+      nodes = nodes.filter(n => n.path.startsWith(prefix))
+    }
+    if (query.glob !== undefined && query.glob !== '') {
+      const glob = query.glob
+      nodes = nodes.filter(n => matchWorkspaceGlob(n.path, glob))
+    }
+    return { info: tree.info, nodes }
+  }
+
+  /** Rollback read: the node bytes at a stored per-path version (history),
+   * or null when that version is not retained (beyond
+   * HISTORY_KEEP_VERSIONS / never written). The current version reads the
+   * live tree file; older versions read the history copy. */
+  readVersion(workspaceId: string, path: string, version: number): WorkspaceNode | null {
+    const clean = normalizeWorkspacePath(path)
+    if (!Number.isInteger(version) || version <= 0) {
+      throw new WorkspaceError('invalid_path', `readVersion: version must be a positive integer, got ${version}`)
+    }
+    const row = this.getNodeRow(workspaceId, clean)
+    if (row !== undefined && version === row.version) {
+      return row.binary === 1 ? this.nodeFromRow(row, null) : this.nodeFromRow(row, this.readBytes(workspaceId, clean, row).toString('utf8'))
+    }
+    const historyFile = this.historyPath(workspaceId, clean, version)
+    let bytes: Buffer
+    try {
+      bytes = readFileSync(historyFile)
+    } catch {
+      return null
+    }
+    const hash = sha256Hex(bytes)
+    return {
+      path: clean,
+      kind: 'file',
+      binary: row !== undefined ? row.binary === 1 : false,
+      media: row !== undefined ? row.media : mediaTypeOf(clean),
+      size: bytes.byteLength,
+      version,
+      etag: workspaceEtag(version, hash),
+      hash,
+      content: row !== undefined && row.binary === 1 ? null : bytes.toString('utf8'),
+      blob_sha256: row !== undefined && row.binary === 1 ? row.blob_sha256 : null,
+      created_at: row?.created_at ?? '',
+      updated_at: row?.updated_at ?? '',
+    }
   }
 }
 

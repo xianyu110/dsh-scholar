@@ -7,7 +7,7 @@
 
 import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
 import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { join, relative, resolve, sep, dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
@@ -24,7 +24,7 @@ import { ArtifactCas } from './cas.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { openPtySessionStore, NullPtyAdapter, PtyError, type PtyAdapter, type PtyAppendResult, type PtyControlResult, type PtySessionStore } from './pty-session.js'
 import { openWorkspaceStore, WorkspaceError, type WorkspaceExpected, type WorkspaceStore } from './workspace-store.js'
-import { TexWorkspaceFacade } from './tex-facade.js'
+import { TexWorkspaceFacade, texInfoToWorkspaceInfo } from './tex-facade.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
 import { IMAGES_LOCK } from './images-lock.js'
@@ -35,6 +35,7 @@ import {
   isImportableMetricsFile, parseMetricsFileV1, buildPhaseProposal, questionViews,
   SAFE_PHASE_LANDING, type StaticScanVerdict,
 } from './intake.js'
+import { TrajectoryStore } from './trajectory.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -515,7 +516,9 @@ export class ResearchKernel {
   readonly pty: PtySessionStore
   /**
    * WORK-01 (api-contracts.md §17): generic VS Code-style workspace store —
-   * revision/etag/CAS + binary artifact CAS (interface layer).
+   * revision/etag/CAS + binary artifact CAS, backed by the REAL disk
+   * adapter (bytes under `dataDir/workspaces/{project_id}/{workspace_id}`,
+   * metadata in `workspace_nodes`; workspace-store.ts).
    */
   readonly workspaces: WorkspaceStore
   /**
@@ -524,6 +527,14 @@ export class ResearchKernel {
    * (tex-facade.ts). The existing TeX routes keep calling `tex` directly.
    */
   readonly texFacade: TexWorkspaceFacade
+  /**
+   * TRAJ-01/SUBAGENT-01 (trajectory-subagents.md): standalone safe
+   * trajectory projection + subagent topology store — read-only outbox
+   * projection (Research/Session lanes, keyset pagination, redaction) and
+   * child_links/history/followups (exact-parent, breadcrumb, one-shot
+   * read-only followup). The Kernel Outbox stays the only business ledger.
+   */
+  readonly trajectory: import('./trajectory.js').TrajectoryStore
   /** §12.7: when true, unsigned run manifests are rejected at completion. */
   requireSignedManifest: boolean
   /** §4 P0 (API-01/EVID-01): service identity for internal HTTP routes. */
@@ -566,8 +577,15 @@ export class ResearchKernel {
     mkdirSync(this.intakeStagedRoot, { recursive: true })
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.pty = openPtySessionStore(options.dbPath ?? ':memory:')
-    this.workspaces = openWorkspaceStore(options.dbPath ?? ':memory:', options.casRoot ?? join(process.cwd(), '.research-cas'))
+    this.workspaces = openWorkspaceStore(options.dbPath ?? ':memory:', options.casRoot ?? join(process.cwd(), '.research-cas'),
+      // WORK-01 disk adapter: one tree root per project under the kernel's
+      // data directory (dataDir/workspaces/{project_id}/{workspace_id}).
+      join(dirname(options.dbPath ?? ':memory:'), 'workspaces'))
     this.texFacade = new TexWorkspaceFacade(this.tex)
+    // TRAJ-01/SUBAGENT-01: the trajectory/topology store shares THIS
+    // connection (single-writer SQLite) and emits its outbox events through
+    // the kernel's canonical emit (per-aggregate monotonic event_seq).
+    this.trajectory = new TrajectoryStore(this.db, (projectId, kind, payload) => this.emit(projectId, kind, payload))
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
     this.serviceToken = options.serviceToken
     // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
@@ -711,6 +729,59 @@ export class ResearchKernel {
   markEventsDelivered(eventIds: string[]): void {
     const stmt = this.db.prepare('UPDATE events SET delivered = 1 WHERE event_id = ? AND delivered = 0')
     for (const id of eventIds) stmt.run(id)
+  }
+
+  // ── trajectory projection & subagent topology (trajectory-subagents.md) ──
+
+  /** Read-only, redacted outbox projection with keyset pagination
+   * ((event_seq, event_id) cursor; single page ≤ 500). */
+  projectTrajectory(projectId: string, opts: Parameters<TrajectoryStore['projectTrajectory']>[1] = {}): ReturnType<TrajectoryStore['projectTrajectory']> {
+    return this.trajectory.projectTrajectory(projectId, opts)
+  }
+
+  /** Research + Session lanes for one project (both always returned). */
+  projectTrajectoryLanes(projectId: string, opts: Parameters<TrajectoryStore['projectTrajectoryLanes']>[1] = {}): ReturnType<TrajectoryStore['projectTrajectoryLanes']> {
+    return this.trajectory.projectTrajectoryLanes(projectId, opts)
+  }
+
+  /** Record a spawned subagent child (plugin research_panel wiring is a
+   * later integration; the kernel surface + tests cover the contract). */
+  registerChildLink(input: Parameters<TrajectoryStore['registerChildLink']>[0]): ReturnType<TrajectoryStore['registerChildLink']> {
+    return this.trajectory.registerChildLink(input)
+  }
+
+  getChildLink(childId: string): ReturnType<TrajectoryStore['getChildLink']> {
+    return this.trajectory.getChildLink(childId)
+  }
+
+  updateChildState(childId: string, state: Parameters<TrajectoryStore['updateChildState']>[1], detail?: string): ReturnType<TrajectoryStore['updateChildState']> {
+    return this.trajectory.updateChildState(childId, state, detail)
+  }
+
+  /** Exact direct children of a parent (or roots); bounded pages. */
+  projectTopology(projectId: string, opts: Parameters<TrajectoryStore['projectTopology']>[1] = {}): ReturnType<TrajectoryStore['projectTopology']> {
+    return this.trajectory.projectTopology(projectId, opts)
+  }
+
+  /** Exact-parent + breadcrumb (cycle-safe, orphan fail-soft). */
+  getChildDetail(childId: string): ReturnType<TrajectoryStore['getChildDetail']> {
+    return this.trajectory.getChildDetail(childId)
+  }
+
+  /** Read-only per-child history; never activates the child. */
+  childHistory(childId: string, opts: Parameters<TrajectoryStore['childHistory']>[1] = {}): ReturnType<TrajectoryStore['childHistory']> {
+    return this.trajectory.childHistory(childId, opts)
+  }
+
+  /** One-shot READ-ONLY followup: records the message, returns message_id,
+   * child state untouched. */
+  childFollowup(childId: string, message: string, requestId?: string): ReturnType<TrajectoryStore['childFollowup']> {
+    return this.trajectory.childFollowup(childId, message, requestId)
+  }
+
+  /** Owning project of a child (BFF membership pre-check; null = unknown). */
+  childProjectId(childId: string): string | null {
+    return this.trajectory.childProjectId(childId)
   }
 
   // ── projects ─────────────────────────────────────────────────────────────
@@ -4100,6 +4171,63 @@ export class ResearchKernel {
     } catch (error) {
       if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
       return this.texFacade.blob(workspaceId, path)
+    }
+  }
+
+  /**
+   * Every workspace of a project (api-contracts.md §17 list): the generic
+   * code/scratch workspaces of the disk-backed store plus the `manuscript`
+   * facade workspaces (one per TeX document).
+   */
+  workspaceList(projectId: string): import('@dsh-scholar/research-schemas').WorkspaceInfo[] {
+    this.getProject(projectId)
+    const generic = this.workspaces.listByProject(projectId)
+    const docs = this.db.prepare('SELECT * FROM tex_documents WHERE project_id = ? ORDER BY created_at')
+      .all(projectId) as unknown as Array<{
+        document_id: string; project_id: string; root_file: string; revision: number; created_at: string; updated_at: string
+      }>
+    return [...generic, ...docs.map(d => texInfoToWorkspaceInfo(d, d.root_file))]
+  }
+
+  /** 404-shaped ownership guard for project-scoped workspace routes: a
+   * workspace that does not belong to the path project is indistinguishable
+   * from a missing one (no cross-project enumeration). */
+  assertWorkspaceInProject(workspaceId: string, projectId: string): void {
+    const info = this.resolveWorkspace(workspaceId)
+    if (info.project_id !== projectId) {
+      throw new WorkspaceError('workspace_not_found', `workspace ${workspaceId} not found`)
+    }
+  }
+
+  /** Watch feed: nodes changed after a workspace revision (generic store:
+   * op-ledger projection; TeX facade: conservative full tree). */
+  workspaceListSince(workspaceId: string, sinceRevision: number): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[]; deleted: string[] } {
+    try {
+      return this.workspaces.listSince(workspaceId, sinceRevision)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.listSince(workspaceId, sinceRevision)
+    }
+  }
+
+  /** PATH search (prefix/glob — content search not implemented). */
+  workspaceSearch(workspaceId: string, query: { prefix?: string; glob?: string }): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[] } {
+    try {
+      return this.workspaces.search(workspaceId, query)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.search(workspaceId, query)
+    }
+  }
+
+  /** Rollback read at a stored per-path version (generic store: history
+   * bytes; TeX facade: current version only). */
+  workspaceReadVersion(workspaceId: string, path: string, version: number): import('@dsh-scholar/research-schemas').WorkspaceNode | null {
+    try {
+      return this.workspaces.readVersion(workspaceId, path, version)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.readVersion(workspaceId, path, version)
     }
   }
 

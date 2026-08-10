@@ -11,7 +11,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -35,6 +35,27 @@ export interface KernelServerOptions {
 }
 
 const idSchema = z.string().min(1)
+
+/** TRAJ-01/SUBAGENT-01 (trajectory-subagents.md §3): register one spawned
+ * subagent child link. `project_id` comes from the route path (never the
+ * body — the kernel binds the child to the path project). */
+const registerChildSchema = z.object({
+  child_id: z.string().min(1),
+  parent_id: z.string().nullable().optional(),
+  label: z.string().nullable().optional(),
+  summary: z.string().max(2000).optional(),
+  kind: z.enum(['subagent', 'task']).optional(),
+  mode: z.enum(['one-shot', 'continuable', 'read-only']).optional(),
+  role: z.string().nullable().optional(),
+  state: z.enum(['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown']).optional(),
+}).strict()
+
+/** One-shot READ-ONLY followup (recorded, never executed by the standalone
+ * kernel — trajectory-subagents.md §3 "接收只返回 message_id"). */
+const followupSchema = z.object({
+  message: z.string().min(1).max(4000),
+  request_id: z.string().optional(),
+}).strict()
 
 /** Canonical artifact kind list (schema + upload route share it). */
 const ARTIFACT_KINDS = ['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle'] as const
@@ -426,6 +447,65 @@ async function handleIntakeArtifactUpload(req: IncomingMessage, res: ServerRespo
   send(res, 201, artifact)
 }
 
+/**
+ * WORK-01 (api-contracts.md §17): multipart binary upload into a workspace
+ * node — same staged-capsule pipeline as UPLOAD-01 (one file part ≤ 32 MiB,
+ * server-side sha256 via writeBinary, path safety inside the kernel), but
+ * the bytes land on the workspace tree instead of an artifact row. Fields:
+ * `path` (required workspace-relative path), `media` (optional media type),
+ * `expected_version` / `expected_etag` (optional CAS guard — 409 on stale).
+ */
+async function handleWorkspaceAsset(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, projectId: string, workspaceId: string): Promise<void> {
+  const contentType = req.headers['content-type']
+  if (typeof contentType !== 'string' || !contentType.trim().toLowerCase().startsWith('multipart/form-data')) {
+    throw new KernelError(415, 'unsupported_media_type', 'workspace asset upload requires multipart/form-data')
+  }
+  const boundary = extractBoundary(contentType)
+  if (boundary === null || boundary === '') {
+    throw new KernelError(400, 'invalid_multipart', 'multipart/form-data boundary is missing or malformed')
+  }
+  const body = await readBodyBytes(req, UPLOAD_MAX_BODY_BYTES)
+  let parts: MultipartPart[]
+  try {
+    parts = parseMultipart(body, boundary)
+  } catch (error) {
+    throw new KernelError(400, 'invalid_multipart', `malformed multipart body: ${(error as Error).message}`)
+  }
+  const fileParts = parts.filter(p => p.fileName !== undefined)
+  if (fileParts.length === 0) {
+    throw new KernelError(422, 'missing_file', 'workspace asset upload requires exactly one file part (name="file", with a filename)')
+  }
+  if (fileParts.length > 1) {
+    throw new KernelError(422, 'multiple_files', 'workspace asset uploads must not carry more than one file part')
+  }
+  const path = fieldText(parts, 'path')
+  if (path === undefined || path === '') {
+    throw new KernelError(422, 'missing_path', 'workspace asset upload requires a path field (workspace-relative)')
+  }
+  const filePart = fileParts[0]!
+  if (filePart.data.byteLength > ResearchKernel.UPLOAD_MAX_FILE_BYTES) {
+    throw new KernelError(413, 'payload_too_large',
+      `workspace asset exceeds the size limit: ${filePart.data.byteLength} bytes (max_file_bytes=${ResearchKernel.UPLOAD_MAX_FILE_BYTES})`)
+  }
+  // CAS guard fields (both optional; the kernel answers 409 on mismatch).
+  const expected: { version?: number; etag?: string } = {}
+  const rawVersion = fieldText(parts, 'expected_version')
+  if (rawVersion !== undefined) {
+    const version = Number(rawVersion)
+    if (!Number.isInteger(version) || version < 0) {
+      throw new KernelError(422, 'invalid_expected_version', 'expected_version must be a non-negative integer')
+    }
+    expected.version = version
+  }
+  const rawEtag = fieldText(parts, 'expected_etag')
+  if (rawEtag !== undefined) expected.etag = rawEtag
+  // Cross-project scope guard (the BFF checks membership of the PATH project;
+  // the kernel additionally pins the workspace to it).
+  kernel.assertWorkspaceInProject(workspaceId, projectId)
+  const node = kernel.workspaceWriteBinary(workspaceId, path, filePart.data, fieldText(parts, 'media') ?? 'application/octet-stream', expected)
+  send(res, 201, node)
+}
+
 /** ONBOARD-01 request schemas (research-onboarding.md §5/§7). */
 const intakeBeginSchema = z.object({
   source_label: z.string().min(1),
@@ -544,10 +624,12 @@ function fail(res: ServerResponse, error: unknown): void {
     send(res, status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof WorkspaceError) {
     // WORK-01 wire mapping: version/etag/destination conflicts → 409,
-    // missing nodes/workspaces → 404, path/binary/kind validation → 422.
+    // missing nodes/workspaces → 404, oversized nodes → 413, path/binary/
+    // kind validation → 422.
     const status = error.code === 'workspace_not_found' || error.code === 'workspace_file_not_found' ? 404
       : error.code === 'workspace_version_conflict' || error.code === 'workspace_etag_conflict' || error.code === 'workspace_move_destination_exists' ? 409
-        : 422
+        : error.code === 'workspace_file_too_large' ? 413
+          : 422
     send(res, status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof z.ZodError) {
     const issues = error.issues.map(i => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ')
@@ -555,6 +637,39 @@ function fail(res: ServerResponse, error: unknown): void {
   } else {
     send(res, 500, { error: errorEnvelope('internal', (error as Error).message ?? String(error)) })
   }
+}
+
+/** TRAJ-01/SUBAGENT-01: trajectory/topology reads are project-scoped —
+ * the authenticated principal (BFF-injected x-principal-id, never a
+ * client-asserted value) must be a project member; otherwise fail-closed
+ * (422 principal_required / 404 project_not_found — no enumeration). */
+function requireProjectMember(kernel: ResearchKernel, req: IncomingMessage, res: ServerResponse, projectId: string): string | null {
+  const principalId = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== '' ? req.headers['x-principal-id'] : ''
+  if (principalId === '') {
+    send(res, 422, { error: errorEnvelope('principal_required', 'trajectory/topology access requires an authenticated principal (x-principal-id); the BFF injects it from the operator session') })
+    return null
+  }
+  if (!kernel.listProjectMembers(projectId).some(m => m.principal_id === principalId)) {
+    send(res, 404, { error: errorEnvelope('project_not_found', 'project not found or access denied') })
+    return null
+  }
+  return principalId
+}
+
+function parseSeqParam(raw: string | null): number | undefined {
+  if (raw === null || raw === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined
+}
+
+function parseLimitParam(raw: string | null): number | undefined {
+  if (raw === null || raw === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined
+}
+
+function parseLaneParam(raw: string | null): 'research' | 'session' | undefined {
+  return raw === 'research' || raw === 'session' ? raw : undefined
 }
 
 function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined, configPin: string | undefined): void {
@@ -605,7 +720,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
       return
     }
   }
-  const [version, resource, id, sub, subId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
+  const [version, resource, id, sub, subId, subSubId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
   if (version !== 'v1' && version !== 'v2') {
     send(res, 404, { error: { code: 'not_found', message: 'unknown api version' } })
     return
@@ -621,6 +736,13 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   // (research-onboarding.md §4). Routed before readJson like UPLOAD-01.
   if (method === 'POST' && version === 'v1' && resource === 'projects' && id !== undefined && sub === 'intake' && subId !== undefined && url.pathname.endsWith('/artifacts')) {
     void handleIntakeArtifactUpload(req, res, kernel, id, subId).catch((error: unknown) => fail(res, error))
+    return
+  }
+  // WORK-01 (api-contracts.md §17): binary workspace asset upload —
+  // multipart, same caps/parser as UPLOAD-01, bytes land on the workspace
+  // tree (server-side sha256 binding). Routed before readJson (raw body).
+  if (method === 'POST' && version === 'v1' && resource === 'projects' && id !== undefined && sub === 'workspaces' && subId !== undefined && subSubId === 'assets') {
+    void handleWorkspaceAsset(req, res, kernel, id, subId).catch((error: unknown) => fail(res, error))
     return
   }
   if (version === 'v2') {
@@ -657,6 +779,134 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (id !== undefined) {
+            // WORK-01 (api-contracts.md §17): generic VS Code-style workspace
+            // routes, project-scoped so the BFF membership/role checks bind
+            // to the PATH project; the kernel additionally pins the workspace
+            // to it (cross-project → 404 workspace_not_found).
+            if (sub === 'workspaces') {
+              if (method === 'POST' && subId === undefined) {
+                const input = z.object({
+                  kind: z.enum(['code', 'manuscript', 'scratch']),
+                  name: z.string().min(1).max(120),
+                }).strict().parse(body)
+                send(res, 201, kernel.workspaceEnsure(id, input.kind, input.name))
+                return
+              }
+              if (method === 'GET' && subId === undefined) {
+                ok(res, kernel.workspaceList(id))
+                return
+              }
+              if (subId !== undefined) {
+                // Every workspace route below is bound to the path project.
+                kernel.assertWorkspaceInProject(subId, id)
+                if (method === 'GET' && subSubId === 'tree') {
+                  ok(res, kernel.workspaceTree(subId))
+                  return
+                }
+                if (method === 'GET' && subSubId === 'history') {
+                  ok(res, kernel.workspaceHistory(subId))
+                  return
+                }
+                if (subSubId === 'nodes') {
+                  if (method === 'GET') {
+                    // ?path= read, ?after_revision=N watch feed, ?path=&version=N
+                    // rollback read (all mutually exclusive).
+                    const path = url.searchParams.get('path')
+                    const afterRevision = url.searchParams.get('after_revision')
+                    const version = url.searchParams.get('version')
+                    if (path !== null && afterRevision === null && version === null) {
+                      const node = kernel.workspaceRead(subId, path)
+                      if (node === null) throw new KernelError(404, 'workspace_file_not_found', `file ${path} not found`)
+                      ok(res, node)
+                      return
+                    }
+                    if (path !== null && version !== null) {
+                      const v = Number(version)
+                      if (!Number.isInteger(v) || v <= 0) {
+                        throw new KernelError(422, 'invalid_version', 'version must be a positive integer')
+                      }
+                      const node = kernel.workspaceReadVersion(subId, path, v)
+                      if (node === null) throw new KernelError(404, 'workspace_file_not_found', `file ${path} not found at version ${v}`)
+                      ok(res, node)
+                      return
+                    }
+                    if (afterRevision !== null) {
+                      const since = Number(afterRevision)
+                      if (!Number.isInteger(since) || since < 0) {
+                        throw new KernelError(422, 'invalid_revision', 'after_revision must be a non-negative integer')
+                      }
+                      ok(res, kernel.workspaceListSince(subId, since))
+                      return
+                    }
+                    throw new KernelError(422, 'missing_params', '?path= (optionally &version=) or ?after_revision= is required')
+                  }
+                  if (method === 'POST') {
+                    const input = WorkspaceWriteRequest.parse(body)
+                    const node = kernel.workspaceWrite(subId, input.path, input.content, {
+                      version: input.expected_version,
+                      etag: input.expected_etag,
+                    })
+                    send(res, 201, node)
+                    return
+                  }
+                  if (method === 'DELETE') {
+                    const path = url.searchParams.get('path')
+                    if (path === null) throw new KernelError(422, 'missing_path', '?path= is required')
+                    const raw = url.searchParams.get('expected_version')
+                    const expected = raw === null || raw === '' ? undefined : Number(raw)
+                    if (expected !== undefined && (!Number.isInteger(expected) || expected < 0)) {
+                      throw new KernelError(422, 'invalid_expected_version', 'expected_version must be a non-negative integer')
+                    }
+                    kernel.workspaceDelete(subId, path, { version: expected, etag: url.searchParams.get('expected_etag') ?? undefined })
+                    ok(res, { ok: true })
+                    return
+                  }
+                }
+                if (method === 'POST' && subSubId === 'moves') {
+                  const input = WorkspaceMoveRequest.parse(body)
+                  const node = kernel.workspaceMove(subId, input.from_path, input.to_path, {
+                    version: input.expected_version,
+                    etag: input.expected_etag,
+                  })
+                  ok(res, node)
+                  return
+                }
+                if (method === 'POST' && subSubId === 'search') {
+                  const input = z.object({
+                    prefix: z.string().min(1).optional(),
+                    glob: z.string().min(1).optional(),
+                  }).strict().parse(body)
+                  if (input.prefix === undefined && input.glob === undefined) {
+                    throw new KernelError(422, 'missing_params', 'search requires prefix and/or glob')
+                  }
+                  ok(res, kernel.workspaceSearch(subId, { prefix: input.prefix, glob: input.glob }))
+                  return
+                }
+                if (method === 'GET' && subSubId === 'blobs') {
+                  // Raw binary bytes: content-type = node media, strong etag
+                  // header, byte-exact body (binary read path).
+                  const path = url.searchParams.get('path')
+                  if (path === null) throw new KernelError(422, 'missing_path', '?path= is required')
+                  const node = kernel.workspaceRead(subId, path)
+                  if (node === null) throw new KernelError(404, 'workspace_file_not_found', `file ${path} not found`)
+                  if (!node.binary) {
+                    throw new KernelError(422, 'workspace_not_binary', `file ${path} is a text node — read it via ?path= on /nodes`)
+                  }
+                  const bytes = kernel.workspaceBlob(subId, path)
+                  if (bytes === null) throw new KernelError(404, 'workspace_file_not_found', `file ${path} bytes not readable`)
+                  res.writeHead(200, {
+                    'content-type': node.media,
+                    'content-length': bytes.byteLength,
+                    etag: node.etag,
+                    'cache-control': 'no-store',
+                  })
+                  res.end(bytes)
+                  return
+                }
+                throw new KernelError(404, 'not_found', `unknown workspace route /v1/projects/${id}/workspaces/${subId}/${subSubId ?? ''}`)
+              }
+              break
+            }
             // ONBOARD-01 (research-onboarding.md / api-contracts.md §16):
             // intake sessions are project-scoped on this surface — every
             // route re-resolves the intake under the path project (cross-
@@ -855,6 +1105,43 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.listEvents(id))
               return
             }
+            // TRAJ-01/SUBAGENT-01 (trajectory-subagents.md §7 standalone
+            // surface): read-only trajectory projection + child topology.
+            // Principal + project membership are enforced here (fail-closed);
+            // the BFF injects x-principal-id and pre-checks membership.
+            if (method === 'GET' && sub === 'trajectory') {
+              if (requireProjectMember(kernel, req, res, id) === null) return
+              const q = url.searchParams
+              ok(res, kernel.projectTrajectory(id, {
+                after_seq: parseSeqParam(q.get('after_seq')),
+                after_event_id: q.get('after_event_id') ?? undefined,
+                limit: parseLimitParam(q.get('limit')),
+                lane: parseLaneParam(q.get('lane')),
+              }))
+              return
+            }
+            if (method === 'GET' && sub === 'trajectory-lanes') {
+              if (requireProjectMember(kernel, req, res, id) === null) return
+              ok(res, kernel.projectTrajectoryLanes(id, { limit: parseLimitParam(url.searchParams.get('limit')) }))
+              return
+            }
+            if (method === 'GET' && sub === 'topology' && subId === undefined) {
+              if (requireProjectMember(kernel, req, res, id) === null) return
+              const q = url.searchParams
+              ok(res, kernel.projectTopology(id, {
+                parent_id: q.get('parent_id') ?? null,
+                after_seq: parseSeqParam(q.get('after_seq')),
+                limit: parseLimitParam(q.get('limit')),
+              }))
+              return
+            }
+            if (method === 'POST' && sub === 'topology' && subId === 'children') {
+              if (requireProjectMember(kernel, req, res, id) === null) return
+              const input = registerChildSchema.parse(body)
+              const link = kernel.registerChildLink({ ...input, project_id: id })
+              send(res, 201, link)
+              return
+            }
             if (method === 'POST' && sub === 'transitions') {
               const input = transitionSchema.parse(body)
               ok(res, kernel.transition(id, input.to as never, input.expected_revision, input.reason))
@@ -962,6 +1249,46 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
           }
           break
+        }
+        case 'topology': {
+          // SUBAGENT-01 global child surface (trajectory-subagents.md §3/§7):
+          // every route resolves the child's project FIRST, then enforces
+          // principal + membership — unknown child AND non-member are the
+          // same 404 (no enumeration). Reads never activate the child.
+          if (id === undefined) {
+            send(res, 404, { error: errorEnvelope('not_found', 'unknown api resource') })
+            return
+          }
+          const childProjectId = kernel.childProjectId(id)
+          if (childProjectId === null) {
+            send(res, 404, { error: errorEnvelope('child_not_found', 'subagent child not found or access denied') })
+            return
+          }
+          if (requireProjectMember(kernel, req, res, childProjectId) === null) return
+          if (method === 'GET' && sub === undefined) {
+            ok(res, kernel.getChildDetail(id))
+            return
+          }
+          if (method === 'GET' && sub === 'history') {
+            const q = url.searchParams
+            ok(res, kernel.childHistory(id, { after_seq: parseSeqParam(q.get('after_seq')), limit: parseLimitParam(q.get('limit')) }))
+            return
+          }
+          if (method === 'PATCH' && sub === 'state') {
+            const input = z.object({
+              state: z.enum(['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown']),
+              detail: z.string().max(2000).optional(),
+            }).strict().parse(body)
+            ok(res, kernel.updateChildState(id, input.state, input.detail))
+            return
+          }
+          if (method === 'POST' && sub === 'followup') {
+            const input = followupSchema.parse(body)
+            ok(res, kernel.childFollowup(id, input.message, input.request_id))
+            return
+          }
+          send(res, 404, { error: errorEnvelope('not_found', 'unknown api resource') })
+          return
         }
         case 'gates': {
           if (id !== undefined && sub === undefined && method === 'GET') {

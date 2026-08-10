@@ -555,6 +555,8 @@ pre-accept 表不能使用 FK 创建 Project/Gate/Job/Run/Evidence 旁路；只�
 
 `(trajectory_id,event_seq)` 和 event_id 唯一。projection 可从 Kernel Outbox/安全 Session source 重建；不能被 Project transaction 读取为业务权威。raw detail 只保存加密/CAS ref + TTL，有界 preview 存 safe_summary_json。
 
+**TRAJ-01/SUBAGENT-01 standalone 投影已落地（migration 0013_trajectory_topology，SCHEMA_VERSION 12，幂等）**：投影直接读 `events` outbox（不复制业务状态，Kernel Outbox 仍是唯一账本），新增 `idx_events_project_seq(project_id,event_seq,event_id)` 支撑 10k 事件 keyset 分页；拓扑存储 `child_links(child_id PK, project_id FK→projects, parent_id, label, summary, kind CHECK subagent/task, mode CHECK one-shot/continuable/read-only, state CHECK running/inactive/diagnostic/succeeded/failed/redacted/unknown, role, created_at, updated_at, ended_at)`（parent_id 无 FK——parent 可以是未注册的 caller agent session）、`child_history(child_id+seq PK, event_id, event_type, payload, occurred_at)`（append-only 每 child 单调 seq 账本：started/registered/state/followup）、`child_followups(message_id PK, child_id FK→child_links, project_id, request, request_hash, status accepted_read_only, created_at)`（one-shot 只读 followup 收据）。child summary 写入+读取双次 redaction；state 只经 `PATCH /v1/topology/{child_id}/state` 变更且 ended_at 首次终态钉定；re-register 不复活终态。child_links 是投影/审计表，不反向成为 Project 状态权威。
+
 ## 6. Artifact CAS
 
 CAS path 只由服务端 SHA-256 计算。put 写同目录临时文件、fsync（可配置）、atomic rename；已有 Blob 校验 size/hash 后幂等返回。读取重新验证标识格式，关键发布流程可复算 hash。
