@@ -4,6 +4,7 @@ import { t } from '../i18n/index'
 import { openContractDetailModal, openIdeaDetailModal } from '../modals/detail'
 import { state, tabSave } from '../state'
 import { phasePipeline, copyText, el, fmtId, openContextMenu } from '../ui'
+import { renderNextActionSection } from './overview'
 /* ─────────────────────────── tab renderers ─────────────────────────── */
 
 export async function renderPhase(body: HTMLElement, p: Projection, projectId?: string): Promise<void> {
@@ -46,23 +47,9 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
     body.appendChild(sum)
   }
 
-  // next actions
-  const next = (p.next_actions ?? []).filter(Boolean)
-  if (next.length > 0) {
-    body.appendChild(el('div', 'section-label', t('overview', 'overview.nextActions')))
-    for (const action of next) {
-      const card = el('div', 'card')
-      const row = el('div', 'row')
-      row.appendChild(el('span', '', '➡️'))
-      const text = el('span', 'grow', action)
-      row.appendChild(text)
-      card.appendChild(row)
-      body.appendChild(card)
-    }
-  } else {
-    body.appendChild(el('div', 'section-label', t('overview', 'overview.nextActions')))
-    body.appendChild(el('div', 'empty', t('overview', 'overview.nextActions.none')))
-  }
+  // next actions: GUIDE-01 structured v2 cards (panels/overview.ts) with
+  // legacy string[] fallback for old kernels — see next-action-cards.ts.
+  renderNextActionSection(body, p)
 
   // history (audit ledger: transitions, gate decisions, renames, archives)
   const history = (p.project?.history ?? [])

@@ -1,0 +1,178 @@
+/**
+ * GUIDE-01 NextAction v2 card model (gui-plugin-plan §5.1, api-contracts.md
+ * §21): PURE logic that turns one structured kernel action (or a legacy
+ * projection) into what the Overview card should look like. No DOM — the
+ * panel layer (panels/overview.ts) only assembles nodes from this model.
+ *
+ * Rendering rules (api-contracts.md §21 — UI 只负责翻译 label 与路由):
+ *
+ * - `title` — the kernel `label` is wire DATA, not chrome: when a stable
+ *   i18n key exists for the action `code` (NEXT_ACTION_LABEL_KEYS) the label
+ *   is translated via `t()`; otherwise the kernel label is shown verbatim
+ *   (codes whose labels embed dynamic ids — `gate_decide`, `job_retry` —
+ *   intentionally fall back, as do unknown/future codes).
+ * - `tone` — the kernel `state` ('ready' | 'blocked' | 'done') maps to the
+ *   card visual class of the same name.
+ * - `disabled` — done actions are grayed out; blocked actions are disabled
+ *   while they carry a non-empty `required` gap list; the `unknown` code is
+ *   ALWAYS read-only (never a mutation CTA, api-contracts §21).
+ * - `missingList` — `required` as an array names the missing preconditions;
+ *   each known gap code is translated (NEXT_ACTION_GAP_KEYS), unknown gap
+ *   codes render verbatim (wire data).
+ * - `route` — the kernel `route` (gates/runs/evidence/manuscript/budget map
+ *   to the same tab; ideas/contracts/release/overview converge on the
+ *   Overview tab 'phase' — the four primary tabs, nav.ts). Unknown/future
+ *   routes fall back to 'phase'; the `unknown` code yields NO route (no
+ *   CTA). hasRoute=false cards render no button.
+ * - `blockingNote` — `blocking=true` actions carry the chrome note that the
+ *   phase cannot advance before this step.
+ */
+import type { NextActionV2, Projection } from './types'
+import { getLocale, t, type Locale } from './i18n/index'
+import { zh as overviewZh, en as overviewEn } from './i18n/locales/overview'
+
+/** Kernel's NEXT_ACTION_UNKNOWN_CODE (research-schemas) — mirrored locally so
+ *  the browser bundle stays dependency-light. */
+export const NEXT_ACTION_UNKNOWN_CODE = 'unknown'
+
+/** Kernel NextActionRoute values that are NOT panel tabs (nav.ts) and
+ *  converge on the Overview tab (the phase panel hosts ideas/contracts and
+ *  release/overview guidance). */
+const ROUTE_TO_TAB: Record<string, string> = {
+  gates: 'gates',
+  runs: 'runs',
+  evidence: 'evidence',
+  manuscript: 'manuscript',
+  budget: 'budget',
+  ideas: 'phase',
+  contracts: 'phase',
+  release: 'phase',
+  overview: 'phase',
+}
+
+/** i18n key per stable action code; codes absent here render the kernel
+ *  label verbatim (their labels embed dynamic wire data). */
+export const NEXT_ACTION_LABEL_KEYS: Record<string, string> = {
+  scope_gate_submit: 'overview.nextaction.code.scope_gate_submit',
+  survey_run: 'overview.nextaction.code.survey_run',
+  idea_generate: 'overview.nextaction.code.idea_generate',
+  idea_gate_approve: 'overview.nextaction.code.idea_gate_approve',
+  baseline_reproduce: 'overview.nextaction.code.baseline_reproduce',
+  contract_register: 'overview.nextaction.code.contract_register',
+  pilot_formal_submit: 'overview.nextaction.code.pilot_formal_submit',
+  evidence_verify: 'overview.nextaction.code.evidence_verify',
+  manuscript_write: 'overview.nextaction.code.manuscript_write',
+  reviewer_run: 'overview.nextaction.code.reviewer_run',
+  release_bundle: 'overview.nextaction.code.release_bundle',
+  release_gate: 'overview.nextaction.code.release_gate',
+  gate_resolve: 'overview.nextaction.code.gate_resolve',
+  project_stop: 'overview.nextaction.code.project_stop',
+  project_archived: 'overview.nextaction.code.project_archived',
+  project_released: 'overview.nextaction.code.project_released',
+  project_stopped: 'overview.nextaction.code.project_stopped',
+  budget_resolve: 'overview.nextaction.code.budget_resolve',
+  unknown: 'overview.nextaction.code.unknown',
+}
+
+/** i18n key per known missing-precondition code; unknown gap codes render
+ *  verbatim (wire data). */
+export const NEXT_ACTION_GAP_KEYS: Record<string, string> = {
+  approved_contract: 'overview.nextaction.missing.approved_contract',
+  succeeded_runs: 'overview.nextaction.missing.succeeded_runs',
+  proposed_idea: 'overview.nextaction.missing.proposed_idea',
+  budget_headroom: 'overview.nextaction.missing.budget_headroom',
+  repair_decision: 'overview.nextaction.missing.repair_decision',
+  state_mapping: 'overview.nextaction.missing.state_mapping',
+}
+
+/** One Overview card, fully resolved for the current locale. */
+export interface NextActionCardModel {
+  code: string
+  /** Resolved title: t() mapping when a dict key exists, else the kernel
+   *  label verbatim (wire data). */
+  title: string
+  /** Visual tone class: 'ready' | 'blocked' | 'done'. */
+  tone: 'ready' | 'blocked' | 'done'
+  /** Whether the card CTA must be inert (done / blocked-with-gaps /
+   *  unknown read-only). */
+  disabled: boolean
+  /** Kernel reason, verbatim (wire data). */
+  reasonText: string
+  /** Resolved missing-precondition texts (empty when none). */
+  missingList: string[]
+  /** Panel tab the card navigates to ('' = no CTA). */
+  route: string
+  /** Whether a route CTA should be rendered. */
+  hasRoute: boolean
+  /** Blocking chrome note ('' when the action is not phase-blocking). */
+  blockingNote: string
+  /** State chrome label ('ready' | 'blocked' | 'done' copy). */
+  stateLabel: string
+  /** True for the kernel's read-only `unknown` code (api-contracts §21). */
+  isUnknown: boolean
+}
+
+/** True when `key` exists in the overview dictionary of `locale` (parity is
+ *  enforced statically, so zh/en agree). */
+function hasOverviewKey(key: string, locale: Locale): boolean {
+  const dict = (locale === 'zh' ? overviewZh : overviewEn) as Record<string, string>
+  return dict[key] !== undefined
+}
+
+/**
+ * PURE card model for ONE structured action. Never throws: missing wire
+ * fields degrade to safe defaults (unknown code, ready tone, no gaps, no
+ * route) so a malformed action still renders as a read-only card.
+ */
+export function nextActionCardModel(action: NextActionV2, locale: Locale = getLocale()): NextActionCardModel {
+  const code = typeof action.code === 'string' && action.code !== '' ? action.code : NEXT_ACTION_UNKNOWN_CODE
+  const isUnknown = code === NEXT_ACTION_UNKNOWN_CODE
+  const labelKey = NEXT_ACTION_LABEL_KEYS[code]
+  const title = labelKey !== undefined && hasOverviewKey(labelKey, locale)
+    ? t('overview', labelKey)
+    : (typeof action.label === 'string' ? action.label : '')
+  const state = action.state ?? 'ready'
+  const tone: NextActionCardModel['tone'] = state === 'done' || state === 'blocked' ? state : 'ready'
+  const required = Array.isArray(action.required) ? action.required.filter(g => typeof g === 'string' && g !== '') : []
+  const missingList = required.map(gap => {
+    const gapKey = NEXT_ACTION_GAP_KEYS[gap]
+    return gapKey !== undefined && hasOverviewKey(gapKey, locale) ? t('overview', gapKey) : gap
+  })
+  // done → inert; blocked → inert only while preconditions are missing;
+  // unknown → always read-only (never a mutation CTA).
+  const disabled = state === 'done' || isUnknown || (state === 'blocked' && required.length > 0)
+  const rawRoute = typeof action.route === 'string' ? action.route : ''
+  const route = isUnknown ? '' : (ROUTE_TO_TAB[rawRoute] ?? 'phase')
+  return {
+    code,
+    title,
+    tone,
+    disabled,
+    reasonText: typeof action.reason === 'string' ? action.reason : '',
+    missingList,
+    route,
+    hasRoute: route !== '',
+    blockingNote: action.blocking === true ? t('overview', 'overview.nextaction.blocking') : '',
+    stateLabel: t('overview', `overview.nextaction.state.${tone}`),
+    isUnknown,
+  }
+}
+
+/**
+ * Backward-compatible input resolution (acceptance §8 ui-guide): the v2
+ * structured projection wins when present (even empty → clean "none" state);
+ * older kernels that only emit `next_actions: string[]` keep working.
+ * A malformed v2 field (mixed types) degrades to the legacy path.
+ */
+export type NextActionInput =
+  | { kind: 'v2'; actions: NextActionV2[] }
+  | { kind: 'legacy'; labels: string[] }
+
+export function resolveNextActionInput(p: Pick<Projection, 'next_actions' | 'next_actions_v2'>): NextActionInput {
+  const v2 = p.next_actions_v2
+  if (Array.isArray(v2) && v2.every(a => typeof a === 'object' && a !== null && typeof (a as NextActionV2).code === 'string')) {
+    return { kind: 'v2', actions: v2 as NextActionV2[] }
+  }
+  const legacy = (p.next_actions ?? []).filter((s): s is string => typeof s === 'string' && s !== '')
+  return { kind: 'legacy', labels: legacy }
+}

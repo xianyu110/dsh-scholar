@@ -118,6 +118,7 @@
 - terminal-dom-bounded：Playwright 在 Job 未完成前观察到 stdout/stderr DOM 增量；全局 seq 单调、只生成安全文本节点，保留窗口滚动后 DOM 行数不超过配置上限；
 - download-full-log：overflow/gap 后下载动作必须读取最终 log Artifact，字节等于 canonical 完整或明确截断日志，不能仅导出浏览器内 retained lines；
 - exit-replay：成功、非零、signal、timeout、cancel 的最终原因永久可读；
+- terminal-frame-integrity：同 (run_id, seq) 重放内容（frame_kind/stream_seq/channel/text/byte_offset/byte_length/payload_json）不同 → 409 `terminal_frame_conflict`（storage-migrations.md §4，不再 INSERT OR IGNORE 静默）；内容相同 → 幂等跳过（重放语义保留）；retention 已淘汰的 seq 重放不报错（storage-migrations.md §4，tests/unit/terminal.test.ts）；
 - backpressure：慢客户端不使 Runner/Kernel 内存无限增长；
 - hidden-tab：暂停渲染后恢复到 latest；
 - ansi-injection：OSC clipboard/link/title 和 HTML 不能执行；
@@ -225,6 +226,7 @@
 - 同一 fixture 在 standalone 重启前后产生等价页面和操作结果。
 - ui-start：无项目首屏只有 Init/Resume/Upload 三项主行动，高级设置不可见；Resume 显示 status/pending Gate/NextAction；
 - ui-guide：所有非终态项目显示结构化 NextAction 的 state/reason/required/revision/CTA；409 刷新，unknown action 不执行；
+- ui-next-action-v2-cards（client 逻辑层，tests/unit/next-action-cards.test.ts 26/26）：Overview 渲染 `next_actions_v2` 结构化卡——code 徽标、三态视觉类名（ready/blocked/done）、label 优先按 i18n key 翻译（未登记 code 原样显示 kernel label，属 wire 数据）、reason 行、required 缺失前置条件列表（blocked 点击展开）、route 按钮经现有导航机制跳转（nav.ts `#tab=` 深链 + activeTab 切换；ideas/contracts/release/overview 收敛到 Overview tab）、blocking 说明；done 灰显禁用、blocked（有缺口时）禁用、ready 高亮；`code='unknown'` 只读、无 CTA、不构造 mutation（api-contracts.md §21）；缺失 `next_actions_v2` 时回退 legacy `next_actions: string[]` 列表（向后兼容），畸形 v2 字段安全退化；
 - ui-routes：Workspace、Run Terminal、Interactive PTY、Manuscript、Trajectory/Topology、Settings 可由上下文/命令面板/深链到达，URL 无 Token；
 - ui-settings：Accordion 默认折叠；每项展示 effective source/hash/revision/default/restart，reset 与 CAS 冲突工作；secret value 零渲染；
 - ui-simple-responsive：640/720/1024 下 Start、More、树/编辑/Preview/Terminal、固定主 CTA 均键盘可达，不因隐藏高级项丢能力；
@@ -427,3 +429,8 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 - sqlite-busy-timeout：openDatabase 设置 WAL + foreign_keys + busy_timeout=5000（storage-migrations.md §2，tests/unit/migrations.test.ts）；
 - cas-put-reverify-size：CAS put 对已存在 Blob 复验 size，不匹配（内容地址损坏）→ 拒绝（storage-migrations.md §6，tests/unit/cas-gc.test.ts）；
 - evidence-provenance-visible：Evidence 面板按 item.provenance_status 原样渲染，不硬编码 verified（gui-plugin-plan.md §10）。
+- next-action-v2-cards-rendered：Overview 渲染结构化 NextAction v2 卡——三态 tone（ready/blocked/done）与禁用规则（done 灰显、blocked 有 required 缺口禁用、ready 高亮）、label 按 i18n key 翻译或原样显示 kernel label、required 缺口列表（已知缺口 code 翻译/未知原样）、route 映射（gates/runs/evidence/manuscript/budget 直达、ideas/contracts/release/overview 收敛 Overview tab、未知 route 安全回退）、`code='unknown'` 只读无 CTA、legacy `next_actions: string[]` 回退与畸形 v2 安全退化——tests/unit/next-action-cards.test.ts 26/26（gui-plugin-plan.md §5.1，审计报告 §4 #11）。
+- metrics-endpoint-loopback（OBS-01，reconstruction-contracts.md §18）：GET /internal/metrics 返回 JSON 快照（counters + histograms + generated_at/uptime_ms），仅 loopback 可达——127.0.0.1/::1/::ffff:127.0.0.1 来源 200，非 loopback 来源 403 `loopback_only`，bind host 为 loopback 时放行；不要求 service token（配置 serviceToken 时同样 200）；快照不含 token/路径/内容（tests/unit/metrics.test.ts）；
+- metrics-key-path-counters（OBS-01）：kernel 关键路径打点后 counter 增长——outbox append（emit）/dead-letter（deadLetterEvent）、job claim/complete、lease expiry（recoverExpiredLeases 累计回收数）、terminal dropped bytes（appendTerminalFrames 累计淘汰字节）、CAS orphan GC（collectOrphanBlobs 累计清除数）、TeX build 完成（texUpdateBuild 终态）、budget 记账（recordUsage 计数 + model_cost_usd 直方图）；HTTP 请求计数与延迟直方图由 server 层按 response finish 记录（tests/unit/metrics.test.ts）；
+- connector-failure-metric（OBS-01）：multiSourceSearch 任一 source 失败 → `connector.source_failure{source}` 计数（观察者钩子可选参数，缺省 no-op，既有调用方行为不变）（tests/unit/metrics.test.ts）。
+- terminal-frame-conflict-409（STORE-05，storage-migrations.md §4）：appendTerminalFrames 对已存在 (run_id, seq) 重放，内容不同 → 409 `terminal_frame_conflict`（通道/文本/byte 范围/frame_kind/payload_json 任一不同即冲突）；内容相同 → 幂等跳过；retention 已淘汰行重放不报错；既有 reconnect-after-seq/retention-gap/overflow 场景不破坏（tests/unit/terminal.test.ts 新增 3 用例）。

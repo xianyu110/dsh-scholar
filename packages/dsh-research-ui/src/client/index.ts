@@ -164,6 +164,18 @@ export function apply(): void {
 .card.border-amber { border-color:var(--tone-amber); }
 .card.border-red { border-color:var(--tone-red); }
 .card.border-green { border-color:var(--tone-green); }
+/* GUIDE-01 NextAction v2 cards (panels/overview.ts): tone classes ready /
+   blocked / done drive the three-state visual language (audit #11). */
+.nax.ready { border-color:var(--tone-green); }
+.nax.blocked { border-color:var(--tone-amber); }
+.nax.done { opacity:.55; border-color:var(--border); }
+.nax-head .nax-code { font:600 9px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.4px; color:var(--tone-blue); background:var(--tone-blue-bg); border:1px solid var(--tone-blue); border-radius:6px; padding:1px 6px; white-space:nowrap; max-width:42%; overflow:hidden; text-overflow:ellipsis; }
+.nax-title { font:600 12px/1.5 system-ui,sans-serif; color:var(--text); }
+.nax-state { font:600 9.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.3px; border-radius:99px; padding:1px 8px; white-space:nowrap; flex-shrink:0; }
+.nax-state-ready { color:var(--tone-green); background:var(--tone-green-bg); border:1px solid var(--tone-green); }
+.nax-state-blocked { color:var(--tone-amber); background:var(--tone-amber-bg); border:1px solid var(--tone-amber); }
+.nax-state-done { color:var(--tone-slate); background:var(--tone-slate-bg); border:1px solid var(--tone-slate); }
+.nax-go-ready { border-color:var(--tone-green); color:var(--tone-green); background:var(--tone-green-bg); }
 .error-banner { background:var(--tone-red-bg); border:1px solid var(--tone-red); color:var(--tone-red); border-radius:9px; padding:8px 10px; margin-bottom:8px; font-size:11px; word-break:break-all; }
 .row { display:flex; align-items:center; gap:8px; }
 .grow { flex:1; min-width:0; }

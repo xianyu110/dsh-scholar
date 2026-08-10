@@ -393,7 +393,7 @@ Tool input 不接受 principal、verified/accepted provenance、internal token�
 
 结构化日志 JSON 字段：time、level、module、instance_id、request_id、project_id?、job_id?、event、duration_ms?、error_code?；不记录 secret/完整 payload。指标至少有 request latency/error、outbox backlog、queued/running jobs、lease expiry、terminal dropped bytes/connections、CAS bytes/orphans、TeX build duration/failure、connector source failure、budget usage。桌面默认只暴露 loopback /internal/metrics；团队 adapter 接 OpenTelemetry。
 
-**现状（如实记录，属后续阶段）**：结构化 JSON 日志字段已落地（kernel/runner 日志模块）；`/internal/metrics` 端点与上述指标计数尚未实现。实现指引：kernel 增加内存 MetricsStore（counter/histogram 极简实现），在 request 完成、outbox append/dead-letter、job claim/complete、lease expiry、terminal dropped_bytes、CAS GC/orphan、TeX build 完成、connector 失败、budget 记账处打点；server 增加 GET /internal/metrics（仅 loopback 可达，JSON 输出，不要求 service token——与 /v1/health 同级公开面或按部署配置）；团队 OpenTelemetry adapter 留作未来 export 面。
+**现状（已实现，2026-08，OBS-01）**：结构化 JSON 日志字段已落地（kernel/runner 日志模块）；`/internal/metrics` 端点与上述指标计数已实现：kernel 内存 MetricsStore（counter/histogram 极简实现，`packages/research-kernel/src/metrics.ts`）在 request 完成（server 层计数+延迟直方图）、outbox append/dead-letter、job claim/complete、lease expiry、terminal dropped_bytes、CAS GC/orphan、TeX build 完成、connector 失败（`multiSourceSearch` 观察者钩子，结构性 duck-typing 不产生包依赖）、budget 记账处打点；server 提供 `GET /internal/metrics`（仅 loopback 可达——`req.socket.remoteAddress` 为 127.0.0.1/::1/::ffff:127.0.0.1 或 bind host 为 loopback；非 loopback 来源 403 `loopback_only`；JSON 输出，不要求 service token——与 /v1/health 同级公开面或按部署配置）。团队 OpenTelemetry adapter 留作未来 export 面。证据：`tests/unit/metrics.test.ts` 18/18（计数/直方图/打点路径/端点 200 与 403/快照不含 token、路径、内容）。
 
 ## 19. Workspace wire
 

@@ -36,6 +36,17 @@ export interface ConnectorCache {
   set(key: string, value: unknown): void
 }
 
+/**
+ * OBS-01 (reconstruction-contracts.md §18): optional metrics observer for
+ * connector-source failures. Structural (duck-typed) so the connector
+ * package never depends on the research-kernel MetricsStore — callers pass
+ * `kernel.metrics` (or any `{count}` compatible store). Keys/tags are fixed
+ * constants (`connector.source_failure` + `source` name), never content.
+ */
+export interface ConnectorMetrics {
+  count(key: string, tags?: Record<string, string>): void
+}
+
 export class DiskCache implements ConnectorCache {
   readonly root: string
   private readonly memory = new Map<string, unknown>()
@@ -345,7 +356,7 @@ export async function searchArxiv(query: string, options: SearchOptions = {}, ca
  * `failures: string[]` field is kept for compatibility (present only when
  * non-empty).
  */
-export async function multiSourceSearch(query: string, options: SearchOptions = {}, cache: ConnectorCache = NULL_CACHE): Promise<{
+export async function multiSourceSearch(query: string, options: SearchOptions = {}, cache: ConnectorCache = NULL_CACHE, metrics?: ConnectorMetrics | null): Promise<{
   hits: SearchHit[]
   queries: Array<{ source: ConnectorSource; query: string; run_at: string }>
   dedup_removed: number
@@ -374,6 +385,8 @@ export async function multiSourceSearch(query: string, options: SearchOptions = 
       const error = (settled.reason as Error).message
       failures.push(`${source}: ${error}`)
       sourceStatus.push({ source, status: 'failed', error })
+      // OBS-01: connector source failure metric (fixed key + source tag).
+      metrics?.count('connector.source_failure', { source })
     }
   }
   const { papers, removed } = dedupPapers(hits.map(h => h.paper))

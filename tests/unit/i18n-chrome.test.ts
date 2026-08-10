@@ -132,7 +132,7 @@ function stripInterpolation(span: string): string {
 const ALLOWED_HARDCODED: Record<string, string> = {
   // nested-template edge case: the line is already i18n'd —
   // t('common','common.updatedAt') + Intl time + raw lastError wire text.
-  'packages/dsh-research-ui/src/client/index.ts:999': 'stamp line: t(updatedAt) + Intl time + raw lastError (nested template)',
+  'packages/dsh-research-ui/src/client/index.ts:1011': 'stamp line: t(updatedAt) + Intl time + raw lastError (nested template)',
   // nested-template edge case: raw wire join of verification history
   // (timestamp · reason), displayed verbatim.
   'packages/dsh-research-ui/src/client/panels/evidence.ts:254': 'raw history join: when · reason (nested template)',
@@ -141,8 +141,8 @@ const ALLOWED_HARDCODED: Record<string, string> = {
   'packages/dsh-research-ui/src/client/panels/budget.ts:120': 'raw budget numbers: value / max (nested template)',
   'packages/dsh-research-ui/src/client/panels/gates.ts:260': 'raw wire join: actor · decision · timestamp (nested template)',
   'packages/dsh-research-ui/src/client/panels/manuscript.ts:269': 'raw wire: rev · build_id (nested template)',
-  'packages/dsh-research-ui/src/client/panels/phase.ts:109': 'raw budget numbers: used / max (nested template)',
-  'packages/dsh-research-ui/src/client/panels/phase.ts:192': 'raw wire: baseline vs treatment methods · version (nested template)',
+  'packages/dsh-research-ui/src/client/panels/phase.ts:96': 'raw budget numbers: used / max (nested template)',
+  'packages/dsh-research-ui/src/client/panels/phase.ts:179': 'raw wire: baseline vs treatment methods · version (nested template)',
 }
 
 function scanChromeEnglish(file: string, lines: string[]): ChromeHit[] {

@@ -140,7 +140,7 @@ Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译�
 
 Budget 页面显示模型、API、GPU、存储和并发。超过硬上限时项目进入 BLOCKED_GATE，正在运行的策略按 Job contract 安全停止或完成；只有 Human Budget Gate 可恢复到 payload 允许的状态。
 
-Overview 顶部 NextAction 说明当前一步、原因、需要 Human/Agent/Runner、阻断项和目标页面。未知旧动作只显示原文，不提供猜测的执行按钮。
+Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步：每张卡含 code 徽标、三态标记（ready 可执行 / blocked 受阻 / done 已完成——done 灰显、blocked 因缺失前置条件而禁用、ready 高亮）、原因、需要 Human/Agent/Runner、缺失前置条件列表（点击受阻卡展开）、阻断说明和跳转目标页面的按钮（gates/runs/evidence/manuscript/budget 直达，ideas/contracts/release 收敛到总览）。标签优先按字典翻译，未登记 code 原样显示内核 label；未知状态动作（code='unknown'）只读，不提供猜测的执行按钮。旧内核的 `next_actions: string[]` 仍以列表形式兼容显示。
 
 所有配置集中在 Settings，默认折叠 Essentials、Execution、Workspace、Terminal、LaTeX、Agent/Trajectory、Security & Secrets、Diagnostics。每项显示 effective value、来源 scope/revision/hash、默认/修改和热更新/重启；Secret 只显示引用。修改只影响新 Job/PTY/Build。服务端已实现:canonical Config Registry(CONFIG-01,单一注册表 + parseCli 四二进制接入 + security floor + effective pin/redacted 视图 + 生成物 configs/generated/)与 kernel/standalone 的 x-config-pin 响应头、/v1/config/effective、/v1/config/schema;Settings UI(浏览器层,由 /v1/config/schema + /v1/config/effective 生成)与 /bff/research/config/*、job scope 键、SecretRef 存储层仍属后续阶段。
 

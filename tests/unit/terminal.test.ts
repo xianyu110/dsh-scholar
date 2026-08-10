@@ -111,6 +111,80 @@ describe('terminal frames (kernel)', () => {
     expect(listed.retention.dropped_bytes).toBeGreaterThan(0)
     kernel.close()
   })
+
+  it('STORE-05: same seq with DIFFERENT content is a terminal_frame_conflict', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k-store-05', kind: 'echo' })
+    kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05', frames: [chunk(1, 'original\n')] })
+    // Replay with identical content stays an idempotent skip.
+    const replay = kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05', frames: [chunk(1, 'original\n')] })
+    expect(replay.appended).toBe(0)
+    // Replay with different TEXT on the same seq is an integrity error.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05', frames: [chunk(1, 'tampered\n')] }),
+      409, 'terminal_frame_conflict',
+    )
+    // Different channel on the same seq is an integrity error too.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({
+        jobId: job.job_id, runId: 'run_s05',
+        frames: [{ seq: 1, stream_seq: 1, channel: 'stderr', text: 'original\n', byte_offset: 0, byte_length: 9, frame_kind: 'chunk' }],
+      }),
+      409, 'terminal_frame_conflict',
+    )
+    // Same content but a different byte_length is still a conflict (content
+    // signature covers byte_offset/byte_length — the raw stream extent).
+    expectKernelError(
+      () => kernel.appendTerminalFrames({
+        jobId: job.job_id, runId: 'run_s05',
+        frames: [{ seq: 1, stream_seq: 1, channel: 'stdout', text: 'original\n', byte_offset: 0, byte_length: 99, frame_kind: 'chunk' }],
+      }),
+      409, 'terminal_frame_conflict',
+    )
+    // An exit frame replaying a chunk seq with different frame_kind conflicts.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05', frames: [{ seq: 1, frame_kind: 'exit' }] }),
+      409, 'terminal_frame_conflict',
+    )
+    // The stored frame is untouched by the rejected replays.
+    const listed = kernel.listTerminalFrames(job.job_id, 'run_s05', 0)
+    expect(listed.frames).toHaveLength(1)
+    expect(listed.frames[0]!.text).toBe('original\n')
+    kernel.close()
+  })
+
+  it('STORE-05: gap/exit frame content conflicts are detected via payload_json', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k-store-05b', kind: 'echo' })
+    kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05b', frames: [{ seq: 1, frame_kind: 'exit', payload_json: JSON.stringify({ exit_code: 0, signal: null }) }] })
+    // Identical exit replay is an idempotent skip.
+    const replay = kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05b', frames: [{ seq: 1, frame_kind: 'exit', payload_json: JSON.stringify({ exit_code: 0, signal: null }) }] })
+    expect(replay.appended).toBe(0)
+    // Same seq, different exit payload -> integrity error.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05b', frames: [{ seq: 1, frame_kind: 'exit', payload_json: JSON.stringify({ exit_code: 1, signal: 'SIGKILL' }) }] }),
+      409, 'terminal_frame_conflict',
+    )
+    kernel.close()
+  })
+
+  it('STORE-05: evicted (retention-dropped) seqs replay without conflict', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k-store-05c', kind: 'echo' })
+    const frames = [...[1, 2, 3, 4].map(i => chunk(i, 'x'.repeat(100))), { seq: 5, frame_kind: 'exit' }]
+    const res = kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05c', frames, maxLogBytes: 250 })
+    expect(res.truncated).toBe(true)
+    expect(res.dropped_bytes).toBeGreaterThan(0)
+    // The oldest chunks were evicted (gap/exit frames never are); replaying
+    // an evicted seq must not throw — eviction already surfaced via
+    // terminal_retention/gap frames, and the row is gone.
+    const replay = kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_s05c', frames: [chunk(1, 'x'.repeat(100))] })
+    expect(replay.appended).toBe(0)
+    kernel.close()
+  })
 })
 
 describe('terminal SSE endpoint', () => {

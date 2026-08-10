@@ -36,6 +36,7 @@ import {
   SAFE_PHASE_LANDING, type StaticScanVerdict,
 } from './intake.js'
 import { TrajectoryStore } from './trajectory.js'
+import { MetricsStore } from './metrics.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -181,6 +182,34 @@ export class KernelError extends Error {
 
 function nowIso(): string {
   return new Date().toISOString()
+}
+
+/**
+ * STORE-05 (storage-migrations.md §4): canonical content signature of one
+ * terminal frame. Compares ONLY content fields (frame_kind, stream_seq,
+ * channel, text, byte_offset, byte_length, payload_json); lease_generation
+ * and created_at are delivery bookkeeping, not content (a reclaim replays
+ * old seqs with a new generation). Deterministic: JSON.stringify of a fixed
+ * field array.
+ */
+function terminalFrameSignature(frame: {
+  frame_kind: string
+  stream_seq?: number | null
+  channel?: string | null
+  text?: string | null
+  byte_offset?: number | null
+  byte_length?: number | null
+  payload_json?: string | null
+}): string {
+  return createHash('sha256').update(JSON.stringify([
+    frame.frame_kind,
+    frame.stream_seq ?? null,
+    frame.channel ?? null,
+    frame.text ?? null,
+    frame.byte_offset ?? null,
+    frame.byte_length ?? null,
+    frame.payload_json ?? '{}',
+  ])).digest('hex')
 }
 
 function jsonParse<T>(text: string | null | undefined, fallback: T): T {
@@ -573,6 +602,16 @@ export class ResearchKernel {
   private ptyAdapter: PtyAdapter | null = null
   /** PTY-01: idle-TTL sweep timer (kernel-owned, see KernelOptions). */
   private readonly ptySweepTimer: NodeJS.Timeout | null
+  /**
+   * OBS-01 (reconstruction-contracts.md §18): in-memory runtime metrics
+   * (counters + histograms). Instrumented at the key paths below — request
+   * completion (server layer), outbox append/dead-letter, job claim/
+   * complete, lease expiry, terminal dropped bytes, CAS GC/orphan, TeX build
+   * completion and budget accounting. Exposed as JSON via GET
+   * /internal/metrics (loopback only). Series keys/tags are FIXED constant
+   * strings — never paths, ids, tokens or content (OBS-01).
+   */
+  readonly metrics: MetricsStore
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
@@ -596,6 +635,8 @@ export class ResearchKernel {
     this.trajectory = new TrajectoryStore(this.db, (projectId, kind, payload) => this.emit(projectId, kind, payload))
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
     this.serviceToken = options.serviceToken
+    // OBS-01: the runtime metrics store is process-local; no locking needed.
+    this.metrics = new MetricsStore()
     // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
     // registers an ephemeral Ed25519 key and signs every completion, so the
     // default only affects callers that never sign. Unit tests that exercise
@@ -716,6 +757,8 @@ export class ResearchKernel {
         next, aggregateType, aggregateId, aggregateRevision,
         requestId, sessionId,
       )
+      // OBS-01: outbox append counter (kind is a fixed event-kind constant).
+      this.metrics.count('outbox.append', { kind })
       return event
     }
     // §16 "SQLite 单写事务分配 event_seq=max+1": emit already running inside
@@ -732,6 +775,23 @@ export class ResearchKernel {
     return rows
       .filter(row => delivered === undefined || row.delivered === (delivered ? 1 : 0))
       .map(eventFromRow)
+  }
+
+  /**
+   * §16 consumer-side delivery bookkeeping: mark one undeliverable event as
+   * dead-lettered (the original event is kept, per §16). Records the
+   * `outbox.dead_letter` metric (OBS-01). Returns true when the event was
+   * transitioned (false when it was already dead-lettered or unknown).
+   */
+  deadLetterEvent(eventId: string, reason = 'max delivery attempts exceeded'): boolean {
+    const result = this.db.prepare(
+      'UPDATE events SET dead_lettered_at = ?, last_error = ? WHERE event_id = ? AND dead_lettered_at IS NULL',
+    ).run(nowIso(), reason, eventId)
+    if (Number(result.changes) === 1) {
+      this.metrics.count('outbox.dead_letter')
+      return true
+    }
+    return false
   }
 
   /** At-least-once delivery: mark events delivered; the caller dedupes. */
@@ -1387,6 +1447,10 @@ export class ResearchKernel {
             .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')}; resume allowed to ${resumeTo})`]), projectId)
         }
       }
+      // OBS-01: budget accounting — one counter per recordUsage + the model
+      // cost delta histogram (fixed keys; no project ids in tags).
+      this.metrics.count('budget.recorded')
+      this.metrics.observe('budget.model_cost_usd', usage.model_cost_usd ?? 0)
       return this.getBudget(projectId)
     })
   }
@@ -1411,6 +1475,8 @@ export class ResearchKernel {
       if (mtime === null || now - mtime < graceMs) continue
       if (this.cas.remove(sha)) removed++
     }
+    // OBS-01: CAS orphan GC counter accumulates removed blobs.
+    if (removed > 0) this.metrics.count('cas.orphans_removed', undefined, removed)
     return removed
   }
 
@@ -3217,6 +3283,8 @@ export class ResearchKernel {
       })
       if (claimedRow !== null) {
         claimed.push({ ...claimedRow.claimedJob, run_id: claimedRow.runId })
+        // OBS-01: one claim counter per successfully claimed job.
+        this.metrics.count('job.claimed')
         // §12.1 (TEX-03): a claimed latex-compile job moves its tex_builds
         // row queued → running, so preview supersede can distinguish a
         // never-started queued preview (→ cancelled) from a running one
@@ -3287,7 +3355,10 @@ export class ResearchKernel {
     const result = this.db.prepare(
       `UPDATE jobs SET status = 'retryable', lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
     ).run(nowIso(), new Date(now).toISOString())
-    return Number(result.changes)
+    const changes = Number(result.changes)
+    // OBS-01: lease expiry counter accumulates the recovered-job count.
+    if (changes > 0) this.metrics.count('lease.expiry', undefined, changes)
+    return changes
   }
 
   /**
@@ -3423,6 +3494,8 @@ export class ResearchKernel {
         })
       }
     }
+    // OBS-01: completion counter tagged with the terminal status constant.
+    this.metrics.count('job.completed', { status: input.status })
     return jobRecord
   }
 
@@ -3613,7 +3686,13 @@ export class ResearchKernel {
         (job_id, run_id, seq, stream_seq, channel, text, byte_offset, byte_length, frame_kind, payload_json, lease_generation, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       for (const frame of input.frames) {
-        if (frame.seq <= cursor) continue // idempotent replay / out-of-order skip
+        if (frame.seq <= cursor) {
+          // STORE-05 (storage-migrations.md §4): a replayed (run_id, seq)
+          // must carry IDENTICAL content — same seq with different content
+          // is an integrity error, not a silent INSERT OR IGNORE skip.
+          this.assertTerminalFrameConsistent(input.jobId, input.runId, frame)
+          continue // idempotent replay / out-of-order skip
+        }
         // P0 (acceptance-tests.md §4): Terminal frames MUST carry the current
         // owner generation/token — a frame with a MISSING generation is
         // rejected 409 (fail-closed, no owner-only/defaulting pass), and a
@@ -3685,6 +3764,9 @@ export class ResearchKernel {
           truncated = MAX(terminal_retention.truncated, excluded.truncated)`)
         .run(input.jobId, input.runId, Number(retainedRow.min_seq), totalBytes, droppedBytes, truncated)
       const retention = this.getTerminalRetention(input.jobId, input.runId)
+      // OBS-01: dropped-bytes counter accumulates the retention-evicted bytes
+      // (terminal dropped bytes, reconstruction-contracts.md §18).
+      if (droppedBytes > 0) this.metrics.count('terminal.dropped_bytes', undefined, droppedBytes)
       for (const frame of inserted) {
         this.emit(job.project_id, 'terminal.frame', frame)
       }
@@ -3696,6 +3778,40 @@ export class ResearchKernel {
         dropped_bytes: retention.dropped_bytes,
       }
     })
+  }
+
+  /**
+   * STORE-05 (storage-migrations.md §4): same (run_id, seq) with DIFFERENT
+   * content is an integrity error. When a frame replays a stored seq, its
+   * content signature (frame_kind/stream_seq/channel/text/byte_offset/
+   * byte_length/payload_json — lease_generation/created_at are bookkeeping,
+   * not content) must match the stored row; otherwise 409
+   * `terminal_frame_conflict`. Identical content is an idempotent skip
+   * (replay semantics preserved). A row already evicted by retention can no
+   * longer be verified and is skipped — its eviction was already surfaced to
+   * the client via terminal_retention/gap frames.
+   */
+  private assertTerminalFrameConsistent(jobId: string, runId: string, frame: {
+    seq: number
+    stream_seq?: number | null
+    channel?: string | null
+    text?: string | null
+    byte_offset?: number | null
+    byte_length?: number | null
+    frame_kind: string
+    payload_json?: string | null
+  }): void {
+    const row = this.db.prepare(
+      'SELECT frame_kind, stream_seq, channel, text, byte_offset, byte_length, payload_json FROM terminal_frames WHERE job_id = ? AND run_id = ? AND seq = ?',
+    ).get(jobId, runId, frame.seq) as {
+      frame_kind: string; stream_seq: number | null; channel: string | null; text: string | null
+      byte_offset: number | null; byte_length: number | null; payload_json: string
+    } | undefined
+    if (row === undefined) return // evicted by retention — nothing to compare
+    if (terminalFrameSignature(frame) !== terminalFrameSignature(row)) {
+      throw new KernelError(409, 'terminal_frame_conflict',
+        `terminal frame (run ${runId}, seq ${frame.seq}) content differs from the stored frame — the same seq must carry identical content (STORE-05)`)
+    }
   }
 
   /** Frames after `afterSeq` (ordered by seq) plus the retention summary. */
@@ -3817,7 +3933,13 @@ export class ResearchKernel {
   }
 
   texUpdateBuild(buildId: string, patch: Parameters<import('./tex-workspace.js').TexWorkspaceStore['updateBuild']>[1]): TexBuild {
-    return this.tex.updateBuild(buildId, patch)
+    const updated = this.tex.updateBuild(buildId, patch)
+    // OBS-01: TeX build completion counter — a terminal status transition
+    // (succeeded/failed/cancelled/superseded) is the completion event.
+    if (patch.status === 'succeeded' || patch.status === 'failed' || patch.status === 'cancelled' || patch.status === 'superseded') {
+      this.metrics.count('tex.build_completed', { status: patch.status })
+    }
+    return updated
   }
 
   /**

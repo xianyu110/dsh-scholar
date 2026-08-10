@@ -6,6 +6,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { z } from 'zod'
 import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from './kernel.js'
 import { TexError } from './tex-workspace.js'
@@ -599,6 +600,45 @@ function serviceTokenEquals(provided: string, expected: string): boolean {
   return timingSafeEqual(a, b)
 }
 
+/** OBS-01: loopback source addresses (IPv4, IPv6, IPv4-mapped IPv6). */
+export function isLoopbackAddress(address: string | undefined | null): boolean {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
+/**
+ * OBS-01 (reconstruction-contracts.md §18): GET /internal/metrics is only
+ * reachable from loopback — either the peer's source address IS loopback or
+ * the server itself is bound to a loopback host (then every peer is local by
+ * construction). Any other combination is rejected 403 by the route.
+ */
+export function metricsAccessAllowed(remoteAddress: string | undefined | null, boundHost: string): boolean {
+  if (boundHost === '127.0.0.1' || boundHost === '::1' || boundHost === 'localhost' || boundHost === '') return true
+  return isLoopbackAddress(remoteAddress)
+}
+
+/**
+ * OBS-01: the /internal/metrics surface — a JSON metrics snapshot, loopback
+ * only, and deliberately NOT a service-token route: like /v1/health it sits
+ * at the deployment's public surface (or is exposed per deployment config;
+ * the loopback check is the default guard). Returns true when the request
+ * was handled (route() then returns immediately).
+ */
+export function handleInternalMetrics(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, boundHost: string): boolean {
+  let url: URL
+  try {
+    url = new URL(req.url ?? '/', 'http://127.0.0.1')
+  } catch {
+    return false
+  }
+  if (req.method !== 'GET' || url.pathname !== '/internal/metrics') return false
+  if (!metricsAccessAllowed(req.socket.remoteAddress, boundHost)) {
+    send(res, 403, { error: errorEnvelope('loopback_only', '/internal/metrics is reachable only from loopback addresses') })
+    return true
+  }
+  ok(res, kernel.metrics.snapshot())
+  return true
+}
+
 let currentRequestId = 'req_unknown'
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -679,7 +719,7 @@ function parseLaneParam(raw: string | null): 'research' | 'session' | undefined 
   return raw === 'research' || raw === 'session' ? raw : undefined
 }
 
-function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined, configPin: string | undefined, configRedacted: Record<string, unknown> | undefined): void {
+function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined, configPin: string | undefined, configRedacted: Record<string, unknown> | undefined, boundHost: string): void {
   currentRequestId = typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id'] !== ''
     ? req.headers['x-request-id']
     : `req_${Math.random().toString(36).slice(2, 12)}`
@@ -694,6 +734,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
       return
     }
   }
+  // OBS-01 (reconstruction-contracts.md §18): GET /internal/metrics — JSON
+  // snapshot, loopback only, no service token required (same public surface
+  // as /v1/health, or exposed per deployment config). Routed BEFORE the
+  // v1/v2 version gate because the path carries no API version prefix.
+  if (handleInternalMetrics(req, res, kernel, boundHost)) return
   let url: URL
   try {
     url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -2189,7 +2234,24 @@ export function startKernelServer(options: KernelServerOptions): Promise<{ serve
   // CONFIG-01: the deployment's redacted effective config (CLI-computed) or
   // the kernel's own — served by GET /v1/config/effective.
   const configRedacted = options.configRedacted ?? kernel.configRedacted
-  const server = createServer((req, res) => route(req, res, kernel, token, configPin, configRedacted))
+  const server = createServer((req, res) => {
+    // OBS-01 (reconstruction-contracts.md §18): HTTP request count + latency
+    // histogram. Recorded once per request on response finish (or close for
+    // aborted sockets); tags are fixed constants (method/status) — never
+    // paths, ids or tokens.
+    const startedAt = performance.now()
+    let counted = false
+    const recordRequest = (): void => {
+      if (counted) return
+      counted = true
+      const method = req.method ?? 'GET'
+      kernel.metrics.count('http.request', { method, status: String(res.statusCode) })
+      kernel.metrics.observe('http.request.duration_ms', performance.now() - startedAt, { method })
+    }
+    res.on('finish', recordRequest)
+    res.on('close', recordRequest)
+    route(req, res, kernel, token, configPin, configRedacted, host)
+  })
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

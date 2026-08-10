@@ -16,6 +16,7 @@ export { IMAGES_LOCK, getLockedDigest, validateImageDigest, type ImagesLock, typ
 export { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
 export { startKernelServer, type KernelServerOptions } from './server.js'
 export { ArtifactCas } from './cas.js'
+export { MetricsStore, HISTOGRAM_BUCKETS, type MetricsSnapshot, type CounterView, type HistogramView, type HistogramBucket, type MetricTags } from './metrics.js'
 export { openDatabase, SCHEMA_VERSION } from './store.js'
 export { runMigrations, MIGRATIONS, checksumOf } from './migrations.js'
 export {
