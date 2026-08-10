@@ -205,6 +205,8 @@ data: {"kind":"exit","job_id":"job_x","run_id":"run_x","seq":99,"exit_code":0,"s
 | POST | /v2/documents/{id}/moves | from_path、to_path、source/file version；原子 rename |
 | POST | /v2/documents/{id}/assets | multipart binary asset upload |
 | GET | /v2/documents/{id}/history | 文件和 workspace revision |
+| POST | /v2/documents/{id}/snapshots | 冻结当前 manifest（含可物化字节，TEX-01） |
+| GET | /v2/documents/{id}/snapshot-files | 冻结 revision 的单文件字节；?revision=&path=（当前实现 /v1/documents/{id}/snapshot-files，TEX-01 构建输入） |
 | POST | /v2/documents/{id}/builds | 冻结 manifest 并创建 latex-compile Job |
 | GET | /v2/documents/{id}/builds | 构建历史 |
 | GET | /v2/builds/{id} | 状态、diagnostics、Artifact refs、freshness |
@@ -227,6 +229,10 @@ Build 请求：
   "idempotency_key": "latex:doc_x:rev7:pdflatex"
 }
 ~~~
+
+Build 提交（POST builds）在冻结与提交两处执行 document-revision CAS：expected_document_revision 过期或提交时 document revision 已前进 → 409 document_version_conflict，不创建 Job、不创建 build 行（保存冲突立即终止编译）。201 响应为 `{ build, job }`，其中 build.job_id、build.revision（输入 revision）与 job 供 UI 接入同一 Job 的 live Terminal（SSE GET /v1/jobs/{job_id}/terminal）与 stale PDF 判定（build.revision < document.revision）。
+
+构建字节是冻结 revision 的可物化字节（TEX-01）：POST snapshots / POST builds 冻结时把每文件 content+hash 存入 snapshot store；Runner 通过 GET snapshot-files?revision=&path= 取该 revision 的字节并逐文件校验 manifest hash，绝不后取当前文件。snapshot-files 对未知 revision/path 返回 404、参数缺失/非法返回 422；Runner 对不可读或 hash 不匹配一律硬失败，不降级为当前文件。
 
 构建日志通过同一 Terminal SSE 读取。Build 完成返回结构化 diagnostics、PDF、完整 log、aux/bbl/blg/fls 和输入 manifest。Artifact PDF 必须为 application/pdf。
 

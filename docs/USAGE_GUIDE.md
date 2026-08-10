@@ -90,7 +90,7 @@ Settings → Execution 选择已经登记的 Local Docker 或 Remote Runner prof
 
 ## 8. TeX Manuscript Workbench
 
-> 当前已有 TeX 文件树、textarea 编辑、expected_version 保存、构建轮询、诊断列表和 PDF embed。仍缺实时 Build Terminal、诊断跳转、PDF freshness、完整 history/move/assets；新建文件和清空非空文件的 dirty 判断存在已知阻断缺陷。以下步骤描述目标 v2，TEX-01/TEX-02 未“已验收”前不得把编辑或编译结果当成正式稿件证据。
+> 当前已有 TeX 文件树、textarea 编辑、expected_version 保存、构建轮询、诊断列表和 PDF embed。dirty 判断已修复（以文件 GET/最近保存内容为基线，清空非空文件会正确显示未保存）；编译冻结可物化字节（快照按 revision 保存文件内容，Runner 编译输入不会被编译期间的编辑改变）；保存冲突（409）会立即终止编译且不创建 Job；构建卡片显示输入 revision 与 stale 标识，可跳转到同一 Job 的实时 Terminal。仍缺（UI 浏览器层，Playwright 类环境不可用、未验收）：Manuscript 页内嵌实时 Build Terminal DOM、PDF freshness 的浏览器验收、完整 history/move/assets。以下步骤描述目标 v2，TEX-01/TEX-02 未“已验收”前不得把编辑或编译结果当成正式稿件证据。
 
 ### 8.1 生成稿件
 

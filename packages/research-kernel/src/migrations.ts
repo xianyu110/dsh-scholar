@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS tex_snapshots (
   created_at TEXT NOT NULL,
   PRIMARY KEY (document_id, revision)
 );
+-- TEX-01 (§4 row 95): frozen, materializable snapshot bytes (parity with the
+-- tex-workspace SCHEMA — the Runner compiles these revision-scoped bytes).
+CREATE TABLE IF NOT EXISTS tex_snapshot_files (
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  PRIMARY KEY (document_id, revision, path)
+);
+CREATE INDEX IF NOT EXISTS idx_tex_snapshot_files_doc ON tex_snapshot_files(document_id, revision);
 CREATE TABLE IF NOT EXISTS tex_builds (
   build_id TEXT PRIMARY KEY,
   document_id TEXT NOT NULL,

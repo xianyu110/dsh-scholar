@@ -7,8 +7,13 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { TexError } from '../../packages/research-kernel/lib/tex-workspace.js'
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-tex-test-'))
@@ -172,6 +177,70 @@ describe('tex workspace', () => {
       expect(error).toBeInstanceOf(KernelError)
       expect((error as KernelError).code).toBe('tex_snapshot_required')
     }
+    kernel.close()
+  })
+
+  it('clear/revert are CAS-visible changes: clearing to "" bumps revision, revert restores bytes (dirty semantics §7)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    const original = '\\documentclass{article}\n\\begin{document}hi\\end{document}\n'
+    const w1 = kernel.texWriteFile(doc.document_id, 'paper.tex', original)
+    expect(w1.version).toBe(1)
+    const revisionBefore = kernel.texTree(doc.document_id).document.revision
+    // Clear (content → '') is a REAL change: new version + document revision,
+    // empty bytes + sha256('') stored (the UI's dirty baseline after save).
+    const cleared = kernel.texWriteFile(doc.document_id, 'paper.tex', '', w1.version)
+    expect(cleared.version).toBe(2)
+    expect(kernel.texReadFile(doc.document_id, 'paper.tex')?.content).toBe('')
+    expect(kernel.texReadFile(doc.document_id, 'paper.tex')?.content_hash).toBe(sha256(''))
+    expect(kernel.texTree(doc.document_id).document.revision).toBeGreaterThan(revisionBefore)
+    // Clearing with a stale expected version → 409 (no silent last-write-wins).
+    try {
+      kernel.texWriteFile(doc.document_id, 'paper.tex', '', 1)
+      throw new Error('expected TexError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(TexError)
+      expect((error as TexError).code).toBe('document_version_conflict')
+    }
+    // Revert restores the original bytes via the CURRENT version CAS → v3.
+    const reverted = kernel.texWriteFile(doc.document_id, 'paper.tex', original, 2)
+    expect(reverted.version).toBe(3)
+    expect(kernel.texReadFile(doc.document_id, 'paper.tex')?.content).toBe(original)
+    // Revert with a stale expected version → 409.
+    try {
+      kernel.texWriteFile(doc.document_id, 'paper.tex', original, 1)
+      throw new Error('expected TexError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(TexError)
+      expect((error as TexError).code).toBe('document_version_conflict')
+    }
+    kernel.close()
+  })
+
+  it('snapshots freeze MATERIALIZABLE bytes: edits after freeze cannot change build input (TEX-01)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    const original = '\\documentclass{article}\n\\begin{document}FROZEN\\end{document}\n'
+    kernel.texWriteFile(doc.document_id, 'paper.tex', original)
+    kernel.texWriteFile(doc.document_id, 'main.bib', '@misc{frozen}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    // Edit + delete after freeze: the document revision moves on…
+    kernel.texWriteFile(doc.document_id, 'paper.tex', original.replace('FROZEN', 'CHANGED'))
+    kernel.texDeleteFile(doc.document_id, 'main.bib')
+    // …but the frozen bytes at the snapshot revision are untouched and
+    // hash-match the manifest: the build input is exactly the frozen revision.
+    const frozen = kernel.texSnapshotFile(doc.document_id, snap.revision, 'paper.tex')
+    expect(frozen?.content).toBe(original)
+    expect(frozen?.content_hash).toBe(snap.manifest.files.find(f => f.path === 'paper.tex')!.content_hash)
+    const frozenBib = kernel.texSnapshotFile(doc.document_id, snap.revision, 'main.bib')
+    expect(frozenBib?.content).toBe('@misc{frozen}\n')
+    // Unknown paths / revisions read as null (fail-closed, never current bytes).
+    expect(kernel.texSnapshotFile(doc.document_id, snap.revision, 'missing.tex')).toBeNull()
+    expect(kernel.texSnapshotFile(doc.document_id, snap.revision - 1, 'paper.tex')).toBeNull()
+    // Traversal rejection mirrors the file store.
+    expect(() => kernel.texSnapshotFile(doc.document_id, snap.revision, '../escape.tex')).toThrowError(/root-relative/)
     kernel.close()
   })
 

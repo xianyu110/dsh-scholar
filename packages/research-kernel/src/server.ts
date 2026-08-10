@@ -916,6 +916,27 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             ok(res, kernel.texSnapshot(id, input.expected_revision))
             return
           }
+          if (id !== undefined && sub === 'snapshot-files' && method === 'GET') {
+            // TEX-01 (§4 row 95): frozen, revision-scoped build bytes — the
+            // Runner materializes latex-compile input from this route, never
+            // from the current file (which may have moved on since freeze).
+            const revisionRaw = url.searchParams.get('revision')
+            const path = url.searchParams.get('path')
+            if (revisionRaw === null || path === null) {
+              throw new KernelError(422, 'missing_params', '?revision=&path= are required')
+            }
+            const revision = Number(revisionRaw)
+            if (!Number.isInteger(revision) || revision <= 0) {
+              throw new KernelError(422, 'invalid_revision', 'revision must be a positive integer')
+            }
+            const file = kernel.texSnapshotFile(id, revision, path)
+            if (file === null) {
+              throw new KernelError(404, 'snapshot_file_not_found',
+                `tex snapshot file ${path} not found at revision ${revision} (document ${id})`)
+            }
+            ok(res, file)
+            return
+          }
           if (id !== undefined && sub === 'builds' && subId === undefined && method === 'GET') {
             ok(res, kernel.texListBuilds(id))
             return

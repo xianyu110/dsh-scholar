@@ -437,6 +437,25 @@ export class ResearchClient {
     }
   }
 
+  /**
+   * TEX-01 (§4 row 95): FROZEN snapshot file bytes at a given revision —
+   * the latex-compile build input. The Runner materializes from THIS, never
+   * from getDocumentFile (the current file may have moved on since freeze).
+   * null → the snapshot revision/path is not materializable: fail closed.
+   */
+  async getDocumentSnapshotFile(documentId: string, revision: number, path: string): Promise<{ path: string; content: string; content_hash: string } | null> {
+    try {
+      const response = await fetch(`${this.endpoint}/v1/documents/${encodeURIComponent(documentId)}/snapshot-files?revision=${revision}&path=${encodeURIComponent(path)}`, {
+        headers: { accept: 'application/json', ...this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {} },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!response.ok) return null
+      return await response.json() as { path: string; content: string; content_hash: string }
+    } catch {
+      return null
+    }
+  }
+
   // ── budget / events ──────────────────────────────────────────────────────
 
   recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): Promise<Record<string, unknown>> {

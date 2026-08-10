@@ -189,6 +189,8 @@ Header 显示 document、revision、保存状态、当前 build、PDF freshness�
 
 Compile 先保存所有脏文件，再冻结 workspace manifest 并提交 latex-compile Job。按钮显示 queued/running/succeeded/failed/cancelled。Build terminal 复用 Terminal 组件并默认 stderr/all。
 
+保存失败（409 document_version_conflict）或 document revision 前进时，Compile 必须立即终止，不得以旧 revision 冻结或创建 Job；queued/running 期间 Compile 按钮禁用（防重复提交，kernel idempotency_key 兜底）。冻结的 manifest 连同每文件字节按 revision 存入 snapshot store；构建输入是冻结 revision 的可物化字节，编译期间的新编辑只前进 document revision 并让旧 PDF 显示 stale，绝不改变本次构建输入。build 卡片展示输入 revision 与 job_id，点击可跳到同一 Job 的实时 Terminal（SSE GET /v1/jobs/{job_id}/terminal）。
+
 诊断按 error/warning/info 分组，显示 file:line:column、pass 和消息；点击定位编辑器。诊断 parser 的本地 code 可翻译，TeX 原始消息保留。undefined citation、missing file、overfull box 和 shell-escape 拒绝有专门类型。
 
 成功保存后按 Settings debounce 自动创建 preview build；状态、编译输出和 diagnostics 实时更新，成功即刷新 PDF。新编辑立即把当前 PDF 标 stale；旧 preview 被新 revision supersede。显式 Compile 仍冻结 manifest 并创建权威 Job，不能被 preview 取消或替代。

@@ -2,7 +2,9 @@ import type { ManuscriptBuild, ManuscriptFile, Projection } from '../types'
 import { api, authHeaders, base } from '../api'
 import { t } from '../i18n/index'
 import { el } from '../ui'
-import { state } from '../state'
+import { state, tabSave } from '../state'
+import { terminalLoadSeq } from '../terminal'
+import { isEditorDirty } from '../manuscript-dirty'
 /* ─────────────────────────── Manuscript Workbench ─────────────────────────── */
 
 /**
@@ -18,6 +20,7 @@ export let msRevision = 1
 export let msOpenPath: string | null = null
 export let msContent = ''
 export let msSavedVersion = 0
+export let msSavedContent = ''
 export let msDirty = false
 export let msConflict: string | null = null
 export let msBuilds: ManuscriptBuild[] = []
@@ -56,6 +59,9 @@ export async function msOpenFile(path: string): Promise<void> {
   msOpenPath = path
   msContent = file.content
   msSavedVersion = file.version
+  // §7 dirty baseline: the SAVED content from the file GET — the tree entry
+  // carries no content, so it can never serve as the dirty baseline.
+  msSavedContent = file.content
   msDirty = false
 }
 
@@ -72,6 +78,9 @@ export async function msSaveFile(): Promise<void> {
     return
   }
   msSavedVersion = result.version
+  // The server stored exactly the content we sent: that is the new baseline
+  // (revert-to-saved must read clean, including a revert to '').
+  msSavedContent = msContent
   msDirty = false
   msConflict = null
   await msLoadTree()
@@ -84,6 +93,7 @@ export async function msReloadFile(): Promise<void> {
   if (file !== null) {
     msContent = file.content
     msSavedVersion = file.version
+    msSavedContent = file.content
     msDirty = false
     msConflict = null
     state.rerender()
@@ -92,12 +102,25 @@ export async function msReloadFile(): Promise<void> {
 
 export async function msCompile(): Promise<void> {
   if (msDocId === null) return
-  if (msDirty) await msSaveFile()
+  // §4 row 95 (TEX-01): a failed save (409 conflict) must TERMINATE the
+  // compile — the workspace revision moved under us and the frozen manifest
+  // would not match what the editor holds. Save first, abort on conflict.
+  if (msDirty) {
+    await msSaveFile()
+    if (msConflict !== null) return
+  }
   const result = await api<{ build: ManuscriptBuild }>(`/v1/documents/${encodeURIComponent(msDocId)}/builds`, {
     method: 'POST',
     body: JSON.stringify({ expected_document_revision: msRevision, root_file: 'paper.tex' }),
   })
-  if (result === null) return
+  if (result === null) {
+    // The kernel rejects a stale-revision compile with 409
+    // document_version_conflict (no job, no build row) — surface it instead
+    // of silently continuing.
+    msConflict = t('manuscript', 'manuscript.compile.rejected')
+    state.rerender()
+    return
+  }
   msBuilds = [result.build, ...msBuilds]
   void msPollBuilds()
   state.rerender()
@@ -169,6 +192,8 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   saveBtn.onclick = () => { void msSaveFile() }
   const compileBtn = el('button', 'btn approve', t('manuscript', 'manuscript.action.compile'))
   compileBtn.style.cssText = 'padding:4px 14px'
+  // §4 row 95: prevent duplicate submits while a build is queued/running.
+  compileBtn.disabled = msBuilds.some(b => b.status === 'queued' || b.status === 'running')
   compileBtn.onclick = () => { void msCompile() }
   const refreshBtn = el('button', 'hbtn', '⟳')
   refreshBtn.title = t('manuscript', 'manuscript.action.refresh')
@@ -237,7 +262,10 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
     ta.style.cssText = 'flex:1;resize:none;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:11.5px/1.6 ui-monospace,Menlo,monospace;outline:none;min-height:420px;white-space:pre'
     ta.oninput = () => {
       msContent = ta.value
-      msDirty = ta.value !== (msFiles.find(f => f.path === msOpenPath)?.content ?? '')
+      // §7 dirty-before-compile: compare against the SAVED content — clearing
+      // a non-empty file ('' !== saved) must read dirty; reverting to the
+      // saved bytes (including '') must read clean.
+      msDirty = isEditorDirty(ta.value, msSavedContent)
       const save = [...(editorCol.querySelectorAll('button') ?? [])].find(b => b.textContent === t('manuscript', 'manuscript.action.save'))
       if (save !== undefined) save.disabled = !msDirty
     }
@@ -266,8 +294,40 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
     const head = el('div', 'row')
     head.style.cssText = 'justify-content:space-between'
     head.appendChild(el('span', 'artifact-kind', b.status.toUpperCase()))
-    head.appendChild(el('span', 'muted', `rev ${b.revision} · ${b.build_id.slice(0, 12)}`))
+    // Input revision of THIS build (freshness baseline): the kernel freezes
+    // the manifest at b.revision; document moves past it make the PDF stale.
+    head.appendChild(el('span', 'muted', t('manuscript', 'manuscript.buildMeta', { rev: String(b.revision), build: b.build_id.slice(0, 12) })))
     card.appendChild(head)
+    if (b.revision < msRevision) {
+      const stale = el('span', 'muted')
+      stale.style.cssText = 'color:var(--tone-amber);font-size:10px;font-weight:700'
+      stale.textContent = t('manuscript', 'manuscript.builds.stale')
+      card.appendChild(stale)
+    }
+    if (b.job_id !== null && b.job_id !== '') {
+      // §4 row 95: cross-link the build to its latex-compile Job's live
+      // Terminal (SSE GET /v1/jobs/{job_id}/terminal; same job_id as the
+      // Runs/Terminal tab).
+      const termBtn = el('button', 'hbtn', '🖥')
+      termBtn.title = t('manuscript', 'manuscript.builds.openTerminal')
+      termBtn.style.cssText = 'padding:0 6px;font-size:9px;flex-shrink:0'
+      termBtn.onclick = () => {
+        state.terminalRunId = b.job_id!
+        state.terminalLines = []
+        state.terminalLastSeq = 0
+        state.terminalTotalBytes = 0
+        state.terminalDroppedBytes = 0
+        state.terminalTruncated = false
+        state.terminalExitCode = null
+        state.terminalExitSignal = null
+        state.terminalStatus = 'idle'
+        terminalLoadSeq()
+        state.activeTab = 'terminal'
+        tabSave()
+        state.rerender()
+      }
+      card.appendChild(termBtn)
+    }
     let diagnostics: Array<{ level: string; message: string }> = []
     try { diagnostics = JSON.parse(b.diagnostics) as Array<{ level: string; message: string }> } catch { /* empty */ }
     if (diagnostics.length > 0) {

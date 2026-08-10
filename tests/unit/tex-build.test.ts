@@ -68,7 +68,7 @@ describe('latex-compile chain (TEX-02)', () => {
     kernel.close()
   })
 
-  it('materializes the frozen workspace with hash verification and traversal protection', async () => {
+  it('materializes the FROZEN snapshot bytes with hash verification and traversal protection (TEX-01)', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'dsh-texmat-'))
     mkdirSync(join(workDir, 'sections'), { recursive: true })
     const content = '\\section{Intro}\n'
@@ -82,11 +82,13 @@ describe('latex-compile chain (TEX-02)', () => {
         { path: 'sections/intro.tex', version: 2, content_hash: sha256(content) },
       ],
     }
+    // The runner talks ONLY to the kernel's snapshot store (revision-scoped
+    // bytes) — there is no current-file read at all.
     const fakeClient = {
-      getDocumentFile: async (docId: string, path: string) => {
-        if (docId !== 'doc_t') return null
-        if (path === 'paper.tex') return { path, version: 3, content: '\\documentclass{article}\n' }
-        if (path === 'sections/intro.tex') return { path, version: 2, content }
+      getDocumentSnapshotFile: async (docId: string, revision: number, path: string) => {
+        if (docId !== 'doc_t' || revision !== 3) return null
+        if (path === 'paper.tex') return { path, content: '\\documentclass{article}\n', content_hash: sha256('\\documentclass{article}\n') }
+        if (path === 'sections/intro.tex') return { path, content, content_hash: sha256(content) }
         return null
       },
     }
@@ -94,15 +96,27 @@ describe('latex-compile chain (TEX-02)', () => {
     expect(count).toBe(2)
     expect(readFile(join(workDir, 'paper.tex'))).toBe('\\documentclass{article}\n')
     expect(readFile(join(workDir, 'sections/intro.tex'))).toBe(content)
+    // Negative TEX-01: a snapshot revision with no frozen bytes fails closed
+    // (the runner must NOT fall back to the current file)…
+    const stale: TexSnapshotManifest = { ...manifest, revision: 4 }
+    await expect(materializeTexWorkspace(fakeClient, stale, workDir)).rejects.toThrow(/revision 4/)
+    // …an unreadable path is a hard error…
+    const missing: TexSnapshotManifest = { ...manifest, files: [{ path: 'gone.tex', version: 1, content_hash: '' }] }
+    await expect(materializeTexWorkspace(fakeClient, missing, workDir)).rejects.toThrow(/unreadable from kernel/)
+    // …and snapshot bytes that do not match the manifest hash are rejected
+    // (frozen bytes are still hash-verified against the manifest).
+    const tamperedClient = {
+      ...fakeClient,
+      getDocumentSnapshotFile: async (docId: string, revision: number, path: string) => {
+        if (docId !== 'doc_t' || revision !== 3) return null
+        if (path === 'paper.tex') return { path, content: 'TAMPERED', content_hash: sha256('TAMPERED') }
+        return null
+      },
+    }
+    await expect(materializeTexWorkspace(tamperedClient, manifest, workDir)).rejects.toThrow(/integrity mismatch/)
     // Traversal path rejected before any fetch.
     const evil: TexSnapshotManifest = { ...manifest, files: [{ path: '../escape.tex', version: 1, content_hash: '' }] }
     await expect(materializeTexWorkspace(fakeClient, evil, workDir)).rejects.toThrow(/unsafe path/)
-    // Hash mismatch is an integrity error.
-    const corrupt: TexSnapshotManifest = {
-      ...manifest,
-      files: [{ path: 'paper.tex', version: 3, content_hash: 'deadbeef' }],
-    }
-    await expect(materializeTexWorkspace(fakeClient, corrupt, workDir)).rejects.toThrow(/integrity mismatch/)
     // Unsafe root_file rejected.
     const badRoot: TexSnapshotManifest = { ...manifest, root_file: 'a; rm -rf /' }
     await expect(materializeTexWorkspace(fakeClient, badRoot, workDir)).rejects.toThrow(/unsafe/)
@@ -217,6 +231,102 @@ describe('latex-compile chain (TEX-02)', () => {
       // The conflict left the file intact at version 2.
       const after = await fetch(`${url}/v1/documents/${doc.document_id}/file?path=${encodeURIComponent('sections/notes.tex')}`)
       expect(((await after.json()) as { version: number }).version).toBe(2)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+    }
+  })
+
+  it('HTTP GET /v1/documents/{id}/snapshot-files serves FROZEN bytes at the frozen revision (TEX-01)', async () => {
+    const kernel = freshKernel()
+    const { server, url } = await startKernelServer({ kernel, host: '127.0.0.1', port: 0 })
+    try {
+      const projResp = await fetch(`${url}/v1/projects`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 't', workspace: '/w', brief: makeBrief() }),
+      })
+      const project = (await projResp.json()) as { project_id: string }
+      const docResp = await fetch(`${url}/v1/projects/${project.project_id}/manuscript-drafts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      })
+      const doc = (await docResp.json()) as { document_id: string }
+      const original = '\\documentclass{article}\n\\begin{document}FROZEN\\end{document}\n'
+      await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'paper.tex', content: original }),
+      })
+      const snapResp = await fetch(`${url}/v1/documents/${doc.document_id}/snapshots`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      })
+      expect(snapResp.status).toBe(200)
+      const snap = (await snapResp.json()) as { revision: number; manifest: { files: Array<{ path: string; content_hash: string }> } }
+      // The CURRENT file moves on after freeze…
+      await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'paper.tex', content: original.replace('FROZEN', 'CHANGED') }),
+      })
+      // …the snapshot-files route still serves the FROZEN bytes, hash-verified.
+      const frozenResp = await fetch(`${url}/v1/documents/${doc.document_id}/snapshot-files?revision=${snap.revision}&path=${encodeURIComponent('paper.tex')}`)
+      expect(frozenResp.status).toBe(200)
+      const frozen = (await frozenResp.json()) as { content: string; content_hash: string }
+      expect(frozen.content).toBe(original)
+      const paperEntry = snap.manifest.files.find(f => f.path === 'paper.tex')
+      expect(paperEntry).toBeDefined()
+      expect(frozen.content_hash).toBe(paperEntry!.content_hash)
+      // Unknown path / revision → 404; bad params → 422 (fail-closed, never
+      // a fallback to the current file).
+      expect((await fetch(`${url}/v1/documents/${doc.document_id}/snapshot-files?revision=${snap.revision}&path=${encodeURIComponent('nope.tex')}`)).status).toBe(404)
+      expect((await fetch(`${url}/v1/documents/${doc.document_id}/snapshot-files?revision=999&path=${encodeURIComponent('paper.tex')}`)).status).toBe(404)
+      expect((await fetch(`${url}/v1/documents/${doc.document_id}/snapshot-files?revision=abc&path=${encodeURIComponent('paper.tex')}`)).status).toBe(422)
+      expect((await fetch(`${url}/v1/documents/${doc.document_id}/snapshot-files?path=${encodeURIComponent('paper.tex')}`)).status).toBe(422)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+    }
+  })
+
+  it('HTTP: a save conflict (409) then compile at the stale revision is rejected — no job, no build row', async () => {
+    const kernel = freshKernel()
+    const { server, url } = await startKernelServer({ kernel, host: '127.0.0.1', port: 0 })
+    try {
+      const projResp = await fetch(`${url}/v1/projects`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 't', workspace: '/w', brief: makeBrief() }),
+      })
+      const project = (await projResp.json()) as { project_id: string }
+      const docResp = await fetch(`${url}/v1/projects/${project.project_id}/manuscript-drafts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      })
+      const doc = (await docResp.json()) as { document_id: string }
+      await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'paper.tex', content: '\\documentclass{article}\n\\begin{document}A\\end{document}\n' }),
+      })
+      const snapResp = await fetch(`${url}/v1/documents/${doc.document_id}/snapshots`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      })
+      const snap = (await snapResp.json()) as { revision: number }
+      // Concurrent save (the "other editor") bumps the document revision —
+      // the local editor's own save would 409 on expected_version.
+      await fetch(`${url}/v1/documents/${doc.document_id}/file`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'paper.tex', content: '\\documentclass{article}\n\\begin{document}B\\end{document}\n' }),
+      })
+      // Compile with the STALE expected_document_revision must be rejected
+      // (409 document_version_conflict) BEFORE any job is created.
+      const buildResp = await fetch(`${url}/v1/documents/${doc.document_id}/builds`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_document_revision: snap.revision, root_file: 'paper.tex' }),
+      })
+      expect(buildResp.status).toBe(409)
+      expect(((await buildResp.json()) as { error: { code: string } }).error.code).toBe('document_version_conflict')
+      // No latex-compile job was queued and no build row exists: the compile
+      // cannot produce a PDF for the stale revision.
+      const jobsResp = await fetch(`${url}/v1/projects/${project.project_id}/jobs`)
+      const jobs = (await jobsResp.json()) as Array<{ kind: string }>
+      expect(jobs.filter(j => j.kind === 'latex-compile')).toHaveLength(0)
+      const buildsResp = await fetch(`${url}/v1/documents/${doc.document_id}/builds`)
+      expect(((await buildsResp.json()) as unknown[])).toHaveLength(0)
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
       kernel.close()

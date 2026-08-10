@@ -86,8 +86,13 @@ export function deprecatedAlias(canonical: ResearchToolDef, alias: string): Rese
   }
 }
 
-/** Build one research tool bound to the shared tool context. */
-export function researchTool(def: ResearchToolDef): ReturnType<typeof defineTool> {
+/**
+ * Build one research tool bound to ITS instance's tool context (instance
+ * closure — no module-level mutable ref, so two plugin instances in one
+ * process can never cross-talk: each tool executes against the client/cache/
+ * roles/ctx captured at registration time).
+ */
+export function researchTool(def: ResearchToolDef, toolCtx: ResearchToolContext): ReturnType<typeof defineTool> {
   // Type-level cast: the DSH value-schema inference is too strict for the
   // dynamic records research tools return; runtime validation stays intact.
   return defineTool({
@@ -99,14 +104,11 @@ export function researchTool(def: ResearchToolDef): ReturnType<typeof defineTool
       render: (_args: unknown, value: unknown) => renderText(value),
     },
     execute: (args: unknown, exec: { agent?: { id: string }; signal: AbortSignal }) => def.execute(
-      args as Record<string, unknown>, toolContextRef.value, exec.agent?.id,
+      args as Record<string, unknown>, toolCtx, exec.agent?.id,
       { agent: exec.agent, signal: exec.signal },
     ),
   } as never) as unknown as ReturnType<typeof defineTool>
 }
-
-/** Set once in apply() before registration. */
-export const toolContextRef: { value: ResearchToolContext } = { value: undefined as unknown as ResearchToolContext }
 
 const OPT_STRING = { type: 'string' as const }
 const INT = { type: 'integer' as const }
@@ -126,7 +128,6 @@ const okSchema = {
 } as const satisfies ObjectValueSchemaSpec
 
 export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<typeof defineTool>): void } }, toolCtx: ResearchToolContext): void {
-  toolContextRef.value = toolCtx
   const { client } = toolCtx
 
   // ── project orchestration (Research Director) ────────────────────────────
@@ -194,7 +195,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
           throw new Error(`unknown action ${args.action}`)
       }
     },
-  }))
+  }, toolCtx))
 
   const GATE_CONTROLLED = ['SCOPED', 'IDEA_APPROVED', 'CONTRACT_APPROVED', 'RELEASED']
   ctx.tools.register(researchTool({
@@ -216,7 +217,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const project = await client.transition(projectId, args.to, args.expected_revision, args.reason)
       return { ok: true, project }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'research_gate_request',
@@ -252,7 +253,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       }
       throw new Error(`unknown action ${args.action}`)
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'research_budget',
@@ -279,7 +280,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, budget }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'research_status',
@@ -291,7 +292,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       return { ok: true, projection: await client.projectProjection(projectId) }
     },
-  }))
+  }, toolCtx))
 
   // ── literature (Scholar) ─────────────────────────────────────────────────
 
@@ -317,7 +318,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       }, ctx_.cache)
       return { hits: result.hits, queries: result.queries, dedup_removed: result.dedup_removed }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'paper_resolve',
@@ -328,7 +329,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const paper = await resolvePaper(args.identifier, ctx_.cache)
       return { ok: true, paper }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'corpus_snapshot',
@@ -356,7 +357,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length, passages: snapshot.passages.length, citation_edges: snapshot.citation_edges.length, dedup_removed: result.dedup_removed }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'passage_lookup',
@@ -373,7 +374,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         : []
       return { ok: true, passages, snapshot_id: latest?.snapshot_id ?? null }
     },
-  }))
+  }, toolCtx))
 
   // ── agent panel orchestration (design §4.3) ──────────────────────────────
 
@@ -454,7 +455,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         note: rejected.length > 0 ? 'some panelists failed; inspect failures before drawing conclusions' : 'all panelists settled',
       }
     },
-  }))
+  }, toolCtx))
 
   // ── idea (Idea Panel / Novelty Auditor) ──────────────────────────────────
 
@@ -512,7 +513,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, idea }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'idea_compare',
@@ -546,7 +547,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       }
       return { ok: true, frontier: frontier.map(c => c.idea_id), frontier_cards: frontier, rest: rest.map(c => c.idea_id), note: 'non-dominated frontier first; pick among it, not by a single blended score' }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'novelty_audit',
@@ -573,7 +574,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, idea: updated, project_id: idea.project_id }
     },
-  }))
+  }, toolCtx))
 
   // ── code & baseline (Code Engineer, design §4.6) ─────────────────────────
 
@@ -617,7 +618,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, snapshot: { ...snapshot, artifact_id: artifact.artifact_id } }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'patch_apply',
@@ -642,7 +643,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, applied: { files_changed: applied.filesChanged }, snapshot: { ...snapshot, artifact_id: artifact.artifact_id } }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'baseline_prepare',
@@ -675,7 +676,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, job, reproduction: { repo: args.repo, commit: args.commit ?? '', tolerance: args.tolerance ?? 0.05, expected_metrics: expected, note: 'reproduction passes when |metric - expected| / |expected| <= tolerance for every expected metric' } }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'test_run',
@@ -701,7 +702,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, job, note: 'poll with experiment_status; failures are classified per design §4.6.2' }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'baseline_verify',
@@ -760,7 +761,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         },
       }
     },
-  }))
+  }, toolCtx))
 
   // ── experiment (Architect / Operator) ────────────────────────────────────
 
@@ -801,7 +802,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, contract }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'experiment_submit',
@@ -842,7 +843,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, job }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'experiment_status',
@@ -857,7 +858,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       return { ok: true, jobs: await client.listJobs(projectId) }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'experiment_cancel',
@@ -868,7 +869,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const job = await client.cancelJob(args.job_id, sessionId ?? 'unknown', args.reason)
       return { ok: true, job }
     },
-  }))
+  }, toolCtx))
 
   // ── evidence (Statistician / Auditor) ────────────────────────────────────
 
@@ -903,7 +904,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, evidence: item, note: 'draft_unverified — cannot support Claims until an Analysis Worker produces verified evidence' }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'claim_create',
@@ -924,7 +925,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       })
       return { ok: true, claim }
     },
-  }))
+  }, toolCtx))
 
   const claimVerifyDef: ResearchToolDef = {
     name: 'claim_verify_request',
@@ -948,10 +949,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       return { ok: true, claim }
     },
   }
-  ctx.tools.register(researchTool(claimVerifyDef))
+  ctx.tools.register(researchTool(claimVerifyDef, toolCtx))
   // §17: one-version deprecation alias — old name stays callable, never
   // "unknown tool"; responses and catalog carry deprecation metadata.
-  ctx.tools.register(researchTool(deprecatedAlias(claimVerifyDef, 'claim_verify')))
+  ctx.tools.register(researchTool(deprecatedAlias(claimVerifyDef, 'claim_verify'), toolCtx))
 
   const analysisRequestDef: ResearchToolDef = {
     name: 'analysis_request',
@@ -969,9 +970,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       return { ok: true, analysis }
     },
   }
-  ctx.tools.register(researchTool(analysisRequestDef))
+  ctx.tools.register(researchTool(analysisRequestDef, toolCtx))
   // §17: one-version deprecation alias (see claim_verify above).
-  ctx.tools.register(researchTool(deprecatedAlias(analysisRequestDef, 'analysis_build')))
+  ctx.tools.register(researchTool(deprecatedAlias(analysisRequestDef, 'analysis_build'), toolCtx))
 
   // ── manuscript (Writer / Reviewer) ───────────────────────────────────────
 
@@ -990,7 +991,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const draft = await client.buildManuscript(projectId, args.format ?? 'markdown', args.include_limitations ?? true)
       return { ok: true, ...draft }
     },
-  }))
+  }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'manuscript_review',
@@ -1003,7 +1004,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const review = await client.manuscriptReview(projectId)
       return { ok: true, review }
     },
-  }))
+  }, toolCtx))
 
   const releaseBundleRequestDef: ResearchToolDef = {
     name: 'release_bundle_request',
@@ -1017,9 +1018,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       return { ok: true, bundle }
     },
   }
-  ctx.tools.register(researchTool(releaseBundleRequestDef))
+  ctx.tools.register(researchTool(releaseBundleRequestDef, toolCtx))
   // §17: one-version deprecation alias (see claim_verify above).
-  ctx.tools.register(researchTool(deprecatedAlias(releaseBundleRequestDef, 'release_bundle')))
+  ctx.tools.register(researchTool(deprecatedAlias(releaseBundleRequestDef, 'release_bundle'), toolCtx))
 }
 
 

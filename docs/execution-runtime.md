@@ -178,7 +178,7 @@ Manuscript Builder 只读 Brief、冻结 Corpus、approved Contract、accepted E
 
 latex-compile Job：
 
-- 输入为冻结 TexWorkspaceSnapshot；
+- 输入为冻结 TexWorkspaceSnapshot；冻结时同步物化每文件字节（TEX-01，§4 行 95）：snapshot store 保存 manifest 与按 revision 的冻结 content+hash，Runner 只从 snapshot store 取该 revision 的字节并逐文件 hash 校验，绝不后取“当前文件”；
 - 镜像使用固定 TeX Live digest；
 - 默认 pdflatex -interaction=nonstopmode -halt-on-error -file-line-error -recorder -no-shell-escape；
 - 按配置运行 latex、bibtex/biber、latex、latex，最多四遍；
@@ -194,7 +194,7 @@ TeX source 可能不可信，正式构建仍必须容器、禁网、禁 shell es
 
 文件保存事务成功后，Workspace event 按配置 debounce 创建 preview build。相同 document 新 revision 到达时，queued preview 取消、running preview 标 superseded；旧 PDF 立即 stale。preview 使用同一固定 TeX image、路径安全、禁网与 no-shell-escape，实时发 Terminal/diagnostics/PDF events，但可以使用较短 retention，且不创建 accepted Evidence。
 
-用户点击 Compile 时必须冻结当前 manifest 并创建权威 latex-compile Job；它不被后续 preview 取代，产出完整 RunManifest/Artifact。保存失败或 revision conflict 不触发 preview。build/preview 状态在 UI 重连后可由 Kernel 投影恢复，不能只存在浏览器 debounce timer。
+用户点击 Compile 时必须冻结当前 manifest 并创建权威 latex-compile Job；它不被后续 preview 取代，产出完整 RunManifest/Artifact。保存失败或 revision conflict 不触发 preview；Compile 前先保存脏文件，保存冲突（409 document_version_conflict）必须立即终止编译——不得用旧 revision 冻结、不得创建 Job（kernel 在冻结与提交两处都执行 document-revision CAS，Runner 只物化冻结 revision 的字节，编译期间的新编辑只影响 stale-PDF 判定）。build/preview 状态在 UI 重连后可由 Kernel 投影恢复，不能只存在浏览器 debounce timer。Build 提交响应必须携带 job_id 与输入 revision（build.revision），供 UI 接入同一 Job 的 live Terminal（SSE GET /v1/jobs/{job_id}/terminal）与 stale PDF 判定（build.revision < document.revision）。
 
 ## 13. Release Bundle 与 clean-room
 

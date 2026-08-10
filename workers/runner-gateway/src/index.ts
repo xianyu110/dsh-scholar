@@ -231,8 +231,11 @@ export function materializeCodeSnapshot(files: Map<string, Buffer>, workDir: str
 /**
  * §12 (TEX-02): frozen TeX workspace manifest carried in the latex-compile
  * job payload (`payload.tex_snapshot`, produced by POST /v1/documents/:id/
- * builds). File CONTENT is fetched from the kernel per file and verified
- * against the manifest content_hash before the container sees it.
+ * builds). §4 row 95 (TEX-01): file CONTENT is fetched from the kernel's
+ * SNAPSHOT store at the frozen revision (revision-scoped bytes) and verified
+ * against the manifest content_hash before the container sees it — the
+ * current file is never read, so a concurrent edit cannot leak into the
+ * build (it only moves the document revision ahead for the stale-PDF signal).
  */
 export interface TexSnapshotManifest {
   schema_version: number
@@ -244,11 +247,15 @@ export interface TexSnapshotManifest {
 }
 
 /**
- * Fetch every file of a frozen TeX snapshot from the kernel into `workDir`
- * (path-traversal protected; hash-verified). Returns the file count.
+ * Fetch every file of a frozen TeX snapshot from the kernel's snapshot store
+ * into `workDir` (path-traversal protected; hash-verified against the
+ * manifest). The bytes are revision-scoped (TEX-01): the materialized
+ * workspace is exactly the frozen revision, even if a file changed or was
+ * deleted after freeze. Returns the file count; any unreadable or
+ * hash-mismatched file is a hard error — never a fallback to current bytes.
  */
 export async function materializeTexWorkspace(
-  client: Pick<ResearchClient, 'getDocumentFile'>,
+  client: Pick<ResearchClient, 'getDocumentSnapshotFile'>,
   manifest: TexSnapshotManifest,
   workDir: string,
 ): Promise<number> {
@@ -258,6 +265,9 @@ export async function materializeTexWorkspace(
   if (typeof manifest.root_file !== 'string' || manifest.root_file === '' || /[;&|`$"'\\ \t\n]/.test(manifest.root_file)) {
     throw new Error(`tex snapshot root_file is unsafe for the build script: ${manifest.root_file}`)
   }
+  if (!Number.isInteger(manifest.revision) || manifest.revision <= 0) {
+    throw new Error(`tex snapshot manifest has an invalid revision: ${String(manifest.revision)}`)
+  }
   const absRoot = resolve(workDir)
   let count = 0
   for (const entry of manifest.files) {
@@ -265,9 +275,9 @@ export async function materializeTexWorkspace(
     if (rel === '' || rel.startsWith('/') || rel.split('/').some(part => part === '..')) {
       throw new Error(`tex snapshot contains an unsafe path: ${rel}`)
     }
-    const file = await client.getDocumentFile(manifest.document_id, rel)
+    const file = await client.getDocumentSnapshotFile(manifest.document_id, manifest.revision, rel)
     if (file === null) {
-      throw new Error(`tex snapshot file unreadable from kernel: ${rel} (document ${manifest.document_id})`)
+      throw new Error(`tex snapshot file unreadable from kernel: ${rel} (document ${manifest.document_id}, revision ${manifest.revision})`)
     }
     const target = resolve(absRoot, rel)
     if (!target.startsWith(`${absRoot}${sep}`) && target !== absRoot) {

@@ -120,6 +120,19 @@ CREATE TABLE IF NOT EXISTS tex_snapshots (
   created_at TEXT NOT NULL,
   PRIMARY KEY (document_id, revision)
 );
+-- TEX-01 (§4 row 95): the snapshot is the MATERIALIZABLE byte source of a
+-- build — every file's frozen content is stored alongside the manifest at
+-- freeze time. The Runner fetches THESE bytes (revision-scoped), never the
+-- current file, so a concurrent edit cannot leak into a compile.
+CREATE TABLE IF NOT EXISTS tex_snapshot_files (
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  PRIMARY KEY (document_id, revision, path)
+);
+CREATE INDEX IF NOT EXISTS idx_tex_snapshot_files_doc ON tex_snapshot_files(document_id, revision);
 CREATE TABLE IF NOT EXISTS tex_builds (
   build_id TEXT PRIMARY KEY,
   document_id TEXT NOT NULL,
@@ -309,25 +322,59 @@ export class TexWorkspaceStore {
     return rows.length > 0 ? rows.map(r => ({ revision: r.revision, at: r.created_at })) : [{ revision: doc.revision, at: doc.updated_at }]
   }
 
-  /** Freeze the current file set into a snapshot manifest (build input). */
+  /**
+   * Freeze the current file set into a snapshot manifest (build input).
+   * TEX-01 (§4 row 95): the freeze ALSO stores every file's content bytes in
+   * tex_snapshot_files at this revision — the snapshot is the materializable
+   * source for latex-compile. The manifest stays hash-only (tree/GET and
+   * build payload contracts); bytes are read back via snapshotFile().
+   * The document-revision CAS still applies: a stale expectedRevision → 409.
+   */
   snapshot(documentId: string, expectedRevision?: number): { revision: number; manifest: TexSnapshotManifest } {
     const document = this.getDocument(documentId)
     if (expectedRevision !== undefined && expectedRevision !== document.revision) {
       throw new TexError('document_version_conflict',
         `document revision ${document.revision} does not match expected revision ${expectedRevision} — save before building`)
     }
-    const { files } = this.tree(documentId)
+    const rows = this.db.prepare('SELECT path, version, content, content_hash FROM tex_files WHERE document_id = ? ORDER BY path')
+      .all(documentId) as unknown as Array<{ path: string; version: number; content: string; content_hash: string }>
     const manifest: TexSnapshotManifest = {
       schema_version: 1,
       document_id: documentId,
       revision: document.revision,
       root_file: document.root_file,
-      files: files.map(f => ({ path: f.path, version: f.version, content_hash: f.content_hash })),
+      files: rows.map(r => ({ path: r.path, version: r.version, content_hash: r.content_hash })),
       frozen_at: nowIso(),
     }
-    this.db.prepare('INSERT OR REPLACE INTO tex_snapshots (document_id, revision, manifest, created_at) VALUES (?, ?, ?, ?)')
-      .run(documentId, document.revision, JSON.stringify(manifest), manifest.frozen_at)
+    // Manifest + frozen bytes are one atomic freeze: either both land or
+    // neither (a partial snapshot must never be materializable).
+    this.db.exec('BEGIN')
+    try {
+      this.db.prepare('INSERT OR REPLACE INTO tex_snapshots (document_id, revision, manifest, created_at) VALUES (?, ?, ?, ?)')
+        .run(documentId, document.revision, JSON.stringify(manifest), manifest.frozen_at)
+      this.db.prepare('DELETE FROM tex_snapshot_files WHERE document_id = ? AND revision = ?').run(documentId, document.revision)
+      const insert = this.db.prepare('INSERT INTO tex_snapshot_files (document_id, revision, path, content, content_hash) VALUES (?, ?, ?, ?, ?)')
+      for (const r of rows) insert.run(documentId, document.revision, r.path, r.content, r.content_hash)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
     return { revision: document.revision, manifest }
+  }
+
+  /**
+   * TEX-01: read the FROZEN bytes of one snapshot file at a given revision.
+   * Returns null when the revision/path is not in the snapshot store (the
+   * runner treats null as a hard materialization failure — never a fallback
+   * to the current file). Path is root-relative with the usual traversal
+   * rejection.
+   */
+  snapshotFile(documentId: string, revision: number, path: string): { path: string; content: string; content_hash: string } | null {
+    this.getDocument(documentId)
+    const row = this.db.prepare('SELECT path, content, content_hash FROM tex_snapshot_files WHERE document_id = ? AND revision = ? AND path = ?')
+      .get(documentId, revision, normalizePath(path)) as { path: string; content: string; content_hash: string } | undefined
+    return row ?? null
   }
 
   createBuild(documentId: string, revision: number, rootFile: string, jobId: string | null): TexBuild {

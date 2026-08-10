@@ -105,7 +105,12 @@
 - 并发保存一个 200、一个 409，无丢失更新；
 - delete/rename/asset upload 执行 path 和 version 校验；
 - compile 自动冻结当前 manifest，不能读取之后编辑；
-- dirty-before-compile：修改或清空非空文件后立即显示 dirty；Compile 先成功保存 exact bytes/hash 再冻结，409 冲突不得创建 Job；
+- snapshot-frozen-bytes：冻结时 snapshot store 保存每文件可物化字节；冻结后编辑/删除当前文件，GET snapshot-files?revision=&path= 仍返回冻结 revision 的字节且 hash 与 manifest 一致；未知 revision/path 404、参数缺失/非法 422；Runner 物化只读 snapshot store 字节（无当前文件读取），不可读或 hash 不匹配一律硬失败（tex-build.test.ts 负向：revision 不可物化、字节被篡改、路径逃逸）；
+- dirty-before-compile：修改或清空非空文件后立即显示 dirty；dirty 基线必须是文件 GET/最近保存内容（tree/GET 无 content，不能作为基线）；revert 到已保存字节（含 ''）后 dirty=false（manuscript-dirty.test.ts）；
+- clear-revert-cas：清空非空文件（content=''）是 CAS 可见变更（新 version + 新 revision，hash=sha256('')）；清空/恢复用过期 expected_version 一律 409；revert 恢复原字节（tex-workspace.test.ts）；
+- save-conflict-terminates-compile：并发保存后 document revision 前进，本地保存 409；随后用旧 revision 编译必须在冻结与提交两处被 409 document_version_conflict 拒绝，不得创建 latex-compile Job、不得创建 build 行、不得产出 PDF（tex-build.test.ts HTTP 集成 + tex-kernel.test.ts 单元）；carried manifest revision 与 tex_revision 不一致同样 409；
+- compile 期间文件被修改：build 输入仍是冻结 revision 的字节（snapshot store 按 revision 返回原字节，hash 与 job payload manifest 一致），新编辑只前进 document revision 供 stale 判定；
+- build-job-linkage：POST builds 201 响应携带 build.job_id、build.revision（输入 revision）与 job；UI 用 job_id 接入同一 Job 的 Terminal SSE（GET /v1/jobs/{job_id}/terminal）；build.revision < document.revision 时旧 PDF 显示 stale；queued/running 期间 Compile 按钮禁用（防重复提交）；
 - pdflatex + bibtex/biber + 多遍编译得到非空 PDF；
 - shell escape、network、越界文件访问被拒绝；
 - compile Terminal 实时显示，完整 log 进 Artifact；
@@ -184,6 +189,9 @@
 - Skill provider 从发布包根目录解析四组 skill，不得解析到不存在的 `lib/skills`；
 - domain/venue 根据 Brief 确定性选择；
 - 插件停止清理 tool/listener/sidecar ownership，standalone 停止清理 BFF/listener/sidecar。
+- 插件 apply 是 async 且被 Cordis await（cordis 4.0.0-rc.7 的 fiber `_execute` 收集 thenable apply 结果，`ctx.plugin()` 经 `fiber.await()` 在 apply 落定后才 resolve）：`sidecar.start()` 完成（port=0 时解析出真实端口）后才发布 `ctx.research`/client/endpoint 并注册工具、命令与 skills；start 失败有明确日志且不留下半初始化资源（fiber FAILED 并卸载已注册效果）；sidecar disposer 在 apply 开头注册，启动期间 dispose/reload 也能停掉 kernel；
+- 同一进程加载两个 research 插件实例时 endpoint/client/缓存/角色/ACL 全部独立（实例闭包，无模块级可变 ref），工具执行解析到本实例的 client，dispose 一个不影响另一个；
+- reload/dispose：dispose 后 sidecar 停止、端口释放、owned endpoint.json 清理、工具/命令/skills/pre-execute 监听器全部回收；cordis `update()` 重载先卸载旧 fiber（旧 kernel 停止、注册全部回收）再重新 apply，不重复注册、同 dataDir 数据保留；
 - port=0 时 sidecar 只使用 0600 `runtime/endpoint.json` 返回的实际端口；10 秒无握手、protocol/schema/database/config 不匹配均失败；
 - 同一端口已有其他 dataDir/database identity 的 Kernel 时拒绝复用，且不得终止非本实例进程；
 - /research help/list/status/gates/jobs/claims 等文档和 UI starter 命令均有真实 handler，不落入 generic help；

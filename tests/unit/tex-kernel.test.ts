@@ -205,6 +205,94 @@ describe('tex compile freeze & replay (§7)', () => {
     kernel.close()
   })
 
+  it('save conflict (409) terminates compile: stale-revision submit is rejected, no job and no build row', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}A\\end{document}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    // The "other editor" concurrently saved: the local editor's save would
+    // 409 (expected_version stale) and the document revision moved on.
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}B\\end{document}\n')
+    // A NEW compile at the STALE frozen revision must be rejected by the
+    // document-revision CAS at submit time (409 document_version_conflict).
+    const jobsBefore = kernel.listJobs(project.project_id).length
+    try {
+      kernel.submitJob({
+        project_id: project.project_id,
+        idempotency_key: 'tex-save409-1',
+        kind: 'latex-compile',
+        command: ['pdflatex', 'paper.tex'],
+        payload: { tex_document_id: doc.document_id, tex_revision: snap.revision, tex_snapshot: snap.manifest },
+      })
+      throw new Error('expected conflict')
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      expect(code).toBe('document_version_conflict')
+    }
+    // No job queued, no build row: the compile cannot produce output.
+    expect(kernel.listJobs(project.project_id).length).toBe(jobsBefore)
+    expect(kernel.texListBuilds(doc.document_id)).toHaveLength(0)
+    kernel.close()
+  })
+
+  it('rejects a latex-compile whose carried manifest revision does not match tex_revision', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}A\\end{document}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    // Manifest frozen at R, but the job claims revision R+1: the build row
+    // would label one revision while the runner compiles another — rejected.
+    try {
+      kernel.submitJob({
+        project_id: project.project_id,
+        idempotency_key: 'tex-rev-mismatch-1',
+        kind: 'latex-compile',
+        command: ['pdflatex', 'paper.tex'],
+        payload: {
+          tex_document_id: doc.document_id,
+          tex_revision: snap.revision + 1,
+          tex_snapshot: snap.manifest,
+        },
+      })
+      throw new Error('expected conflict')
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      expect(code).toBe('document_version_conflict')
+    }
+    // The mismatched compile did not mutate the snapshot store.
+    expect(kernel.texSnapshotFile(doc.document_id, snap.revision, 'paper.tex')?.content_hash)
+      .toBe(snap.manifest.files[0]!.content_hash)
+    kernel.close()
+  })
+
+  it('compile freezes MATERIALIZABLE bytes: edits during the build cannot change the compiled input (TEX-01)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    const original = '\\documentclass{article}\n\\begin{document}FROZEN\\end{document}\n'
+    kernel.texWriteFile(doc.document_id, 'paper.tex', original)
+    const snap = kernel.texSnapshot(doc.document_id)
+    const job = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'tex-frozen-bytes-1',
+      kind: 'latex-compile',
+      command: ['pdflatex', 'paper.tex'],
+      payload: { tex_document_id: doc.document_id, tex_revision: snap.revision, tex_snapshot: snap.manifest },
+    })
+    // Simulate an edit landing AFTER the freeze but BEFORE/DURING the build:
+    // the runner materializes from the kernel's snapshot store…
+    kernel.texWriteFile(doc.document_id, 'paper.tex', original.replace('FROZEN', 'EDITED MID-BUILD'))
+    const frozen = kernel.texSnapshotFile(doc.document_id, snap.revision, 'paper.tex')
+    // …and gets exactly the frozen revision bytes, hash-identical to the
+    // manifest the job carries — never the post-freeze current file.
+    const carried = (job.payload as Record<string, unknown>).tex_snapshot as TexSnapshotManifest
+    expect(frozen?.content).toBe(original)
+    expect(frozen?.content_hash).toBe(carried.files[0]!.content_hash)
+    kernel.close()
+  })
+
   it('build history replays the log and PDF artifacts', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })

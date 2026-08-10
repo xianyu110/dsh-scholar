@@ -1523,6 +1523,15 @@ export class ResearchKernel {
             if (typeof path === 'string') assertSafeTexBuildPath(path)
           }
         }
+        // TEX-01 (§4 row 95): the carried manifest must describe the SAME
+        // revision the job claims to compile — a mismatched manifest would
+        // let a build row label one revision while the runner compiles
+        // another. 409, never queued.
+        const manifestRevision = (snap as { revision?: unknown }).revision
+        if (typeof manifestRevision === 'number' && manifestRevision !== rev) {
+          throw new KernelError(409, 'document_version_conflict',
+            `tex snapshot manifest revision ${manifestRevision} does not match tex_revision ${rev} — freeze a fresh manifest before building`)
+        }
       }
       this.texSnapshot(docId, rev)
     }
@@ -2286,6 +2295,15 @@ export class ResearchKernel {
 
   texSnapshot(documentId: string, expectedRevision?: number): { revision: number; manifest: TexSnapshotManifest } {
     return this.tex.snapshot(documentId, expectedRevision)
+  }
+
+  /**
+   * TEX-01 (§4 row 95): frozen bytes of one snapshot file at a revision —
+   * the Runner materializes latex-compile input from THESE bytes (never the
+   * current file). null when the revision/path is not in the snapshot store.
+   */
+  texSnapshotFile(documentId: string, revision: number, path: string): { path: string; content: string; content_hash: string } | null {
+    return this.tex.snapshotFile(documentId, revision, path)
   }
 
   texCreateBuild(documentId: string, revision: number, rootFile: string, jobId: string | null): TexBuild {

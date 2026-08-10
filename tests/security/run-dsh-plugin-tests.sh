@@ -276,7 +276,9 @@ const ctx = {
   commands: { register() {} },
 }
 try {
-  apply(ctx, { kernel: { host: '127.0.0.1', port: 7412, dataDir: process.env.DSH01_DATA ?? '/tmp/dsh01' }, cacheDir: process.env.DSH01_CACHE ?? '/tmp/dsh01-cache' })
+  // apply is ASYNC (hardening §4 row 100): Cordis awaits it, so the probe
+  // must await it too — start must complete before anything is published.
+  await apply(ctx, { kernel: { host: '127.0.0.1', port: 7412, dataDir: process.env.DSH01_DATA ?? '/tmp/dsh01' }, cacheDir: process.env.DSH01_CACHE ?? '/tmp/dsh01-cache' })
   if (startCalled < 1) problems.push('apply must start the kernel sidecar')
   for (const cleanup of cleanups) await cleanup()
   if (stopCalled < 1) problems.push('plugin dispose must stop the kernel sidecar (disposer missing)')
@@ -315,6 +317,202 @@ else
     ok "plugin disposer stops the kernel sidecar (register cleanup)"
   else
     bad "plugin disposer missing sidecar stop"
+  fi
+fi
+
+# ── hardening §4 row 100: REAL cordis host fixture (minimal host) ───────────
+# The DSH host itself (bundle boot) is not available in this test env, so the
+# fixture boots a MINIMAL CORDIS HOST with the real cordis 4.0.0-rc.7 Context
+# and the REAL @deepseek-ai ToolRegistry / CommandService / SkillService (the
+# exact registries the plugin registers into in production). This exercises
+# the REAL lifecycle machinery: async apply awaited by cordis, effect-model
+# disposal of tools/commands/listeners/services/skills, and the sidecar
+# disposer — no faked lifecycle. Covered here (hardening §4 row 100 closing
+# conditions):
+#   - port=0: apply() awaits sidecar.start(); ctx.research.endpoint is the
+#     REAL bound port published in 0600 runtime/endpoint.json and the client
+#     works against the real kernel (list/create/list projects);
+#   - dual instances in ONE process: each instance owns its kernel/dataDir/
+#     endpoint/roles/cache; tool execution resolves the RIGHT instance's
+#     client (no module-level tool-context ref), roles and ACL listeners are
+#     per-instance (granting a role in B never leaks into A);
+#   - reload: cordis update() unloads (kills the old kernel, unregisters
+#     tools) then re-applies — no duplicate registration (still exactly 32
+#     tools / 1 skill provider), data persists in the same dataDir;
+#   - dispose: sidecar kernel dead, endpoint.json removed, port released,
+#     tools/commands/skills/pre-execute listeners all gone, the other
+#     instance is unaffected; re-applying on the same root works and
+#     registers exactly once again.
+say "DSH-01/SIDE-01: minimal cordis host fixture (async apply / port=0 / dual instance / reload / dispose)"
+HOSTFIX=$(jnode - "$REPO" <<'EOF'
+const repo = process.argv[2]
+const { createRequire } = await import('node:module')
+const { join } = await import('node:path')
+// cordis is a DSH host peer dep; resolve the SAME module instance the
+// @deepseek-ai registries use (vendor/cordis via dsh-tools' node_modules) so
+// this fixture exercises the real cordis effect/lifecycle machinery.
+const require = createRequire(`${repo}/node_modules/@deepseek-ai/dsh-tools/package.json`)
+const { Context } = require('cordis')
+const { ToolRegistry } = await import(`${repo}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`)
+const { CommandService } = await import(`${repo}/node_modules/@deepseek-ai/dsh-commands/lib/index.js`)
+const { SkillService } = await import(`${repo}/node_modules/@deepseek-ai/dsh-skill/lib/index.js`)
+const pluginMod = await import(`${repo}/lib/plugin/index.js`)
+const { readFileSync, mkdtempSync, rmSync, existsSync } = await import('node:fs')
+const { tmpdir } = await import('node:os')
+
+const problems = []
+const tempDirs = []
+const trackedPids = []
+const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+const terminate = (pid) => { if (!alive(pid)) return; try { process.kill(pid, 'SIGKILL') } catch { /* gone */ } }
+const readEp = (dataDir) => JSON.parse(readFileSync(join(dataDir, 'runtime', 'endpoint.json'), 'utf8'))
+const projectBrief = { problem: 'test problem', scope: 'test scope', questions: [], primary_metrics: [], resources: '', risks: [], target_outputs: ['conference-paper'], target_venue: null, baseline_repo: null, domain: 'machine-learning' }
+
+/** Minimal host: real cordis root + the real DSH registries the plugin uses. */
+async function makeHost() {
+  const root = new Context()
+  root.provide('systemPrompt', { tools() {}, section() {} })
+  await root.plugin(ToolRegistry, { mode: 'native' })
+  await root.plugin(CommandService)
+  await root.plugin(SkillService)
+  root.provide('subagents', { start: async () => { throw new Error('fixture has no subagent backend') } })
+  return root
+}
+
+/** Dispatch tools/pre-execute the way dsh-tools does (waterfall + next). */
+async function runAcl(root, agentId, tool) {
+  let nextCalled = false
+  const result = await root.waterfall('tools/pre-execute', { name: tool, agent: { id: agentId } },
+    async () => { nextCalled = true; return 'NEXT' })
+  return result?.kind === 'deny' ? 'deny' : nextCalled ? 'allow' : 'other'
+}
+
+try {
+  const dirA = mkdtempSync(join(tmpdir(), 'dsh-hostfix-a-'))
+  const dirB = mkdtempSync(join(tmpdir(), 'dsh-hostfix-b-'))
+  tempDirs.push(dirA, dirB)
+  const cfgA = { kernel: { host: '127.0.0.1', port: 0, dataDir: dirA }, unattended: true }
+  const cfgB = { kernel: { host: '127.0.0.1', port: 0, dataDir: dirB }, unattended: true }
+  const rootA = await makeHost()
+  const rootB = await makeHost()
+
+  // ── apply A and B (async apply is awaited by cordis) ─────────────────────
+  const handleA = await rootA.plugin(pluginMod, cfgA)
+  const handleB = await rootB.plugin(pluginMod, cfgB)
+
+  // ── port=0: endpoint is the REAL bound port, client usable ───────────────
+  const epA = new URL(rootA.research.endpoint)
+  const epB = new URL(rootB.research.endpoint)
+  const epFileA = readEp(dirA)
+  const epFileB = readEp(dirB)
+  trackedPids.push(epFileA.pid, epFileB.pid)
+  if (!(Number(epA.port) > 0 && Number(epA.port) === epFileA.port)) problems.push('port0 endpoint A not resolved from runtime/endpoint.json')
+  if (!(Number(epB.port) > 0 && Number(epB.port) === epFileB.port)) problems.push('port0 endpoint B not resolved from runtime/endpoint.json')
+  if (epA.origin === epB.origin) problems.push('dual instance endpoints must differ (port=0)')
+  if (epFileA.pid === epFileB.pid) problems.push('dual instance kernels must be distinct processes')
+  if (rootA.research.client.endpoint !== epA.origin) problems.push('client endpoint must be the resolved real port')
+  const projA = await rootA.research.client.createProject({ name: 'proj-a', workspace: '/research/proj-a', brief: projectBrief, session_id: 's-a' })
+  if ((await rootA.research.client.listProjects()).length < 1) problems.push('client not usable against the real kernel after start (instance A)')
+
+  // ── tools / commands / skills registered exactly once ────────────────────
+  const toolsA = rootA.tools.schemas().map(s => s.name)
+  if (toolsA.length !== 32) problems.push(`instance A tool count ${toolsA.length} != 32`)
+  if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
+  if (!rootA.commands.list({}).some(c => c.name === 'research')) problems.push('/research command not registered')
+  if (rootA.skills.providers.size !== 1) problems.push(`instance A skill providers ${rootA.skills.providers.size} != 1`)
+
+  // ── dual-instance isolation: tool execution resolves the RIGHT client ────
+  const exec = { agent: { id: 'agent-x' }, signal: new AbortController().signal }
+  const listA = await rootA.tools.get('research_project').execute({ action: 'list' }, exec)
+  const listB = await rootB.tools.get('research_project').execute({ action: 'list' }, exec)
+  if (!listA.projects.some(p => p.project_id === projA.project_id)) problems.push('instance A tool must see kernel A data')
+  if (listB.projects.some(p => p.project_id === projA.project_id)) problems.push('instance B tool must NOT see kernel A data (tool context cross-talk)')
+  // roles registry isolation
+  rootA.research.roles.set('sess-x', 'director')
+  if (rootB.research.roles.get('sess-x') !== 'none') problems.push('role registries must be per-instance')
+  // ACL listener isolation: granting a role in B never affects A
+  if (await runAcl(rootA, 'unknown-u', 'research_project') !== 'deny') problems.push('unknown agent must be denied on instance A')
+  rootB.research.roles.set('unknown-u', 'director')
+  if (await runAcl(rootA, 'unknown-u', 'research_project') !== 'deny') problems.push('granting a role in instance B must not leak into A (ACL cross-talk)')
+  if (await runAcl(rootB, 'unknown-u', 'research_project') !== 'allow') problems.push('director role must allow research_project on instance B')
+
+  // ── reload via cordis update(): unload then re-apply, no duplicates ──────
+  const oldPid = epFileA.pid
+  await handleA.update(cfgA)
+  const epFileA2 = readEp(dirA)
+  trackedPids.push(epFileA2.pid)
+  if (alive(oldPid)) problems.push('reload must stop the old kernel (sidecar disposer)')
+  if (epFileA2.pid === oldPid) problems.push('reload must spawn/reuse a fresh kernel instance')
+  if (rootA.tools.schemas().length !== 32) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 32, duplicate risk)`)
+  if (rootA.skills.providers.size !== 1) problems.push(`reload leaked skill providers (${rootA.skills.providers.size} != 1)`)
+  if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('reload must keep kernel data (same dataDir)')
+  if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 1) problems.push('reload must not duplicate the pre-execute listener')
+
+  // ── dispose: everything released, port freed, B unaffected ───────────────
+  const lastEndpoint = rootA.research.endpoint
+  await handleA.dispose()
+  if (rootA.research !== undefined) problems.push('dispose must remove the research service')
+  if (alive(epFileA2.pid)) problems.push('dispose must stop the kernel sidecar child')
+  if (existsSync(join(dirA, 'runtime', 'endpoint.json'))) problems.push('dispose must remove the owned endpoint.json')
+  if (rootA.tools.get('research_project') !== undefined || rootA.tools.schemas().length !== 0) problems.push('dispose must unregister every research tool')
+  if (rootA.commands.list({}).length !== 0) problems.push('dispose must unregister the /research command')
+  if (rootA.skills.providers.size !== 0) problems.push(`dispose must unregister the skill provider (${rootA.skills.providers.size} left)`)
+  if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 0) problems.push('dispose must remove the pre-execute listener')
+  const healthAfter = await fetch(`${lastEndpoint}/v1/health`).then(r => r.ok).catch(() => false)
+  if (healthAfter) problems.push('dispose must release the kernel port (health still answering)')
+  // the sibling instance is untouched
+  if (rootB.tools.schemas().length !== 32) problems.push('disposing A must not affect B tools')
+  if (rootB.research === undefined) problems.push('disposing A must not affect B research service')
+
+  // ── re-apply on the same root: usable again, still exactly once ──────────
+  const handleA2 = await rootA.plugin(pluginMod, cfgA)
+  const epFileA3 = readEp(dirA)
+  trackedPids.push(epFileA3.pid)
+  if (rootA.tools.schemas().length !== 32) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 32`)
+  if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('re-apply must restore the client against the same dataDir')
+  await handleA2.dispose()
+} catch (error) {
+  problems.push(`fixture error: ${error instanceof Error ? error.message : String(error)}`)
+} finally {
+  for (const pid of trackedPids) terminate(pid)
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
+}
+
+console.log(JSON.stringify({ problems }))
+EOF
+)
+if [ -z "$HOSTFIX" ]; then
+  bad "host fixture probe script produced no output"
+else
+  if probe "$HOSTFIX" "j.problems.length === 0"; then
+    ok "minimal cordis host: async apply / port=0 endpoint / dual instance / reload / dispose all pass"
+  else
+    bad "host fixture: $(printf '%s' "$HOSTFIX" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.join('|')))")"
+  fi
+  if probe "$HOSTFIX" "!j.problems.some(p=>/port0/.test(p)||/endpoint/.test(p)||/client endpoint/.test(p))"; then
+    ok "port=0: apply awaits start; endpoint is the resolved real port and the client is usable"
+  else
+    bad "port=0 endpoint resolution failed"
+  fi
+  if probe "$HOSTFIX" "!j.problems.some(p=>/cross-talk/.test(p)||/per-instance/.test(p)||/leak into A/.test(p)||/distinct/.test(p))"; then
+    ok "dual instances: endpoints/kernels/roles/ACL/tool client all isolated in one process"
+  else
+    bad "dual-instance isolation failed"
+  fi
+  if probe "$HOSTFIX" "!j.problems.some(p=>/reload/.test(p)||/re-registered/.test(p)||/duplicate/.test(p))"; then
+    ok "reload (cordis update): old kernel stopped, tools/skills/listeners not duplicated, data persists"
+  else
+    bad "reload leaked or duplicated resources"
+  fi
+  if probe "$HOSTFIX" "!j.problems.some(p=>/dispose/.test(p)||/unregister/.test(p)||/release the kernel port/.test(p)||/affect B/.test(p))"; then
+    ok "dispose: sidecar stopped, port released, tools/commands/skills/listeners released, sibling unaffected"
+  else
+    bad "dispose left residual resources"
+  fi
+  if probe "$HOSTFIX" "!j.problems.some(p=>/re-apply/.test(p))"; then
+    ok "re-apply on the same root registers exactly once and stays usable"
+  else
+    bad "re-apply failed"
   fi
 fi
 
