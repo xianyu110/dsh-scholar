@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@dsh-scholar/research-kernel": "file:../research-kernel",
+    "@dsh-scholar/research-schemas": "file:../research-schemas",
     "@dsh-scholar/scholar-connectors": "file:../scholar-connectors"
   },
   "devDependencies": {

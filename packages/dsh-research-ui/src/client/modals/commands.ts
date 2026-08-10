@@ -1,4 +1,4 @@
-import { t } from '../i18n/index'
+import { registerOverlayRebuild, t } from '../i18n/index'
 import { favCommandToggle, favCommands, state, tabSave } from '../state'
 import { el, trapFocus } from '../ui'
 export function runChatLine(line: string): void {
@@ -60,6 +60,9 @@ export function openShortcutsModal(root: ShadowRoot | null | undefined): void {
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: a locale switch re-opens this modal in the new
+  // locale (the old overlay is removed; the new one re-registers itself).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openShortcutsModal(root) })
 }
 
 export const CHAT_COMMANDS: Array<[string, string, string]> = [
@@ -187,6 +190,9 @@ export function openCommandsModal(root: ShadowRoot | null | undefined): void {
   })
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the palette (paletteQuery is
+  // module state, so the filter survives the rebuild).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openCommandsModal(root) })
   input.focus()
   trapFocus(overlay, null)
 }

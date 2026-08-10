@@ -26,6 +26,18 @@
 - concurrent-decision：两个请求只有一个成功；
 - budget-gate-resume：只允许 payload 声明的 resume_to。
 
+## 2.1 结构化 NextAction（GUIDE-01）
+
+- next-action-every-phase：17 个 ProjectStatus 每个至少投影一个 schema 合法动作，未知/未来状态退化 `code='unknown'` 的只读动作，不抛错、不生成 mutation CTA；
+- next-action-code-stable：相同状态输入两次投影产生相同 code/id 集合（确定性机器码）；
+- next-action-required-gaps：缺少前置条件（`approved_contract`、`succeeded_runs`、`proposed_idea`）时动作 `state=blocked` 且 `required` 列出缺失项，满足后转 ready；
+- next-action-legacy-derivation：`next_actions: string[]` 与 `next_actions_v2` 中非 done 动作的 label 完全一致（终态为空数组），UI/API 旧消费端不受破坏；
+- next-action-pending-gate：pending gate 产生 gate 决策动作（budget → `budget_resolve`，其余 → `gate_decide`），base 动作已引用的 gate 不重复；
+- next-action-budget-block：预算超限 + pending Budget Gate → `budget_resolve` `state=blocked`、`required=['budget_headroom']`、`blocking=true`；
+- next-action-failed-job：失败/retryable 作业产生 `job_retry`（attempts 未耗尽 ready；耗尽 blocked + `repair_decision`，capability=pi）；
+- next-action-phase-flow：每阶段主动作与状态机一致——DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate、IDEATING→idea_gate_approve、IDEA_APPROVED/BASELINE_REPRO→contract_register+baseline_reproduce、CONTRACT_APPROVED/EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done；
+- next-action-revision：动作携带依赖对象 revision（gate 决策=project.revision，run 动作=contract version，idea gate=idea version）。
+
 ## 3. Project 隔离与 Artifact
 
 - 相同 idempotency key 在两个项目生成独立 Job；
@@ -133,6 +145,7 @@
 - browser client 源码必须纳入 strict `tsc --noEmit`，不得只由 tsdown 跳过类型后转译；
 - persisted locale > browser regional locale > zh；
 - setLocale 后已开 modal、tabs、aria、Terminal status、TeX chrome 更新；测试不得导航或 reload，必须在一个 render tick 内断言可见 text/title/aria/status 与 `html[lang]` 同步切换；
+- i18n-runtime（tests/unit/i18n-runtime.test.ts）：locale 切换后 tab/header/model/density/aria/document title 由纯 chrome 模型（i18n/chrome.ts）重新求值，pipeline 步骤（phasePipeline()）、Terminal status/meta/exit、状态 pill/sidebar/search 状态文案（statusLabel()）随 locale 重求值；已开 modal 经 overlay registry（registerOverlayRebuild/relocalizeOpenOverlays）重开；t() 遇全字典缺 key 返回 raw key 并在开发模式 console.warn 一次/键（含字典路径提示），注入 setMissingKeyReporter 收集器可断言；zh→en→zh 往返文案一致；unknown enum 仍原样显示；静态 zh/en parity 断言保持；
 - Intl 显式使用 active locale，不能出现中英文日期混用；
 - unknown enum 和 wire/model/Terminal/TeX raw text 原样显示；
 - standalone 首屏和 token error 双语，html lang 正确；
@@ -240,6 +253,13 @@
 - Release 未批准没有外部发布能力。
 - Intake stage/accept、Workspace/PTY、Runner target/config、Trajectory summary/detail/followup 都执行独立 capability 和 Project AuthZ；
 - Config schema/UI/file/CLI key parity；错误 scope/unknown key/放宽 security floor 拒绝；effective provenance 可解释，SecretRef value 不进 browser/log/argv/Manifest/Bundle；
+- config-defaults-merge：registry 对请求 scope 合并默认（project scope 与 ExecutionConfig/IntegrityConfig 的 zod 默认逐字段一致），覆盖当前全部运行项（ExecutionConfig/IntegrityConfig 全字段、kernel CLI port/host/token/service-token/db/cas、runner CLI poll/heartbeat/timeout/cancel/owner/mode、standalone --host/--port/--token/--principal、images.lock 路径与 digest、network_policy）；
+- config-unknown-key-reject：注册表外键与 scope 过滤外的键一律 `unknown_config_key`，不静默忽略；
+- config-secret-redaction：secret 键（token/service-token 等）在明文输出中恒为 `<redacted>`，只进入单向 pin hash；换 secret 后 pin 变化（config-registry.test.ts）；
+- config-security-floor：`runner.privileged`/`runner.docker_socket`/`runner.network=host`、`network_policy=none` 下的非 none 网络、`allow_automatic_public_release=true`、`--no-token` 非 loopback host、锁外 image digest 一律 `security_floor_violation` 拒绝；
+- config-generated-artifacts：JSON Schema/template/CLI help 由注册表生成并与 Zod 一致（同键同默认、secret/floor 注解、enum 集合），生成物写入 configs/generated/（scripts/generate-config-artifacts.mjs）；
+- config-pin-hash：相同 effective config 的 pin 稳定，任何值变更（含 secret）pin 变化；kernel 构造期 pin 生效配置（kernel.configPinHash），HTTP 响应带 `x-config-pin` 头、`/v1|v2/health` 带 `config_pin`；kernel CLI 把 pin 写入 0600 endpoint 文件；
+- config-project-enforcement：createProject 的项目级 execution+integrity 经 registry 校验，security floor 违规（如自动发布）在落库前拒绝且不产生项目行；
 
 ## 12. Recovery 与 Golden Path
 

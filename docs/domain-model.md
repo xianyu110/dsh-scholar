@@ -276,7 +276,9 @@ Intake status 为 draft、uploading、scanning、needs_input、grilling、propos
 
 ## 14. NextAction
 
-NextAction 是 Kernel 投影，不是 UI 本地状态。字段至少有 id、code、label_key、state、target_route、blocking、reason、refs、required principal kind、required_revision、capability 可选和 raw 可选。NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code 只能只读显示。
+NextAction 是 Kernel 投影，不是 UI 本地状态（GUIDE-01）。字段：`id`（`${code}:${projectId}` 稳定，ref-bound 覆盖动作追加 ref id）、`code`（稳定机器码：scope_gate_submit / survey_run / idea_generate / idea_gate_approve / contract_register / baseline_reproduce / pilot_formal_submit / evidence_verify / manuscript_write / reviewer_run / release_bundle / release_gate / gate_resolve / budget_resolve / gate_decide / job_retry / project_stop / project_archived / project_released / project_stopped / unknown）、`label`（i18n key 或英文默认文案；legacy `next_actions: string[]` 由此派生）、`reason`（为什么现在做）、`required`（true 或缺失前置项列表，如 `['approved_contract']`）、`route`（gates/runs/evidence/manuscript/budget/ideas/contracts/release/overview）、`capability` 可选（如 researcher/pi）、`revision`（依赖对象版本：gate 决策=project.revision、run 动作=contract version、idea gate=idea version；null=不适用）、`state`（ready=现在做 / blocked=前置缺失 / done=已完成）、`blocking`（是否阻塞阶段完成）、`refs`（gate/job/contract/idea/evidence 权威对象）、`required_by`（human/agent/runner）。
+
+NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code（`unknown` 退化）只能只读显示。每阶段至少一个动作：DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate、IDEATING→idea_gate_approve、IDEA_APPROVED/BASELINE_REPRO→contract_register+baseline_reproduce、CONTRACT_APPROVED/EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done。pending gate 产生 gate 决策动作（budget→budget_resolve，其余→gate_decide，base 已引用不重复）；失败/retryable 作业产生 job_retry（attempts 耗尽→blocked+repair_decision）。Intake/Grill 阶段动作待 ONBOARD-01 落地后扩展。
 
 ## 15. Trajectory 与 Subagent Node
 

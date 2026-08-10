@@ -1,8 +1,8 @@
 import type { ArtifactRow, ClaimRow, EvidenceRow, ProjectRow, Projection } from '../types'
 import { api } from '../api'
-import { t } from '../i18n/index'
+import { registerOverlayRebuild, t } from '../i18n/index'
 import { chatSessionSelect, notifClear, notifMarkRead, notifPersist, state, tabSave } from '../state'
-import { STATUS_META, copyText, el, openContextMenu, rootHost, showToast } from '../ui'
+import { STATUS_META, copyText, el, openContextMenu, rootHost, showToast, statusLabel } from '../ui'
 import { HISTORY_KEY, favProjects } from '../state'
 export function openNotificationsModal(root: ShadowRoot | null | undefined): void {
   if (root == null) return
@@ -89,6 +89,8 @@ export function openNotificationsModal(root: ShadowRoot | null | undefined): voi
   modal.appendChild(clearBtn)
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the modal in the new locale.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openNotificationsModal(root) })
 }
 
 
@@ -189,6 +191,8 @@ export function openCommandHistoryModal(root: ShadowRoot | null | undefined): vo
   modal.appendChild(list)
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the history modal.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openCommandHistoryModal(root) })
 }
 
 
@@ -331,7 +335,7 @@ export function openGlobalSearchModal(root: ShadowRoot | null | undefined): void
       row.appendChild(el('span', 'artifact-kind', `${KIND_ICON[h.kind] ?? ''} ${h.kind.toUpperCase()}`))
       const bodyEl = el('div', 'grow')
       bodyEl.style.cssText = 'min-width:0'
-      const projEl = el('div', 'muted', h.status !== undefined ? `${h.project} · ${STATUS_META[h.status]?.label ?? h.status}` : h.project)
+      const projEl = el('div', 'muted', h.status !== undefined ? `${h.project} · ${statusLabel(h.status)}` : h.project)
       projEl.style.cssText = 'font-size:10px'
       if (h.status !== undefined) {
         // dsh-web status colour: dot mirroring the sidebar tones.
@@ -424,6 +428,8 @@ export function openGlobalSearchModal(root: ShadowRoot | null | undefined): void
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the search modal.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openGlobalSearchModal(root) })
   input.focus()
 }
 
@@ -554,6 +560,9 @@ export function openSessionSearchModal(root: ShadowRoot | null | undefined): voi
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the session search modal
+  // (sessionSearchQuery is module state, so the query survives the rebuild).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openSessionSearchModal(root) })
   input.focus()
 }
 
@@ -626,7 +635,7 @@ export function openProjectSwitcherModal(root: ShadowRoot | null | undefined): v
       dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:var(--tone-${tone});flex-shrink:0`
       const name = el('span', 'grow', p.name ?? p.project_id)
       name.style.cssText = 'font-size:11.5px;color:var(--text)'
-      const meta = el('span', 'muted mono', `${STATUS_META[p.status ?? '']?.label ?? p.status ?? ''} · ${p.project_id.slice(0, 14)}`)
+      const meta = el('span', 'muted mono', `${statusLabel(p.status)} · ${p.project_id.slice(0, 14)}`)
       meta.style.cssText = 'font-size:9.5px'
       row.append(dot, name, meta)
       row.onmouseenter = () => { selIdx = rows.indexOf(row); paint() }
@@ -662,6 +671,9 @@ export function openProjectSwitcherModal(root: ShadowRoot | null | undefined): v
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the switcher (projectSwitchQuery
+  // is module state, so the filter survives the rebuild).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openProjectSwitcherModal(root) })
   input.focus()
   void api<ProjectRow[]>('/v1/projects').then((projects) => { renderList(projects ?? []) })
 }
@@ -688,6 +700,8 @@ export async function openCompareModal(root: ShadowRoot, projectIds: string[]): 
   modal.appendChild(loading)
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the compare modal.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); void openCompareModal(root, projectIds) })
 
   const rows: Array<{ label: string; values: string[] }> = []
   const projections = await Promise.all(projectIds.map(id => api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)))

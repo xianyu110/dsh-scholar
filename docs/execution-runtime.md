@@ -205,3 +205,12 @@ Clean-room 在新 dataDir 和 Runner 中验证所有 hash，物化、重跑关�
 ## 14. Self-referential Cordis 与执行面的隔离
 
 开发模式的 cordis_mount 运行在 DSH 进程内，不是 Runner，也不是安全沙箱。它不能用于正式 Job、TeX 编译、Evidence 或 Gate。动态工具不得拿到 Runner key、Kernel internal token 或数据库路径。完整开发开关与限制见 dsh-integration.md 和 security-baseline.md。
+
+## 15. Config Registry
+
+所有运行时配置项由 canonical Config Registry 管理（CONFIG-01）：单一 Zod schema 注册表
+（scope 层次、secret/security-floor 标记、来源）、`validateConfig` 合并默认 + 拒绝未知键 +
+security floor 违规拒绝 + 对 effective config 计算 sha256 pin；JSON Schema / 默认值
+template / CLI 帮助文本全部由注册表生成。Kernel 与 standalone 的 HTTP 响应携带
+`x-config-pin` 头、health 暴露 `config_pin`，配置变更后 pin 必然变化。详见
+[config-registry.md](config-registry.md)。

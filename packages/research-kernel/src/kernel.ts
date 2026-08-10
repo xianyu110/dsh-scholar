@@ -15,11 +15,13 @@ import {
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, type ArtifactKind, type GateType, type JobSpecBound, type JobStatus, type ProjectStatus,
+  buildProjectId, validateConfig, type ArtifactKind, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
+import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
+import { IMAGES_LOCK } from './images-lock.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -319,6 +321,16 @@ export class ResearchKernel {
   requireSignedManifest: boolean
   /** §4 P0 (API-01/EVID-01): service identity for internal HTTP routes. */
   readonly serviceToken: string | undefined
+  /**
+   * CONFIG-01: sha256 pin of the running kernel's effective config, computed
+   * through the canonical Config Registry (research-schemas config-registry
+   * module): global + project scope defaults merged with this instance's
+   * kernel-scope values (db/cas/require-signed-manifest/service identity) and
+   * the trusted images.lock digests. Deterministic for identical configs and
+   * changes whenever any value changes — including the (hashed-only) service
+   * token. Exposed via the HTTP `x-config-pin` header and /v1|v2 health.
+   */
+  readonly configPinHash: string
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
@@ -331,6 +343,19 @@ export class ResearchKernel {
     // default only affects callers that never sign. Unit tests that exercise
     // unrelated paths opt out explicitly (freshKernel passes false).
     this.requireSignedManifest = options.requireSignedManifest ?? true
+    // CONFIG-01: pin the effective runtime config through the registry. The
+    // registry validates the values (unknown keys / floor violations throw
+    // here — fail fast at construction) and returns the one-way sha256 pin.
+    const pinned = validateConfig({
+      'kernel.db': options.dbPath ?? ':memory:',
+      'kernel.cas': options.casRoot ?? join(process.cwd(), '.research-cas'),
+      'kernel.require_signed_manifest': this.requireSignedManifest,
+      'kernel.service_token': this.serviceToken ?? '',
+    }, {
+      scopes: ['global', 'project', 'kernel'],
+      imagesLock: { node_fixture: IMAGES_LOCK.node_fixture, texlive: IMAGES_LOCK.texlive },
+    })
+    this.configPinHash = pinned.pinHash
   }
 
   close(): void {
@@ -433,6 +458,19 @@ export class ResearchKernel {
     // hardening: store the PARSED brief (defaults applied), never the raw
     // caller object — projection and ledger stay consistent.
     const brief = ResearchBrief.parse(input.brief)
+    // CONFIG-01: the project-scope effective config (execution + integrity)
+    // must pass the canonical Config Registry — the zod parses below reject
+    // unknown keys and wrong values; the registry additionally enforces the
+    // security floor for programmatic callers (docker socket / privileged /
+    // host network / images.lock pins). Throws ConfigRegistryError on
+    // violation before anything is persisted.
+    const execution = ExecutionConfig.parse(input.execution ?? {})
+    const integrity = IntegrityConfig.parse(input.integrity ?? {})
+    // canonical registry keys are dotted: execution.* / integrity.*
+    const projectConfig: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(execution)) projectConfig[`execution.${key}`] = value
+    for (const [key, value] of Object.entries(integrity)) projectConfig[`integrity.${key}`] = value
+    validateConfig(projectConfig, { scopes: ['project'] })
     const project: ResearchProject = {
       project_id: buildProjectId(),
       name: input.name,
@@ -442,8 +480,8 @@ export class ResearchKernel {
       revision: 0,
       brief,
       constraints: BudgetConstraints.parse(input.constraints ?? {}),
-      execution: ExecutionConfig.parse(input.execution ?? {}),
-      integrity: IntegrityConfig.parse(input.integrity ?? {}),
+      execution,
+      integrity,
       session_id: input.session_id ?? null,
       dsh_workspace_id: input.dsh_workspace_id ?? null,
       created_at: nowIso(),
@@ -3092,40 +3130,54 @@ export class ResearchKernel {
     jobs: Array<Pick<JobRecord, 'job_id' | 'kind' | 'status'>>
     budget: BudgetRecord
     counts: { ideas: number; contracts: number; claims: number; evidence: number; artifacts: number; corpus_snapshots: number }
+    /** GUIDE-01 legacy: labels of the non-done structured actions (stable derivation). */
     next_actions: string[]
+    /** GUIDE-01 authoritative: structured next-step projection (code/label/reason/required/route/capability/revision/state). */
+    next_actions_v2: NextAction[]
   } {
     const project = this.getProject(projectId)
     const pendingGates = this.listGates(projectId, 'pending')
-    const jobs = this.listJobs(projectId).map(j => ({ job_id: j.job_id, kind: j.kind, status: j.status }))
+    const jobs = this.listJobs(projectId)
     const budget = this.getBudget(projectId)
     const count = (table: string): number => {
       const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE project_id = ?`).get(projectId) as { n: number }
       return Number(row.n)
     }
-    const nextActions: string[] = []
-    if (project.status === 'DRAFT') nextActions.push('complete Scope Gate')
-    if (project.status === 'SCOPED') nextActions.push('run literature survey → corpus snapshot')
-    if (project.status === 'SURVEYING') nextActions.push('generate idea cards + novelty audit')
-    if (project.status === 'IDEATING') nextActions.push('approve an Idea at the Idea Gate')
-    if (project.status === 'IDEA_APPROVED') nextActions.push('reproduce baseline in isolated runner')
-    if (project.status === 'BASELINE_REPRO') nextActions.push('register and approve Experiment Contract')
-    if (project.status === 'CONTRACT_APPROVED') nextActions.push('submit pilot + formal runs per contract')
-    if (project.status === 'EXPERIMENTING') nextActions.push('build evidence + verify claims')
-    if (project.status === 'EVIDENCE_READY') nextActions.push('write manuscript from read-only ledger')
-    if (project.status === 'WRITING') nextActions.push('run reviewer panel + reproducibility audit')
-    if (project.status === 'REVIEWING') nextActions.push('finalize release bundle; Release Gate stays human')
-    if (project.status === 'BLOCKED_GATE') nextActions.push('resolve pending gate or budget decision')
-    if (pendingGates.length > 0) nextActions.push(`pending ${pendingGates.map(g => g.type).join(', ')} gate`)
+    // GUIDE-01: the structured projection is a PURE function of authoritative
+    // state; the legacy string[] is derived from its labels.
+    const actionJobs: NextActionJob[] = jobs.map(j => ({
+      job_id: j.job_id,
+      kind: j.kind,
+      status: j.status,
+      failure_class: j.failure_class,
+      attempts: j.attempts,
+      max_attempts: j.max_attempts,
+      contract_id: j.contract_id,
+      created_at: j.created_at,
+    }))
+    const nextActionsV2 = nextActionProjection({
+      project,
+      gates: pendingGates,
+      jobs: actionJobs,
+      budget,
+      contracts: this.listContracts(projectId),
+      ideas: this.listIdeas(projectId),
+      evidence: this.listEvidence(projectId),
+      claims: this.listClaims(projectId),
+      corpus_snapshots: this.listCorpusSnapshots(projectId),
+    })
+    const nextActions = legacyNextActionStrings(nextActionsV2)
     return {
       project,
       pending_gates: pendingGates,
-      jobs,
+      jobs: jobs.map(j => ({ job_id: j.job_id, kind: j.kind, status: j.status })),
       budget,
       counts: {
         ideas: count('ideas'), contracts: count('contracts'), claims: count('claims'),
         evidence: count('evidence'), artifacts: count('artifacts'), corpus_snapshots: count('corpus_snapshots'),
       },
       next_actions: nextActions,
+      next_actions_v2: nextActionsV2,
     }
   }
 }

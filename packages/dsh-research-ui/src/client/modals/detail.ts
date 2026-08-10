@@ -1,4 +1,4 @@
-import { t } from '../i18n/index'
+import { registerOverlayRebuild, t } from '../i18n/index'
 import { el, fmtId, pill, trapFocus } from '../ui'
 /* ─────────────────────────── contract detail modal ─────────────────────────── */
 
@@ -69,6 +69,8 @@ export function openContractDetailModal(root: ShadowRoot, contract: Record<strin
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the drawer in the new locale.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openContractDetailModal(root, contract) })
   trapFocus(overlay, null)
 }
 
@@ -137,6 +139,8 @@ export function openIdeaDetailModal(root: ShadowRoot, idea: Record<string, unkno
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the drawer in the new locale.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openIdeaDetailModal(root, idea) })
   trapFocus(overlay, null)
 }
 

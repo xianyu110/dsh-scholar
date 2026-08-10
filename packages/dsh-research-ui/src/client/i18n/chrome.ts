@@ -1,0 +1,71 @@
+/**
+ * Pure chrome-copy model (acceptance-tests.md §8 / §13.4): the shell's
+ * once-built chrome — tab groups, tab labels/descriptions, model selector
+ * choices, density options — is defined here as FUNCTIONS that evaluate
+ * `t()` against the CURRENT locale on every call. The DOM layer re-paints
+ * from these on locale switch, so nothing snapshots copy at init time.
+ * Kept free of DOM so unit tests can assert zh/en re-evaluation purely.
+ */
+import { t } from './index'
+
+export interface ChromeTab { key: string; label: string; description: string }
+export interface ChromeTabGroup { label: string; tabs: ChromeTab[] }
+export interface ChromeModelChoice { id: string; label: string }
+export interface ChromeDensityOption { value: 'compact' | 'normal'; label: string }
+
+/** Tab groups with labels/descriptions in the CURRENT locale. */
+export function chromeTabGroups(): ChromeTabGroup[] {
+  return [
+    {
+      label: t('shell', 'shell.tabs.group.research'),
+      tabs: [
+        { key: 'chat', label: t('shell', 'shell.tab.chat'), description: t('shell', 'shell.tab.chat.desc') },
+        { key: 'phase', label: t('shell', 'shell.tab.phase'), description: t('shell', 'shell.tab.phase.desc') },
+      ],
+    },
+    {
+      label: t('shell', 'shell.tabs.group.execution'),
+      tabs: [
+        { key: 'gates', label: t('shell', 'shell.tab.gates'), description: t('shell', 'shell.tab.gates.desc') },
+        { key: 'runs', label: t('shell', 'shell.tab.runs'), description: t('shell', 'shell.tab.runs.desc') },
+        { key: 'terminal', label: t('shell', 'shell.tab.terminal'), description: t('shell', 'shell.tab.terminal.desc') },
+      ],
+    },
+    {
+      label: t('shell', 'shell.tabs.group.review'),
+      tabs: [
+        { key: 'artifacts', label: t('shell', 'shell.tab.artifacts'), description: t('shell', 'shell.tab.artifacts.desc') },
+        { key: 'evidence', label: t('shell', 'shell.tab.evidence'), description: t('shell', 'shell.tab.evidence.desc') },
+        { key: 'manuscript', label: t('shell', 'shell.tab.manuscript'), description: t('shell', 'shell.tab.manuscript.desc') },
+      ],
+    },
+    {
+      label: t('shell', 'shell.tabs.group.operations'),
+      tabs: [
+        { key: 'budget', label: t('shell', 'shell.tab.budget'), description: t('shell', 'shell.tab.budget.desc') },
+      ],
+    },
+  ]
+}
+
+/** Flat tab list in the CURRENT locale (order = Alt+1..9 order). */
+export function chromeTabs(): ChromeTab[] {
+  return chromeTabGroups().flatMap(group => group.tabs)
+}
+
+/** Research-agent model selector choices in the CURRENT locale. */
+export function chromeModelChoices(): ChromeModelChoice[] {
+  return [
+    { id: '', label: t('shell', 'shell.model.auto') },
+    { id: 'deepseek-v4-flash', label: t('shell', 'shell.model.deepseek-v4-flash') },
+    { id: 'deepseek-v4-pro', label: t('shell', 'shell.model.deepseek-v4-pro') },
+  ]
+}
+
+/** Density selector options in the CURRENT locale. */
+export function chromeDensityOptions(): ChromeDensityOption[] {
+  return [
+    { value: 'compact', label: t('shell', 'shell.density.compact') },
+    { value: 'normal', label: t('shell', 'shell.density.normal') },
+  ]
+}

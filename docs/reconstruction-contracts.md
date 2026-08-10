@@ -475,9 +475,9 @@ Intake staged upload 复用 Content-Range/offset/hash 幂等规则，但绑定 i
 ## 24. NextAction、Trajectory 与 Subagent wire
 
 ~~~typescript
-interface NextAction { id:string; code:string; label_key:string; state:'available'|'running'|'waiting-gate'|'waiting-external'|'blocked'|'failed'|'completed'; target_route:string; blocking:boolean; reason:string; refs:Array<{kind:string;id:string}>; required:'human'|'agent'|'runner'; required_revision:number; capability?:string; raw?:string }
+interface NextAction { id:string; code:string; label:string; reason:string; required:true|string[]; route:string; capability?:string; revision:number|null; state:'ready'|'blocked'|'done'; blocking:boolean; refs:Array<{kind:string;id:string}>; required_by:'human'|'agent'|'runner' }
 interface SubagentAddress { parent_session_id:string; child_session_id:string; mode:'one-shot'|'continuable' }
 interface TrajectoryNodeSummary { node_id:string; parent_node_id:string|null; relation:'root'|'child'|'fork'; source:'kernel-outbox'|'dsh-session'|'external'; kind:'session'|'subagent'|'task'|'research-event'; label:string|null; mode:'one-shot'|'continuable'|'read-only'|null; status:string; has_children:boolean; children_count:number|null; duration_ms:number|null; tokens:{uncached_input:number;cache_read:number;cache_write:number;output:number}|null; permissions:{can_read_summary:boolean;can_read_detail:boolean;can_continue:boolean} }
 ~~~
 
-Project projection 的 `next_actions` 使用 `NextAction[]`。一版迁移 adapter 可把旧 `string[]` 包装为 `{code:'legacy_unknown',raw,...}`，UI 不得为 unknown 构造 mutation。Trajectory event envelope、分页、SSE、retention、redaction、token/duration 聚合与 exact-parent follow-up 见 trajectory-subagents.md。
+Project projection 同时返回 legacy `next_actions: string[]`（由非 done 动作的 label 稳定派生）与权威 `next_actions_v2: NextAction[]`（GUIDE-01；字段语义见 domain-model.md §14，Zod schema 见 research-schemas `NextAction`）。动作由 Kernel 从 status/pending gates/jobs/budget/contracts/ideas/evidence 确定性生成；未知/未来状态退化 `code:'unknown'` 的只读动作，UI 不得为 unknown 构造 mutation。Trajectory event envelope、分页、SSE、retention、redaction、token/duration 聚合与 exact-parent follow-up 见 trajectory-subagents.md。

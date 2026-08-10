@@ -85,7 +85,9 @@ export function terminalAppendText(target: HTMLElement, text: string): void {
   }
 }
 
-/** Live status bar paint (async status changes update the DOM directly). */
+/** Live status bar paint (async status changes update the DOM directly).
+ *  All copy is evaluated against the CURRENT locale at paint time (§13.4);
+ *  raw byte counts stay numeric wire data. */
 export function terminalPaintStatus(): void {
   if (state.terminalStatusEl === null) return
   const statusMap: Record<string, string> = {
@@ -96,15 +98,16 @@ export function terminalPaintStatus(): void {
     ? 'var(--tone-green)'
     : (state.terminalStatus === 'reconnecting' || state.terminalStatus === 'connecting' ? 'var(--tone-amber)' : 'var(--text-3)')
   if (state.terminalMetaEl !== null) {
-    const parts = [
-      `seq ${state.terminalLastSeq}`,
-      t('terminal', 'terminal.lines', { shown: String(state.terminalLines.length), max: String(TERMINAL_MAX_LINES) }),
-      `${state.terminalTotalBytes} byte(s)`,
-    ]
-    if (state.terminalDroppedBytes > 0) parts.push(`${state.terminalDroppedBytes} dropped`)
-    if (state.terminalTruncated) parts.push('truncated')
-    if (state.terminalExitCode !== null || state.terminalExitSignal !== null) parts.push(`exit ${state.terminalExitCode ?? state.terminalExitSignal}`)
-    state.terminalMetaEl.textContent = parts.join(' · ')
+    state.terminalMetaEl.textContent = t('terminal', 'terminal.meta', {
+      seq: String(state.terminalLastSeq),
+      lines: t('terminal', 'terminal.lines', { shown: String(state.terminalLines.length), max: String(TERMINAL_MAX_LINES) }),
+      bytes: String(state.terminalTotalBytes),
+      dropped: state.terminalDroppedBytes > 0 ? t('terminal', 'terminal.meta.dropped', { count: String(state.terminalDroppedBytes) }) : '',
+      truncated: state.terminalTruncated ? t('terminal', 'terminal.meta.truncated') : '',
+      exit: state.terminalExitCode !== null || state.terminalExitSignal !== null
+        ? t('terminal', 'terminal.meta.exit', { code: state.terminalExitCode !== null ? String(state.terminalExitCode) : String(state.terminalExitSignal ?? '') })
+        : '',
+    })
   }
 }
 
@@ -163,10 +166,11 @@ export function terminalHandleData(event: string, payload: Record<string, unknow
     if (state.terminalStreamEl !== null && state.terminalSearch === '') {
       const end = el('div', 'term-exit')
       end.style.cssText = 'color:var(--text-3);white-space:pre;font-weight:700'
-      const parts = [`exit${state.terminalExitCode !== null ? ` code ${state.terminalExitCode}` : ''}${state.terminalExitSignal !== null ? ` (${state.terminalExitSignal})` : ''}`]
-      if (state.terminalTruncated) parts.push('truncated')
-      parts.push(`${state.terminalTotalBytes} byte(s)${state.terminalDroppedBytes > 0 ? ` · ${state.terminalDroppedBytes} dropped` : ''}`)
-      end.textContent = `— ${parts.join(' · ')} —`
+      const code = state.terminalExitCode !== null ? t('terminal', 'terminal.exit.code', { code: String(state.terminalExitCode) }) : ''
+      const signal = state.terminalExitSignal !== null ? t('terminal', 'terminal.exit.signal', { signal: state.terminalExitSignal }) : ''
+      const truncated = state.terminalTruncated ? t('terminal', 'terminal.meta.truncated') : ''
+      const dropped = state.terminalDroppedBytes > 0 ? t('terminal', 'terminal.meta.dropped', { count: String(state.terminalDroppedBytes) }) : ''
+      end.textContent = t('terminal', 'terminal.exitLine', { code, signal, truncated, bytes: String(state.terminalTotalBytes), dropped })
       state.terminalStreamEl.appendChild(end)
       state.terminalStreamEl.scrollTop = state.terminalStreamEl.scrollHeight
     }

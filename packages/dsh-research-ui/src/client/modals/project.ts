@@ -1,6 +1,6 @@
 import type { Projection } from '../types'
 import { api } from '../api'
-import { t } from '../i18n/index'
+import { registerOverlayRebuild, t } from '../i18n/index'
 import { state, tabSave } from '../state'
 import { copyText, el, pill, trapFocus } from '../ui'
 /* ─────────────────────────── standalone project creator ─────────────────────────── */
@@ -103,6 +103,8 @@ export function openNewProjectModal(root: ShadowRoot | null | undefined): void {
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the form in the new locale.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openNewProjectModal(root) })
   trapFocus(overlay, nameInput)
   nameInput.focus()
 }
@@ -178,6 +180,9 @@ export function openRenameModal(root: ShadowRoot, projectId: string, currentName
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the rename dialog (the typed
+  // name is preserved via the currentName argument captured below).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openRenameModal(root, projectId, currentName, onDone) })
   input.focus()
   input.select()
 }
@@ -204,6 +209,8 @@ export async function openProjectDetailModal(root: ShadowRoot, projectId: string
   modal.appendChild(loading)
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the drawer in the new locale.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); void openProjectDetailModal(root, projectId) })
 
   const p = await api<Projection>(`/v1/projects/${encodeURIComponent(projectId)}/projection`)
   if (p === null || p.project === undefined) {

@@ -2,8 +2,14 @@
  * dsh-web local locale adapter (gui-plugin-plan §13.2): bind/getSnapshot/
  * subscribe/setLocale with zh/en dictionaries. Lookup order: active-locale
  * namespace → zh namespace → active-locale common → zh common → the raw key
- * (never an empty string; missing keys log one warning in dev). A second
- * install of the adapter in the same app instance is an assembly error.
+ * (never an empty string). Missing keys (absent from EVERY dictionary) are
+ * reported to the injected reporter and warn once per key in dev
+ * (acceptance-tests.md §8: 缺 key 在开发模式 warning). Locale switching
+ * (setLocale) bumps the revision, notifies listeners (the shell re-paints
+ * chrome and re-renders panels) and rebuilds every registered open overlay
+ * so tabs, pipeline, modals, Terminal and status all re-evaluate their
+ * copy. A second install of the adapter in the same app instance is an
+ * assembly error.
  */
 import { zh as commonZh, en as commonEn } from './locales/common'
 import { zh as standaloneZh, en as standaloneEn } from './locales/standalone'
@@ -15,6 +21,7 @@ import { zh as runsZh, en as runsEn } from './locales/runs'
 import { zh as artifactsZh, en as artifactsEn } from './locales/artifacts'
 import { zh as evidenceZh, en as evidenceEn } from './locales/evidence'
 import { zh as budgetZh, en as budgetEn } from './locales/budget'
+import { zh as statusZh, en as statusEn } from './locales/status'
 
 export type Locale = 'zh' | 'en'
 
@@ -33,6 +40,7 @@ const DICTS: AllDicts = {
     artifacts: artifactsZh as unknown as Record<string, string>,
     evidence: evidenceZh as unknown as Record<string, string>,
     budget: budgetZh as unknown as Record<string, string>,
+    status: statusZh as unknown as Record<string, string>,
   },
   en: {
     common: commonEn as unknown as Record<string, string>,
@@ -45,6 +53,7 @@ const DICTS: AllDicts = {
     artifacts: artifactsEn as unknown as Record<string, string>,
     evidence: evidenceEn as unknown as Record<string, string>,
     budget: budgetEn as unknown as Record<string, string>,
+    status: statusEn as unknown as Record<string, string>,
   },
 }
 
@@ -105,7 +114,58 @@ export function setLocale(locale: Locale): void {
   localeRevision += 1
   try { localStorage.setItem(LOCALE_KEY, locale) } catch { /* private mode */ }
   try { document.documentElement.lang = locale } catch { /* sandboxed */ }
-  for (const fn of localeListeners) fn()
+  for (const fn of [...localeListeners]) fn()
+  // dsh-web i18n §13.4: every open modal re-opens in the new locale; the
+  // shell listener above re-paints tabs/header and re-renders panels.
+  relocalizeOpenOverlays()
+}
+
+/* ─────────────────────── missing-key reporting (dev) ─────────────────────── */
+
+/** One fully-missing key (absent from every dictionary) at runtime. */
+export interface MissingKeyReport { namespace: string; key: string; locale: Locale }
+
+export type MissingKeyReporter = (report: MissingKeyReport) => void
+
+/** Injectable collector — tests capture runtime misses without a console. */
+let missingKeyReporter: MissingKeyReporter | null = null
+/** Per-key dedupe for the dev console warning (the reporter sees every miss). */
+const warnedMissingKeys = new Set<string>()
+
+export function setMissingKeyReporter(reporter: MissingKeyReporter | null): void {
+  missingKeyReporter = reporter
+}
+
+export function resetMissingKeyWarnings(): void {
+  warnedMissingKeys.clear()
+}
+
+/**
+ * Dev-mode probe: true in Vite dev servers and under test runners (vitest
+ * exposes MODE='test'), false in production bundles (where import.meta.env
+ * is absent and `process` is undefined in the browser). Console warnings
+ * for missing keys are gated on this; the injected reporter is not.
+ */
+export function isLocaleDevMode(): boolean {
+  const env = (import.meta as { env?: { DEV?: boolean; MODE?: string } }).env
+  if (env?.DEV === true) return true
+  if (env?.MODE === 'test') return true
+  try {
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') return true
+  } catch { /* sandboxed */ }
+  return false
+}
+
+function notifyMissingKey(namespace: string, key: string, locale: Locale): void {
+  missingKeyReporter?.({ namespace, key, locale })
+  const uid = `${namespace}.${key}`
+  if (warnedMissingKeys.has(uid)) return
+  warnedMissingKeys.add(uid)
+  if (isLocaleDevMode()) {
+    const hint = namespace === 'common' ? 'locales/common.ts' : `locales/${namespace}.ts`
+    // eslint-disable-next-line no-console
+    console.warn(`[dsh-scholar i18n] missing key "${namespace}.${key}" (locale=${locale}); add it to ${hint} (zh/en parity required)`)
+  }
 }
 
 export function t(namespace: string, key: string, params?: Record<string, string>): string {
@@ -113,13 +173,62 @@ export function t(namespace: string, key: string, params?: Record<string, string
   const zhNs = DICTS.zh?.[namespace] ?? {}
   const activeCommon = DICTS[activeLocale]?.common ?? {}
   const zhCommon = DICTS.zh.common ?? {}
-  let text = active[key] ?? zhNs[key] ?? activeCommon[key] ?? zhCommon[key] ?? key
+  const found = active[key] ?? zhNs[key] ?? activeCommon[key] ?? zhCommon[key]
+  if (found === undefined) {
+    notifyMissingKey(namespace, key, activeLocale)
+    return key
+  }
+  let text = found
   if (params !== undefined) {
     for (const [name, value] of Object.entries(params)) {
       text = text.replaceAll(`{${name}}`, value)
     }
   }
   return text
+}
+
+/* ─────────────────── open-overlay rebuild registry (§13.4) ─────────────────── */
+
+/**
+ * Modals register their overlay + a reopen closure when they mount. On
+ * locale switch setLocale() re-runs every registration whose overlay is
+ * still connected (registrations for overlays the user already closed are
+ * pruned). The overlay type is structural (`{ isConnected: boolean }`) so
+ * Node-level tests can register fakes without a DOM.
+ */
+export interface OverlayRegistration {
+  overlay: { isConnected: boolean } | null
+  rebuild: () => void
+}
+
+const overlayRebuilds = new Map<number, OverlayRegistration>()
+let nextOverlayId = 1
+
+/** Register an open overlay for locale-switch rebuild; returns the id. */
+export function registerOverlayRebuild(overlay: { isConnected: boolean } | null, rebuild: () => void): number {
+  const id = nextOverlayId
+  nextOverlayId += 1
+  overlayRebuilds.set(id, { overlay, rebuild })
+  return id
+}
+
+export function unregisterOverlayRebuild(id: number): void {
+  overlayRebuilds.delete(id)
+}
+
+/** Rebuild every still-open overlay in the current locale (prunes stale
+ *  registrations); returns the number of overlays rebuilt. */
+export function relocalizeOpenOverlays(): number {
+  let rebuilt = 0
+  for (const [id, reg] of [...overlayRebuilds]) {
+    if (reg.overlay !== null && reg.overlay.isConnected !== true) {
+      overlayRebuilds.delete(id)
+      continue
+    }
+    rebuilt += 1
+    reg.rebuild()
+  }
+  return rebuilt
 }
 
 /** Static check: zh/en key sets must be exactly equal per namespace.
@@ -147,9 +256,7 @@ export function assertLocaleParity(): void {
   const violations = localeParityReport()
   if (violations.length === 0) return
   const msg = violations.join('\n')
-  // import.meta.env may be absent in non-Vite builds; treat as production.
-  const dev = (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true
-  if (dev) {
+  if (isLocaleDevMode()) {
     // eslint-disable-next-line no-console
     console.warn('[dsh-scholar i18n] ' + msg)
   }

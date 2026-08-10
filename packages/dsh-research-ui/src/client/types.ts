@@ -12,6 +12,21 @@ export interface Projection {
   budget?: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }
   counts?: { ideas?: number; contracts?: number; claims?: number; evidence?: number; artifacts?: number; corpus_snapshots?: number }
   next_actions?: string[]
+  /** GUIDE-01: structured next-step projection (kernel-authoritative; UI renders legacy labels today). */
+  next_actions_v2?: Array<{
+    id?: string
+    code?: string
+    label?: string
+    reason?: string
+    required?: true | string[]
+    route?: string
+    capability?: string
+    revision?: number | null
+    state?: 'ready' | 'blocked' | 'done'
+    blocking?: boolean
+    refs?: Array<{ kind?: string; id?: string }>
+    required_by?: 'human' | 'agent' | 'runner'
+  }>
 }
 
 export interface ClaimRow { claim_id?: string; statement?: string; status?: string; confidence?: string; scope?: { dataset?: string; split?: string }; evidence?: { evidence_ids?: string[]; analysis_artifact?: string }; limitations?: string[]; history?: Array<{ status?: string; at?: string; reason?: string }> }

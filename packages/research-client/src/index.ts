@@ -130,6 +130,21 @@ export class ResearchClient {
     budget: Record<string, unknown>
     counts: Record<string, number>
     next_actions: string[]
+    /** GUIDE-01: structured next-step projection (kernel-authoritative). */
+    next_actions_v2: Array<{
+      id: string
+      code: string
+      label: string
+      reason: string
+      required: true | string[]
+      route: string
+      capability?: string
+      revision: number | null
+      state: 'ready' | 'blocked' | 'done'
+      blocking: boolean
+      refs: Array<{ kind: string; id: string }>
+      required_by: 'human' | 'agent' | 'runner'
+    }>
   }> {
     return this.request('GET', `/v1/projects/${projectId}/projection`)
   }

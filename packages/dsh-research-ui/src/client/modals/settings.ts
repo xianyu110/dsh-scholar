@@ -1,6 +1,6 @@
 import type { Projection } from '../types'
 import { api, base } from '../api'
-import { getLocale, setLocale, t } from '../i18n/index'
+import { getLocale, registerOverlayRebuild, setLocale, t } from '../i18n/index'
 import { openShortcutsModal } from '../modals/commands'
 import { accentColor, accentSet, autoRefreshEnabled, autoRefreshSet, chatClear, densityApply, radiusSet, radiusValue, readTheme, state, textureSet, textureValue, writeTheme } from '../state'
 import { ACCENTS, ACCENT_DARK, copyText, el, rootHost, showToast, trapFocus } from '../ui'
@@ -162,13 +162,11 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   localeSelect.value = localeCurrent
   localeSelect.onchange = () => {
     const next = localeSelect.value === 'zh' ? 'zh' : 'en'
+    // dsh-web i18n §13.4: setLocale re-paints the shell chrome, re-renders
+    // the active panel and rebuilds every open overlay (this modal
+    // included) via the overlay registry — no manual reopen needed.
     setLocale(next)
-    localeSelect.value = next
     document.dispatchEvent(new Event('dsh-scholar-locale-changed'))
-    // dsh-web i18n §13.4: the open settings modal re-renders in the new
-    // locale immediately (other overlays refresh on their next open).
-    overlay.remove()
-    void openSettingsModal(root)
   }
   localeRow.append(localeLabel, localeSelect)
   modal.appendChild(localeRow)
@@ -361,6 +359,9 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the settings modal in the
+  // new locale (setLocale → relocalizeOpenOverlays).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); void openSettingsModal(root) })
   trapFocus(overlay, null)
 }
 
@@ -416,5 +417,7 @@ export function openAboutModal(root: ShadowRoot | null | undefined): void {
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the about modal.
+  registerOverlayRebuild(overlay, () => { overlay.remove(); openAboutModal(root) })
 }
 

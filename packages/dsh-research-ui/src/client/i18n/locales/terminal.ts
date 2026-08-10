@@ -21,6 +21,12 @@ export const zh = {
   'terminal.exitLine': '— 退出{code}{signal}{truncated} · {bytes} 字节{dropped} —',
   'terminal.lines': '{shown}/{max} 行',
   'terminal.meta': 'seq {seq} · {lines} · {bytes} 字节{dropped}{truncated}{exit}',
+  // meta/exit fragments (passed as params to terminal.meta / terminal.exitLine)
+  'terminal.meta.dropped': ' · 丢弃 {count} 字节',
+  'terminal.meta.truncated': ' · 已截断',
+  'terminal.meta.exit': ' · 退出 {code}',
+  'terminal.exit.code': ' 代码 {code}',
+  'terminal.exit.signal': ' ({signal})',
   'terminal.streamAria': '运行终端输出',
   'terminal.jumpLatestTitle': '跳到最新输出',
 } as const
@@ -46,6 +52,12 @@ export const en: Record<TerminalKey, string> = {
   'terminal.exitLine': '— exit{code}{signal}{truncated} · {bytes} byte(s){dropped} —',
   'terminal.lines': '{shown}/{max} lines',
   'terminal.meta': 'seq {seq} · {lines} · {bytes} byte(s){dropped}{truncated}{exit}',
+  // meta/exit fragments (passed as params to terminal.meta / terminal.exitLine)
+  'terminal.meta.dropped': ' · {count} dropped',
+  'terminal.meta.truncated': ' · truncated',
+  'terminal.meta.exit': ' · exit {code}',
+  'terminal.exit.code': ' code {code}',
+  'terminal.exit.signal': ' ({signal})',
   'terminal.streamAria': 'run terminal output',
   'terminal.jumpLatestTitle': 'jump to the newest output',
 }

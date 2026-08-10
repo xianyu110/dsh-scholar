@@ -635,6 +635,77 @@ describe('claims and evidence', () => {
   })
 })
 
+describe('CONFIG-01 canonical Config Registry integration', () => {
+  it('pins the kernel effective config (stable for identical options, sensitive to change)', () => {
+    const kernel = freshKernel()
+    expect(kernel.configPinHash).toMatch(/^sha256:[0-9a-f]{64}$/)
+    // identical explicit options → identical pin (freshKernel uses a random
+    // temp dir, so the two instances above legitimately differ in db path)
+    const opts = { dbPath: ':memory:', casRoot: '/tmp/config-pin-cas' } as const
+    const a = new ResearchKernel(opts)
+    const b = new ResearchKernel(opts)
+    try {
+      expect(b.configPinHash).toBe(a.configPinHash)
+      // a changed cas root changes the pin
+      const c = new ResearchKernel({ ...opts, casRoot: '/tmp/config-pin-cas-other' })
+      try {
+        expect(c.configPinHash).not.toBe(a.configPinHash)
+      } finally {
+        c.close()
+      }
+      // a changed service identity changes the pin (secret hashed, never echoed)
+      const withToken = new ResearchKernel({ ...opts, serviceToken: 'svc-secret-x' })
+      try {
+        expect(withToken.configPinHash).not.toBe(a.configPinHash)
+        expect(withToken.configPinHash).not.toContain('svc-secret-x')
+      } finally {
+        withToken.close()
+      }
+    } finally {
+      a.close()
+      b.close()
+      kernel.close()
+    }
+  })
+
+  it('server health carries config_pin and every response has x-config-pin', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const v1 = await fetch(`http://127.0.0.1:${port}/v1/health`)
+      expect(v1.status).toBe(200)
+      expect(v1.headers.get('x-config-pin')).toBe(kernel.configPinHash)
+      const v1Body = await v1.json() as { config_pin?: string }
+      expect(v1Body.config_pin).toBe(kernel.configPinHash)
+      const v2 = await fetch(`http://127.0.0.1:${port}/v2/health`)
+      expect(v2.status).toBe(200)
+      expect(v2.headers.get('x-config-pin')).toBe(kernel.configPinHash)
+      const v2Body = await v2.json() as { config_pin?: string }
+      expect(v2Body.config_pin).toBe(kernel.configPinHash)
+      // a regular API response carries the header too
+      const projects = await fetch(`http://127.0.0.1:${port}/v1/projects`)
+      expect(projects.headers.get('x-config-pin')).toBe(kernel.configPinHash)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('createProject enforces the registry security floor (automatic release forbidden)', () => {
+    const kernel = freshKernel()
+    try {
+      expect(() => kernel.createProject({
+        name: 't', workspace: '/w', brief: makeBrief(), integrity: { allow_automatic_public_release: true },
+      })).toThrow(/automatic public release/)
+      // nothing was persisted
+      expect(kernel.listProjects()).toHaveLength(0)
+    } finally {
+      kernel.close()
+    }
+  })
+})
+
 describe('corpus + ideas + manuscript', () => {
   it('snapshots corpus and builds deterministic manuscripts from the ledger', () => {
     const kernel = freshKernel()

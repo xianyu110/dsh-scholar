@@ -6,52 +6,73 @@ import { state } from './state'
 
 /* ─────────────────────────── design system ─────────────────────────── */
 
-export const STATUS_META: Record<string, { label: string; tone: string }> = {
-  // Status pill labels mirror the kernel's raw status ENUMS verbatim
-  // (acceptance-tests.md §8 line 115: unknown enum / wire text stays raw).
+export const STATUS_META: Record<string, { tone: string }> = {
+  // Status pill tones mirror the kernel's raw status ENUMS. Display text is
+  // i18n'd via statusLabel() (status namespace, zh/en parity); unknown
+  // enum/wire statuses fall back to the raw value verbatim
+  // (acceptance-tests.md §8 line 115).
   // project phases
-  DRAFT: { label: 'DRAFT', tone: 'slate' },
-  SCOPED: { label: 'SCOPED', tone: 'blue' },
-  SURVEYING: { label: 'SURVEYING', tone: 'cyan' },
-  IDEATING: { label: 'IDEATING', tone: 'violet' },
-  IDEA_APPROVED: { label: 'IDEA ✓', tone: 'green' },
-  BASELINE_REPRO: { label: 'BASELINE', tone: 'amber' },
-  CONTRACT_APPROVED: { label: 'CONTRACT ✓', tone: 'green' },
-  EXPERIMENTING: { label: 'EXPERIMENT', tone: 'blue' },
-  EVIDENCE_READY: { label: 'EVIDENCE', tone: 'cyan' },
-  WRITING: { label: 'WRITING', tone: 'violet' },
-  REVIEWING: { label: 'REVIEW', tone: 'amber' },
-  RELEASE_READY: { label: 'RELEASE ✓', tone: 'green' },
-  RELEASED: { label: 'RELEASED', tone: 'green' },
-  BLOCKED_GATE: { label: 'BLOCKED', tone: 'red' },
-  ARCHIVED: { label: 'ARCHIVED', tone: 'slate' },
+  DRAFT: { tone: 'slate' },
+  SCOPED: { tone: 'blue' },
+  SURVEYING: { tone: 'cyan' },
+  IDEATING: { tone: 'violet' },
+  IDEA_APPROVED: { tone: 'green' },
+  BASELINE_REPRO: { tone: 'amber' },
+  CONTRACT_APPROVED: { tone: 'green' },
+  EXPERIMENTING: { tone: 'blue' },
+  EVIDENCE_READY: { tone: 'cyan' },
+  WRITING: { tone: 'violet' },
+  REVIEWING: { tone: 'amber' },
+  RELEASE_READY: { tone: 'green' },
+  RELEASED: { tone: 'green' },
+  BLOCKED_GATE: { tone: 'red' },
+  ARCHIVED: { tone: 'slate' },
   // gates
-  pending: { label: 'PENDING', tone: 'amber' },
-  approved: { label: 'APPROVED', tone: 'green' },
-  rejected: { label: 'REJECTED', tone: 'red' },
+  pending: { tone: 'amber' },
+  approved: { tone: 'green' },
+  rejected: { tone: 'red' },
   // jobs
-  queued: { label: 'QUEUED', tone: 'slate' },
-  running: { label: 'RUNNING', tone: 'blue' },
-  succeeded: { label: 'SUCCEEDED', tone: 'green' },
-  failed: { label: 'FAILED', tone: 'red' },
-  cancelled: { label: 'CANCELLED', tone: 'slate' },
-  retryable: { label: 'RETRYABLE', tone: 'amber' },
+  queued: { tone: 'slate' },
+  running: { tone: 'blue' },
+  succeeded: { tone: 'green' },
+  failed: { tone: 'red' },
+  cancelled: { tone: 'slate' },
+  retryable: { tone: 'amber' },
   // claims
-  supported: { label: 'SUPPORTED', tone: 'green' },
-  contradicted: { label: 'CONTRADICTED', tone: 'red' },
-  inconclusive: { label: 'INCONCLUSIVE', tone: 'amber' },
-  unverified: { label: 'UNVERIFIED', tone: 'slate' },
+  supported: { tone: 'green' },
+  contradicted: { tone: 'red' },
+  inconclusive: { tone: 'amber' },
+  unverified: { tone: 'slate' },
   // generic
-  none: { label: '—', tone: 'slate' },
+  none: { tone: 'slate' },
 }
 
-export const PHASE_PIPELINE: Array<[string, string]> = [
-  ['DRAFT', t('overview', 'overview.pipeline.draft')], ['SCOPED', t('overview', 'overview.pipeline.scoped')], ['SURVEYING', t('overview', 'overview.pipeline.survey')],
-  ['IDEATING', t('overview', 'overview.pipeline.ideas')], ['IDEA_APPROVED', t('overview', 'overview.pipeline.ideaApproved')], ['BASELINE_REPRO', t('overview', 'overview.pipeline.baseline')],
-  ['CONTRACT_APPROVED', t('overview', 'overview.pipeline.contract')], ['EXPERIMENTING', t('overview', 'overview.pipeline.run')], ['EVIDENCE_READY', t('overview', 'overview.pipeline.analyze')],
-  ['WRITING', t('overview', 'overview.pipeline.write')], ['REVIEWING', t('overview', 'overview.pipeline.review')], ['RELEASE_READY', t('overview', 'overview.pipeline.package')],
-  ['RELEASED', t('overview', 'overview.pipeline.released')],
-]
+/**
+ * Status display label in the CURRENT locale (status namespace). Known
+ * statuses resolve through the dicts (zh/en parity is CI-enforced); an
+ * unknown future enum falls back to the raw wire value verbatim (§8).
+ */
+export function statusLabel(status: string | undefined): string {
+  if (status === undefined || status === '') return ''
+  const key = `status.${status}`
+  const text = t('status', key)
+  return text === key ? status : text
+}
+
+/**
+ * Pipeline step definitions in the CURRENT locale. A FUNCTION (not a
+ * module-level snapshot) so a locale switch + panel re-render re-evaluates
+ * every step label (acceptance §8 line 135 / §13.4).
+ */
+export function phasePipeline(): Array<[string, string]> {
+  return [
+    ['DRAFT', t('overview', 'overview.pipeline.draft')], ['SCOPED', t('overview', 'overview.pipeline.scoped')], ['SURVEYING', t('overview', 'overview.pipeline.survey')],
+    ['IDEATING', t('overview', 'overview.pipeline.ideas')], ['IDEA_APPROVED', t('overview', 'overview.pipeline.ideaApproved')], ['BASELINE_REPRO', t('overview', 'overview.pipeline.baseline')],
+    ['CONTRACT_APPROVED', t('overview', 'overview.pipeline.contract')], ['EXPERIMENTING', t('overview', 'overview.pipeline.run')], ['EVIDENCE_READY', t('overview', 'overview.pipeline.analyze')],
+    ['WRITING', t('overview', 'overview.pipeline.write')], ['REVIEWING', t('overview', 'overview.pipeline.review')], ['RELEASE_READY', t('overview', 'overview.pipeline.package')],
+    ['RELEASED', t('overview', 'overview.pipeline.released')],
+  ]
+}
 
 
 export function fmtBytes(bytes: number | undefined): string {
@@ -82,13 +103,13 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: st
 
 /** Status pill: colored dot + label, tone-driven. */
 export function pill(status: string | undefined): HTMLElement {
-  const meta = STATUS_META[status ?? ''] ?? { label: status ?? '', tone: 'slate' as const }
+  const meta = STATUS_META[status ?? ''] ?? { tone: 'slate' as const }
   const node = el('span', 'pill')
   node.style.cssText = `display:inline-flex;align-items:center;gap:5px;font:600 10px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.4px;color:var(--tone-${meta.tone});background:var(--tone-${meta.tone}-bg);border:1px solid var(--tone-${meta.tone});border-radius:99px;padding:1px 8px;white-space:nowrap`
   const dot = el('span')
   dot.style.cssText = `width:6px;height:6px;border-radius:50%;background:var(--tone-${meta.tone});box-shadow:0 0 5px var(--tone-${meta.tone})`
   node.appendChild(dot)
-  node.appendChild(document.createTextNode(meta.label))
+  node.appendChild(document.createTextNode(statusLabel(status)))
   return node
 }
 

@@ -8,6 +8,7 @@
  */
 
 import { t, getLocale, subscribeLocale, assertLocaleParity } from './i18n/index'
+import { chromeTabGroups, chromeTabs, chromeModelChoices } from './i18n/chrome'
 import { api } from './api'
 import { el, pill, copyText, ACCENTS, ACCENT_DARK } from './ui'
 import type { ProjectRow, Projection } from './types'
@@ -44,10 +45,11 @@ let modalObserver: MutationObserver | null = null
 
 export function apply(): void {
   // dsh-web i18n: locale resolves before the first render (§13.4); the
-  // document lang reflects the active locale and chrome re-renders on change.
+  // document lang reflects the active locale and chrome re-paints on
+  // change (subscription installed at the end of apply(), once every
+  // paint target exists).
   assertLocaleParity()
   try { document.documentElement.lang = getLocale() } catch { /* sandboxed */ }
-  subscribeLocale(() => { state.rerender() })
   const host = document.createElement('div')
   host.id = 'dsh-scholar-ui'
   host.style.cssText = 'position:fixed;inset:0;z-index:9999;font:14px/1.5 system-ui,sans-serif'
@@ -459,30 +461,43 @@ export function apply(): void {
   // ── header ──
   const header = el('div', 'header')
   const brand = el('div', 'brand')
-  brand.appendChild(el('span', 'brand-mark', t('shell', 'shell.brand.mark')))
+  const brandMark = el('span', 'brand-mark', '')
+  brand.appendChild(brandMark)
   const brandCopy = el('div', 'brand-copy')
-  brandCopy.appendChild(el('span', 'title', t('shell', 'shell.brand.name')))
-  brandCopy.appendChild(el('span', 'brand-subtitle', t('shell', 'shell.brand.meta')))
+  const brandName = el('span', 'title', '')
+  const brandMeta = el('span', 'brand-subtitle', '')
+  brandCopy.append(brandName, brandMeta)
   brand.appendChild(brandCopy)
   header.appendChild(brand)
   // dsh-web kernel status: live dot (green when the kernel answers, red
-  // when the bridge is down; amber while checking).
+  // when the bridge is down; amber while checking). Tracked state lets the
+  // locale paint re-evaluate the title without a new health probe.
+  let kernelChecked = false
+  let kernelOk = true
+  let kernelInstance = ''
+  const paintKernelDot = (): void => {
+    kernelDot.style.background = !kernelChecked ? 'var(--tone-amber)' : (kernelOk ? 'var(--tone-green)' : 'var(--tone-red)')
+    kernelDot.title = !kernelChecked
+      ? t('shell', 'shell.kernel.status.checking')
+      : (kernelOk
+          ? t('shell', 'shell.kernelConnected', { instance: kernelInstance })
+          : t('shell', 'shell.kernelUnreachableClick'))
+    kernelDot.setAttribute('aria-label', t('shell', 'shell.kernel.status'))
+  }
   const kernelDot = el('span', 'kernel-dot')
-  kernelDot.style.background = 'var(--tone-amber)'
-  kernelDot.title = t('shell', 'shell.kernel.status.checking')
-  kernelDot.setAttribute('aria-label', t('shell', 'shell.kernel.status'))
   kernelDot.style.cursor = 'pointer'
   kernelDot.onclick = () => { void openSettingsModal(root) }
+  paintKernelDot()
   header.appendChild(kernelDot)
   const spacer = el('span', 'spacer')
   header.appendChild(spacer)
   const themeBtn = el('button', 'hbtn header-theme')
-  themeBtn.setAttribute('aria-label', t('shell', 'shell.theme.toggle'))
   themeBtn.setAttribute('aria-keyshortcuts', 'Control+Shift+T Meta+Shift+T')
   const paintTheme = (): void => {
     const dark = host.dataset.theme === 'dark'
     themeBtn.textContent = dark ? t('shell', 'shell.theme.light') : t('shell', 'shell.theme.dark')
     themeBtn.title = dark ? t('shell', 'shell.theme.switchLight') : t('shell', 'shell.theme.switchDark')
+    themeBtn.setAttribute('aria-label', t('shell', 'shell.theme.toggle'))
   }
   themeBtn.onclick = () => {
     host.dataset.theme = host.dataset.theme === 'dark' ? 'light' : 'dark'
@@ -492,24 +507,23 @@ export function apply(): void {
   }
   paintTheme()
   const refresh = el('button', 'hbtn header-refresh')
-  refresh.append(el('span', '', '↻'), el('span', 'long-label', ` ${t('common', 'common.action.refresh')}`))
+  const refreshLabel = el('span', 'long-label', '')
+  refresh.append(el('span', '', '↻'), refreshLabel)
   refresh.title = t('shell', 'shell.refresh.now')
   refresh.setAttribute('aria-label', t('common', 'common.action.refresh'))
   const commandsBtn = el('button', 'hbtn header-command')
-  commandsBtn.append(el('span', '', '⌘K'), el('span', 'long-label', ` ${t('shell', 'shell.commands.label')}`))
+  const commandsLabel = el('span', 'long-label', '')
+  commandsBtn.append(el('span', '', '⌘K'), commandsLabel)
   commandsBtn.title = t('shell', 'shell.commands.titleAttr')
   commandsBtn.setAttribute('aria-keyshortcuts', 'Control+K Meta+K')
   commandsBtn.onclick = () => { openCommandsModal(root) }
-  const shortcutsBtn = el('button', 'hbtn header-secondary', t('shell', 'shell.shortcuts.button'))
-  shortcutsBtn.title = t('shell', 'shell.shortcuts.titleAttr')
+  const shortcutsBtn = el('button', 'hbtn header-secondary', '')
   shortcutsBtn.onclick = () => { openShortcutsModal(root) }
   const bellBtn = el('button', 'hbtn header-notifications')
-  bellBtn.append(el('span', '', '○'), el('span', 'long-label', ` ${t('shell', 'shell.activity')}`))
-  bellBtn.title = t('shell', 'shell.notifications')
+  const bellLabel = el('span', 'long-label', '')
+  bellBtn.append(el('span', '', '○'), bellLabel)
   bellBtn.onclick = () => { openNotificationsModal(root) }
   const modeBadge = el('span', 'mode-badge')
-  modeBadge.textContent = t('shell', 'shell.mode.humanGates')
-  modeBadge.title = t('shell', 'shell.mode.humanGates.title')
   // dsh-web "Collapse sidebar": toggles the workspace sidebar width
   // (persisted, dsh-web layout memory).
   const SIDEBAR_KEY = 'dsh-scholar-ui-sidebar'
@@ -535,9 +549,9 @@ export function apply(): void {
   // Normal controls the panel font scale.
   densityLoad()
   const densitySelect = el('select', 'picker state.density-select')
-  const dOptCompact = el('option', '', t('shell', 'shell.density.compact'))
+  const dOptCompact = el('option', '', '')
   dOptCompact.value = 'compact'
-  const dOptNormal = el('option', '', t('shell', 'shell.density.normal'))
+  const dOptNormal = el('option', '', '')
   dOptNormal.value = 'normal'
   densitySelect.append(dOptCompact, dOptNormal)
   densitySelect.value = state.density
@@ -548,25 +562,9 @@ export function apply(): void {
   densityApply(panel)
   // Research-agent model seat: the selection is persisted by the standalone
   // server (/api/model → model.json) and consumed by the DSH-side plugin for
-  // the primary research role ('auto' = agent default).
-  const MODEL_CHOICES: Array<{ id: string; label: string }> = [
-    { id: '', label: t('shell', 'shell.model.auto') },
-    { id: 'deepseek-v4-flash', label: t('shell', 'shell.model.deepseek-v4-flash') },
-    { id: 'deepseek-v4-pro', label: t('shell', 'shell.model.deepseek-v4-pro') },
-  ]
+  // the primary research role ('auto' = agent default). Labels re-evaluate
+  // with the locale (chromeModelChoices).
   const modelSelect = el('select', 'picker state.density-select')
-  modelSelect.setAttribute('aria-label', t('shell', 'shell.model.ariaLabel'))
-  modelSelect.title = t('shell', 'shell.model.label')
-  for (const choice of MODEL_CHOICES) {
-    const opt = el('option', '', choice.label)
-    opt.value = choice.id
-    modelSelect.append(opt)
-  }
-  void api<{ ok?: boolean; model?: string }>('/api/model').then(state => {
-    if (state?.ok === true && typeof state.model === 'string') {
-      modelSelect.value = state.model
-    }
-  }).catch(() => { /* keep auto default */ })
   modelSelect.onchange = () => {
     const chosen = modelSelect.value
     void api<{ ok?: boolean }>('/api/model', {
@@ -574,97 +572,76 @@ export function apply(): void {
       body: JSON.stringify({ model: chosen }),
     }).then(state => {
       if (state?.ok !== true) {
-        modelSelect.value = modelSelect.value // no-op keeps UI stable; error surfaced via title
         modelSelect.title = t('shell', 'shell.model.error')
         setTimeout(() => { modelSelect.title = t('shell', 'shell.model.label') }, 3000)
       }
     })
   }
+  const paintSelects = (): void => {
+    dOptCompact.textContent = t('shell', 'shell.density.compact')
+    dOptNormal.textContent = t('shell', 'shell.density.normal')
+    const modelValue = modelSelect.value
+    modelSelect.replaceChildren()
+    for (const choice of chromeModelChoices()) {
+      const opt = el('option', '', choice.label)
+      opt.value = choice.id
+      modelSelect.append(opt)
+    }
+    modelSelect.value = modelValue
+    modelSelect.setAttribute('aria-label', t('shell', 'shell.model.ariaLabel'))
+    modelSelect.title = t('shell', 'shell.model.label')
+  }
+  paintSelects()
+  void api<{ ok?: boolean; model?: string }>('/api/model').then(state => {
+    if (state?.ok === true && typeof state.model === 'string') {
+      modelSelect.value = state.model
+    }
+  }).catch(() => { /* keep auto default */ })
   const headerActions = el('div', 'header-actions')
   headerActions.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, modelSelect, themeBtn, refresh)
   header.appendChild(headerActions)
   main.appendChild(header)
 
   // ── tabs ──
+  // Tab structure (keys + order) is locale-independent; labels/descriptions
+  // come from the pure chrome model and are re-painted on locale switch.
   const tabs = el('div', 'tabs')
   tabs.setAttribute('role', 'tablist')
   tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
-  type TabDef = readonly [key: string, label: string, description: string]
-  const TAB_GROUPS: Array<{ label: string; tabs: TabDef[] }> = [
-    {
-      label: t('shell', 'shell.tabs.group.research'),
-      tabs: [
-        ['chat', t('shell', 'shell.tab.chat'), t('shell', 'shell.tab.chat.desc')],
-        ['phase', t('shell', 'shell.tab.phase'), t('shell', 'shell.tab.phase.desc')],
-      ],
-    },
-    {
-      label: t('shell', 'shell.tabs.group.execution'),
-      tabs: [
-        ['gates', t('shell', 'shell.tab.gates'), t('shell', 'shell.tab.gates.desc')],
-        ['runs', t('shell', 'shell.tab.runs'), t('shell', 'shell.tab.runs.desc')],
-        ['terminal', t('shell', 'shell.tab.terminal'), t('shell', 'shell.tab.terminal.desc')],
-      ],
-    },
-    {
-      label: t('shell', 'shell.tabs.group.review'),
-      tabs: [
-        ['artifacts', t('shell', 'shell.tab.artifacts'), t('shell', 'shell.tab.artifacts.desc')],
-        ['evidence', t('shell', 'shell.tab.evidence'), t('shell', 'shell.tab.evidence.desc')],
-        ['manuscript', t('shell', 'shell.tab.manuscript'), t('shell', 'shell.tab.manuscript.desc')],
-      ],
-    },
-    {
-      label: t('shell', 'shell.tabs.group.operations'),
-      tabs: [
-        ['budget', t('shell', 'shell.tab.budget'), t('shell', 'shell.tab.budget.desc')],
-      ],
-    },
-  ]
-  const TAB_DEFS = TAB_GROUPS.flatMap(group => group.tabs)
   const tabButtons = new Map<string, HTMLElement>()
-  for (const group of TAB_GROUPS) {
+  const groupLabelEls: HTMLElement[] = []
+  for (const group of chromeTabGroups()) {
     const groupEl = el('div', 'tab-group')
     groupEl.setAttribute('role', 'presentation')
-    groupEl.appendChild(el('span', 'tab-group-label', group.label))
+    const groupLabel = el('span', 'tab-group-label', '')
+    groupLabelEls.push(groupLabel)
+    groupEl.appendChild(groupLabel)
     const groupTabs = el('div', 'tab-group-tabs')
     groupTabs.setAttribute('role', 'presentation')
-    for (const [key, label] of group.tabs) {
-      const button = el('button', 'tab', label)
-      button.dataset.tab = key
-      button.dataset.group = group.label
-      button.id = `tab-${key}`
+    for (const tab of group.tabs) {
+      const button = el('button', 'tab', '')
+      button.dataset.tab = tab.key
+      button.id = `tab-${tab.key}`
       button.setAttribute('aria-controls', 'panel-body')
-      button.setAttribute('aria-keyshortcuts', `Alt+${TAB_DEFS.findIndex(t => t[0] === key) + 1}`)
+      button.setAttribute('aria-keyshortcuts', `Alt+${chromeTabs().findIndex(t => t.key === tab.key) + 1}`)
       button.setAttribute('role', 'tab')
-      button.setAttribute('aria-selected', key === state.activeTab ? 'true' : 'false')
-      // dsh-web "pin view": ★ marks a favourite tab (persisted).
-      const pinned = tabPinned(key)
-      if (pinned) {
-        button.classList.add('pinned')
-        const pin = el('span', 'tab-pin', '★ ')
-        pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
-        button.prepend(pin)
-      }
-      button.title = pinned
-        ? t('shell', 'shell.tab.pinned.title', { label })
-        : t('shell', 'shell.tab.title', { label, group: group.label, key: String(TAB_DEFS.findIndex(t => t[0] === key) + 1) })
+      button.setAttribute('aria-selected', tab.key === state.activeTab ? 'true' : 'false')
       button.onclick = (event) => {
         // A click on the pin glyph toggles the favourite instead of switching.
         const target = event.target as HTMLElement
         if (target.classList.contains('tab-pin')) {
-          tabTogglePin(key)
+          tabTogglePin(tab.key)
           return
         }
-        state.activeTab = key
+        state.activeTab = tab.key
         tabSave()
         void render()
       }
       button.oncontextmenu = (event) => {
         event.preventDefault()
-        tabTogglePin(key)
+        tabTogglePin(tab.key)
       }
-      tabButtons.set(key, button)
+      tabButtons.set(tab.key, button)
       groupTabs.appendChild(button)
     }
     groupEl.appendChild(groupTabs)
@@ -711,9 +688,13 @@ export function apply(): void {
   // dsh-web document title: reflect the active tab + project in the tab
   // title so the plugin is identifiable among many tabs (ignored when the
   // plugin runs inside a sandboxed iframe where the title is read-only).
+  // Evaluated against the CURRENT locale; paintChrome() re-runs it on
+  // locale switch so the title switches in the same tick (§8 line 135).
+  let lastProjectName: string | undefined
   const syncTitle = (projectName: string | undefined): void => {
+    lastProjectName = projectName
     try {
-      const tabLabel = TAB_DEFS.find(t => t[0] === state.activeTab)?.[1] ?? 'overview'
+      const tabLabel = chromeTabs().find(t => t.key === state.activeTab)?.label ?? 'overview'
       const project = projectName !== undefined && projectName !== '' ? ` · ${projectName}` : ''
       document.title = t('shell', 'shell.documentTitle', { project, tab: tabLabel })
     } catch { /* sandboxed iframe */ }
@@ -745,10 +726,10 @@ export function apply(): void {
       const health = await api<{ ok?: boolean; instance?: string }>('/v1/health')
       kernelOnline = health !== null && health.ok === true
       // dsh-web status dot: reflect bridge health immediately.
-      kernelDot.style.background = kernelOnline ? 'var(--tone-green)' : 'var(--tone-red)'
-      kernelDot.title = kernelOnline
-        ? t('shell', 'shell.kernelConnected', { instance: health?.instance ?? '' })
-        : t('shell', 'shell.kernelUnreachableClick')
+      kernelChecked = true
+      kernelOk = kernelOnline
+      kernelInstance = health?.instance ?? ''
+      paintKernelDot()
     }
     // Project list drives the standalone workspace sidebar.
     const projects = (await api<ProjectRow[]>('/v1/projects')) ?? []
@@ -858,12 +839,12 @@ export function apply(): void {
     title.append(projectHeading, statusPill, pid)
     body.appendChild(title)
 
-    const activeDef = TAB_DEFS.find(def => def[0] === state.activeTab)
-    const activeGroup = TAB_GROUPS.find(group => group.tabs.some(def => def[0] === state.activeTab))
+    const activeDef = chromeTabs().find(def => def.key === state.activeTab)
+    const activeGroup = chromeTabGroups().find(group => group.tabs.some(def => def.key === state.activeTab))
     if (activeDef !== undefined && activeGroup !== undefined) {
       const intro = el('div', 'view-intro')
       const copy = el('div', 'view-copy')
-      copy.append(el('h2', 'view-title', activeDef[1]), el('div', 'view-description', activeDef[2]))
+      copy.append(el('h2', 'view-title', activeDef.label), el('div', 'view-description', activeDef.description))
       intro.append(copy, el('span', 'view-group', activeGroup.label))
       body.appendChild(intro)
     }
@@ -896,7 +877,68 @@ export function apply(): void {
       : t('shell', 'shell.notifications')
   }
   paintBell()
+  // ── locale-aware chrome paint (§13.4 / acceptance §8 line 135) ──
+  // Re-evaluates every once-built chrome node (header, tabs, selects, aria,
+  // document title) against the CURRENT locale. Runs once at init and again
+  // on every locale switch; copy sources are the pure chrome model
+  // (i18n/chrome.ts) so the DOM layer only applies evaluated strings.
+  const paintChrome = (): void => {
+    sidebar.setAttribute('aria-label', t('shell', 'shell.sidebar.ariaLabel'))
+    body.setAttribute('aria-label', t('shell', 'shell.panelBody.aria'))
+    brandMark.textContent = t('shell', 'shell.brand.mark')
+    brandName.textContent = t('shell', 'shell.brand.name')
+    brandMeta.textContent = t('shell', 'shell.brand.meta')
+    paintKernelDot()
+    paintTheme()
+    refreshLabel.textContent = ` ${t('common', 'common.action.refresh')}`
+    refresh.title = t('shell', 'shell.refresh.now')
+    refresh.setAttribute('aria-label', t('common', 'common.action.refresh'))
+    commandsLabel.textContent = ` ${t('shell', 'shell.commands.label')}`
+    commandsBtn.title = t('shell', 'shell.commands.titleAttr')
+    shortcutsBtn.textContent = t('shell', 'shell.shortcuts.button')
+    shortcutsBtn.title = t('shell', 'shell.shortcuts.titleAttr')
+    modeBadge.textContent = t('shell', 'shell.mode.humanGates')
+    modeBadge.title = t('shell', 'shell.mode.humanGates.title')
+    sidebarToggle.title = t('shell', 'shell.sidebar.toggle')
+    sidebarToggle.setAttribute('aria-label', t('shell', 'shell.sidebar.toggleAria'))
+    paintBell()
+    paintSelects()
+    const groups = chromeTabGroups()
+    const defs = chromeTabs()
+    groups.forEach((group, gi) => {
+      const labelEl = groupLabelEls[gi]
+      if (labelEl !== undefined) labelEl.textContent = group.label
+    })
+    for (const tab of defs) {
+      const button = tabButtons.get(tab.key)
+      if (button === undefined) continue
+      button.replaceChildren()
+      const pinned = tabPinned(tab.key)
+      if (pinned) {
+        const pin = el('span', 'tab-pin', '★ ')
+        pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
+        button.prepend(pin)
+      }
+      button.append(document.createTextNode(tab.label))
+      const idx = defs.findIndex(d => d.key === tab.key) + 1
+      const group = groups.find(g => g.tabs.some(x => x.key === tab.key))
+      button.title = pinned
+        ? t('shell', 'shell.tab.pinned.title', { label: tab.label })
+        : t('shell', 'shell.tab.title', { label: tab.label, group: group?.label ?? '', key: String(idx) })
+    }
+    tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
+    syncTitle(lastProjectName)
+  }
+  paintChrome()
   state.rerender = () => { void render() }
+  // dsh-web i18n: locale switch re-paints the static chrome AND re-renders
+  // the active panel (panels/terminal/status pills evaluate t() per render,
+  // so the body follows the new locale in the same tick); setLocale itself
+  // rebuilds every open overlay (i18n/index.ts overlay registry).
+  subscribeLocale(() => {
+    paintChrome()
+    state.rerender()
+  })
   chatLoad()
   historyLoad()
   tabLoad()
@@ -1029,9 +1071,9 @@ export function apply(): void {
     if (event.altKey && /^[1-9]$/.test(event.key) && !typing) {
       event.preventDefault()
       const idx = Number(event.key) - 1
-      const tab = TAB_DEFS[idx]
+      const tab = chromeTabs()[idx]
       if (tab !== undefined) {
-        state.activeTab = tab[0]
+        state.activeTab = tab.key
         tabSave()
         state.rerender()
       }

@@ -48,6 +48,9 @@ importers:
       '@dsh-scholar/research-kernel':
         specifier: file:../research-kernel
         version: link:../research-kernel
+      '@dsh-scholar/research-schemas':
+        specifier: file:../research-schemas
+        version: link:../research-schemas
       '@dsh-scholar/scholar-connectors':
         specifier: file:../scholar-connectors
         version: link:../scholar-connectors

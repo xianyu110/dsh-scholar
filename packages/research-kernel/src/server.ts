@@ -18,6 +18,13 @@ export interface KernelServerOptions {
   token?: string
   /** §12.7: require signed run manifests (also settable on the kernel itself). */
   requireSignedManifest?: boolean
+  /**
+   * CONFIG-01: sha256 pin of the deployment's effective config (computed by
+   * the CLI through the canonical Config Registry). When omitted the kernel's
+   * own configPinHash is used; exposed via the `x-config-pin` response header
+   * and the `/v1|v2/health` `config_pin` field.
+   */
+  configPinHash?: string
 }
 
 const idSchema = z.string().min(1)
@@ -315,10 +322,14 @@ function fail(res: ServerResponse, error: unknown): void {
   }
 }
 
-function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined): void {
+function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined, configPin: string | undefined): void {
   currentRequestId = typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id'] !== ''
     ? req.headers['x-request-id']
     : `req_${Math.random().toString(36).slice(2, 12)}`
+  // CONFIG-01: every response carries the effective-config pin so running
+  // objects can be correlated with the config that produced them. The header
+  // is set before any writeHead and therefore lands on every answer.
+  if (configPin !== undefined && configPin !== '') res.setHeader('x-config-pin', configPin)
   if (token !== undefined) {
     const provided = req.headers.authorization
     if (provided !== `Bearer ${token}`) {
@@ -367,7 +378,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   if (version === 'v2') {
     void readJson(req).then(async (body) => {
       try {
-        await handleV2({ req, res, method, url, id, sub, subId, body, kernel })
+        await handleV2({ req, res, method, url, id, sub, subId, body, kernel, configPin })
       } catch (error) {
         if (error instanceof KernelError) send(res, error.status, { error: { code: error.code, message: error.message } })
         else {
@@ -383,7 +394,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     try {
       switch (resource) {
         case 'health': {
-          ok(res, { ok: true, instance: kernel.instanceId, time: new Date().toISOString() })
+          ok(res, { ok: true, instance: kernel.instanceId, config_pin: configPin ?? kernel.configPinHash, time: new Date().toISOString() })
           return
         }
         case 'projects': {
@@ -1201,8 +1212,9 @@ async function handleV2(ctx: {
   subId?: string
   body: unknown
   kernel: ResearchKernel
+  configPin?: string
 }): Promise<void> {
-  const { req, res, method, url, id, sub, subId, body, kernel } = ctx
+  const { req, res, method, url, id, sub, subId, body, kernel, configPin } = ctx
   const principal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
   // API-01 role capabilities: the BFF injects x-principal-role from ITS OWN
   // membership lookup (client-supplied values are never trusted). When
@@ -1241,6 +1253,7 @@ async function handleV2(ctx: {
       protocol_version: 2,
       schema_version: kernel.schemaVersion(),
       database_id: kernel.databaseId(),
+      config_pin: configPin ?? kernel.configPinHash,
       capabilities: ['terminal_stream', 'tex_workspace', 'latex_compile', 'signed_manifest', 'clean_room', 'locales'],
       time: new Date().toISOString(),
     })
@@ -1343,7 +1356,9 @@ async function handleV2(ctx: {
 export function startKernelServer(options: KernelServerOptions): Promise<{ server: Server; url: string; port: number }> {  const { kernel, host = '127.0.0.1', port = 7412, token } = options
   // §12.7 server-level startup parameter (see also KernelOptions.requireSignedManifest).
   if (options.requireSignedManifest !== undefined) kernel.requireSignedManifest = options.requireSignedManifest
-  const server = createServer((req, res) => route(req, res, kernel, token))
+  // CONFIG-01: the deployment config pin (CLI-computed) or the kernel's own.
+  const configPin = options.configPinHash ?? kernel.configPinHash
+  const server = createServer((req, res) => route(req, res, kernel, token, configPin))
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

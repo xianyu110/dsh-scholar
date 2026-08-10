@@ -1,0 +1,140 @@
+# DSH Scholar canonical config template (CONFIG-01).
+# GENERATED from packages/research-schemas/src/config-registry.ts — do not edit by hand.
+# Effective config = defaults + overrides, merged/validated/pinned by validateConfig().
+# Secret keys are never echoed in plaintext output; they only enter the one-way pin hash.
+
+global:
+  images_lock:
+    # Trusted image digest lock file (RUN-02): overridable via DSH_IMAGES_LOCK.
+    # sources: env/file
+    path: configs/runner-profiles/images.lock.json
+    # Pinned node fixture digest — must equal the images.lock node_fixture entry.
+    # sources: file; security-floor
+    node_fixture: node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+    # Pinned TeX Live digest — must equal the images.lock texlive entry.
+    # sources: file; security-floor
+    texlive: texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4
+
+project:
+  execution:
+    # Execution profile of the project.
+    # sources: http/ui/file
+    runner_profile: local-docker-cpu
+    # Runner network policy; `none` forbids any container network other than none.
+    # sources: http/ui/file; security-floor
+    network_policy: allowlist
+    # Artifact store backing the project.
+    # sources: http/ui/file
+    artifact_store: local-cas
+  integrity:
+    # Baseline reproduction is required before experiments.
+    # sources: http/ui/file
+    require_baseline_reproduction: true
+    # Approved experiment contracts are required for formal runs.
+    # sources: http/ui/file
+    require_experiment_contract: true
+    # Claims must link accepted evidence.
+    # sources: http/ui/file
+    require_claim_evidence_links: true
+    # Release requires a clean-room rerun.
+    # sources: http/ui/file
+    require_clean_room_rerun: false
+    # Automatic public release is forbidden by the security baseline (§1); the Release Gate is the only path.
+    # sources: http/ui/file; security-floor
+    allow_automatic_public_release: false
+    # Project-level manifest signature requirement (§12.7); the kernel-level default is true.
+    # sources: http/ui/file
+    require_signed_manifest: false
+
+job:
+  # reserved scope — no keys yet (per-job policy is derived from runner-profile + job payload).
+runner-profile:
+  runner:
+    # Kernel endpoint the runner claims jobs from.
+    # sources: cli/env/file
+    kernel: http://127.0.0.1:7412
+    # Execution mode; formal kinds are container-only (runtime enforced, execution-runtime.md §1).
+    # sources: cli/env/file; security-floor
+    mode: subprocess
+    # Poll interval between claim cycles.
+    # sources: cli/env/file
+    poll_ms: 2000
+    # Per-job execution timeout.
+    # sources: cli/env/file
+    timeout_ms: 60000
+    # Lease heartbeat interval while a job executes.
+    # sources: cli/env/file
+    heartbeat_ms: 15000
+    # Cancel-watcher poll interval (terminates the real execution).
+    # sources: cli/env/file
+    cancel_poll_ms: 5000
+    # Lease owner identity; a random runner-<id> is generated when empty.
+    # sources: cli/env/file
+    owner: ''
+    # Ed25519 signing key file (0600); an ephemeral key is generated when absent.
+    # sources: cli/env/file
+    key_file: ''
+    # Kernel bearer token for the runner client.
+    # sources: cli/env/file; secret
+    token: ''
+    # Service identity for internal kernel routes.
+    # sources: cli/env/file; secret
+    service_token: ''
+    # Container network mode; `host` is forbidden by the security floor and `network_policy=none` allows only `none`.
+    # sources: file/http/ui; security-floor
+    network: none
+    # Privileged containers are forbidden by the security floor.
+    # sources: file/http/ui; security-floor
+    privileged: false
+    # Docker socket mounts are forbidden by the security floor.
+    # sources: file/http/ui; security-floor
+    docker_socket: false
+
+kernel:
+  # Kernel HTTP listen host.
+  # sources: cli/env/file
+  host: 127.0.0.1
+  # Kernel HTTP listen port (0 = ephemeral, published via endpoint file).
+  # sources: cli/env/file
+  port: 7412
+  # Kernel bearer token; never logged, never in argv when the env path is used.
+  # sources: cli/env/file; secret
+  token: ''
+  # Internal-route service identity (x-service-token).
+  # sources: cli/env/file; secret
+  service_token: ''
+  # SQLite database path; empty = ephemeral temp database.
+  # sources: cli/env/file
+  db: ''
+  # CAS root for immutable artifacts.
+  # sources: cli/env/file
+  cas: .research-cas
+  # 0600 endpoint identity file written after bind (SIDE-01).
+  # sources: cli/env/file
+  endpoint_file: ''
+  # Reject unsigned run manifests at completion (RUN-01: default true).
+  # sources: file/http/ui; security-floor
+  require_signed_manifest: true
+
+standalone:
+  # Standalone BFF listen host.
+  # sources: cli/file
+  host: 127.0.0.1
+  # Standalone BFF listen port.
+  # sources: cli/file
+  port: 18610
+  # Research Kernel sidecar port spawned by the BFF.
+  # sources: cli/file
+  kernel_port: 17413
+  # Data directory (token/session/endpoint files); empty = DSH_HOME or ~/.dsh-scholar-standalone.
+  # sources: cli/file
+  data_dir: ''
+  # Loopback bearer token; auto-generated and persisted 0600 when empty.
+  # sources: cli/file; secret
+  token: ''
+  # Operator principal identity (GOV-01 local resolver).
+  # sources: cli/file
+  principal: ''
+  # Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).
+  # sources: cli/file; security-floor
+  no_token: false

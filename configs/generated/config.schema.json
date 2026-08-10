@@ -1,0 +1,366 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dsh-scholar.dev/schemas/config-registry.json",
+  "title": "DSH Scholar canonical config registry",
+  "description": "Generated from packages/research-schemas/src/config-registry.ts — do not edit by hand.",
+  "type": "object",
+  "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "images_lock": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Trusted image digest lock file (RUN-02): overridable via DSH_IMAGES_LOCK.",
+              "default": "configs/runner-profiles/images.lock.json",
+              "x-dsh-scope": "global",
+              "x-dsh-env": "DSH_IMAGES_LOCK"
+            },
+            "node_fixture": {
+              "type": "string",
+              "pattern": "/^[^\\s@]+@sha256:[0-9a-f]{64}$/",
+              "description": "Pinned node fixture digest — must equal the images.lock node_fixture entry.",
+              "default": "node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",
+              "x-dsh-scope": "global",
+              "x-dsh-security-floor": true
+            },
+            "texlive": {
+              "type": "string",
+              "pattern": "/^[^\\s@]+@sha256:[0-9a-f]{64}$/",
+              "description": "Pinned TeX Live digest — must equal the images.lock texlive entry.",
+              "default": "texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4",
+              "x-dsh-scope": "global",
+              "x-dsh-security-floor": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "execution": {
+          "type": "object",
+          "properties": {
+            "runner_profile": {
+              "enum": [
+                "local-docker-gpu",
+                "local-docker-cpu",
+                "isolated-subprocess"
+              ],
+              "type": "string",
+              "description": "Execution profile of the project.",
+              "default": "local-docker-cpu",
+              "x-dsh-scope": "project"
+            },
+            "network_policy": {
+              "enum": [
+                "allowlist",
+                "none"
+              ],
+              "type": "string",
+              "description": "Runner network policy; `none` forbids any container network other than none.",
+              "default": "allowlist",
+              "x-dsh-scope": "project",
+              "x-dsh-security-floor": true
+            },
+            "artifact_store": {
+              "enum": [
+                "local-cas"
+              ],
+              "type": "string",
+              "description": "Artifact store backing the project.",
+              "default": "local-cas",
+              "x-dsh-scope": "project"
+            }
+          },
+          "additionalProperties": false
+        },
+        "integrity": {
+          "type": "object",
+          "properties": {
+            "require_baseline_reproduction": {
+              "type": "boolean",
+              "description": "Baseline reproduction is required before experiments.",
+              "default": true,
+              "x-dsh-scope": "project"
+            },
+            "require_experiment_contract": {
+              "type": "boolean",
+              "description": "Approved experiment contracts are required for formal runs.",
+              "default": true,
+              "x-dsh-scope": "project"
+            },
+            "require_claim_evidence_links": {
+              "type": "boolean",
+              "description": "Claims must link accepted evidence.",
+              "default": true,
+              "x-dsh-scope": "project"
+            },
+            "require_clean_room_rerun": {
+              "type": "boolean",
+              "description": "Release requires a clean-room rerun.",
+              "default": false,
+              "x-dsh-scope": "project"
+            },
+            "allow_automatic_public_release": {
+              "type": "boolean",
+              "description": "Automatic public release is forbidden by the security baseline (§1); the Release Gate is the only path.",
+              "default": false,
+              "x-dsh-scope": "project",
+              "x-dsh-security-floor": true
+            },
+            "require_signed_manifest": {
+              "type": "boolean",
+              "description": "Project-level manifest signature requirement (§12.7); the kernel-level default is true.",
+              "default": false,
+              "x-dsh-scope": "project"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "job": {
+      "type": "object",
+      "description": "reserved scope — no keys yet",
+      "additionalProperties": false
+    },
+    "runner-profile": {
+      "type": "object",
+      "properties": {
+        "runner": {
+          "type": "object",
+          "properties": {
+            "kernel": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Kernel endpoint the runner claims jobs from.",
+              "default": "http://127.0.0.1:7412",
+              "x-dsh-scope": "runner-profile"
+            },
+            "mode": {
+              "enum": [
+                "subprocess",
+                "docker"
+              ],
+              "type": "string",
+              "description": "Execution mode; formal kinds are container-only (runtime enforced, execution-runtime.md §1).",
+              "default": "subprocess",
+              "x-dsh-scope": "runner-profile",
+              "x-dsh-security-floor": true
+            },
+            "poll_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Poll interval between claim cycles.",
+              "default": 2000,
+              "x-dsh-scope": "runner-profile"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Per-job execution timeout.",
+              "default": 60000,
+              "x-dsh-scope": "runner-profile"
+            },
+            "heartbeat_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Lease heartbeat interval while a job executes.",
+              "default": 15000,
+              "x-dsh-scope": "runner-profile"
+            },
+            "cancel_poll_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Cancel-watcher poll interval (terminates the real execution).",
+              "default": 5000,
+              "x-dsh-scope": "runner-profile"
+            },
+            "owner": {
+              "type": "string",
+              "description": "Lease owner identity; a random runner-<id> is generated when empty.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "key_file": {
+              "type": "string",
+              "description": "Ed25519 signing key file (0600); an ephemeral key is generated when absent.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "token": {
+              "type": "string",
+              "description": "Kernel bearer token for the runner client.",
+              "default": "",
+              "x-dsh-scope": "runner-profile",
+              "x-dsh-secret": true
+            },
+            "service_token": {
+              "type": "string",
+              "description": "Service identity for internal kernel routes.",
+              "default": "",
+              "x-dsh-scope": "runner-profile",
+              "x-dsh-secret": true,
+              "x-dsh-env": "DSH_SCHOLAR_SERVICE_TOKEN"
+            },
+            "network": {
+              "enum": [
+                "none",
+                "bridge",
+                "host"
+              ],
+              "type": "string",
+              "description": "Container network mode; `host` is forbidden by the security floor and `network_policy=none` allows only `none`.",
+              "default": "none",
+              "x-dsh-scope": "runner-profile",
+              "x-dsh-security-floor": true
+            },
+            "privileged": {
+              "type": "boolean",
+              "description": "Privileged containers are forbidden by the security floor.",
+              "default": false,
+              "x-dsh-scope": "runner-profile",
+              "x-dsh-security-floor": true
+            },
+            "docker_socket": {
+              "type": "boolean",
+              "description": "Docker socket mounts are forbidden by the security floor.",
+              "default": false,
+              "x-dsh-scope": "runner-profile",
+              "x-dsh-security-floor": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "kernel": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Kernel HTTP listen host.",
+          "default": "127.0.0.1",
+          "x-dsh-scope": "kernel"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Kernel HTTP listen port (0 = ephemeral, published via endpoint file).",
+          "default": 7412,
+          "x-dsh-scope": "kernel"
+        },
+        "token": {
+          "type": "string",
+          "description": "Kernel bearer token; never logged, never in argv when the env path is used.",
+          "default": "",
+          "x-dsh-scope": "kernel",
+          "x-dsh-secret": true,
+          "x-dsh-env": "DSH_SCHOLAR_KERNEL_TOKEN"
+        },
+        "service_token": {
+          "type": "string",
+          "description": "Internal-route service identity (x-service-token).",
+          "default": "",
+          "x-dsh-scope": "kernel",
+          "x-dsh-secret": true,
+          "x-dsh-env": "DSH_SCHOLAR_SERVICE_TOKEN"
+        },
+        "db": {
+          "type": "string",
+          "description": "SQLite database path; empty = ephemeral temp database.",
+          "default": "",
+          "x-dsh-scope": "kernel"
+        },
+        "cas": {
+          "type": "string",
+          "description": "CAS root for immutable artifacts.",
+          "default": ".research-cas",
+          "x-dsh-scope": "kernel"
+        },
+        "endpoint_file": {
+          "type": "string",
+          "description": "0600 endpoint identity file written after bind (SIDE-01).",
+          "default": "",
+          "x-dsh-scope": "kernel",
+          "x-dsh-env": "DSH_SCHOLAR_KERNEL_ENDPOINT_FILE"
+        },
+        "require_signed_manifest": {
+          "type": "boolean",
+          "description": "Reject unsigned run manifests at completion (RUN-01: default true).",
+          "default": true,
+          "x-dsh-scope": "kernel",
+          "x-dsh-security-floor": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "standalone": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Standalone BFF listen host.",
+          "default": "127.0.0.1",
+          "x-dsh-scope": "standalone"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Standalone BFF listen port.",
+          "default": 18610,
+          "x-dsh-scope": "standalone"
+        },
+        "kernel_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Research Kernel sidecar port spawned by the BFF.",
+          "default": 17413,
+          "x-dsh-scope": "standalone"
+        },
+        "data_dir": {
+          "type": "string",
+          "description": "Data directory (token/session/endpoint files); empty = DSH_HOME or ~/.dsh-scholar-standalone.",
+          "default": "",
+          "x-dsh-scope": "standalone"
+        },
+        "token": {
+          "type": "string",
+          "description": "Loopback bearer token; auto-generated and persisted 0600 when empty.",
+          "default": "",
+          "x-dsh-scope": "standalone",
+          "x-dsh-secret": true
+        },
+        "principal": {
+          "type": "string",
+          "description": "Operator principal identity (GOV-01 local resolver).",
+          "default": "",
+          "x-dsh-scope": "standalone"
+        },
+        "no_token": {
+          "type": "boolean",
+          "description": "Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).",
+          "default": false,
+          "x-dsh-scope": "standalone",
+          "x-dsh-security-floor": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -3,17 +3,19 @@ import { api } from '../api'
 import { t } from '../i18n/index'
 import { openContractDetailModal, openIdeaDetailModal } from '../modals/detail'
 import { state, tabSave } from '../state'
-import { PHASE_PIPELINE, copyText, el, fmtId, openContextMenu } from '../ui'
+import { phasePipeline, copyText, el, fmtId, openContextMenu } from '../ui'
 /* ─────────────────────────── tab renderers ─────────────────────────── */
 
 export async function renderPhase(body: HTMLElement, p: Projection, projectId?: string): Promise<void> {
   const status = p.project?.status ?? ''
-  const statusIdx = PHASE_PIPELINE.findIndex(([k]) => k === status)
+  // Evaluated per render against the CURRENT locale (§13.4).
+  const pipelineDefs = phasePipeline()
+  const statusIdx = pipelineDefs.findIndex(([k]) => k === status)
   const pipeline = el('div', 'pipeline-wrap')
   const steps = el('div', 'pipeline')
-  for (const [key, label] of PHASE_PIPELINE) {
+  for (const [key, label] of pipelineDefs) {
     const step = el('div', 'pstep')
-    const idx = PHASE_PIPELINE.findIndex(([k]) => k === key)
+    const idx = pipelineDefs.findIndex(([k]) => k === key)
     if (statusIdx < 0 || idx < statusIdx) step.classList.add('done')
     if (key === status) step.classList.add('current')
     step.appendChild(el('span', 'dot'))
@@ -22,8 +24,8 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
   }
   pipeline.appendChild(steps)
   // dsh-web progress: completion % of the pipeline.
-  const statusIdx2 = statusIdx >= 0 ? statusIdx : PHASE_PIPELINE.length
-  const pct = Math.round((statusIdx2 / PHASE_PIPELINE.length) * 100)
+  const statusIdx2 = statusIdx >= 0 ? statusIdx : pipelineDefs.length
+  const pct = Math.round((statusIdx2 / pipelineDefs.length) * 100)
   const pctRow = el('div', 'muted')
   pctRow.style.cssText = 'font-size:10px;margin-top:6px;text-align:right'
   pctRow.textContent = t('overview', 'overview.progress', { pct: String(pct) })

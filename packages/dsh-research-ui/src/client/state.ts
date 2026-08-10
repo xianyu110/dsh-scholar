@@ -3,7 +3,7 @@
  * the mutable `state` object; persistence helpers own their storage keys. */
 import type { ChatMessage, ChatSession, NotifEntry, TerminalLine } from './types'
 import { ACCENTS, el, rootHost, trapFocus } from './ui'
-import { getLocale, t } from './i18n/index'
+import { getLocale, registerOverlayRebuild, t } from './i18n/index'
 
 export let favProjects = new Set<string>()
 
@@ -363,6 +363,9 @@ export function chatSessionRename(id: string): void {
   modal.appendChild(actions)
   overlay.appendChild(modal)
   root.appendChild(overlay)
+  // dsh-web i18n §13.4: locale switch re-opens the rename dialog (the typed
+  // name is preserved via session.name captured below).
+  registerOverlayRebuild(overlay, () => { overlay.remove(); chatSessionRename(id) })
   input.focus()
   input.select()
   trapFocus(overlay, null)

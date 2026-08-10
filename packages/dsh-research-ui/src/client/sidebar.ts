@@ -4,7 +4,7 @@ import { openNewProjectModal, openProjectDetailModal, openRenameModal } from './
 import { openCompareModal } from './modals/search'
 import { openSettingsModal } from './modals/settings'
 import { favProjectToggle, favProjects, state, tabSave } from './state'
-import { STATUS_META, copyText, el, openContextMenu, rootHost, showToast } from './ui'
+import { STATUS_META, copyText, el, openContextMenu, rootHost, showToast, statusLabel } from './ui'
 import { t } from './i18n/index'
 /** Sidebar search filter (dsh-web "Search sessions" feel). */
 export let sidebarQuery = ''
@@ -176,7 +176,7 @@ export function renderSidebar(
       const itemText = el('span', 'ws-text')
       itemText.append(
         el('span', 'ws-name', p.name ?? p.project_id ?? ''),
-        el('span', 'ws-status', STATUS_META[p.status ?? '']?.label ?? p.status ?? ''),
+        el('span', 'ws-status', statusLabel(p.status)),
       )
       item.appendChild(itemText)
       if (blocked) {

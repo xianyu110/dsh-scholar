@@ -66,7 +66,7 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 | POST | /bff/research/projects/{id}/stop | PI；expected_revision、reason |
 | POST | /bff/research/projects/{id}/fail | PI/Policy；expected_revision、reason、failure_class |
 | POST | /bff/research/projects/{id}/refine | PI；expected_revision、target phase、reason |
-| GET | /v2/projects/{id}/projection | Project、pending gates、jobs、budget、counts、结构化 next_actions、capabilities |
+| GET | /v2/projects/{id}/projection | Project、pending gates、jobs、budget、counts、`next_actions`(legacy string[])+ `next_actions_v2`(NextAction[])、capabilities |
 | POST | /v2/projects/{id}/transitions | to、expected_revision、reason；Gate 状态永远 422 |
 | POST | /v2/projects/{id}/session-links | 只绑定调用 Principal 当前 session_id；客户端不能提交任意会话 |
 | GET | /v2/session-links/current | 从调用 Principal 当前 session 返回 project_id |
@@ -339,4 +339,6 @@ Remote Agent internal 面提供 enroll/heartbeat/capability/claim/CAS fetch/stag
 
 ## 21. NextAction 兼容
 
-v2 Project/Intake projection 返回 reconstruction-contracts.md 的 `NextAction[]`。迁移期读取旧 `string[]` 时 BFF 只包装为 `legacy_unknown` + raw，不为其生成 mutation CTA。状态、reason、required revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label_key 与路由。
+`GET /v1/projects/{id}/projection`（v2 同路由）返回双字段（GUIDE-01）：`next_actions: string[]`（legacy，由 `next_actions_v2` 中非 done 动作的 label 稳定派生，终态为空数组——旧 UI/API 消费端不受破坏）与 `next_actions_v2: NextAction[]`（权威结构化投影，wire 字段见 reconstruction-contracts.md §24 / domain-model.md §14）。
+
+NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contracts、ideas、evidence、claims 确定性生成（`nextActionProjection` 纯函数，无 DB、无副作用、不抛错）。状态、reason、required 缺口、revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label 与路由。未知/未来状态退化 `code='unknown'` 的只读动作（state=blocked、required=['state_mapping']），UI 不得为 unknown 构造 mutation。Intake/Grill 阶段动作在 ONBOARD-01 落地后由同一投影扩展。

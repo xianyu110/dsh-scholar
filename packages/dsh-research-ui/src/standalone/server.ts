@@ -28,6 +28,7 @@ import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { UiKernelSidecar } from './sidecar.js'
+import { validateConfig } from '@dsh-scholar/research-schemas'
 import {
   MAX_BODY_BYTES,
   SlidingWindowRateLimiter,
@@ -490,12 +491,22 @@ export function loadOptions(argv: string[]): StandaloneOptions {
 }
 
 export async function startStandalone(options: StandaloneOptions): Promise<void> {
-  // SEC-UI-01: tokenless mode is only safe on an explicit loopback bind.
-  // loadOptions already rejects this; the guard here also protects
-  // programmatic callers BEFORE anything binds (stable message, no paths).
-  if (options.token === null && !isLoopbackHost(options.host)) {
-    throw new Error('--no-token requires an explicit loopback --host (127.0.0.0/8, ::1, or localhost)')
-  }
+  // CONFIG-01: the standalone effective config is validated through the
+  // canonical Config Registry BEFORE anything binds — unknown keys, invalid
+  // values and security-floor violations fail fast (the registry enforces
+  // the --no-token loopback floor for programmatic callers as well; the
+  // error message is identical to loadOptions' so CLI behavior is unchanged).
+  const resolvedConfig = validateConfig({
+    'standalone.host': options.host,
+    'standalone.port': options.port,
+    'standalone.kernel_port': options.kernelPort,
+    'standalone.data_dir': options.dataDir,
+    'standalone.token': options.token ?? '',
+    'standalone.no_token': options.token === null,
+    'standalone.principal': options.principal ?? '',
+  }, { scopes: ['standalone'] })
+  const configPin = resolvedConfig.pinHash
+  console.error(`[standalone] config pin ${configPin} (${options.host}:${options.port}, kernel=${options.kernelPort})`)
   const sidecar = new UiKernelSidecar({
     host: '127.0.0.1',
     port: options.kernelPort,
@@ -599,6 +610,9 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   }
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
+      // CONFIG-01: every BFF response carries the effective-config pin so the
+      // running object can be correlated with the config that produced it.
+      res.setHeader('x-config-pin', configPin)
       if (!limiter.allow(req.socket.remoteAddress ?? 'unknown')) {
         sendJson(res, 429, { ok: false, error: 'rate limited' })
         return

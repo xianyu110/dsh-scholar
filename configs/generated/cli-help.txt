@@ -1,0 +1,35 @@
+Options (global):
+
+Options (project):
+
+Options (job):
+
+Options (runner-profile):
+  --kernel <string> — Kernel endpoint the runner claims jobs from. (default: http://127.0.0.1:7412)
+  --mode <string> — Execution mode; formal kinds are container-only (runtime enforced, execution-runtime.md §1). (default: subprocess)
+  --poll-ms <number> — Poll interval between claim cycles.
+  --timeout-ms <number> — Per-job execution timeout.
+  --heartbeat-ms <number> — Lease heartbeat interval while a job executes.
+  --cancel-poll-ms <number> — Cancel-watcher poll interval (terminates the real execution).
+  --owner <string> — Lease owner identity; a random runner-<id> is generated when empty.
+  --key-file <string> — Ed25519 signing key file (0600); an ephemeral key is generated when absent.
+  --token <secret> [secret] — Kernel bearer token for the runner client.
+  --service-token <secret> [secret] — Service identity for internal kernel routes. (env: DSH_SCHOLAR_SERVICE_TOKEN)
+
+Options (kernel):
+  --host <string> — Kernel HTTP listen host. (default: 127.0.0.1)
+  --port <number> — Kernel HTTP listen port (0 = ephemeral, published via endpoint file).
+  --token <secret> [secret] — Kernel bearer token; never logged, never in argv when the env path is used. (env: DSH_SCHOLAR_KERNEL_TOKEN)
+  --service-token <secret> [secret] — Internal-route service identity (x-service-token). (env: DSH_SCHOLAR_SERVICE_TOKEN)
+  --db <string> — SQLite database path; empty = ephemeral temp database.
+  --cas <string> — CAS root for immutable artifacts. (default: .research-cas)
+  --endpoint-file <string> — 0600 endpoint identity file written after bind (SIDE-01). (env: DSH_SCHOLAR_KERNEL_ENDPOINT_FILE)
+
+Options (standalone):
+  --host <string> — Standalone BFF listen host. (default: 127.0.0.1)
+  --port <number> — Standalone BFF listen port.
+  --kernel-port <number> — Research Kernel sidecar port spawned by the BFF.
+  --data-dir <string> — Data directory (token/session/endpoint files); empty = DSH_HOME or ~/.dsh-scholar-standalone.
+  --token <secret> [secret] — Loopback bearer token; auto-generated and persisted 0600 when empty.
+  --principal <string> — Operator principal identity (GOV-01 local resolver).
+  --no-token <string> — Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).
