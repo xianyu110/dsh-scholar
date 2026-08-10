@@ -581,6 +581,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           break
         }
         case 'gates': {
+          if (id !== undefined && sub === undefined && method === 'GET') {
+            // Gate lookup (BFF principal resolver uses it to map a gate
+            // decision to the gate's project for membership/role checks).
+            ok(res, kernel.getGate(id))
+            return
+          }
           if (id !== undefined && sub === 'decisions' && method === 'POST') {
             // GOV-01 (fail-closed): a Human Gate decision is only accepted
             // with an authenticated principal — anonymous or bare-actor
@@ -599,6 +605,15 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               return
             }
             const input = decisionSchema.parse(body)
+            // GOV-01 principal resolver: when the BFF forwarded a durable
+            // session (x-principal-session, session.json-derived) and the
+            // decision carries no explicit session_id, bind the forwarded
+            // session so the recorded decision is traceable to the
+            // authenticated session ("Session link 在重启后恢复").
+            const forwardedSession = req.headers['x-principal-session']
+            if ((input.session_id === undefined || input.session_id === null) && typeof forwardedSession === 'string' && forwardedSession !== '') {
+              input.session_id = forwardedSession
+            }
             ok(res, kernel.decideGate({ gate_id: id, actor: input.actor ?? principalId, ...input }))
             return
           }

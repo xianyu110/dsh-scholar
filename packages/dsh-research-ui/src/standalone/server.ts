@@ -19,9 +19,9 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -66,6 +66,59 @@ function writeModelPreference(dataDir: string, model: string): void {
   const file = join(dataDir, MODEL_FILE)
   writeFileSync(file, JSON.stringify({ model, updated_at: new Date().toISOString() }, null, 2), { mode: 0o600 })
   chmodSync(file, 0o600)
+}
+
+const SESSION_FILE = 'session.json'
+
+export interface OperatorSession {
+  session_id: string
+  principal_id: string
+  tenant_id: string | null
+  auth_method: 'dsh-session'
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * GOV-01 principal resolver (local scope): derive the operator's DURABLE
+ * session identity from the loopback bearer credential. The session id is
+ * deterministic (sha256 of principal + a per-data-dir secret), persisted
+ * 0600 under the data dir, and stable across standalone restarts — the
+ * "Session link 在重启后恢复" property. An external IdP can replace this
+ * resolver later; the durable principal/tenant/auth_method/session shape is
+ * the contract the kernel already persists on decisions.
+ */
+export function operatorSession(dataDir: string, principalId: string): OperatorSession {
+  const file = join(dataDir, SESSION_FILE)
+  const now = new Date().toISOString()
+  const existing = ((): OperatorSession | null => {
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<OperatorSession>
+      if (typeof parsed.session_id === 'string' && typeof parsed.principal_id === 'string') {
+        return { session_id: parsed.session_id, principal_id: parsed.principal_id, tenant_id: null, auth_method: 'dsh-session', created_at: parsed.created_at ?? now, updated_at: parsed.updated_at ?? now }
+      }
+    } catch { /* absent or malformed — recreate */ }
+    return null
+  })()
+  if (existing !== null && existing.principal_id === principalId) {
+    return existing
+  }
+  const session: OperatorSession = {
+    session_id: `sess_${createHash('sha256').update(`${principalId}:${dataDir}`).digest('hex').slice(0, 16)}`,
+    principal_id: principalId,
+    tenant_id: null,
+    auth_method: 'dsh-session',
+    created_at: now,
+    updated_at: now,
+  }
+  try {
+    mkdirSync(dataDir, { recursive: true })
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 0o600 })
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, file)
+  } catch { /* read-only data dir — session still derived deterministically */ }
+  return session
 }
 
 interface StandaloneOptions {
@@ -476,8 +529,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   }
   function projectIdFromPath(pathname: string): string | null {
     const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    // Only /v1|v2/projects/{id} carries a PROJECT id in this position — gate
+    // ids and job ids are resolved through the kernel (see gateProjectId
+    // below), never misread as projects.
     if (parts.length >= 3 && (parts[0] === 'v1' || parts[0] === 'v2') && parts[1] === 'projects') return parts[2] ?? null
-    if (parts.length >= 3 && parts[0] === 'v1' && parts[1] === 'gates') return parts[2] ?? null
     return null
   }
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -716,6 +771,17 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             const jobId = jobIdFromPath(url.pathname)
             if (jobId !== null) memberProjectId = await jobProjectId(jobId)
           }
+          if (memberProjectId === null && url.pathname.startsWith('/v1/gates/') && url.pathname.includes('/decisions')) {
+            // GOV-01/API-01: a gate DECISION is project-scoped via the gate's
+            // owning project — resolve it through the kernel (the gate id is
+            // NOT a project id; treating it as one caused false 404s).
+            const gateId = url.pathname.split('/').filter(Boolean)[2] ?? ''
+            if (gateId !== '') {
+              memberProjectId = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}`, { headers: { accept: 'application/json' } })
+                .then(async r => (r.ok ? (await r.json() as { project_id?: string }).project_id ?? null : null))
+                .catch(() => null)
+            }
+          }
           if (memberProjectId !== null && !(await isProjectMember(memberProjectId))) {
             sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
             return
@@ -788,6 +854,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             const role = await projectRole(memberProjectId)
             if (role !== null) proxyHeaders['x-principal-role'] = role
           }
+        }
+        // GOV-01 principal resolver: the authenticated operator session is a
+        // DURABLE identity derived from the bearer token (session.json,
+        // 0600, stable across restarts — "Session link 在重启后恢复"). Every
+        // forwarded request carries x-principal-session so kernel decisions
+        // record the session_id (durable principal, acceptance-tests.md §2).
+        if (options.principal !== null) {
+          proxyHeaders['x-principal-session'] = operatorSession(options.dataDir, options.principal).session_id
         }
         const upstream = await fetch(`${endpoint}${url.pathname}${url.search}`, {
           method,

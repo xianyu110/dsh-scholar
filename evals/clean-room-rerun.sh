@@ -42,7 +42,7 @@ SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d 
 [ -n "$SNAP" ] || { echo "failed to create code snapshot"; exit 1; }
 # P0 (acceptance-tests.md §4): baseline jobs must bind an APPROVED contract —
 # register + freeze one before submission.
-CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_clean_room","data":{"dataset_id":"clean-room"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"f1"},"seeds":[11,23]}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_clean_room","data":{"dataset_id":"clean-room"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"f1"},"seeds":[11,23],"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":2,"stop_on_data_leakage":true}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"clean-room-eval"}' > /dev/null
 ok "contract $CT registered + frozen (P0 binding)"
 # §12.5 (P0): baselines write the fixed-schema MetricsFileV1 to
@@ -86,7 +86,7 @@ ok "fresh kernel booted (old DB deleted); CAS artifacts still readable"
 PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"clean-room-rerun\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 SNAP2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/code-snapshots" -d "{\"path\":\"$WORK/code\",\"description\":\"clean-room fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
 [ -n "$SNAP2" ] || { echo "failed to re-create code snapshot"; exit 1; }
-CT2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/contracts" -d '{"idea_id":"idea_clean_room","data":{"dataset_id":"clean-room"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"f1"},"seeds":[11,23]}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+CT2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/contracts" -d '{"idea_id":"idea_clean_room","data":{"dataset_id":"clean-room"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"f1"},"seeds":[11,23],"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":2,"stop_on_data_leakage":true}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/contracts/$CT2/approve" -d '{"actor":"clean-room-eval"}' > /dev/null
 ok "rerun contract $CT2 registered + frozen (P0 binding)"
 KEY="rerun-baseline-11" CT="$CT2" SNAP="$SNAP2" INNER="$(metrics_script 11)" node -e 'console.log(JSON.stringify({idempotency_key:process.env.KEY,kind:"baseline",contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],payload:{},output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))' \

@@ -880,6 +880,32 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
     kernel.close()
   })
 
+  it('RUN-01: DEFAULT kernel config (no option) rejects unsigned manifests; a signed one is accepted', () => {
+    // No requireSignedManifest option at all — the constructor default is
+    // TRUE (§12.7), so this is the production configuration.
+    const { kernel, job, metrics, privateKey, keyId } = signedJobSetup()
+    // The job is claimed; complete with an UNSIGNED manifest -> 422
+    // manifest_signature_required and the job stays running.
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: makeManifest(job, metrics.artifact_id) }),
+      422, 'manifest_signature_required',
+    )
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // The same flow with a valid Ed25519 signature -> succeeded.
+    const signed = signManifest(makeManifest(job, metrics.artifact_id), privateKey, keyId)
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: signed })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
+  it('RUN-01: requireSignedManifest:false explicitly accepts unsigned manifests (compat path)', () => {
+    const { kernel, job, metrics } = signedJobSetup({ requireSignedManifest: false })
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded', run_manifest: makeManifest(job, metrics.artifact_id) })
+    expect(done.status).toBe('succeeded')
+    expect(done.run_manifest?.signature).toBeUndefined()
+    kernel.close()
+  })
+
   it('project integrity require_signed_manifest rejects unsigned manifests', () => {
     const { kernel, job } = signedJobSetup()
     // Flag stored on the project's integrity record (raw JSON, read verbatim).
@@ -1852,6 +1878,56 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
     const content = JSON.parse(kernel.cas.read(artifact.sha256).toString('utf8')) as { n_resamples?: number }
     expect(content.n_resamples).toBe(10000)
     kernel.close()
+  })
+
+  it('derives minimum_n from the bound contract when the caller passes none (§12)', () => {
+    // Project A: approved contract with min_completed_seeds=3 and 3 paired
+    // runs — computeAnalysis WITHOUT options.minimum_n must pass (the
+    // contract value drives AnalysisPlan.minimum_n).
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'stat3', workspace: '/w', brief: makeBrief() })
+    const codeSnap = kernel.registerArtifact({
+      project_id: project.project_id, kind: 'code', content: Buffer.from('x=1'),
+    }).artifact_id
+    const contract = kernel.registerContract({
+      project_id: project.project_id, idea_id: 'i',
+      data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'm' }, seeds: [1, 2, 3],
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 3, stop_on_data_leakage: true },
+    })
+    kernel.approveContract(contract.contract_id, 'dec_gate_1', 'pi')
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b1', 'baseline', 1, 0.4)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b2', 'baseline', 2, 0.5)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'b3', 'baseline', 3, 0.6)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f1', 'formal', 1, 0.6)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f2', 'formal', 2, 0.7)
+    pairRun(kernel, project.project_id, codeSnap, contract.contract_id, 'f3', 'formal', 3, 0.8)
+    const analysis = kernel.computeAnalysis(project.project_id, undefined, 'm')
+    expect(analysis.n).toBe(3)
+    expect(analysis.effect_size).toBeCloseTo(0.2, 9)
+    // Project B: same contract minimum (3) but only 2 paired runs — the
+    // contract-derived minimum must be enforced (matched_seeds_required,
+    // NOT the legacy fallback 1), proving the derivation really happened.
+    const kernelB = freshKernel()
+    const projectB = kernelB.createProject({ name: 'stat3b', workspace: '/w', brief: makeBrief() })
+    const codeSnapB = kernelB.registerArtifact({
+      project_id: projectB.project_id, kind: 'code', content: Buffer.from('x=1'),
+    }).artifact_id
+    const contractB = kernelB.registerContract({
+      project_id: projectB.project_id, idea_id: 'i',
+      data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'm' }, seeds: [1, 2],
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 3, stop_on_data_leakage: true },
+    })
+    kernelB.approveContract(contractB.contract_id, 'dec_gate_1', 'pi')
+    pairRun(kernelB, projectB.project_id, codeSnapB, contractB.contract_id, 'b1', 'baseline', 1, 0.4)
+    pairRun(kernelB, projectB.project_id, codeSnapB, contractB.contract_id, 'b2', 'baseline', 2, 0.5)
+    pairRun(kernelB, projectB.project_id, codeSnapB, contractB.contract_id, 'f1', 'formal', 1, 0.6)
+    pairRun(kernelB, projectB.project_id, codeSnapB, contractB.contract_id, 'f2', 'formal', 2, 0.7)
+    expect(() => kernelB.computeAnalysis(projectB.project_id, undefined, 'm'))
+      .toThrowError(/requires >= 3 baseline\/treatment runs with MATCHED seeds/)
+    kernel.close()
+    kernelB.close()
   })
 
   it('caller cannot lower minimum_n below the contract minimum (422)', () => {

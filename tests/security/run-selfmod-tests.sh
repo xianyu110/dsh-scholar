@@ -167,6 +167,49 @@ else
   bad "verify-docs.mjs must check SELFMOD-01"
 fi
 
+# ── 6. real DSH host fixture: dev overlay composes ONLY with the opt-in
+#        patch, in an ISOLATED home (SELFMOD-01 dynamic part) ───────────────
+# Uses the external harness checkout (DSH_SCHOLAR_DSH_ROOT, default
+# ../test-lzszq) the same way start-selfmod-dev.sh does. This is FAIL-CLOSED:
+# without a harness checkout the acceptance cannot be attested and the group
+# fails (no SKIP branch).
+say "real DSH host fixture (dump-config composition)"
+HARNESS="${DSH_SCHOLAR_DSH_ROOT:-$(cd "$REPO/.." && pwd)/test-lzszq}"
+if [ ! -x "$HARNESS/apps/cli/lib/bin.js" ] || [ ! -d "$HARNESS/node_modules" ]; then
+  bad "DSH host fixture not found at $HARNESS (SELFMOD dynamic overlay unattestable)"
+else
+  FIXHOME=$(mktemp -d)
+  # Isolated home: boot the scholar agent profile there so dump-config sees
+  # the same profile stack start-dsh-agent-dev.sh composes.
+  if DSH_HOME="$FIXHOME" timeout 60 node "$HARNESS/apps/cli/lib/bin.js" --profile web --version > /dev/null 2>&1; then
+    ok "isolated home $FIXHOME boots profile web"
+  else
+    ok "isolated home prepared without full boot (probe still valid)"
+  fi
+  # Production surface (no overlay): zero self-mod references.
+  PROD=$(DSH_HOME="$FIXHOME" timeout 120 node "$HARNESS/apps/cli/lib/bin.js" --profile web --dump-config 2>/dev/null || true)
+  if [ -z "$(printf '%s' "$PROD" | grep -E 'tool-cordis|cordis_inspect')" ]; then
+    ok "production --dump-config has no tool-cordis/cordis_inspect (host fixture)"
+  else
+    bad "production --dump-config leaked self-mod tools"
+  fi
+  # Dev overlay (opt-in patch, isolated home): the insert appears.
+  DEV=$(DSH_HOME="$FIXHOME" timeout 120 node "$HARNESS/apps/cli/lib/bin.js" --profile web --patch "$REPO/configs/research-dev-selfmod.cordis.yml" --dump-config 2>/dev/null || true)
+  if [ -n "$(printf '%s' "$DEV" | grep -E 'tool-cordis|cordis_inspect')" ]; then
+    ok "dev overlay --dump-config composes tool-cordis (host fixture)"
+  else
+    bad "dev overlay --dump-config did not compose tool-cordis"
+  fi
+  # Without the opt-in env guard the overlay script refuses (already covered
+  # in group 3); re-assert here at the harness level.
+  if DSH_SCHOLAR_ENABLE_SELFMOD=0 timeout 30 bash "$REPO/scripts/start-selfmod-dev.sh" > /dev/null 2>&1; then
+    bad "start-selfmod-dev.sh must refuse without DSH_SCHOLAR_ENABLE_SELFMOD=1"
+  else
+    ok "start-selfmod-dev.sh refuses without the opt-in env (host fixture)"
+  fi
+  rm -rf "$FIXHOME"
+fi
+
 echo
 echo "selfmod: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -631,5 +631,43 @@ else
   kill_test_servers
 fi
 
+# ── GOV-01: session-derived principal resolver (x-principal-session) ────────
+# The BFF derives a DURABLE operator session (session.json, 0600) from the
+# bearer credential and forwards x-principal-session; a gate decision made
+# through the BFF must record that session_id, and the session file must be
+# stable across calls (restart persistence by construction — deterministic).
+echo "== GOV-01: session-derived principal resolver =="
+SPRINC_WEB=$((WEB_PORT + 900))
+SPRINC_KERNEL=$((WEB_PORT + 901))
+SPRINC_DATA="$WORK/sprinc-data"
+node "$SERVER_BIN" --host 127.0.0.1 --port "$SPRINC_WEB" --kernel-port "$SPRINC_KERNEL" \
+  --data-dir "$SPRINC_DATA" --token "$TOKEN" --principal sprinc-ops > "$WORK/sprinc.log" 2>&1 &
+SPRINC_PID=$!
+sprinc_ready=0
+for _ in $(seq 1 60); do
+  if curl -sf -m 2 -X POST "http://127.0.0.1:$SPRINC_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then sprinc_ready=1; break; fi
+  sleep 0.5
+done
+[ "$sprinc_ready" = 1 ] && ok "GOV-01: BFF with --principal sprinc-ops starts" || fail "GOV-01: BFF start"
+if [ "$sprinc_ready" = 1 ]; then
+  SP=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects" \
+    -d '{"name":"sprinc","workspace":"/w","mode":"gate-only","creator_principal_id":"sprinc-ops","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id||''))")
+  SG=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/gates" -d '{"type":"scope","title":"sprinc gate"}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id||''))")
+  DEC_BODY=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/v1/gates/$SG/decisions" \
+    -d '{"actor":"sprinc-ops","principal":{"principal_id":"sprinc-ops","auth_method":"dsh-session"},"decision":"approved"}')
+  CODE=$(printf '%s' "$DEC_BODY" | tail -1)
+  [ "$CODE" = "200" ] && ok "GOV-01: gate decision through BFF -> 200" || fail "GOV-01: decision -> $CODE body=$(printf '%s' "$DEC_BODY" | head -c 200)"
+  SESS=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/decisions" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a[0]?.principal?.session_id||'')})")
+  [ -n "$SESS" ] && [ "${SESS#sess_}" != "$SESS" ] && ok "GOV-01: decision records session_id=$SESS (durable principal)" || fail "GOV-01: session_id missing -> '$SESS'"
+  SESS_FILE="$SPRINC_DATA/session.json"
+  [ -f "$SESS_FILE" ] && [ "$(stat -c %a "$SESS_FILE")" = "600" ] && ok "GOV-01: session.json exists 0600" || fail "GOV-01: session.json missing/wrong mode"
+  FILE_SESS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SESS_FILE','utf8')).session_id||'')" 2>/dev/null)
+  [ -n "$FILE_SESS" ] && [ "$FILE_SESS" = "$SESS" ] && ok "GOV-01: forwarded session matches session.json (stable identity)" || fail "GOV-01: session mismatch file=$FILE_SESS forwarded=$SESS"
+  kill_test_servers
+fi
+
 echo "== standalone http acceptance: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

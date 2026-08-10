@@ -94,7 +94,7 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"golden-p
 ok "project $PROJ"
 
 echo "== contract: P0 binding for baseline/formal jobs (approval required) =="
-CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_gpv2","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"m1","secondary":["n_samples","m2"]},"seeds":[1,2,3,4],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_gpv2","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"m1","secondary":["n_samples","m2"]},"seeds":[1,2,3,4],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"golden-v2-eval"}' > /dev/null
 [[ "$CT" == expc_* ]] && ok "contract $CT registered + frozen (P0 binding)" || bad "contract id '$CT'"
 

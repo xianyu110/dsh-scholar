@@ -306,6 +306,21 @@ describe('computePairedAnalysis — §6 byte determinism & §12 golden vector', 
     expect(JSON.stringify(result)).toBe(extra!.canonical_output)
     expect(result.direction).toBe('lower_is_better')
     expect(result.direction_ok).toBe(false) // positive effect is bad for lower_is_better
+    // §12: key order must match the PairedAnalysisResult interface declaration
+    // order for EVERY case, not just the primary one.
+    expect(Object.keys(result)).toEqual([
+      'metric',
+      'direction',
+      'baseline_mean',
+      'treatment_mean',
+      'paired_mean_difference',
+      'effect_size',
+      'ci_low',
+      'ci_high',
+      'n_pairs',
+      'adjusted_p_value',
+      'direction_ok',
+    ])
   })
 
   it('run array order does not change the output bytes (canonicalized by seed)', () => {
