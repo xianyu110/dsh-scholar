@@ -7,11 +7,12 @@
  * @module @dsh-scholar/research-ui/client
  */
 
-import { t, getLocale, subscribeLocale, assertLocaleParity } from './i18n/index'
+import { t, getLocale, subscribeLocale, assertLocaleParity, registerOverlayRebuild } from './i18n/index'
 import { chromeTabGroups, chromeTabs, chromeModelChoices } from './i18n/chrome'
 import { api } from './api'
-import { el, pill, copyText, ACCENTS, ACCENT_DARK } from './ui'
+import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost, showToast } from './ui'
 import type { ProjectRow, Projection } from './types'
+import { MORE_TAB_KEYS, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups } from './nav'
 import {
   state, readTheme, writeTheme, radiusValue, textureValue, accentColor,
   tabPinned, tabTogglePin, tabSave, tabLoad, autoRefreshEnabled,
@@ -443,6 +444,33 @@ export function apply(): void {
   .welcome-steps { flex-direction:column; }
   .overlay { padding:14px; }
 }
+/* UI-SIMPLE-01: Start 三卡 (acceptance §8 ui-start) */
+.start-screen { min-height:calc(100vh - 132px); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:40px 24px; text-align:center; }
+.start-cards { display:flex; gap:12px; width:min(780px,100%); margin-top:14px; flex-wrap:wrap; justify-content:center; }
+.start-card { flex:1 1 200px; min-width:190px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; text-align:left; border:1px solid var(--border-2); border-radius:14px; background:var(--bg-2); padding:16px 18px; cursor:pointer; color:var(--text); box-shadow:var(--shadow-soft); transition:border-color .1s,transform .1s; }
+.start-card:hover { border-color:var(--accent); transform:translateY(-1px); }
+.start-card:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.start-card-label { font:600 14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.start-card-desc { color:var(--text-2); font:400 11.5px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+/* UI-SIMPLE-01: More dropdown (four primary tabs + More) */
+.more-btn { color:var(--text-3); }
+.more-menu { position:fixed; min-width:240px; background:var(--bg-2); border:1px solid var(--border-strong); border-radius:12px; padding:6px; box-shadow:0 12px 40px rgba(0,0,0,.35); z-index:10002; font:12px/1.4 system-ui,sans-serif; color:var(--text); display:flex; flex-direction:column; gap:2px; }
+.more-item { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; border:0; background:none; color:var(--text); text-align:left; padding:8px 10px; border-radius:8px; cursor:pointer; font:inherit; }
+.more-item:hover { background:var(--bg-hover); }
+.more-item .muted { font-size:10px; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* UI-SIMPLE-01: Settings progressive disclosure (acceptance §8 ui-settings) */
+.settings-section { border:1px solid var(--border-2); border-radius:12px; margin:8px 0; background:var(--bg-3); overflow:hidden; }
+.settings-section-head { display:flex; align-items:center; gap:8px; width:100%; border:0; background:none; color:var(--text); padding:10px 12px; cursor:pointer; font:600 12px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-align:left; }
+.settings-section-head:hover { background:var(--bg-hover); }
+.settings-section-caret { color:var(--text-3); font-size:10px; transition:transform .15s; flex:none; }
+.settings-section[data-open="true"] .settings-section-caret { transform:rotate(90deg); }
+.settings-section-summary { margin-left:auto; color:var(--text-3); font:400 10px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width:55%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.settings-section-body { display:none; padding:2px 12px 10px; border-top:1px solid var(--border-2); }
+.settings-section[data-open="true"] .settings-section-body { display:block; }
+.settings-row { display:flex; align-items:center; gap:9px; padding:6px 0; min-height:30px; }
+.settings-row-label { width:120px; color:var(--text-2); font-size:11.5px; flex-shrink:0; }
+.settings-row-slot { flex:1; min-width:0; display:flex; align-items:center; gap:8px; }
+.settings-row-slot .mono { font-size:10.5px; word-break:break-all; }
 `
   root.appendChild(style)
 
@@ -602,51 +630,103 @@ export function apply(): void {
   header.appendChild(headerActions)
   main.appendChild(header)
 
-  // ── tabs ──
-  // Tab structure (keys + order) is locale-independent; labels/descriptions
-  // come from the pure chrome model and are re-painted on locale switch.
+  // ── tabs (UI-SIMPLE-01: four primary tabs + More) ──
+  // Grouping/keys are locale-independent; labels/descriptions come from the
+  // pure navigation model (nav.ts tabGroups) and are re-painted on locale
+  // switch (paintChrome). Every non-primary entry stays reachable through
+  // the More menu with a stable deep link (acceptance §8 ui-routes).
   const tabs = el('div', 'tabs')
   tabs.setAttribute('role', 'tablist')
   tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
   const tabButtons = new Map<string, HTMLElement>()
-  const groupLabelEls: HTMLElement[] = []
-  for (const group of chromeTabGroups()) {
-    const groupEl = el('div', 'tab-group')
-    groupEl.setAttribute('role', 'presentation')
-    const groupLabel = el('span', 'tab-group-label', '')
-    groupLabelEls.push(groupLabel)
-    groupEl.appendChild(groupLabel)
-    const groupTabs = el('div', 'tab-group-tabs')
-    groupTabs.setAttribute('role', 'presentation')
-    for (const tab of group.tabs) {
-      const button = el('button', 'tab', '')
-      button.dataset.tab = tab.key
-      button.id = `tab-${tab.key}`
-      button.setAttribute('aria-controls', 'panel-body')
-      button.setAttribute('aria-keyshortcuts', `Alt+${chromeTabs().findIndex(t => t.key === tab.key) + 1}`)
-      button.setAttribute('role', 'tab')
-      button.setAttribute('aria-selected', tab.key === state.activeTab ? 'true' : 'false')
-      button.onclick = (event) => {
-        // A click on the pin glyph toggles the favourite instead of switching.
-        const target = event.target as HTMLElement
-        if (target.classList.contains('tab-pin')) {
-          tabTogglePin(tab.key)
-          return
-        }
-        state.activeTab = tab.key
-        tabSave()
-        void render()
-      }
-      button.oncontextmenu = (event) => {
-        event.preventDefault()
-        tabTogglePin(tab.key)
-      }
-      tabButtons.set(tab.key, button)
-      groupTabs.appendChild(button)
-    }
-    groupEl.appendChild(groupTabs)
-    tabs.appendChild(groupEl)
+  const syncHash = (tab: string): void => {
+    try { history.replaceState(null, '', `#tab=${tab}`) } catch { /* sandboxed iframe */ }
   }
+  const activateTab = (key: string): void => {
+    state.activeTab = key
+    tabSave()
+    syncHash(key)
+    void render()
+  }
+  const activateNavEntry = (entry: { key: string; kind?: string }): void => {
+    if (entry.kind === 'modal') {
+      openSettingsModal(root)
+      return
+    }
+    activateTab(entry.key)
+  }
+  for (const tab of tabGroups().primary) {
+    const button = el('button', 'tab', '')
+    button.dataset.tab = tab.key
+    button.id = `tab-${tab.key}`
+    button.setAttribute('aria-controls', 'panel-body')
+    const shortcut = navShortcutIndex(tab.key)
+    if (shortcut >= 1 && shortcut <= 9) button.setAttribute('aria-keyshortcuts', `Alt+${shortcut}`)
+    button.setAttribute('role', 'tab')
+    button.setAttribute('aria-selected', tab.key === state.activeTab ? 'true' : 'false')
+    button.onclick = (event) => {
+      // A click on the pin glyph toggles the favourite instead of switching.
+      const target = event.target as HTMLElement
+      if (target.classList.contains('tab-pin')) {
+        tabTogglePin(tab.key)
+        return
+      }
+      activateTab(tab.key)
+    }
+    button.oncontextmenu = (event) => {
+      event.preventDefault()
+      tabTogglePin(tab.key)
+    }
+    tabButtons.set(tab.key, button)
+    tabs.appendChild(button)
+  }
+  // More dropdown: Gate/Budget/Artifacts/Terminal/Chat + Settings modal.
+  const moreBtn = el('button', 'tab more-btn', '')
+  moreBtn.dataset.tab = 'more'
+  moreBtn.setAttribute('aria-haspopup', 'menu')
+  moreBtn.setAttribute('aria-expanded', 'false')
+  const openMoreMenu = (): void => {
+    const scrim = el('div', 'ctx-scrim')
+    scrim.style.cssText = 'position:fixed;inset:0;z-index:10001;background:transparent'
+    const menu = el('div', 'more-menu')
+    menu.setAttribute('role', 'menu')
+    menu.setAttribute('aria-label', t('shell', 'shell.nav.more.ariaLabel'))
+    for (const entry of tabGroups().more) {
+      const item = el('button', 'more-item')
+      item.setAttribute('role', 'menuitem')
+      item.dataset.moreKey = entry.key
+      item.dataset.deepLink = entry.deepLink
+      item.id = `more-${entry.key}`
+      const shortcut = navShortcutIndex(entry.key)
+      if (shortcut >= 1 && shortcut <= 9) {
+        item.title = t('shell', 'shell.tab.title.more', {
+          label: entry.label,
+          menu: t('shell', 'shell.nav.more'),
+          key: `Alt+${shortcut}`,
+        })
+      }
+      const label = el('span', '', entry.label)
+      const desc = el('span', 'muted', entry.description)
+      item.append(label, desc)
+      item.onclick = () => {
+        scrim.remove()
+        activateNavEntry(entry)
+      }
+      menu.appendChild(item)
+    }
+    scrim.onclick = () => scrim.remove()
+    scrim.oncontextmenu = (event) => { event.preventDefault(); scrim.remove() }
+    scrim.appendChild(menu)
+    root.appendChild(scrim)
+    // Anchor under the More button, flipping at the right viewport edge.
+    const rect = moreBtn.getBoundingClientRect()
+    menu.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`
+    menu.style.top = `${rect.bottom + 6}px`
+    // dsh-web i18n §13.4: locale switch re-opens the menu in the new locale.
+    registerOverlayRebuild(scrim, () => { scrim.remove(); openMoreMenu() })
+  }
+  moreBtn.onclick = () => openMoreMenu()
+  tabs.appendChild(moreBtn)
   main.appendChild(tabs)
 
   // ── body + picker ──
@@ -662,6 +742,10 @@ export function apply(): void {
   main.appendChild(chatDock)
   const styleTabs = (): void => {
     body.classList.toggle('chat-active', state.activeTab === 'chat')
+    // UI-SIMPLE-01: when a More entry is active, the More button carries
+    // the active indicator (no primary tab matches).
+    const moreActive = (MORE_TAB_KEYS as readonly string[]).includes(state.activeTab)
+    moreBtn.classList.toggle('active', moreActive)
     for (const [key, button] of tabButtons) {
       const selected = key === state.activeTab
       button.classList.toggle('active', selected)
@@ -682,7 +766,11 @@ export function apply(): void {
         button.querySelector('.tab-pin')?.remove()
       }
     }
-    body.setAttribute('aria-labelledby', `tab-${state.activeTab}`)
+    // UI-SIMPLE-01: More tabs are not rendered as tablist buttons, so the
+    // panel is only labelled when its tab button actually exists.
+    const activeBtn = tabButtons.get(state.activeTab)
+    if (activeBtn !== undefined) body.setAttribute('aria-labelledby', activeBtn.id)
+    else body.removeAttribute('aria-labelledby')
   }
 
   // dsh-web document title: reflect the active tab + project in the tab
@@ -698,6 +786,23 @@ export function apply(): void {
       const project = projectName !== undefined && projectName !== '' ? ` · ${projectName}` : ''
       document.title = t('shell', 'shell.documentTitle', { project, tab: tabLabel })
     } catch { /* sandboxed iframe */ }
+  }
+
+  // UI-SIMPLE-01 Start 三卡 handlers (acceptance §8 ui-start): the cards
+  // are definitions from nav.ts startActions(); the DOM layer maps their
+  // stable route targets to concrete actions. 'import' is honest —
+  // ONBOARD-01/UPLOAD-01 are not implemented, so it surfaces a placeholder
+  // toast instead of fake upload UI (recorded in hardening status §3).
+  const handleStartAction = (route: string): void => {
+    if (route === 'new-project') {
+      openNewProjectModal(root)
+      return
+    }
+    if (route === 'open-project') {
+      openProjectSwitcherModal(root)
+      return
+    }
+    showToast(rootHost(), t('shell', 'shell.start.importNote'))
   }
 
   const render = async (): Promise<void> => {
@@ -766,7 +871,38 @@ export function apply(): void {
     renderSidebar(sidebar, projects, state.projectId, (id) => { state.projectId = id; void render() })
     if (target === undefined) {
       syncTitle(undefined)
-      // dsh-web hero: a guided empty state instead of a bare message.
+      // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start): the empty first
+      // screen offers exactly three primary actions — 新建研究 / 打开已有
+      // 项目 / 上传·接入 — defined by the pure nav.ts startActions() model
+      // (labels re-evaluate per locale; codes/routes are the stable
+      // contract). 高级设置不可见 (settings stay behind the gear/more).
+      if (projects.length === 0) {
+        const start = el('div', 'welcome start-screen')
+        start.appendChild(el('div', 'welcome-mark', '⌁'))
+        start.appendChild(el('h1', '', t('shell', 'shell.start.title')))
+        start.appendChild(el('div', 'welcome-eyebrow', t('shell', 'shell.start.subtitle')))
+        const cards = el('div', 'start-cards')
+        for (const action of startActions()) {
+          const card = el('button', 'start-card')
+          card.dataset.start = action.code
+          card.dataset.route = action.route
+          card.setAttribute('aria-label', `${action.label} — ${action.description}`)
+          card.append(
+            el('span', 'start-card-label', action.label),
+            el('span', 'start-card-desc', action.description),
+          )
+          card.onclick = () => handleStartAction(action.route)
+          cards.appendChild(card)
+        }
+        start.appendChild(cards)
+        chatDock.hidden = true
+        chatDock.replaceChildren()
+        body.replaceChildren(start)
+        return
+      }
+      // dsh-web hero: a guided empty state instead of a bare message (kept
+      // for the case where projects exist but none is selected — the
+      // Welcome/Create path stays intact).
       const hero = el('div', 'welcome')
       hero.appendChild(el('div', 'welcome-mark', '⌁'))
       hero.appendChild(el('h1', '', t('shell', 'shell.welcome.title')))
@@ -903,13 +1039,11 @@ export function apply(): void {
     sidebarToggle.setAttribute('aria-label', t('shell', 'shell.sidebar.toggleAria'))
     paintBell()
     paintSelects()
-    const groups = chromeTabGroups()
-    const defs = chromeTabs()
-    groups.forEach((group, gi) => {
-      const labelEl = groupLabelEls[gi]
-      if (labelEl !== undefined) labelEl.textContent = group.label
-    })
-    for (const tab of defs) {
+    // UI-SIMPLE-01: primary tabs + More re-paint from the pure nav model
+    // (tabGroups() evaluates t() against the current locale).
+    moreBtn.textContent = t('shell', 'shell.nav.more')
+    moreBtn.title = t('shell', 'shell.nav.more.title')
+    for (const tab of tabGroups().primary) {
       const button = tabButtons.get(tab.key)
       if (button === undefined) continue
       button.replaceChildren()
@@ -920,11 +1054,9 @@ export function apply(): void {
         button.prepend(pin)
       }
       button.append(document.createTextNode(tab.label))
-      const idx = defs.findIndex(d => d.key === tab.key) + 1
-      const group = groups.find(g => g.tabs.some(x => x.key === tab.key))
       button.title = pinned
         ? t('shell', 'shell.tab.pinned.title', { label: tab.label })
-        : t('shell', 'shell.tab.title', { label: tab.label, group: group?.label ?? '', key: String(idx) })
+        : t('shell', 'shell.tab.title', { label: tab.label, key: `Alt+${navShortcutIndex(tab.key)}` })
     }
     tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
     syncTitle(lastProjectName)
@@ -939,9 +1071,28 @@ export function apply(): void {
     paintChrome()
     state.rerender()
   })
+  // UI-SIMPLE-01 deep links (acceptance §8 ui-routes): `#tab=<key>` for
+  // every panel tab and `#settings` for the Settings modal survive reload
+  // and back/forward; existing query routing is untouched (parseDeepLink
+  // strips `?…`). Unknown hashes are a no-op.
+  const applyDeepLink = (renderNow: boolean): void => {
+    let link: ReturnType<typeof parseDeepLink> = null
+    try { link = parseDeepLink(location.hash) } catch { /* sandboxed */ }
+    if (link === null) return
+    if (link.kind === 'tab') {
+      state.activeTab = link.target
+      tabSave()
+      if (renderNow) void render()
+    } else if (link.target === 'settings') {
+      openSettingsModal(root)
+    }
+  }
+  const onHashChange = (): void => applyDeepLink(true)
+  window.addEventListener('hashchange', onHashChange)
   chatLoad()
   historyLoad()
   tabLoad()
+  applyDeepLink(false)
   notifLoad()
   favProjectsLoad()
   sidebarSortLoad()
@@ -1067,15 +1218,15 @@ export function apply(): void {
       }
       return
     }
-    // dsh-web keyboard navigation: Alt+1..9 switches tabs.
+    // dsh-web keyboard navigation: Alt+1..9 walks the flat nav order
+    // (primary tabs → More entries → Settings modal; nav.ts navOrder()).
     if (event.altKey && /^[1-9]$/.test(event.key) && !typing) {
       event.preventDefault()
       const idx = Number(event.key) - 1
-      const tab = chromeTabs()[idx]
-      if (tab !== undefined) {
-        state.activeTab = tab.key
-        tabSave()
-        state.rerender()
+      const target = navOrder()[idx]
+      if (target !== undefined) {
+        if (target === 'settings') openSettingsModal(root)
+        else activateTab(target)
       }
     }
   }
@@ -1104,6 +1255,7 @@ export function apply(): void {
     state.refreshTimer = null
     window.removeEventListener('keydown', onKey)
     window.removeEventListener('resize', onResize)
+    window.removeEventListener('hashchange', onHashChange)
   }, { once: true })
   document.body.appendChild(host)
 }

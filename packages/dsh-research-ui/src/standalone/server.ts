@@ -228,6 +228,48 @@ function readBody(req: IncomingMessage): Promise<{ body: string; tooLarge: boole
   })
 }
 
+/**
+ * UPLOAD-01: raw-bytes body reader for multipart passthrough — a string
+ * conversion would corrupt binary file content. `limit` is the kernel's
+ * upload body cap (32 MiB file + bounded multipart envelope overhead), so
+ * the BFF rejects oversized uploads with 413 before forwarding; the kernel
+ * enforces the same cap again (defense in depth).
+ */
+function readBodyBytes(req: IncomingMessage, limit: number): Promise<{ buffer: Buffer; tooLarge: boolean }> {
+  return new Promise(resolve => {
+    const chunks: Buffer[] = []
+    let total = 0
+    let settled = false
+    const done = (value: { buffer: Buffer; tooLarge: boolean }): void => {
+      if (!settled) {
+        settled = true
+        resolve(value)
+      }
+    }
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return // past the cap: keep draining (bounded memory) so
+      // the client can still read our 413 response — destroying the socket
+      // here would surface as a client-side connection error instead.
+      total += chunk.length
+      if (!withinBodyLimit(total, limit)) {
+        done({ buffer: Buffer.alloc(0), tooLarge: true })
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => done({ buffer: Buffer.concat(chunks), tooLarge: false }))
+    req.on('error', () => done({ buffer: Buffer.alloc(0), tooLarge: false }))
+    req.on('close', () => done({ buffer: Buffer.alloc(0), tooLarge: false }))
+  })
+}
+
+/**
+ * UPLOAD-01: multipart uploads are capped at the kernel's 32 MiB file limit
+ * plus a bounded envelope allowance (headers + boundaries) — same budget as
+ * the kernel's uploads.ts UPLOAD_MAX_BODY_BYTES.
+ */
+const UPLOAD_MAX_BODY_BYTES = (32 + 1) * 1024 * 1024
+
 /** JSON error responses never carry internal paths/env (design §15.2). */
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, {
@@ -912,20 +954,41 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             }
           }
         }
-        let body: string | undefined
+        // UPLOAD-01 (hardening §4 P1): multipart uploads pass through as RAW
+        // BYTES with their ORIGINAL content-type (the boundary must survive
+        // the proxy). A string conversion would corrupt binary file content
+        // and a rewritten content-type would lose the boundary. Everything
+        // else keeps the JSON-only path (normalized identity, canonical
+        // application/json). The body cap for multipart is the kernel's
+        // upload budget (32 MiB file + envelope overhead); oversized
+        // uploads are rejected here with 413 before reaching the kernel.
+        const incomingContentType = req.headers['content-type']
+        const isMultipart = typeof incomingContentType === 'string' && incomingContentType.trim().toLowerCase().startsWith('multipart/form-data')
+        let body: string | Buffer | undefined
         if (method !== 'GET' && method !== 'HEAD') {
-          const read = await readBody(req)
-          if (read.tooLarge) {
-            sendJson(res, 413, { ok: false, error: 'payload too large' })
-            return
+          if (isMultipart) {
+            const read = await readBodyBytes(req, UPLOAD_MAX_BODY_BYTES)
+            if (read.tooLarge) {
+              sendJson(res, 413, { ok: false, error: 'payload too large' })
+              return
+            }
+            body = read.buffer
+          } else {
+            const read = await readBody(req)
+            if (read.tooLarge) {
+              sendJson(res, 413, { ok: false, error: 'payload too large' })
+              return
+            }
+            body = read.body
           }
-          body = read.body
         }
         // API-01/GOV-01 (hardening §4 P0): the authenticated operator session
         // is derived ONCE per request — it both normalizes identity fields in
         // write bodies and supplies x-principal-session for the kernel.
+        // (Multipart bodies are never JSON, so identity normalization is a
+        // no-op there; the kernel binds the project from the URL path.)
         const opSession = options.principal !== null ? operatorSession(options.dataDir, options.principal) : null
-        if (opSession !== null && body !== undefined && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
+        if (opSession !== null && typeof body === 'string' && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
           const seedCreator = url.pathname === '/v1/projects' || url.pathname === '/v2/projects'
           body = normalizeIdentityBody(body, opSession.principal_id, opSession.session_id, seedCreator)
         }
@@ -934,7 +997,9 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // trusted on any surface: on /v1 the standalone enforces membership
         // itself, and on /v2 the identity headers below are overwritten with
         // the server-derived principal/role (never taken from the client).
-        const proxyHeaders: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' }
+        const proxyHeaders: Record<string, string> = isMultipart
+          ? { 'content-type': incomingContentType, accept: 'application/json' }
+          : { 'content-type': 'application/json', accept: 'application/json' }
         // §4 P0 (API-01/EVID-01): internal routes demand the service token.
         // The BFF injects its OWN credential (server-derived, 0600 file) and
         // never forwards a client-supplied x-service-token; the kernel
@@ -971,7 +1036,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         const upstream = await fetch(`${endpoint}${url.pathname}${url.search}`, {
           method,
           headers: proxyHeaders,
-          body,
+          // Multipart bodies are Buffers — pass a Uint8Array copy (never a
+          // string, which would corrupt binary file content).
+          body: body === undefined ? undefined
+            : typeof body === 'string' ? body
+              : new Uint8Array(body),
         })
         if (upstream.status >= 400) {
           let code = upstream.status >= 500 ? 'kernel_error' : 'request_rejected'

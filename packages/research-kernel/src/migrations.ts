@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -135,10 +135,24 @@ CREATE TABLE IF NOT EXISTS tex_builds (
   diagnostics TEXT NOT NULL DEFAULT '[]',
   pdf_artifact TEXT,
   log_artifact TEXT,
+  -- TEX-03 (§4 row 96 / execution-runtime.md §12.1): preview flag +
+  -- supersede linkage for live preview builds (parity with tex-workspace.ts).
+  preview INTEGER NOT NULL DEFAULT 0,
+  superseded_by TEXT,
+  superseded_at TEXT,
   created_at TEXT NOT NULL,
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tex_builds_doc ON tex_builds(document_id);
+-- TEX-03: durable debounced preview request (survives kernel restarts).
+CREATE TABLE IF NOT EXISTS tex_preview_pending (
+  document_id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL,
+  root_file TEXT NOT NULL,
+  engine TEXT NOT NULL DEFAULT 'pdflatex',
+  debounce_ms INTEGER NOT NULL DEFAULT 800,
+  requested_at TEXT NOT NULL
+);
 `
 
 /**
@@ -653,6 +667,34 @@ const runsSnapshotNullable = (db: DatabaseSync, report: MigrationReport): void =
 }
 
 /**
+ * 0010 — TEX-03 (execution-runtime.md §12.1): live LaTeX preview build
+ * records. tex_builds gains the preview flag + supersede linkage
+ * (superseded_by/superseded_at) and the durable debounced preview request
+ * table (tex_preview_pending) so preview state survives kernel restarts and
+ * UI reconnects. Additive and idempotent: columns are ensured by name, the
+ * pending table is CREATE IF NOT EXISTS, and existing latex-compile rows
+ * stay authoritative (preview=0 default).
+ */
+const previewBuilds = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'tex_builds', 'preview', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'tex_builds', 'superseded_by', 'TEXT')
+  ensureColumn(db, 'tex_builds', 'superseded_at', 'TEXT')
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tex_preview_pending (
+      document_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      root_file TEXT NOT NULL,
+      engine TEXT NOT NULL DEFAULT 'pdflatex',
+      debounce_ms INTEGER NOT NULL DEFAULT 800,
+      requested_at TEXT NOT NULL
+    );
+  `)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.tex_builds = (db.prepare('SELECT COUNT(*) AS n FROM tex_builds').get() as { n: number }).n
+  report.rows.tex_preview_pending = (db.prepare('SELECT COUNT(*) AS n FROM tex_preview_pending').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -711,6 +753,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'RUN-01: runs.snapshot_sha256 nullable (echo/smoke jobs have no code snapshot)',
     body: runsSnapshotNullable.toString(),
     up: runsSnapshotNullable,
+  },
+  {
+    id: '0010_preview_builds',
+    description: 'TEX-03: tex_builds preview/superseded_by/superseded_at + tex_preview_pending (live LaTeX preview)',
+    body: previewBuilds.toString(),
+    up: previewBuilds,
   },
 ]
 

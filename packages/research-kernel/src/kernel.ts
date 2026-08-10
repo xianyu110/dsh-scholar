@@ -6,22 +6,23 @@
  */
 
 import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
-import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
-  ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision,
+  ArtifactKind, ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision,
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, validateConfig, type ArtifactKind, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  buildProjectId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
 import { IMAGES_LOCK } from './images-lock.js'
+import { STAGED_UPLOAD_TTL_MS as STAGED_TTL, UPLOAD_MAX_FILE_BYTES as UPLOAD_LIMIT_BYTES } from './upload-limits.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -50,9 +51,51 @@ function assertSafeTexBuildPath(path: string): void {
   }
 }
 
-import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
+/**
+ * UPLOAD-01 path safety (execution-runtime.md §4 / domain-model.md §artifact):
+ * the upload file name must be a plain basename. Rejects absolute paths
+ * (POSIX and Windows drive prefixes), `..` segments (on both separators),
+ * NUL bytes and anything that normalizes to empty. Throws 422
+ * invalid_file_name — the same contract the code-snapshot walk enforces for
+ * archived paths. Lives here (not in uploads.ts) so the parser module stays
+ * dependency-free: kernel.ts is the only module that needs KernelError.
+ */
+export function validateUploadFileName(name: string): void {
+  if (name === '' || name.trim() === '') {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must not be empty')
+  }
+  if (name.includes('\0')) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must not contain NUL bytes')
+  }
+  if (name.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(name)) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must be a relative basename (absolute paths are rejected)')
+  }
+  // Windows drive prefix without separator (e.g. "C:evil.txt") is ambiguous —
+  // reject it too so a Windows-style name can never reach the CAS download
+  // Content-Disposition or a future archive materializer.
+  if (/^[a-zA-Z]:/.test(name)) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must not carry a Windows drive prefix')
+  }
+  const normalized = name.replaceAll('\\', '/')
+  if (normalized.startsWith('/')) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must be a relative basename (absolute paths are rejected)')
+  }
+  if (normalized.split('/').some(part => part === '..' || part === '.')) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must not contain "." or ".." path segments')
+  }
+  if (normalized.includes('/')) {
+    // A single-file upload carries one basename; nested paths belong to
+    // research-package archives (validated by the archive walk instead).
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must be a single basename without path separators')
+  }
+}
+
+import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexPreviewPending, type TexSnapshotManifest } from './tex-workspace.js'
 import { validateImageDigest, type SecureJobKind } from './images-lock.js'
 import { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
+
+/** §12.1 (TEX-03): default debounce for live preview builds after a save. */
+export const TEX_PREVIEW_DEBOUNCE_MS_DEFAULT = 800
 
 export interface KernelOptions {
   /** SQLite database path (defaults to `:memory:`). */
@@ -73,6 +116,21 @@ export interface KernelOptions {
    * stays open (dev compatibility).
    */
   serviceToken?: string
+  /**
+   * §12.1 (TEX-03): debounce window for live preview builds after a save
+   * success (default 800ms). Per-request overrides are accepted by
+   * texRequestPreview / POST preview-builds.
+   */
+  previewDebounceMs?: number
+  /**
+   * §12.1 (TEX-03): when true, every successful workspace write (save/new/
+   * delete/move) automatically schedules a debounced preview build — the
+   * kernel-internal "Workspace event → preview" path. Off by default so the
+   * explicit POST /v1/documents/{id}/preview-builds hook (called by the UI
+   * after a save success) stays the canonical trigger; the flag exists for
+   * deployments that want zero client involvement.
+   */
+  previewAutoTrigger?: boolean
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -312,9 +370,31 @@ export class ResearchKernel {
   static SNAPSHOT_MAX_FILE_BYTES = 64 * 1024 * 1024 // 64 MiB per file
   static SNAPSHOT_MAX_TOTAL_BYTES = 512 * 1024 * 1024 // 512 MiB total
 
+  /**
+   * UPLOAD-01: hard cap for ONE multipart-uploaded file (api-contracts.md
+   * §1/§7). Static so deployments/tests can lower it (same pattern as the
+   * snapshot limits above); 超限 → 413 payload_too_large with the concrete
+   * limit and measured value in the message. The HTTP layer streams against
+   * this cap (plus a bounded multipart envelope allowance) so an oversized
+   * upload is rejected before it is buffered in full.
+   */
+  static UPLOAD_MAX_FILE_BYTES = UPLOAD_LIMIT_BYTES
+
+  /** Default staged-upload TTL for cleanupStagedUploads (24 h). */
+  static STAGED_UPLOAD_TTL_MS = STAGED_TTL
+
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
   readonly instanceId: string
+  /**
+   * UPLOAD-01: staging area for in-flight multipart uploads (inside the CAS
+   * root so it lives/dies with the artifact store). Files are written as
+   * `stage_<id>.part` (raw bytes) + `stage_<id>.json` (metadata: project,
+   * kind, file_name, media_type, sha256, size) and are never visible to
+   * cas.list() (which only accepts 64-hex blob names) — they either become a
+   * CAS blob at finalize or are collected by cleanupStagedUploads.
+   */
+  readonly stagedUploadsRoot: string
   /** TeX workspace store (execution-runtime.md §12). */
   readonly tex: import('./tex-workspace.js').TexWorkspaceStore
   /** §12.7: when true, unsigned run manifests are rejected at completion. */
@@ -331,10 +411,18 @@ export class ResearchKernel {
    * token. Exposed via the HTTP `x-config-pin` header and /v1|v2 health.
    */
   readonly configPinHash: string
+  /** §12.1 (TEX-03): debounce window for live preview builds. */
+  readonly previewDebounceMs: number
+  /** §12.1 (TEX-03): auto-trigger previews on every workspace write. */
+  readonly previewAutoTrigger: boolean
+  /** §12.1 (TEX-03): in-flight debounce timers, one per document. */
+  private readonly previewTimers = new Map<string, NodeJS.Timeout>()
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
+    this.stagedUploadsRoot = join(this.cas.root, 'staged-uploads')
+    mkdirSync(this.stagedUploadsRoot, { recursive: true })
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
     this.serviceToken = options.serviceToken
@@ -343,6 +431,11 @@ export class ResearchKernel {
     // default only affects callers that never sign. Unit tests that exercise
     // unrelated paths opt out explicitly (freshKernel passes false).
     this.requireSignedManifest = options.requireSignedManifest ?? true
+    // §12.1 (TEX-03): preview scheduling knobs. Defaults keep the explicit
+    // preview-builds hook as the canonical trigger; the pending rows are
+    // durable, so any request that survived a restart is re-armed below.
+    this.previewDebounceMs = options.previewDebounceMs ?? TEX_PREVIEW_DEBOUNCE_MS_DEFAULT
+    this.previewAutoTrigger = options.previewAutoTrigger ?? false
     // CONFIG-01: pin the effective runtime config through the registry. The
     // registry validates the values (unknown keys / floor violations throw
     // here — fail fast at construction) and returns the one-way sha256 pin.
@@ -356,9 +449,17 @@ export class ResearchKernel {
       imagesLock: { node_fixture: IMAGES_LOCK.node_fixture, texlive: IMAGES_LOCK.texlive },
     })
     this.configPinHash = pinned.pinHash
+    // §12.1 (TEX-03): re-arm debounce timers for pending preview requests
+    // that survived a kernel restart — preview state is re-projectable from
+    // the kernel, it never lives only in a browser debounce timer.
+    for (const pending of this.tex.listPendingPreviews()) {
+      this.armPreviewTimer(pending.document_id, pending.debounce_ms)
+    }
   }
 
   close(): void {
+    for (const timer of this.previewTimers.values()) clearTimeout(timer)
+    this.previewTimers.clear()
     this.tex.close()
     this.db.close()
   }
@@ -1058,6 +1159,13 @@ export class ResearchKernel {
 
   // ── artifacts (CAS) ──────────────────────────────────────────────────────
 
+  /** Shared artifact-row insert + outbox event (single writer: SQLite). */
+  private persistArtifact(record: ArtifactRecord): void {
+    this.db.prepare('INSERT INTO artifacts (artifact_id, project_id, kind, size_bytes, sha256, metadata, media_type, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(record.artifact_id, record.project_id, record.kind, record.size_bytes, record.sha256, JSON.stringify(record.metadata), record.media_type, record.file_name, record.created_at)
+    this.emit(record.project_id, 'artifact.registered', { artifact_id: record.artifact_id, kind: record.kind, size_bytes: record.size_bytes })
+  }
+
   registerArtifact(input: {
     project_id: string
     kind: ArtifactKind
@@ -1090,10 +1198,209 @@ export class ResearchKernel {
       file_name: input.file_name ?? null,
       created_at: nowIso(),
     }
-    this.db.prepare('INSERT INTO artifacts (artifact_id, project_id, kind, size_bytes, sha256, metadata, media_type, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(record.artifact_id, record.project_id, record.kind, record.size_bytes, record.sha256, JSON.stringify(record.metadata), record.media_type, record.file_name, record.created_at)
-    this.emit(input.project_id, 'artifact.registered', { artifact_id: record.artifact_id, kind: record.kind, size_bytes })
+    this.persistArtifact(record)
     return record
+  }
+
+  // ── staged uploads (UPLOAD-01, api-contracts.md §7) ─────────────────────
+
+  /** Absolute path of a staged part/metadata file for `stageId`. */
+  stagedPartPath(stageId: string): string {
+    return join(this.stagedUploadsRoot, `stage_${stageId}.part`)
+  }
+
+  stagedMetaPath(stageId: string): string {
+    return join(this.stagedUploadsRoot, `stage_${stageId}.json`)
+  }
+
+  /**
+   * UPLOAD-01 phase 1 (stage): write the received bytes to a session-id'd
+   * temporary file under the CAS root together with a metadata sidecar.
+   * Nothing is registered yet — the artifact only becomes visible at
+   * finalizeStagedUpload, so a crash between the two leaves only a staged
+   * file (recoverable: re-upload or cleanupStagedUploads), never a partial
+   * artifact row. Validation (project existence, kind, file name, size cap)
+   * runs here — before anything touches disk beyond the staging area.
+   */
+  stageUploadContent(input: {
+    project_id: string
+    kind: ArtifactKind
+    file_name: string
+    media_type?: string
+    content: Uint8Array | string
+  }): { stage_id: string } {
+    this.getProject(input.project_id)
+    const kindCheck = ArtifactKind.safeParse(input.kind)
+    if (!kindCheck.success) {
+      throw new KernelError(422, 'invalid_kind', `upload kind must be one of ${ArtifactKind.options.join('/')}`)
+    }
+    validateUploadFileName(input.file_name)
+    const bytes = typeof input.content === 'string' ? Buffer.from(input.content, 'utf8') : Buffer.from(input.content)
+    if (bytes.byteLength > ResearchKernel.UPLOAD_MAX_FILE_BYTES) {
+      throw new KernelError(413, 'payload_too_large',
+        `upload exceeds the size limit: ${bytes.byteLength} bytes (max_file_bytes=${ResearchKernel.UPLOAD_MAX_FILE_BYTES})`)
+    }
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const stageId = randomUUID().replaceAll('-', '')
+    const partPath = this.stagedPartPath(stageId)
+    const metaPath = this.stagedMetaPath(stageId)
+    try {
+      // mkdirSync is a no-op once the staging root exists (constructor).
+      mkdirSync(this.stagedUploadsRoot, { recursive: true })
+      writeFileSync(partPath, bytes, { mode: 0o600 })
+      writeFileSync(metaPath, JSON.stringify({
+        schema_version: 1,
+        stage_id: stageId,
+        project_id: input.project_id,
+        kind: kindCheck.data,
+        file_name: input.file_name,
+        media_type: input.media_type ?? '',
+        sha256,
+        size_bytes: bytes.byteLength,
+        created_at: nowIso(),
+      }), { mode: 0o600 })
+    } catch (error) {
+      // Rollback: never leave a half-written stage behind.
+      try { unlinkSync(partPath) } catch { /* absent */ }
+      try { unlinkSync(metaPath) } catch { /* absent */ }
+      throw new KernelError(500, 'stage_write_failed', `staged upload write failed: ${(error as Error).message}`)
+    }
+    return { stage_id: stageId }
+  }
+
+  /**
+   * UPLOAD-01 phase 2 (finalize): atomically promote a staged upload to a
+   * registered artifact. The staged bytes are re-hashed and re-measured
+   * (the recorded sha256 is server-computed at stage time; a mismatch means
+   * the staged file was tampered with → 422 stage_corrupted), then the part
+   * file is renamed into the CAS blob slot (atomic on POSIX; concurrent
+   * writers with identical content keep the existing blob) and the artifact
+   * row is inserted in the same write path as registerArtifact. Idempotent:
+   * an existing artifact for the same project + sha256 + file_name is
+   * returned unchanged (reused: true) and the staged files are dropped.
+   * Any failure removes the staged files before rethrowing (rollback).
+   */
+  finalizeStagedUpload(stageId: string): { record: ArtifactRecord; reused: boolean } {
+    const partPath = this.stagedPartPath(stageId)
+    const metaPath = this.stagedMetaPath(stageId)
+    let meta: {
+      project_id: string
+      kind: ArtifactKind
+      file_name: string
+      media_type?: string
+      sha256: string
+      size_bytes: number
+    }
+    try {
+      meta = JSON.parse(readFileSync(metaPath, 'utf8')) as typeof meta
+    } catch {
+      // Absent/expired stage: stable code from the internal-stage contract
+      // (api-contracts.md §2 artifact_stage_expired).
+      throw new KernelError(409, 'artifact_stage_expired', `upload stage ${stageId} not found or expired`)
+    }
+    const rollback = (): void => {
+      try { unlinkSync(partPath) } catch { /* absent */ }
+      try { unlinkSync(metaPath) } catch { /* absent */ }
+    }
+    if (typeof meta.project_id !== 'string' || typeof meta.kind !== 'string' || typeof meta.file_name !== 'string' || typeof meta.sha256 !== 'string') {
+      throw new KernelError(422, 'stage_corrupted', `upload stage ${stageId} metadata is malformed`)
+    }
+    if (!ArtifactKind.safeParse(meta.kind).success) {
+      rollback()
+      throw new KernelError(422, 'stage_corrupted', `upload stage ${stageId} metadata carries an invalid kind`)
+    }
+    try {
+      // Re-hash the staged bytes: the artifact hash is bound to the CONTENT
+      // actually promoted, never to a client claim or a stale record.
+      const staged = readFileSync(partPath)
+      const actualSha = createHash('sha256').update(staged).digest('hex')
+      if (actualSha !== meta.sha256 || staged.byteLength !== meta.size_bytes) {
+        rollback()
+        throw new KernelError(422, 'stage_corrupted',
+          `upload stage ${stageId} content hash mismatch (recorded ${meta.sha256}, got ${actualSha})`)
+      }
+      if (staged.byteLength > ResearchKernel.UPLOAD_MAX_FILE_BYTES) {
+        rollback()
+        throw new KernelError(413, 'payload_too_large',
+          `upload exceeds the size limit: ${staged.byteLength} bytes (max_file_bytes=${ResearchKernel.UPLOAD_MAX_FILE_BYTES})`)
+      }
+      this.getProject(meta.project_id)
+      // Idempotency (UPLOAD-01): same project + sha256 + file_name re-upload
+      // returns the ORIGINAL artifact without writing anything new.
+      const artifactId = `sha256:${meta.sha256}`
+      const existing = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
+        .get(meta.project_id, artifactId) as ArtifactRecord | undefined
+      if (existing !== undefined) {
+        rollback()
+        return { record: existing, reused: true }
+      }
+      // Atomic promotion: rename the staged part into the CAS blob slot
+      // (POSIX rename is atomic; a concurrent identical writer keeps the
+      // existing blob — same semantics as ArtifactCas.put).
+      const target = this.cas.pathFor(meta.sha256)
+      try {
+        renameSync(partPath, target)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        try { unlinkSync(partPath) } catch { /* absent */ }
+      }
+      const mediaType = meta.media_type !== undefined && meta.media_type !== ''
+        ? meta.media_type
+        : (meta.kind === 'pdf' ? 'application/pdf' : 'application/octet-stream')
+      const record: ArtifactRecord = {
+        artifact_id: artifactId,
+        project_id: meta.project_id,
+        kind: meta.kind,
+        size_bytes: meta.size_bytes,
+        sha256: meta.sha256,
+        metadata: {},
+        media_type: mediaType,
+        file_name: meta.file_name,
+        created_at: nowIso(),
+      }
+      this.persistArtifact(record)
+      try { unlinkSync(metaPath) } catch { /* absent */ }
+      return { record, reused: false }
+    } catch (error) {
+      rollback()
+      throw error
+    }
+  }
+
+  /**
+   * UPLOAD-01 recovery/GC: remove staged uploads older than `maxAgeMs`
+   * (grace-period model, mirroring collectOrphanBlobs). Both the `.part`
+   * and the `.json` sidecar of an aged stage are removed; orphaned sidecars
+   * of already-finalized stages are collected as well. Returns the number
+   * of files removed. A finalized upload's blob lives in CAS and is never
+   * touched here (accepted blobs are not intake GC targets).
+   */
+  cleanupStagedUploads(maxAgeMs: number = ResearchKernel.STAGED_UPLOAD_TTL_MS): number {
+    let entries: string[]
+    try {
+      entries = readdirSync(this.stagedUploadsRoot)
+    } catch {
+      return 0
+    }
+    const now = Date.now()
+    let removed = 0
+    for (const entry of entries) {
+      if (!entry.startsWith('stage_') || !(entry.endsWith('.part') || entry.endsWith('.json'))) continue
+      const full = join(this.stagedUploadsRoot, entry)
+      let mtime: number
+      try {
+        mtime = statSync(full).mtimeMs
+      } catch {
+        continue // raced with another cleanup — skip
+      }
+      if (now - mtime > maxAgeMs) {
+        try {
+          unlinkSync(full)
+          removed += 1
+        } catch { /* raced — another collector won */ }
+      }
+    }
+    return removed
   }
 
   /** Project-scoped artifact lookup (v2 §3.4 isolation). */
@@ -1788,6 +2095,14 @@ export class ResearchKernel {
           claimedJob.contract_id, this.resolveSnapshotSha256(claimedJob.code_snapshot_id), now,
         )
         claimed.push({ ...claimedJob, run_id: runId })
+        // §12.1 (TEX-03): a claimed latex-compile job moves its tex_builds
+        // row queued → running, so preview supersede can distinguish a
+        // never-started queued preview (→ cancelled) from a running one
+        // (→ superseded).
+        const texBuildRow = this.db.prepare('SELECT build_id, status FROM tex_builds WHERE job_id = ?').get(claimedJob.job_id) as { build_id: string; status: string } | undefined
+        if (texBuildRow !== undefined && texBuildRow.status === 'queued') {
+          this.tex.updateBuild(texBuildRow.build_id, { status: 'running' })
+        }
       }
     }
     return claimed
@@ -1955,6 +2270,11 @@ export class ResearchKernel {
       const manifest = input.run_manifest as Record<string, unknown>
       const buildRow = this.db.prepare('SELECT build_id FROM tex_builds WHERE job_id = ?').get(job.job_id) as { build_id: string } | undefined
       if (buildRow !== undefined) {
+        // §12.1 (TEX-03): a superseded/cancelled preview build is FINAL —
+        // its completion (a race between supersede and a runner that already
+        // passed the running check) must never resurrect the record.
+        const current = this.tex.getBuild(buildRow.build_id)
+        const frozen = current.status === 'superseded' || current.status === 'cancelled'
         let diagnostics: LatexDiagnostic[] = Array.isArray(manifest.tex_diagnostics)
           ? manifest.tex_diagnostics as LatexDiagnostic[]
           : []
@@ -1974,7 +2294,7 @@ export class ResearchKernel {
           }
         }
         this.texUpdateBuild(buildRow.build_id, {
-          status: input.status === 'succeeded' ? 'succeeded' : (input.status === 'cancelled' ? 'cancelled' : 'failed'),
+          status: frozen ? current.status : (input.status === 'succeeded' ? 'succeeded' : (input.status === 'cancelled' ? 'cancelled' : 'failed')),
           diagnostics: JSON.stringify(diagnostics),
           pdf_artifact: typeof manifest.tex_pdf_artifact === 'string' ? manifest.tex_pdf_artifact : null,
           log_artifact: typeof manifest.tex_log_artifact === 'string' ? manifest.tex_log_artifact : null,
@@ -2088,6 +2408,13 @@ export class ResearchKernel {
     }
     this.db.prepare('UPDATE jobs SET status = ?, error = ?, lease_owner = NULL, updated_at = ? WHERE job_id = ?')
       .run('cancelled', reason ? `cancelled by ${actor}: ${reason}` : `cancelled by ${actor}`, nowIso(), jobId)
+    // §12.1 (TEX-03): cancelling a latex-compile job finalizes its tex_builds
+    // row (queued/running → cancelled) so build history never shows a
+    // cancelled job with a live build.
+    const texBuildRow = this.db.prepare('SELECT build_id, status FROM tex_builds WHERE job_id = ?').get(jobId) as { build_id: string; status: string } | undefined
+    if (texBuildRow !== undefined && (texBuildRow.status === 'queued' || texBuildRow.status === 'running')) {
+      this.tex.updateBuild(texBuildRow.build_id, { status: 'cancelled' })
+    }
     // dsh-web parity: unify the job.updated event with the other mutations.
     this.emit(job.project_id, 'job.updated', { job_id: jobId, status: 'cancelled', actor })
     return this.getJob(jobId)
@@ -2316,15 +2643,34 @@ export class ResearchKernel {
   }
 
   texWriteFile(documentId: string, path: string, content: string, expectedVersion?: number) {
-    return this.tex.writeFile(documentId, path, content, expectedVersion)
+    const result = this.tex.writeFile(documentId, path, content, expectedVersion)
+    // §12.1 (TEX-03): with previewAutoTrigger the save-success event itself
+    // schedules the debounced preview build (kernel-internal Workspace event
+    // path; the explicit POST preview-builds hook remains the canonical one).
+    if (this.previewAutoTrigger) this.maybeAutoPreview(documentId)
+    return result
   }
 
   texDeleteFile(documentId: string, path: string, expectedVersion?: number): void {
     this.tex.deleteFile(documentId, path, expectedVersion)
+    if (this.previewAutoTrigger) this.maybeAutoPreview(documentId)
   }
 
   texMoveFile(documentId: string, fromPath: string, toPath: string, expectedVersion?: number): void {
     this.tex.moveFile(documentId, fromPath, toPath, expectedVersion)
+    if (this.previewAutoTrigger) this.maybeAutoPreview(documentId)
+  }
+
+  /** §12.1 (TEX-03): schedule a preview after a write, unless the document
+   * has no files left (an empty workspace cannot compile — the runner would
+   * just fail). */
+  private maybeAutoPreview(documentId: string): void {
+    try {
+      if (this.tex.tree(documentId).files.length === 0) return
+      this.texRequestPreview(documentId)
+    } catch {
+      // Preview scheduling is best-effort; the write itself already landed.
+    }
   }
 
   texHistory(documentId: string) {
@@ -2344,20 +2690,181 @@ export class ResearchKernel {
     return this.tex.snapshotFile(documentId, revision, path)
   }
 
-  texCreateBuild(documentId: string, revision: number, rootFile: string, jobId: string | null): TexBuild {
-    return this.tex.createBuild(documentId, revision, rootFile, jobId)
+  texCreateBuild(documentId: string, revision: number, rootFile: string, jobId: string | null, preview = false): TexBuild {
+    return this.tex.createBuild(documentId, revision, rootFile, jobId, preview)
   }
 
   texUpdateBuild(buildId: string, patch: Parameters<import('./tex-workspace.js').TexWorkspaceStore['updateBuild']>[1]): TexBuild {
     return this.tex.updateBuild(buildId, patch)
   }
 
-  texGetBuild(buildId: string): TexBuild {
-    return this.tex.getBuild(buildId)
+  /**
+   * §12.1 (TEX-03): a build record's staleness for PDF display — the
+   * compiled PDF is stale as soon as the document revision moved past the
+   * revision the build froze (build.revision < document.revision).
+   */
+  private texBuildView(build: TexBuild): TexBuild & { stale: boolean } {
+    let documentRevision = build.revision
+    try {
+      documentRevision = this.tex.getDocument(build.document_id).revision
+    } catch {
+      // document gone — keep the build's own revision (stale=false baseline)
+    }
+    return { ...build, stale: documentRevision > build.revision }
   }
 
-  texListBuilds(documentId: string): TexBuild[] {
-    return this.tex.listBuilds(documentId)
+  texGetBuild(buildId: string): TexBuild & { stale: boolean } {
+    return this.texBuildView(this.tex.getBuild(buildId))
+  }
+
+  /** §12.1 (TEX-03): authoritative builds only (preview=0) — the explicit
+   * Compile surface is kept separate from live previews. */
+  texListBuilds(documentId: string): Array<TexBuild & { stale: boolean }> {
+    return this.tex.listBuilds(documentId).filter(b => !b.preview).map(b => this.texBuildView(b))
+  }
+
+  /** §12.1 (TEX-03): live preview builds (preview=1), newest first. */
+  texListPreviews(documentId: string): Array<TexBuild & { stale: boolean }> {
+    return this.tex.listPreviews(documentId).map(b => this.texBuildView(b))
+  }
+
+  /**
+   * §12.1 (TEX-03): request a debounced live preview build after a save
+   * success. The pending request is durable (tex_preview_pending) and the
+   * debounce timer is owned by the kernel — UI reconnects and kernel
+   * restarts re-project the same state. A second request while the debounce
+   * is pending simply restarts the window (coalescing); the flush compiles
+   * the LATEST document revision.
+   */
+  texRequestPreview(documentId: string, opts: { debounce_ms?: number; root_file?: string; engine?: string } = {}): TexPreviewPending {
+    this.tex.getDocument(documentId)
+    if (opts.engine !== undefined && opts.engine !== '' && !TEX_ENGINES.includes(opts.engine)) {
+      throw new KernelError(422, 'engine_invalid',
+        `preview engine '${opts.engine}' is not in the fixed engine whitelist (${TEX_ENGINES.join('/')})`)
+    }
+    if (opts.root_file !== undefined && opts.root_file !== '') assertSafeTexBuildPath(opts.root_file)
+    const debounceMs = opts.debounce_ms ?? this.previewDebounceMs
+    const pending = this.tex.requestPreview(documentId, debounceMs, opts.root_file, opts.engine)
+    this.armPreviewTimer(documentId, debounceMs)
+    return pending
+  }
+
+  /** §12.1 (TEX-03): debounce timer bookkeeping (one timer per document). */
+  private armPreviewTimer(documentId: string, debounceMs: number): void {
+    const existing = this.previewTimers.get(documentId)
+    if (existing !== undefined) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      this.previewTimers.delete(documentId)
+      try {
+        this.texFlushPreview(documentId)
+      } catch (error) {
+        // Best-effort preview: a failed flush must never loop. Consume the
+        // pending request so the failure surfaces once (build history or
+        // diagnostics), then drop it.
+        console.error(`[kernel] tex preview flush failed for ${documentId}: ${(error as Error).message}`)
+        try { this.tex.consumePendingPreview(documentId) } catch { /* ignore */ }
+      }
+    }, debounceMs)
+    timer.unref?.()
+    this.previewTimers.set(documentId, timer)
+  }
+
+  /**
+   * §12.1 (TEX-03): consume the pending request and create the preview build
+   * (synchronous, called by the debounce timer or directly for tests).
+   * Preview runs the SAME fixed TeX image / no-network / no-shell-escape
+   * latex-compile runner path (kind stays latex-compile, payload.preview=true
+   * marks the record) but is NOT part of the authoritative manifest chain:
+   * no accepted Evidence, no manifest freeze beyond the revision-scoped
+   * snapshot it compiles. Skipped when an authoritative latex-compile is
+   * active (its build superseded previews) or when a non-terminal preview
+   * for the same revision already exists.
+   */
+  texFlushPreview(documentId: string): {
+    action: 'noop' | 'skipped_authoritative' | 'skipped_dup' | 'created'
+    revision?: number
+    build?: TexBuild
+    job?: JobSpecBound
+    superseded?: string[]
+  } {
+    const pending = this.tex.consumePendingPreview(documentId)
+    if (pending === null) return { action: 'noop' }
+    const document = this.tex.getDocument(documentId)
+    const revision = document.revision
+    // An active authoritative latex-compile supersedes previews by existing:
+    // do not queue another container run behind it.
+    const activeAuthoritative = this.listJobs(document.project_id).some(j =>
+      j.kind === 'latex-compile'
+      && (j.status === 'queued' || j.status === 'running')
+      && (j.payload as Record<string, unknown> | undefined)?.preview !== true
+      && (j.payload as Record<string, unknown>)?.tex_document_id === documentId)
+    if (activeAuthoritative) return { action: 'skipped_authoritative', revision }
+    // Dedupe: an already queued/running preview for this exact revision is
+    // the preview the UI wants; creating a second job would waste a run.
+    const sameRevisionLive = this.tex.listPreviews(documentId).find(b => b.revision === revision && (b.status === 'queued' || b.status === 'running'))
+    if (sameRevisionLive !== undefined) return { action: 'skipped_dup', revision }
+    // Freeze the CURRENT revision (the debounce coalesced any newer saves)
+    // and run the same fixed-image latex-compile pipeline, marked preview.
+    const snap = this.tex.snapshot(documentId)
+    const rootFile = pending.root_file !== '' ? pending.root_file : document.root_file
+    const engine = pending.engine !== '' ? pending.engine : 'pdflatex'
+    const job = this.submitJob({
+      project_id: document.project_id,
+      // Nonce so a retried flush after a terminal preview never reuses a
+      // finished job (store-level dedup prevents same-revision duplicates).
+      idempotency_key: `latex-preview:${documentId}:${snap.revision}:${engine}:${randomUUID().slice(0, 8)}`,
+      kind: 'latex-compile',
+      command: [engine, '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-no-shell-escape', rootFile],
+      payload: {
+        tex_document_id: documentId,
+        tex_revision: snap.revision,
+        tex_snapshot: snap.manifest,
+        engine,
+        preview: true,
+      },
+    })
+    const build = this.tex.createBuild(documentId, snap.revision, rootFile, job.job_id, true)
+    // The new revision's preview supersedes every non-terminal older preview
+    // (queued → cancelled, running → superseded) and cancels their jobs.
+    const superseded = this.tex.supersedePreviews(documentId, build.build_id)
+    for (const old of superseded) {
+      if (old.job_id !== null) {
+        try {
+          this.cancelJob(old.job_id, 'kernel:preview-supersede', `superseded by preview build ${build.build_id}`)
+        } catch {
+          // Job already terminal — its build row is already frozen too.
+        }
+      }
+    }
+    return { action: 'created', revision: snap.revision, build, job, superseded: superseded.map(b => b.build_id) }
+  }
+
+  /**
+   * §12.1 (TEX-03): an explicit authoritative Compile supersedes ALL
+   * non-terminal previews of the document (queued → cancelled, running →
+   * superseded, superseded_by = the authoritative build). Previews never
+   * block or replace the authoritative job; the authority is the manifest
+   * frozen by POST builds.
+   */
+  texSupersedePreviews(documentId: string, supersederBuildId: string): TexBuild[] {
+    const affected = this.tex.supersedePreviews(documentId, supersederBuildId)
+    for (const old of affected) {
+      if (old.job_id !== null) {
+        try {
+          this.cancelJob(old.job_id, 'kernel:authoritative-compile', `superseded by authoritative build ${supersederBuildId}`)
+        } catch {
+          // Job already terminal — its build row is already frozen too.
+        }
+      }
+    }
+    return affected
+  }
+
+  /** §12.1 (TEX-03): projection for UI reconnects — pending debounce state
+   * (if any) plus the document's preview builds with staleness flags. */
+  texPreviewStatus(documentId: string): { pending: TexPreviewPending | null; builds: Array<TexBuild & { stale: boolean }> } {
+    this.tex.getDocument(documentId)
+    return { pending: this.tex.getPendingPreview(documentId), builds: this.texListPreviews(documentId) }
   }
 
   /**

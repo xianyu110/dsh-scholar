@@ -6,356 +6,366 @@ import { accentColor, accentSet, autoRefreshEnabled, autoRefreshSet, chatClear, 
 import { ACCENTS, ACCENT_DARK, copyText, el, rootHost, showToast, trapFocus } from '../ui'
 import { tokenProvider } from '../api'
 import { RADII, TEXTURES } from '../state'
+import { settingsKey, settingsSections } from '../settings-model'
 /* ─────────────────────────── settings modal ─────────────────────────── */
 
 /**
- * dsh-web "Settings" counterpart: connection status (kernel health +
- * endpoint), access token state, theme and conversation controls. Reads
- * live kernel health through the bridge.
+ * dsh-web "Settings" counterpart with UI-SIMPLE-01 progressive disclosure
+ * (acceptance-tests.md §8 ui-settings): every section is an Accordion that
+ * starts COLLAPSED (defaultCollapsed in the pure settingsSections() model),
+ * each item carries its source / effective-status line, and the config
+ * provenance section shows the kernel's effective config pin hash when the
+ * registry data is available (health config_pin) — otherwise an honest
+ * placeholder. Rows without a static value are dynamic slots filled below
+ * with live controls (kernel health, selects, toggles). All copy goes
+ * through t()/settingsKey() — no hardcoded chrome (i18n §8).
  */
 export async function openSettingsModal(root: ShadowRoot | null | undefined): Promise<void> {
   if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
-  modal.style.cssText = 'width:520px;max-width:92vw'
+  modal.style.cssText = 'width:560px;max-width:92vw'
   const header = el('div', 'modal-header', t('shell', 'shell.settings.title'))
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
   header.appendChild(closeBtn)
   modal.appendChild(header)
 
-  const section = (title: string): HTMLElement => {
-    const label = el('div', 'section-label', title)
-    label.style.cssText = 'margin-top:14px'
-    return label
+  // Accordion expand memory (optional): sections start collapsed; only a
+  // user-expanded section stays open across re-opens.
+  const SETTINGS_OPEN_KEY = 'dsh-scholar-ui-settings-open'
+  const settingsOpenLoad = (): Set<string> => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_OPEN_KEY)
+      const parsed = raw !== null ? JSON.parse(raw) as unknown : null
+      return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [])
+    } catch { /* private mode */ }
+    return new Set()
   }
-  const row = (label: string, value: string, valueClass = 'mono'): void => {
-    const r = el('div', 'row')
-    r.style.cssText = 'padding:4px 0'
-    const l = el('span', '', label)
-    l.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-    const v = el('span', valueClass, value)
-    v.style.cssText = 'font-size:11px;color:var(--text);word-break:break-all'
-    r.append(l, v)
-    modal.appendChild(r)
+  const settingsOpenPersist = (open: Set<string>): void => {
+    try { localStorage.setItem(SETTINGS_OPEN_KEY, JSON.stringify([...open])) } catch { /* private mode */ }
+  }
+  const openSections = settingsOpenLoad()
+
+  // One kernel health probe serves the connection section and the config
+  // provenance section (CONFIG-01: health carries config_pin).
+  const health = await api<{ ok?: boolean; instance?: string; config_pin?: string }>('/v1/health')
+
+  // ── Accordion sections from the pure model (settingsSections()) ──
+  for (const section of settingsSections()) {
+    const acc = el('div', 'settings-section')
+    acc.dataset.section = section.id
+    const open = openSections.has(section.id) || !section.defaultCollapsed
+    acc.dataset.open = open ? 'true' : 'false'
+    const head = el('button', 'settings-section-head')
+    head.id = `settings-head-${section.id}`
+    head.setAttribute('aria-expanded', open ? 'true' : 'false')
+    head.setAttribute('aria-controls', `settings-body-${section.id}`)
+    head.setAttribute('aria-label', t('shell', 'shell.settings.accordion.toggle', { title: settingsKey(section.titleKey) }))
+    const caret = el('span', 'settings-section-caret', '▸')
+    const title = el('span', '', settingsKey(section.titleKey))
+    const summary = el('span', 'settings-section-summary', settingsKey(section.summaryKey))
+    head.append(caret, title, summary)
+    head.onclick = () => {
+      const next = acc.dataset.open !== 'true'
+      acc.dataset.open = next ? 'true' : 'false'
+      head.setAttribute('aria-expanded', next ? 'true' : 'false')
+      if (next) openSections.add(section.id)
+      else openSections.delete(section.id)
+      settingsOpenPersist(openSections)
+    }
+    acc.appendChild(head)
+    const body = el('div', 'settings-section-body')
+    body.id = `settings-body-${section.id}`
+    for (const row of section.rows) {
+      const rowEl = el('div', 'settings-row')
+      rowEl.dataset.row = row.id
+      rowEl.appendChild(el('span', 'settings-row-label', settingsKey(row.labelKey)))
+      const slot = el('div', 'settings-row-slot')
+      slot.dataset.slot = row.id
+      if (row.valueKey !== undefined) {
+        slot.appendChild(el('span', 'mono', settingsKey(row.valueKey, row.valueParams)))
+      }
+      if (row.actionKey !== undefined) {
+        const btn = el('button', 'hbtn', settingsKey(row.actionKey))
+        btn.dataset.action = row.id
+        btn.style.cssText = 'padding:2px 10px'
+        slot.appendChild(btn)
+      }
+      rowEl.appendChild(slot)
+      body.appendChild(rowEl)
+    }
+    acc.appendChild(body)
+    modal.appendChild(acc)
   }
 
-  // Connection: live kernel health through the bridge.
-  modal.appendChild(section(t('shell', 'shell.settings.connection')))
-  const healthRow = el('div', 'row')
-  healthRow.style.cssText = 'padding:4px 0'
-  const healthLabel = el('span', '', t('shell', 'shell.settings.kernel'))
-  healthLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const healthValue = el('span', 'mono', t('common', 'common.status.checking'))
-  healthValue.style.cssText = 'font-size:11px'
-  healthRow.append(healthLabel, healthValue)
-  modal.appendChild(healthRow)
-  const health = await api<{ ok?: boolean; instance?: string }>('/v1/health')
-  if (health === null || health.ok !== true) {
-    healthValue.textContent = t('common', 'common.status.unreachable')
-    healthValue.style.color = 'var(--tone-red)'
+  /** Dynamic-slot lookup: rows without a static value get live controls. */
+  const slot = (sectionId: string, rowId: string): HTMLElement | null =>
+    modal.querySelector(`[data-section="${sectionId}"] [data-slot="${rowId}"]`)
+  const actionBtn = (rowId: string): HTMLElement | null =>
+    modal.querySelector(`[data-action="${rowId}"]`)
+
+  // ── connection: live kernel health, auth state, endpoint + token ──
+  const kernelSlot = slot('connection', 'connection.kernel')
+  if (kernelSlot !== null) {
+    const up = health !== null && health.ok === true
+    const value = el('span', 'mono', up
+      ? t('common', 'common.status.connectedTo', { instance: health?.instance ?? '' })
+      : t('common', 'common.status.unreachable'))
+    value.style.cssText = 'font-size:11px'
+    value.style.color = up ? 'var(--tone-green)' : 'var(--tone-red)'
+    kernelSlot.appendChild(value)
+  }
+  const authSlot = slot('connection', 'connection.auth')
+  if (authSlot !== null) {
+    authSlot.appendChild(el('span', 'mono', tokenProvider !== undefined
+      ? t('shell', 'shell.settings.authToken')
+      : t('shell', 'shell.settings.authNone')))
+  }
+  const endpointSlot = slot('connection', 'connection.endpoint')
+  if (endpointSlot !== null) {
+    const bridgeEnd = `${location.origin}${base()}/v1`
+    const value = el('span', 'mono', bridgeEnd)
+    value.style.cssText = 'flex:1'
+    const copy = el('button', 'hbtn', '⧉')
+    copy.title = t('shell', 'shell.settings.copyEndpoint')
+    copy.style.cssText = 'padding:1px 8px'
+    copy.onclick = () => copyText(bridgeEnd)
+    endpointSlot.append(value, copy)
+  }
+  // Access token row (standalone only); hidden without a token provider.
+  const tokenRow = modal.querySelector('[data-section="connection"] [data-row="connection.token"]')
+  if (tokenProvider !== undefined && tokenRow !== null) {
+    const tokenSlot = slot('connection', 'connection.token')
+    if (tokenSlot !== null) {
+      const value = el('span', 'mono', '••••••••')
+      const reveal = el('button', 'hbtn', t('common', 'common.action.show'))
+      reveal.style.cssText = 'padding:1px 8px'
+      reveal.onclick = async () => {
+        const tok = await tokenProvider?.()
+        value.textContent = tok ?? t('shell', 'shell.settings.tokenNone')
+        reveal.remove()
+      }
+      const copyTok = el('button', 'hbtn', '⧉')
+      copyTok.title = t('shell', 'shell.settings.copyToken')
+      copyTok.style.cssText = 'padding:1px 8px'
+      copyTok.onclick = async () => {
+        const tok = await tokenProvider?.()
+        if (tok != null) copyText(tok)
+      }
+      tokenSlot.append(value, reveal, copyTok)
+    }
   } else {
-    healthValue.textContent = t('common', 'common.status.connectedTo', { instance: health.instance ?? '' })
-    healthValue.style.color = 'var(--tone-green)'
+    tokenRow?.remove()
   }
-  row(t('shell', 'shell.settings.bridge'), t('shell', 'shell.settings.bridgeValue'))
-  row(t('shell', 'shell.settings.auth'), tokenProvider !== undefined ? t('shell', 'shell.settings.authToken') : t('shell', 'shell.settings.authNone'))
-  // dsh-web connection details: the exact bridge endpoint, copyable.
-  const bridgeEnd = `${location.origin}${base()}/v1`
-  const bridgeRow = el('div', 'row')
-  bridgeRow.style.cssText = 'padding:4px 0'
-  const bridgeLabel = el('span', '', t('shell', 'shell.settings.endpoint'))
-  bridgeLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const bridgeValue = el('span', 'mono', bridgeEnd)
-  bridgeValue.style.cssText = 'font-size:11px;color:var(--text);word-break:break-all;flex:1'
-  const bridgeCopy = el('button', 'hbtn', '⧉')
-  bridgeCopy.title = t('shell', 'shell.settings.copyEndpoint')
-  bridgeCopy.style.cssText = 'padding:1px 8px'
-  bridgeCopy.onclick = () => copyText(bridgeEnd)
-  bridgeRow.append(bridgeLabel, bridgeValue, bridgeCopy)
-  modal.appendChild(bridgeRow)
 
-  // Access token (standalone only).
-  if (tokenProvider !== undefined) {
-    modal.appendChild(section(t('shell', 'shell.settings.access')))
-    const tokRow = el('div', 'row')
-    tokRow.style.cssText = 'padding:4px 0'
-    const tokLabel = el('span', '', t('shell', 'shell.settings.token'))
-    tokLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-    const tokValue = el('span', 'mono', '••••••••')
-    tokValue.style.cssText = 'font-size:11px'
-    const reveal = el('button', 'hbtn', t('common', 'common.action.show'))
-    reveal.style.cssText = 'padding:1px 8px'
-    reveal.onclick = async () => {
-      const tok = await tokenProvider?.()
-      tokValue.textContent = tok ?? t('shell', 'shell.settings.tokenNone')
-      reveal.remove()
+  // ── appearance: theme / accent / corners / texture / density ──
+  const themeSlot = slot('appearance', 'appearance.theme')
+  if (themeSlot !== null) {
+    const value = el('span', 'mono', readTheme() === 'dark' ? 'dark' : 'light')
+    const toggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
+    toggle.style.cssText = 'padding:1px 8px'
+    toggle.onclick = () => {
+      const next = readTheme() === 'dark' ? 'light' : 'dark'
+      writeTheme(next)
+      const hostEl = root.host as HTMLElement
+      hostEl.dataset.theme = next
+      value.textContent = next
+      // Refresh the header button label too.
+      document.dispatchEvent(new Event('dsh-scholar-theme-changed'))
     }
-    const copyTok = el('button', 'hbtn', '⧉')
-    copyTok.title = t('shell', 'shell.settings.copyToken')
-    copyTok.style.cssText = 'padding:1px 8px'
-    copyTok.onclick = async () => {
-      const tok = await tokenProvider?.()
-      if (tok != null) copyText(tok)
+    themeSlot.append(value, toggle)
+  }
+  const accentSlot = slot('appearance', 'appearance.accent')
+  if (accentSlot !== null) {
+    const accentSelect = el('select', 'picker')
+    accentSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+    const currentAccent = (Object.entries(ACCENTS).find(([, v]) => v === accentColor())?.[0] ?? 'blue')
+    for (const [name, color] of Object.entries(ACCENTS)) {
+      const opt = el('option', '', `${name} (${color})`)
+      opt.value = name
+      accentSelect.appendChild(opt)
     }
-    tokRow.append(tokLabel, tokValue, reveal, copyTok)
-    modal.appendChild(tokRow)
-  }
-
-  // Appearance.
-  modal.appendChild(section(t('shell', 'shell.settings.appearance')))
-  const themeRow = el('div', 'row')
-  themeRow.style.cssText = 'padding:4px 0'
-  const themeLabel = el('span', '', t('shell', 'shell.settings.theme'))
-  themeLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const themeValue = el('span', 'mono', readTheme() === 'dark' ? 'dark' : 'light')
-  themeValue.style.cssText = 'font-size:11px'
-  const themeToggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
-  themeToggle.style.cssText = 'padding:1px 8px'
-  themeToggle.onclick = () => {
-    const next = readTheme() === 'dark' ? 'light' : 'dark'
-    writeTheme(next)
-    const hostEl = root.host as HTMLElement
-    hostEl.dataset.theme = next
-    themeValue.textContent = next
-    // Refresh the header button label too.
-    document.dispatchEvent(new Event('dsh-scholar-theme-changed'))
-  }
-  themeRow.append(themeLabel, themeValue, themeToggle)
-  modal.appendChild(themeRow)
-
-  // Preferences: state.density, auto-refresh (dsh-web settings feel).
-  modal.appendChild(section(t('shell', 'shell.settings.preferences')))
-  const densRow = el('div', 'row')
-  densRow.style.cssText = 'padding:4px 0'
-  const densLabel = el('span', '', t('shell', 'shell.settings.density'))
-  densLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const densValue = el('span', 'mono', state.density === 'compact' ? 'compact' : 'normal')
-  densValue.style.cssText = 'font-size:11px'
-  const densToggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
-  densToggle.style.cssText = 'padding:1px 8px'
-  densToggle.onclick = () => {
-    state.density = state.density === 'compact' ? 'normal' : 'compact'
-    const hostEl = document.querySelector('#dsh-scholar-ui')
-    const panelEl = hostEl !== null ? hostEl.shadowRoot?.querySelector('.panel') as HTMLElement | null : null
-    if (panelEl !== null) densityApply(panelEl)
-    densValue.textContent = state.density
-    state.rerender()
-  }
-  densRow.append(densLabel, densValue, densToggle)
-  modal.appendChild(densRow)
-
-  // dsh-web i18n: locale switch (§13.2) — persisted, immediate re-render.
-  const localeRow = el('div', 'row')
-  localeRow.style.cssText = 'padding:4px 0'
-  const localeLabel = el('span', '', t('shell', 'shell.settings.language'))
-  localeLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const localeSelect = el('select', 'picker')
-  localeSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
-  const localeCurrent = getLocale()
-  for (const [code, label] of [['zh', t('shell', 'shell.locale.zh')], ['en', t('shell', 'shell.locale.en')]] as Array<[string, string]>) {
-    const opt = el('option', '', label)
-    opt.value = code
-    localeSelect.appendChild(opt)
-  }
-  localeSelect.value = localeCurrent
-  localeSelect.onchange = () => {
-    const next = localeSelect.value === 'zh' ? 'zh' : 'en'
-    // dsh-web i18n §13.4: setLocale re-paints the shell chrome, re-renders
-    // the active panel and rebuilds every open overlay (this modal
-    // included) via the overlay registry — no manual reopen needed.
-    setLocale(next)
-    document.dispatchEvent(new Event('dsh-scholar-locale-changed'))
-  }
-  localeRow.append(localeLabel, localeSelect)
-  modal.appendChild(localeRow)
-
-  const refreshRow = el('div', 'row')
-  refreshRow.style.cssText = 'padding:4px 0'
-  const refreshLabel = el('span', '', t('shell', 'shell.settings.autoRefresh'))
-  refreshLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const refreshValue = el('span', 'mono', autoRefreshEnabled() ? t('shell', 'shell.settings.polling') : t('shell', 'shell.settings.off'))
-  refreshValue.style.cssText = 'font-size:11px'
-  const refreshToggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
-  refreshToggle.style.cssText = 'padding:1px 8px'
-  refreshToggle.onclick = () => {
-    const next = !autoRefreshEnabled()
-    autoRefreshSet(next)
-    if (next && state.refreshTimer === null) state.refreshTimer = state.startRefreshTimer()
-    if (!next && state.refreshTimer !== null) {
-      window.clearInterval(state.refreshTimer)
-      state.refreshTimer = null
+    accentSelect.value = currentAccent
+    accentSelect.onchange = () => {
+      accentSet(accentSelect.value)
+      const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
+      const dark = hostEl?.dataset.theme === 'dark'
+      const name = accentSelect.value
+      const c = dark ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
+      hostEl?.style.setProperty('--accent', c)
+      hostEl?.style.setProperty('--accent-soft', `${c}1f`)
+      hostEl?.style.setProperty('--accent-text', c)
+      state.rerender()
     }
-    refreshValue.textContent = next ? t('shell', 'shell.settings.polling') : t('shell', 'shell.settings.off')
+    accentSlot.appendChild(accentSelect)
   }
-  refreshRow.append(refreshLabel, refreshValue, refreshToggle)
-  modal.appendChild(refreshRow)
-
-  // Accent colour (dsh-web theming).
-  const accentRow = el('div', 'row')
-  accentRow.style.cssText = 'padding:4px 0'
-  const accentLabel = el('span', '', t('shell', 'shell.settings.accent'))
-  accentLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const accentSelect = el('select', 'picker')
-  accentSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
-  const currentAccent = (Object.entries(ACCENTS).find(([, v]) => v === accentColor())?.[0] ?? 'blue')
-  for (const [name, color] of Object.entries(ACCENTS)) {
-    const opt = el('option', '', `${name} (${color})`)
-    opt.value = name
-    accentSelect.appendChild(opt)
-  }
-  accentSelect.value = currentAccent
-  accentSelect.onchange = () => {
-    accentSet(accentSelect.value)
-    const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
-    const dark = hostEl?.dataset.theme === 'dark'
-    const name = accentSelect.value
-    const c = dark ? (ACCENT_DARK[name] ?? accentColor()) : accentColor()
-    hostEl?.style.setProperty('--accent', c)
-    hostEl?.style.setProperty('--accent-soft', `${c}1f`)
-    hostEl?.style.setProperty('--accent-text', c)
-    state.rerender()
-  }
-  accentRow.append(accentLabel, accentSelect)
-  modal.appendChild(accentRow)
-
-  // Corner radius (dsh-web appearance).
-  const radiusRow = el('div', 'row')
-  radiusRow.style.cssText = 'padding:4px 0'
-  const radiusLabel = el('span', '', t('shell', 'shell.settings.corners'))
-  radiusLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const radiusSelect = el('select', 'picker')
-  radiusSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
-  const currentRadius = Object.entries(RADII).find(([, v]) => v === radiusValue())?.[0] ?? 'normal'
-  for (const [name, val] of Object.entries(RADII)) {
-    const opt = el('option', '', `${name} (${val})`)
-    opt.value = name
-    radiusSelect.appendChild(opt)
-  }
-  radiusSelect.value = currentRadius
-  radiusSelect.onchange = () => {
-    radiusSet(radiusSelect.value)
-    const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
-    hostEl?.style.setProperty('--panel-radius', radiusValue())
-    state.rerender()
-  }
-  radiusRow.append(radiusLabel, radiusSelect)
-  modal.appendChild(radiusRow)
-
-  // Background texture (dsh-web appearance).
-  const textureRow = el('div', 'row')
-  textureRow.style.cssText = 'padding:4px 0'
-  const textureLabel = el('span', '', t('shell', 'shell.settings.texture'))
-  textureLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const textureSelect = el('select', 'picker')
-  textureSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
-  const currentTexture = textureValue()
-  for (const name of Object.keys(TEXTURES)) {
-    const opt = el('option', '', name)
-    opt.value = name
-    textureSelect.appendChild(opt)
-  }
-  textureSelect.value = currentTexture
-  textureSelect.onchange = () => {
-    textureSet(textureSelect.value)
-    const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
-    if (hostEl !== null) hostEl.dataset.texture = textureValue()
-    state.rerender()
-  }
-  textureRow.append(textureLabel, textureSelect)
-  modal.appendChild(textureRow)
-
-  // Conversation.
-  modal.appendChild(section(t('shell', 'shell.settings.conversation')))
-  const convRow = el('div', 'row')
-  convRow.style.cssText = 'padding:4px 0'
-  const convLabel = el('span', '', t('shell', 'shell.settings.transcript'))
-  convLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const convValue = el('span', 'mono', t('shell', 'shell.settings.transcriptValue', { sessions: String(state.chatSessions.length), messages: String(state.chatMessages.length) }))
-  convValue.style.cssText = 'font-size:11px'
-  const clearBtn = el('button', 'hbtn', t('common', 'common.action.clear'))
-  clearBtn.style.cssText = 'padding:1px 8px'
-  clearBtn.onclick = () => {
-    chatClear()
-    convValue.textContent = t('shell', 'shell.settings.zeroMessages')
-    state.rerender()
-  }
-  convRow.append(convLabel, convValue, clearBtn)
-  modal.appendChild(convRow)
-
-  // dsh-web share/summary: copy a markdown summary of the active project.
-  modal.appendChild(section(t('shell', 'shell.settings.project')))
-  const projRow = el('div', 'row')
-  projRow.style.cssText = 'padding:4px 0'
-  const projLabel = el('span', '', t('shell', 'shell.settings.summary'))
-  projLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const summaryBtn = el('button', 'hbtn', t('common', 'common.action.copyMarkdown'))
-  summaryBtn.style.cssText = 'padding:2px 10px'
-  summaryBtn.onclick = async () => {
-    const id = state.projectId
-    if (id === undefined) return
-    const p = await api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)
-    if (p === null || p.project === undefined) {
-      summaryBtn.textContent = t('common', 'common.status.unavailable')
-      return
+  const radiusSlot = slot('appearance', 'appearance.corners')
+  if (radiusSlot !== null) {
+    const radiusSelect = el('select', 'picker')
+    radiusSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+    const currentRadius = Object.entries(RADII).find(([, v]) => v === radiusValue())?.[0] ?? 'normal'
+    for (const [name, val] of Object.entries(RADII)) {
+      const opt = el('option', '', `${name} (${val})`)
+      opt.value = name
+      radiusSelect.appendChild(opt)
     }
-    const counts = p.counts ?? {}
-    const lines = [
-      `# ${p.project.name}`,
-      '',
-      `- Project: \`${id}\``,
-      `- Phase: \`${p.project.status}\` (rev ${p.project.revision ?? 0})`,
-      `- Problem: ${p.project.brief?.problem ?? '—'}`,
-      `- Primary metrics: ${(p.project.brief?.primary_metrics ?? []).join(', ') || '—'}`,
-      `- Corpus snapshots: ${counts.corpus_snapshots ?? 0} · Ideas: ${counts.ideas ?? 0} · Contracts: ${counts.contracts ?? 0}`,
-      `- Claims: ${counts.claims ?? 0} · Evidence: ${counts.evidence ?? 0} · Artifacts: ${counts.artifacts ?? 0}`,
-      `- Pending gates: ${(p.pending_gates ?? []).map(g => `${g.type} (${g.status})`).join(', ') || 'none'}`,
-      `- Next: ${(p.next_actions ?? []).join('; ') || '—'}`,
-    ]
-    await navigator.clipboard.writeText(lines.join('\n'))
-    summaryBtn.textContent = t('common', 'common.action.copied')
-    setTimeout(() => { summaryBtn.textContent = t('common', 'common.action.copyMarkdown') }, 1800)
-  }
-  projRow.append(projLabel, summaryBtn)
-  modal.appendChild(projRow)
-
-  const about = el('button', 'hbtn', t('shell', 'shell.aboutButton'))
-  about.style.cssText = 'margin-top:16px;padding:3px 12px;align-self:flex-start'
-  about.onclick = () => { openAboutModal(root) }
-  modal.appendChild(about)
-
-  // dsh-web data management: clear every local preference/transcript.
-  modal.appendChild(section(t('shell', 'shell.settings.help')))
-  const helpRow = el('div', 'row')
-  helpRow.style.cssText = 'padding:4px 0'
-  const helpBtn = el('button', 'hbtn', t('shell', 'shell.shortcuts.title'))
-  helpBtn.style.cssText = 'padding:2px 10px'
-  helpBtn.onclick = () => { overlay.remove(); openShortcutsModal(root) }
-  helpRow.appendChild(helpBtn)
-  modal.appendChild(helpRow)
-
-  modal.appendChild(section(t('shell', 'shell.settings.data')))
-  const resetRow = el('div', 'row')
-  resetRow.style.cssText = 'padding:4px 0'
-  const resetLabel = el('span', '', t('shell', 'shell.settings.localData'))
-  resetLabel.style.cssText = 'width:130px;color:var(--text-2);font-size:11.5px;flex-shrink:0'
-  const resetBtn = el('button', 'btn cancel', t('common', 'common.action.resetPreferences'))
-  resetBtn.style.cssText = 'padding:3px 10px;font-size:11px'
-  resetBtn.title = t('shell', 'shell.settings.resetTitle')
-  resetBtn.onclick = () => {
-    const toRemove: string[] = []
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i)
-      // The access token survives a preference reset (no forced re-login).
-      if (k !== null && k.startsWith('dsh-scholar-ui-') && k !== 'dsh-scholar-ui-token') toRemove.push(k)
+    radiusSelect.value = currentRadius
+    radiusSelect.onchange = () => {
+      radiusSet(radiusSelect.value)
+      const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
+      hostEl?.style.setProperty('--panel-radius', radiusValue())
+      state.rerender()
     }
-    for (const k of toRemove) localStorage.removeItem(k)
-    overlay.remove()
-    showToast(rootHost(), t('shell', 'shell.settings.resetDone'))
+    radiusSlot.appendChild(radiusSelect)
   }
-  resetRow.append(resetLabel, resetBtn)
-  modal.appendChild(resetRow)
+  const textureSlot = slot('appearance', 'appearance.texture')
+  if (textureSlot !== null) {
+    const textureSelect = el('select', 'picker')
+    textureSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+    const currentTexture = textureValue()
+    for (const name of Object.keys(TEXTURES)) {
+      const opt = el('option', '', name)
+      opt.value = name
+      textureSelect.appendChild(opt)
+    }
+    textureSelect.value = currentTexture
+    textureSelect.onchange = () => {
+      textureSet(textureSelect.value)
+      const hostEl = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
+      if (hostEl !== null) hostEl.dataset.texture = textureValue()
+      state.rerender()
+    }
+    textureSlot.appendChild(textureSelect)
+  }
+  const densitySlot = slot('appearance', 'appearance.density')
+  if (densitySlot !== null) {
+    const value = el('span', 'mono', state.density === 'compact' ? 'compact' : 'normal')
+    const toggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
+    toggle.style.cssText = 'padding:1px 8px'
+    toggle.onclick = () => {
+      state.density = state.density === 'compact' ? 'normal' : 'compact'
+      const hostEl = document.querySelector('#dsh-scholar-ui')
+      const panelEl = hostEl !== null ? hostEl.shadowRoot?.querySelector('.panel') as HTMLElement | null : null
+      if (panelEl !== null) densityApply(panelEl)
+      value.textContent = state.density
+      state.rerender()
+    }
+    densitySlot.append(value, toggle)
+  }
+
+  // ── preferences: language / auto-refresh / transcript / summary / actions ──
+  const localeSlot = slot('preferences', 'preferences.language')
+  if (localeSlot !== null) {
+    const localeSelect = el('select', 'picker')
+    localeSelect.style.cssText = 'flex:1;padding:3px 6px;font-size:11px;border-radius:7px'
+    const localeCurrent = getLocale()
+    for (const [code, label] of [['zh', t('shell', 'shell.locale.zh')], ['en', t('shell', 'shell.locale.en')]] as Array<[string, string]>) {
+      const opt = el('option', '', label)
+      opt.value = code
+      localeSelect.appendChild(opt)
+    }
+    localeSelect.value = localeCurrent
+    localeSelect.onchange = () => {
+      const next = localeSelect.value === 'zh' ? 'zh' : 'en'
+      // dsh-web i18n §13.4: setLocale re-paints the shell chrome, re-renders
+      // the active panel and rebuilds every open overlay (this modal
+      // included) via the overlay registry — no manual reopen needed.
+      setLocale(next)
+      document.dispatchEvent(new Event('dsh-scholar-locale-changed'))
+    }
+    localeSlot.appendChild(localeSelect)
+  }
+  const refreshSlot = slot('preferences', 'preferences.autoRefresh')
+  if (refreshSlot !== null) {
+    const value = el('span', 'mono', autoRefreshEnabled() ? t('shell', 'shell.settings.polling') : t('shell', 'shell.settings.off'))
+    const toggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
+    toggle.style.cssText = 'padding:1px 8px'
+    toggle.onclick = () => {
+      const next = !autoRefreshEnabled()
+      autoRefreshSet(next)
+      if (next && state.refreshTimer === null) state.refreshTimer = state.startRefreshTimer()
+      if (!next && state.refreshTimer !== null) {
+        window.clearInterval(state.refreshTimer)
+        state.refreshTimer = null
+      }
+      value.textContent = next ? t('shell', 'shell.settings.polling') : t('shell', 'shell.settings.off')
+    }
+    refreshSlot.append(value, toggle)
+  }
+  const transcriptSlot = slot('preferences', 'preferences.transcript')
+  if (transcriptSlot !== null) {
+    const value = el('span', 'mono', t('shell', 'shell.settings.transcriptValue', { sessions: String(state.chatSessions.length), messages: String(state.chatMessages.length) }))
+    const clearBtn = el('button', 'hbtn', t('common', 'common.action.clear'))
+    clearBtn.style.cssText = 'padding:1px 8px'
+    clearBtn.onclick = () => {
+      chatClear()
+      value.textContent = t('shell', 'shell.settings.zeroMessages')
+      state.rerender()
+    }
+    transcriptSlot.append(value, clearBtn)
+  }
+  const summarySlot = slot('preferences', 'preferences.summary')
+  if (summarySlot !== null) {
+    const summaryBtn = el('button', 'hbtn', t('common', 'common.action.copyMarkdown'))
+    summaryBtn.style.cssText = 'padding:2px 10px'
+    summaryBtn.onclick = async () => {
+      const id = state.projectId
+      if (id === undefined) return
+      const p = await api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)
+      if (p === null || p.project === undefined) {
+        summaryBtn.textContent = t('common', 'common.status.unavailable')
+        return
+      }
+      const counts = p.counts ?? {}
+      const lines = [
+        `# ${p.project.name}`,
+        '',
+        `- Project: \`${id}\``,
+        `- Phase: \`${p.project.status}\` (rev ${p.project.revision ?? 0})`,
+        `- Problem: ${p.project.brief?.problem ?? '—'}`,
+        `- Primary metrics: ${(p.project.brief?.primary_metrics ?? []).join(', ') || '—'}`,
+        `- Corpus snapshots: ${counts.corpus_snapshots ?? 0} · Ideas: ${counts.ideas ?? 0} · Contracts: ${counts.contracts ?? 0}`,
+        `- Claims: ${counts.claims ?? 0} · Evidence: ${counts.evidence ?? 0} · Artifacts: ${counts.artifacts ?? 0}`,
+        `- Pending gates: ${(p.pending_gates ?? []).map(g => `${g.type} (${g.status})`).join(', ') || 'none'}`,
+        `- Next: ${(p.next_actions ?? []).join('; ') || '—'}`,
+      ]
+      await navigator.clipboard.writeText(lines.join('\n'))
+      summaryBtn.textContent = t('common', 'common.action.copied')
+      setTimeout(() => { summaryBtn.textContent = t('common', 'common.action.copyMarkdown') }, 1800)
+    }
+    summarySlot.appendChild(summaryBtn)
+  }
+  const shortcutsBtn = actionBtn('preferences.shortcuts')
+  shortcutsBtn?.addEventListener('click', () => { overlay.remove(); openShortcutsModal(root) })
+  const aboutBtn = actionBtn('preferences.about')
+  aboutBtn?.addEventListener('click', () => openAboutModal(root))
+  const resetBtn = actionBtn('preferences.localData')
+  if (resetBtn !== null) {
+    resetBtn.classList.add('cancel')
+    resetBtn.title = t('shell', 'shell.settings.resetTitle')
+    resetBtn.onclick = () => {
+      const toRemove: string[] = []
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i)
+        // The access token survives a preference reset (no forced re-login).
+        if (k !== null && k.startsWith('dsh-scholar-ui-') && k !== 'dsh-scholar-ui-token') toRemove.push(k)
+      }
+      for (const k of toRemove) localStorage.removeItem(k)
+      overlay.remove()
+      showToast(rootHost(), t('shell', 'shell.settings.resetDone'))
+    }
+  }
+
+  // ── config provenance: effective config pin from the kernel registry ──
+  const pinSlot = slot('config', 'config.pin')
+  if (pinSlot !== null) {
+    const pin = health?.config_pin
+    pinSlot.appendChild(el('span', 'mono', pin !== undefined && pin !== ''
+      ? t('shell', 'shell.settings.configPinValue', { pin })
+      : t('shell', 'shell.settings.configPinNone')))
+  }
 
   overlay.appendChild(modal)
   root.appendChild(overlay)
@@ -420,4 +430,3 @@ export function openAboutModal(root: ShadowRoot | null | undefined): void {
   // dsh-web i18n §13.4: locale switch re-opens the about modal.
   registerOverlayRebuild(overlay, () => { overlay.remove(); openAboutModal(root) })
 }
-

@@ -32,6 +32,10 @@
 #                               resume + cross-project 404 on the kernel,
 #                               and the same through the standalone BFF
 #                               proxy (401/404, no token leak)
+#   run-upload-tests.sh         UPLOAD-01 multipart artifact upload (§3.1):
+#                               curl -F success + server-side hash binding,
+#                               33 MiB 413, path traversal 422, idempotent
+#                               reuse, BFF passthrough + BFF authz negatives
 #   run-selfmod-tests.sh        SELFMOD-01 production static negation
 #                               (no cordis_inspect/tool-cordis/dump-config
 #                               in the published plugin; dev overlay opt-in)
@@ -57,6 +61,7 @@ SCRIPTS=(
   run-gate-tests.sh
   run-terminal-tests.sh
   run-sse-tests.sh
+  run-upload-tests.sh
   run-unicode-tests.sh
   run-lower-is-better-tests.sh
   run-malformed-path-tests.sh

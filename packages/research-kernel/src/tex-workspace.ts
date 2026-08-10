@@ -80,18 +80,55 @@ export interface TexSnapshotManifest {
   frozen_at: string
 }
 
+export type TexBuildStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'superseded'
+
+/**
+ * One TeX build record (authoritative latex-compile OR live preview,
+ * execution-runtime.md §12/§12.1, TEX-03). Preview records are marked
+ * `preview=true` and are NOT part of the authoritative manifest chain: they
+ * never produce accepted Evidence and are superseded (queued → cancelled,
+ * running → superseded) as soon as a newer preview build or an explicit
+ * authoritative Compile exists (superseded_by/superseded_at).
+ */
 export interface TexBuild {
   build_id: string
   document_id: string
   revision: number
   root_file: string
   job_id: string | null
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  status: TexBuildStatus
   diagnostics: string
   pdf_artifact: string | null
   log_artifact: string | null
+  /** true when this build is a live preview (TEX-03); authoritative builds are false. */
+  preview: boolean
+  /** build_id of the newer preview / authoritative build that superseded this one. */
+  superseded_by: string | null
+  superseded_at: string | null
   created_at: string
   finished_at: string | null
+}
+
+/**
+ * Durable debounced preview request (execution-runtime.md §12.1, TEX-03):
+ * written when a save succeeds (or the preview-builds endpoint is called),
+ * consumed by the kernel when the debounce fires. Survives kernel restarts
+ * so preview state is always re-projectable — it never lives only in a
+ * browser debounce timer.
+ */
+export interface TexPreviewPending {
+  document_id: string
+  /** Document revision observed at request time (the flush compiles the LATEST revision). */
+  revision: number
+  root_file: string
+  engine: string
+  debounce_ms: number
+  requested_at: string
+}
+
+/** Raw tex_builds row as stored (preview is 0/1 in SQLite). */
+interface TexBuildRow extends Omit<TexBuild, 'preview'> {
+  preview: number
 }
 
 const SCHEMA = `
@@ -143,10 +180,24 @@ CREATE TABLE IF NOT EXISTS tex_builds (
   diagnostics TEXT NOT NULL DEFAULT '[]',
   pdf_artifact TEXT,
   log_artifact TEXT,
+  -- TEX-03 (§4 row 96 / execution-runtime.md §12.1): preview flag +
+  -- supersede linkage for live preview builds.
+  preview INTEGER NOT NULL DEFAULT 0,
+  superseded_by TEXT,
+  superseded_at TEXT,
   created_at TEXT NOT NULL,
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tex_builds_doc ON tex_builds(document_id);
+-- TEX-03: durable debounced preview request (survives kernel restarts).
+CREATE TABLE IF NOT EXISTS tex_preview_pending (
+  document_id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL,
+  root_file TEXT NOT NULL,
+  engine TEXT NOT NULL DEFAULT 'pdflatex',
+  debounce_ms INTEGER NOT NULL DEFAULT 800,
+  requested_at TEXT NOT NULL
+);
 `
 
 function nowIso(): string {
@@ -179,6 +230,29 @@ export class TexWorkspaceStore {
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA foreign_keys = ON')
     this.db.exec(SCHEMA)
+    // TEX-03 parity for databases opened directly (without the kernel
+    // migration runner): CREATE IF NOT EXISTS does not add columns to an
+    // existing tex_builds, so ensure them idempotently like migrations.ts.
+    this.ensurePreviewColumns()
+  }
+
+  /** Additive TEX-03 columns/table on pre-migration databases (idempotent). */
+  private ensurePreviewColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(tex_builds)`).all() as unknown as Array<{ name: string }>
+    const has = (name: string): boolean => cols.some(c => c.name === name)
+    if (!has('preview')) this.db.exec('ALTER TABLE tex_builds ADD COLUMN preview INTEGER NOT NULL DEFAULT 0')
+    if (!has('superseded_by')) this.db.exec('ALTER TABLE tex_builds ADD COLUMN superseded_by TEXT')
+    if (!has('superseded_at')) this.db.exec('ALTER TABLE tex_builds ADD COLUMN superseded_at TEXT')
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS tex_preview_pending (
+        document_id TEXT PRIMARY KEY,
+        revision INTEGER NOT NULL,
+        root_file TEXT NOT NULL,
+        engine TEXT NOT NULL DEFAULT 'pdflatex',
+        debounce_ms INTEGER NOT NULL DEFAULT 800,
+        requested_at TEXT NOT NULL
+      );
+    `)
   }
 
   close(): void {
@@ -377,7 +451,12 @@ export class TexWorkspaceStore {
     return row ?? null
   }
 
-  createBuild(documentId: string, revision: number, rootFile: string, jobId: string | null): TexBuild {
+  /** Map a raw row (preview 0/1) to the public TexBuild shape. */
+  private buildFromRow(row: TexBuildRow): TexBuild {
+    return { ...row, preview: row.preview === 1 }
+  }
+
+  createBuild(documentId: string, revision: number, rootFile: string, jobId: string | null, preview = false): TexBuild {
     const build: TexBuild = {
       build_id: `build_${randomUUID().slice(0, 12)}`,
       document_id: documentId,
@@ -388,11 +467,14 @@ export class TexWorkspaceStore {
       diagnostics: '[]',
       pdf_artifact: null,
       log_artifact: null,
+      preview,
+      superseded_by: null,
+      superseded_at: null,
       created_at: nowIso(),
       finished_at: null,
     }
-    this.db.prepare('INSERT INTO tex_builds (build_id, document_id, revision, root_file, job_id, status, diagnostics, pdf_artifact, log_artifact, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(build.build_id, build.document_id, build.revision, build.root_file, build.job_id, build.status, build.diagnostics, build.pdf_artifact, build.log_artifact, build.created_at, build.finished_at)
+    this.db.prepare('INSERT INTO tex_builds (build_id, document_id, revision, root_file, job_id, status, diagnostics, pdf_artifact, log_artifact, preview, superseded_by, superseded_at, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(build.build_id, build.document_id, build.revision, build.root_file, build.job_id, build.status, build.diagnostics, build.pdf_artifact, build.log_artifact, build.preview ? 1 : 0, build.superseded_by, build.superseded_at, build.created_at, build.finished_at)
     return build
   }
 
@@ -402,6 +484,9 @@ export class TexWorkspaceStore {
     pdf_artifact?: string | null
     log_artifact?: string | null
     job_id?: string | null
+    preview?: boolean
+    superseded_by?: string | null
+    superseded_at?: string | null
   }): TexBuild {
     const current = this.getBuild(buildId)
     const next: TexBuild = {
@@ -412,22 +497,93 @@ export class TexWorkspaceStore {
       pdf_artifact: patch.pdf_artifact !== undefined ? patch.pdf_artifact : current.pdf_artifact,
       log_artifact: patch.log_artifact !== undefined ? patch.log_artifact : current.log_artifact,
       job_id: patch.job_id !== undefined ? patch.job_id : current.job_id,
-      finished_at: (patch.status === 'succeeded' || patch.status === 'failed' || patch.status === 'cancelled') ? (current.finished_at ?? nowIso()) : current.finished_at,
+      preview: patch.preview !== undefined ? patch.preview : current.preview,
+      superseded_by: patch.superseded_by !== undefined ? patch.superseded_by : current.superseded_by,
+      superseded_at: patch.superseded_at !== undefined ? patch.superseded_at : current.superseded_at,
+      finished_at: (patch.status === 'succeeded' || patch.status === 'failed' || patch.status === 'cancelled' || patch.status === 'superseded') ? (current.finished_at ?? nowIso()) : current.finished_at,
     }
-    this.db.prepare('UPDATE tex_builds SET status = ?, diagnostics = ?, pdf_artifact = ?, log_artifact = ?, job_id = ?, finished_at = ? WHERE build_id = ?')
-      .run(next.status, next.diagnostics, next.pdf_artifact, next.log_artifact, next.job_id, next.finished_at, buildId)
+    this.db.prepare('UPDATE tex_builds SET status = ?, diagnostics = ?, pdf_artifact = ?, log_artifact = ?, job_id = ?, preview = ?, superseded_by = ?, superseded_at = ?, finished_at = ? WHERE build_id = ?')
+      .run(next.status, next.diagnostics, next.pdf_artifact, next.log_artifact, next.job_id, next.preview ? 1 : 0, next.superseded_by, next.superseded_at, next.finished_at, buildId)
     return next
   }
 
   getBuild(buildId: string): TexBuild {
-    const row = this.db.prepare('SELECT * FROM tex_builds WHERE build_id = ?').get(buildId) as TexBuild | undefined
+    const row = this.db.prepare('SELECT * FROM tex_builds WHERE build_id = ?').get(buildId) as TexBuildRow | undefined
     if (row === undefined) throw new TexError('build_not_found', `tex build ${buildId} not found`)
-    return row
+    return this.buildFromRow(row)
   }
 
   listBuilds(documentId: string): TexBuild[] {
     this.getDocument(documentId)
-    const rows = this.db.prepare('SELECT * FROM tex_builds WHERE document_id = ? ORDER BY created_at DESC').all(documentId) as unknown as TexBuild[]
-    return rows
+    const rows = this.db.prepare('SELECT * FROM tex_builds WHERE document_id = ? ORDER BY created_at DESC').all(documentId) as unknown as TexBuildRow[]
+    return rows.map(r => this.buildFromRow(r))
+  }
+
+  /** TEX-03: live preview builds of a document, newest first. */
+  listPreviews(documentId: string): TexBuild[] {
+    this.getDocument(documentId)
+    const rows = this.db.prepare('SELECT * FROM tex_builds WHERE document_id = ? AND preview = 1 ORDER BY created_at DESC').all(documentId) as unknown as TexBuildRow[]
+    return rows.map(r => this.buildFromRow(r))
+  }
+
+  /**
+   * TEX-03 (§12.1): supersede every non-terminal preview build of the
+   * document when a newer preview or an authoritative Compile exists.
+   * queued previews are cancelled (their job never ran), running previews
+   * are marked `superseded`; both get superseded_by/superseded_at and a
+   * finished_at. Terminal records (succeeded/failed/cancelled/superseded)
+   * are left untouched — they simply become stale via the revision check.
+   * The superseding build itself is never selected (a fresh preview is
+   * queued when this runs). Returns the affected builds so the caller can
+   * cancel their jobs.
+   */
+  supersedePreviews(documentId: string, supersederBuildId: string): TexBuild[] {
+    const rows = this.db.prepare("SELECT * FROM tex_builds WHERE document_id = ? AND preview = 1 AND status IN ('queued','running') AND build_id != ? ORDER BY created_at")
+      .all(documentId, supersederBuildId) as unknown as TexBuildRow[]
+    const affected: TexBuild[] = []
+    const now = nowIso()
+    for (const row of rows) {
+      const status: TexBuild['status'] = row.status === 'queued' ? 'cancelled' : 'superseded'
+      this.db.prepare('UPDATE tex_builds SET status = ?, superseded_by = ?, superseded_at = ?, finished_at = ? WHERE build_id = ?')
+        .run(status, supersederBuildId, now, now, row.build_id)
+      affected.push(this.buildFromRow({ ...row, status, superseded_by: supersederBuildId, superseded_at: now, finished_at: now }))
+    }
+    return affected
+  }
+
+  // ── preview request scheduler (TEX-03 / execution-runtime.md §12.1) ──────
+
+  /** Record a debounced preview request (upsert per document; the debounce
+   * timer is owned by the kernel, the row is durable across restarts). */
+  requestPreview(documentId: string, debounceMs: number, rootFile?: string, engine?: string): TexPreviewPending {
+    const document = this.getDocument(documentId)
+    const pending: TexPreviewPending = {
+      document_id: documentId,
+      revision: document.revision,
+      root_file: rootFile !== undefined && rootFile !== '' ? rootFile : document.root_file,
+      engine: engine !== undefined && engine !== '' ? engine : 'pdflatex',
+      debounce_ms: debounceMs,
+      requested_at: nowIso(),
+    }
+    this.db.prepare(`INSERT INTO tex_preview_pending (document_id, revision, root_file, engine, debounce_ms, requested_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(document_id) DO UPDATE SET revision = excluded.revision, root_file = excluded.root_file, engine = excluded.engine, debounce_ms = excluded.debounce_ms, requested_at = excluded.requested_at`)
+      .run(pending.document_id, pending.revision, pending.root_file, pending.engine, pending.debounce_ms, pending.requested_at)
+    return pending
+  }
+
+  getPendingPreview(documentId: string): TexPreviewPending | null {
+    const row = this.db.prepare('SELECT * FROM tex_preview_pending WHERE document_id = ?').get(documentId) as TexPreviewPending | undefined
+    return row ?? null
+  }
+
+  listPendingPreviews(): TexPreviewPending[] {
+    return this.db.prepare('SELECT * FROM tex_preview_pending ORDER BY requested_at').all() as unknown as TexPreviewPending[]
+  }
+
+  /** Read + delete the pending request (a flush consumes exactly one). */
+  consumePendingPreview(documentId: string): TexPreviewPending | null {
+    const pending = this.getPendingPreview(documentId)
+    if (pending !== null) this.db.prepare('DELETE FROM tex_preview_pending WHERE document_id = ?').run(documentId)
+    return pending
   }
 }

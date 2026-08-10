@@ -7,8 +7,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
-import { ResearchKernel, KernelError, TEX_ENGINES } from './kernel.js'
+import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from './kernel.js'
 import { TexError } from './tex-workspace.js'
+import {
+  UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
+  type MultipartPart,
+} from './uploads.js'
 
 export interface KernelServerOptions {
   kernel: ResearchKernel
@@ -28,6 +32,9 @@ export interface KernelServerOptions {
 }
 
 const idSchema = z.string().min(1)
+
+/** Canonical artifact kind list (schema + upload route share it). */
+const ARTIFACT_KINDS = ['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle'] as const
 
 const terminalFramesSchema = z.object({
   run_id: z.string().min(1),
@@ -110,7 +117,7 @@ const decisionSchema = z.object({
 
 const artifactSchema = z.object({
   project_id: z.string().min(1),
-  kind: z.enum(['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle']),
+  kind: z.enum(ARTIFACT_KINDS),
   content_base64: z.string().min(1),
   metadata: z.record(z.unknown()).optional(),
   media_type: z.string().min(1).optional(),
@@ -256,6 +263,122 @@ function readJson(req: IncomingMessage): Promise<unknown> {
   })
 }
 
+/**
+ * UPLOAD-01: read a raw request body into a Buffer with a hard cap. The cap
+ * is the file limit plus a bounded multipart envelope allowance (headers +
+ * boundaries), so a file at the exact 32 MiB limit still fits while an
+ * oversized upload is rejected mid-stream (413 payload_too_large).
+ */
+function readBodyBytes(req: IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let settled = false
+    const settle = (fn: () => void): void => {
+      if (settled) return
+      settled = true
+      fn()
+    }
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return // past the cap: keep draining (bounded memory) so
+      // the client can still read our 413 response — destroying the socket
+      // here would surface as a client-side connection error instead.
+      size += chunk.length
+      if (size > limit) {
+        settle(() => reject(new KernelError(413, 'payload_too_large',
+          `upload body exceeds ${limit} bytes (max_file_bytes=${ResearchKernel.UPLOAD_MAX_FILE_BYTES} plus envelope overhead)`)))
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => settle(() => resolve(Buffer.concat(chunks))))
+    req.on('error', (error: Error) => settle(() => reject(error)))
+    req.on('close', () => settle(() => reject(new KernelError(400, 'invalid_multipart', 'request closed before the upload body was complete'))))
+  })
+}
+
+/** Form-field text helper: a part's UTF-8 payload trimmed, or undefined. */
+function fieldText(parts: MultipartPart[], name: string): string | undefined {
+  const part = parts.find(p => p.name === name)
+  if (part === undefined) return undefined
+  const text = part.data.toString('utf8').trim()
+  return text === '' ? undefined : text
+}
+
+/**
+ * UPLOAD-01 (api-contracts.md §7): POST /v1/projects/{id}/uploads —
+ * multipart/form-data single-file artifact upload with staged finalize
+ * semantics:
+ *
+ *   - fields: `kind` (required ArtifactKind), `file` (required file part),
+ *     `file_name` (optional, defaults to the part's filename), `media_type`
+ *     (optional);
+ *   - server-side sha256 binding: the hash recorded on the artifact is
+ *     computed over the bytes actually received (never a client claim);
+ *   - size cap: ≤ 32 MiB per file (413 payload_too_large; the streaming body
+ *     reader rejects oversized requests before they are buffered in full);
+ *   - path safety: the file name must be a plain basename (validateUpload-
+ *     FileName) — absolute paths, `..`, NUL and Windows drive prefixes are
+ *     rejected (422 invalid_file_name); multiple file parts are rejected
+ *     (422 multiple_files; duplicate normalized paths are an archive concern
+ *     enforced by the code-snapshot walk);
+ *   - staged → finalize: bytes land in a session-id'd staging file first,
+ *     then finalizeStagedUpload atomically promotes them into the CAS blob
+ *     slot + artifact row; any failure rolls the stage back;
+ *   - idempotency: the same project + sha256 + file_name returns the
+ *     ORIGINAL artifact (HTTP 200, `reused: true`) without re-writing;
+ *   - GC/recovery: expired staged files are collected by
+ *     kernel.cleanupStagedUploads (24 h default TTL).
+ */
+async function handleUpload(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, projectId: string): Promise<void> {
+  const contentType = req.headers['content-type']
+  if (typeof contentType !== 'string' || !contentType.trim().toLowerCase().startsWith('multipart/form-data')) {
+    throw new KernelError(415, 'unsupported_media_type', 'artifact upload requires multipart/form-data')
+  }
+  const boundary = extractBoundary(contentType)
+  if (boundary === null || boundary === '') {
+    throw new KernelError(400, 'invalid_multipart', 'multipart/form-data boundary is missing or malformed')
+  }
+  const body = await readBodyBytes(req, UPLOAD_MAX_BODY_BYTES)
+  let parts: MultipartPart[]
+  try {
+    parts = parseMultipart(body, boundary)
+  } catch (error) {
+    throw new KernelError(400, 'invalid_multipart', `malformed multipart body: ${(error as Error).message}`)
+  }
+  const fileParts = parts.filter(p => p.fileName !== undefined)
+  if (fileParts.length === 0) {
+    throw new KernelError(422, 'missing_file', 'upload requires exactly one file part (name="file", with a filename)')
+  }
+  if (fileParts.length > 1) {
+    throw new KernelError(422, 'multiple_files', 'single-file uploads must not carry more than one file part')
+  }
+  const filePart = fileParts[0]!
+  const kindRaw = fieldText(parts, 'kind')
+  const kindCheck = z.enum(ARTIFACT_KINDS).safeParse(kindRaw)
+  if (!kindCheck.success) {
+    throw new KernelError(422, 'invalid_kind', `upload kind must be one of ${ARTIFACT_KINDS.join('/')}`)
+  }
+  // The registered download name: explicit file_name field wins, otherwise
+  // the part's filename. Both are validated as plain basenames.
+  const rawName = fieldText(parts, 'file_name') ?? filePart.fileName!
+  validateUploadFileName(rawName)
+  if (filePart.data.byteLength > ResearchKernel.UPLOAD_MAX_FILE_BYTES) {
+    throw new KernelError(413, 'payload_too_large',
+      `upload exceeds the size limit: ${filePart.data.byteLength} bytes (max_file_bytes=${ResearchKernel.UPLOAD_MAX_FILE_BYTES})`)
+  }
+  const mediaType = fieldText(parts, 'media_type')
+  const stage = kernel.stageUploadContent({
+    project_id: projectId,
+    kind: kindCheck.data,
+    file_name: rawName,
+    media_type: mediaType,
+    content: filePart.data,
+  })
+  const { record, reused } = kernel.finalizeStagedUpload(stage.stage_id)
+  send(res, reused ? 200 : 201, { ...record, reused })
+}
+
 function errorEnvelope(code: string, message: string): Record<string, unknown> {
   // api-contracts.md §1: stable retryable flags for the documented codes.
   const retryableCodes = new Set(['lease_conflict', 'lease_stale', 'upload_offset_conflict', 'document_version_conflict'])
@@ -373,6 +496,13 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   const [version, resource, id, sub, subId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
   if (version !== 'v1' && version !== 'v2') {
     send(res, 404, { error: { code: 'not_found', message: 'unknown api version' } })
+    return
+  }
+  // §4 P1 (UPLOAD-01): multipart artifact upload — staged, hash-bound,
+  // idempotent (api-contracts.md §7 / acceptance-tests.md §3.1). Routed
+  // before readJson: the body is raw multipart, not JSON.
+  if (method === 'POST' && version === 'v1' && resource === 'projects' && id !== undefined && sub === 'uploads' && subId === undefined) {
+    void handleUpload(req, res, kernel, id).catch((error: unknown) => fail(res, error))
     return
   }
   if (version === 'v2') {
@@ -989,11 +1119,40 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               },
             })
             const build = kernel.texCreateBuild(id, snap.revision, rootFile, job.job_id)
+            // §12.1 (TEX-03): the authoritative Compile supersedes every
+            // non-terminal preview (queued → cancelled, running →
+            // superseded) — previews never block or replace the authority.
+            kernel.texSupersedePreviews(id, build.build_id)
             send(res, 201, { build, job })
             return
           }
           if (id !== undefined && sub === 'builds' && subId !== undefined && method === 'GET') {
             ok(res, kernel.texGetBuild(subId))
+            return
+          }
+          if (id !== undefined && sub === 'preview-builds' && subId === undefined && method === 'POST') {
+            // §12.1 (TEX-03): save-success hook — the caller (UI/BFF) invokes
+            // this after a successful save; the kernel owns the debounce
+            // timer and the durable pending request, so preview state is
+            // re-projectable after reconnects/restarts.
+            const input = z.object({
+              debounce_ms: z.number().int().positive().optional(),
+              root_file: z.string().optional(),
+              engine: z.string().optional(),
+            }).parse(body)
+            const pending = kernel.texRequestPreview(id, {
+              debounce_ms: input.debounce_ms,
+              root_file: input.root_file,
+              engine: input.engine,
+            })
+            ok(res, { pending })
+            return
+          }
+          if (id !== undefined && sub === 'preview-builds' && subId === undefined && method === 'GET') {
+            // §12.1 (TEX-03): projection for UI reconnects — pending debounce
+            // state plus preview builds, each carrying preview=true and the
+            // stale flag (build.revision < document.revision).
+            ok(res, kernel.texPreviewStatus(id))
             return
           }
           break

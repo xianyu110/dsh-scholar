@@ -533,7 +533,7 @@ CREATE TABLE pty_events (
 );
 ~~~
 
-TexDocument 新增 workspace_id，并把 tex_file_revisions 迁入或以 view/facade 指向 workspace_file_revisions；不得长期维护两份 bytes/revision 权威。Tex preview 增加 preview/superseded_by/config_sha256/fresh 字段或独立 `tex_previews` 表。
+TexDocument 新增 workspace_id，并把 tex_file_revisions 迁入或以 view/facade 指向 workspace_file_revisions；不得长期维护两份 bytes/revision 权威。Tex preview 增加 preview/superseded_by/config_sha256/fresh 字段或独立 `tex_previews` 表。**TEX-03 已落地（migration 0010_preview_builds，SCHEMA_VERSION 9）**：tex_builds 增加 `preview INTEGER NOT NULL DEFAULT 0`、`superseded_by TEXT`、`superseded_at TEXT`（queued→cancelled、running→superseded 状态机；stale 由 build.revision<document.revision 计算，不落库），新增 `tex_preview_pending(document_id PK, revision, root_file, engine, debounce_ms, requested_at)` 持久化 debounce 请求（kernel 重启自动重挂）；迁移幂等（ensureColumn + CREATE IF NOT EXISTS）。
 
 ### 5.2 Runner、Profile 与 Config
 

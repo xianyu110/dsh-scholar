@@ -4,6 +4,10 @@
 import type { ChatMessage, ChatSession, NotifEntry, TerminalLine } from './types'
 import { ACCENTS, el, rootHost, trapFocus } from './ui'
 import { getLocale, registerOverlayRebuild, t } from './i18n/index'
+// UI-SIMPLE-01: the canonical tab key set lives in the pure nav model
+// (nav.ts ALL_TAB_KEYS) so tab restore covers every panel incl. the More
+// tabs (manuscript/terminal).
+import { ALL_TAB_KEYS } from './nav'
 
 export let favProjects = new Set<string>()
 
@@ -69,7 +73,7 @@ export function writeTheme(theme: 'light' | 'dark' | string | undefined): void {
 /* ─────────────────────────── panel state ─────────────────────────── */
 
 export const TAB_KEY = 'dsh-scholar-ui-tab'
-export const TAB_IDS = ['chat', 'phase', 'gates', 'runs', 'artifacts', 'evidence', 'budget'] as const
+export const TAB_IDS = [...ALL_TAB_KEYS]
 
 /** Restore the last active tab (dsh-web session restore feel). */
 export function tabLoad(): void {

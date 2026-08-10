@@ -116,6 +116,31 @@ Contract approval 只能由 Gate 事务发生，没有独立 approve 路由。
 
 浏览器/用户上传只接受 <=32 MiB multipart/form-data；更大输入和研究包必须通过 `/v2/intakes` 的受控 staged upload，不能使用 Runner internal stage。服务端计算 SHA-256，不信任客户端 hash。请求 metadata 包含 kind、media_type、file_name 和 provenance。
 
+### POST /v1/projects/{id}/uploads（UPLOAD-01 服务端/BFF 层，已实现）
+
+当前提交实现为 **kernel 原生 multipart 端点 + standalone BFF 原样透传**（v2 artifacts 上传面由 `/v2/intakes` 的 intake staged upload 承接，属 ONBOARD-01，未实现）。standalone 同源直接暴露同一路径（`/v1/projects/{id}/uploads`），multipart 请求经 BFF 以原始字节与原 `multipart/form-data; boundary=…` Content-Type 转发，CSRF/Origin、bearer 与 project membership/role 检查与其它 `/v1` 写完全一致。
+
+请求为 `multipart/form-data`，字段：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `kind` | 是 | 固定枚举：code/pdf/data/log/model/chart/paper/analysis/manifest/bundle；非法 → 422 `invalid_kind` |
+| `file` | 是 | 唯一文件 part（`filename=` 必填）；缺失 → 422 `missing_file`，多于一个文件 part → 422 `multiple_files` |
+| `file_name` | 否 | 登记到 ArtifactRecord 的下载名；缺省用 file part 的 filename。必须是单段 basename |
+| `media_type` | 否 | RFC 2046；缺省 pdf→`application/pdf`，其余 `application/octet-stream` |
+
+约束与语义：
+
+- **大小**：单文件 ≤ 32 MiB（`ResearchKernel.UPLOAD_MAX_FILE_BYTES`，可覆写）；请求体上限 = 32 MiB + 1 MiB multipart envelope 余量。超限 → 413 `payload_too_large`（流式读取中途即拒，不完整缓冲），错误消息含具体 limit 与实测字节数；
+- **hash 绑定**：sha256 由服务端对实际收到的字节计算（stage 时计算、finalize 时复算并核对），客户端无法声明 hash；artifact_id=`sha256:<hex>` 与 CAS blob 一一对应；
+- **路径安全**：`file_name` 拒绝绝对路径（POSIX 与 Windows 盘符）、`..`/`.` 段（两种分隔符）、NUL 与路径分隔符 → 422 `invalid_file_name`；重复规范化路径与越界 symlink 属于研究包 archive 语义，由 code-snapshot walk（snapshotCodeArchive/unpackCodeSnapshot）在 archive 面强制；
+- **staged → finalize 原子**：先写会话 id 命名的 staged 文件（CAS root 下 `staged-uploads/stage_<id>.part` + `.json` 元数据），finalize 时复算 hash、原子 rename 进 CAS blob 槽并插入 artifact 行；任何失败回滚 staged 文件，绝不留下半成品 artifact 行；
+- **幂等**：同 project + sha256 + file_name 重传返回**原 artifact**（HTTP 200，响应体 `reused: true`；新建为 201 `reused: false`），不重复写 blob、不重复插行；同 project 不同 file_name 的同 blob 也返回既有记录（与 `POST /v1/artifacts` 语义一致，首登记名生效）；
+- **恢复/GC**：过期 staged 文件由 `kernel.cleanupStagedUploads(maxAgeMs)` 清理（默认 TTL 24h，`ResearchKernel.STAGED_UPLOAD_TTL_MS`），grace-period 模型同 CAS 孤儿 GC；已 finalize 的 blob 永不被该 GC 触碰；
+- **协议错误**：非 multipart Content-Type → 415 `unsupported_media_type`；boundary 缺失/畸形或 body 解析失败 → 400 `invalid_multipart`；未知 project → 404 `project_not_found`。
+
+响应体为 ArtifactRecord（同 `POST /v1/artifacts`）附加 `reused: boolean`。浏览器拖拽上传 UI、intake quarantine/scan UI 属浏览器层，待 Playwright 类环境验收（见 hardening-v0.2-status.md §3 UPLOAD-01 行）。
+
 ### GET /bff/research/projects/{project_id}/artifacts/{artifact_id}
 
 返回字节流，保留 Content-Type、Content-Length、Content-Disposition、ETag。支持 Range。artifact_id 不能脱离 project_id 读取；不提供模糊的全局 artifact GET。
@@ -207,9 +232,11 @@ data: {"kind":"exit","job_id":"job_x","run_id":"run_x","seq":99,"exit_code":0,"s
 | GET | /v2/documents/{id}/history | 文件和 workspace revision |
 | POST | /v2/documents/{id}/snapshots | 冻结当前 manifest（含可物化字节，TEX-01） |
 | GET | /v2/documents/{id}/snapshot-files | 冻结 revision 的单文件字节；?revision=&path=（当前实现 /v1/documents/{id}/snapshot-files，TEX-01 构建输入） |
-| POST | /v2/documents/{id}/builds | 冻结 manifest 并创建 latex-compile Job |
-| GET | /v2/documents/{id}/builds | 构建历史 |
-| GET | /v2/builds/{id} | 状态、diagnostics、Artifact refs、freshness |
+| POST | /v2/documents/{id}/builds | 冻结 manifest 并创建 latex-compile Job（权威 Compile） |
+| GET | /v2/documents/{id}/builds | 构建历史（仅权威 build；每条带 preview=false 与 stale 字段） |
+| GET | /v2/builds/{id} | 状态、diagnostics、Artifact refs、freshness、preview/stale/superseded 字段 |
+| POST | /v1/documents/{id}/preview-builds | 保存成功后调用：server 端 debounce（默认 800ms，body debounce_ms 可配置）创建 preview build（TEX-03，§12.1） |
+| GET | /v1/documents/{id}/preview-builds | preview 投影：`{ pending, builds }`（pending=待处理 debounce，builds 每条 preview=true + stale + superseded_by/at） |
 | POST | /v2/projects/{id}/manuscript-drafts | 从 Ledger 生成新的 TeX workspace revision |
 | GET | /v2/projects/{id}/manuscript-review | 确定性检查 |
 
@@ -235,6 +262,10 @@ Build 提交（POST builds）在冻结与提交两处执行 document-revision CA
 构建字节是冻结 revision 的可物化字节（TEX-01）：POST snapshots / POST builds 冻结时把每文件 content+hash 存入 snapshot store；Runner 通过 GET snapshot-files?revision=&path= 取该 revision 的字节并逐文件校验 manifest hash，绝不后取当前文件。snapshot-files 对未知 revision/path 返回 404、参数缺失/非法返回 422；Runner 对不可读或 hash 不匹配一律硬失败，不降级为当前文件。
 
 构建日志通过同一 Terminal SSE 读取。Build 完成返回结构化 diagnostics、PDF、完整 log、aux/bbl/blg/fls 和输入 manifest。Artifact PDF 必须为 application/pdf。
+
+### 11.1 实时 Preview（TEX-03）
+
+保存事务成功后调用 `POST /v1/documents/{id}/preview-builds`（body 可选 `debounce_ms`/`root_file`/`engine`，engine 必须在固定白名单内否则 422 engine_invalid），返回 `{ pending: { document_id, revision, root_file, engine, debounce_ms, requested_at } }`。Kernel 持有 debounce 定时器（默认 800ms，KernelOptions.previewDebounceMs 或请求体可配置）并写持久化 `tex_preview_pending`；到期后冻结**当前** revision、复用 latex-compile runner 路径（同一固定 texlive image/禁网/no-shell-escape）提交 `payload.preview=true` 的作业并创建 `preview=true` 的 tex_builds 行。preview build 状态机：queued→running（claim 时同步）→succeeded/failed，或 queued→cancelled、running→superseded（新 revision preview 或权威 Compile 到达时，带 superseded_by/superseded_at，job 尽力取消）；终态不被改写。preview 不产 accepted Evidence、不参与权威 manifest 链；活跃权威 latex-compile（queued/running）存在时 preview flush 跳过。每条 build 记录（GET builds、GET builds/{id}、GET preview-builds）携带 `preview`、`stale`（build.revision < document.revision）与 `superseded_by`/`superseded_at`；GET preview-builds 的 `pending` 字段让 UI 重连/内核重启后可恢复 debounce 状态。显式 POST builds（权威 Compile）冻结自身 manifest 并 supersede 该 document 全部非终态 preview。
 
 ## 12. Release
 

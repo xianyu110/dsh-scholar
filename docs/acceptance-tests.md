@@ -47,6 +47,19 @@
 - malformed percent path 返回 JSON 400，不崩溃；
 - CAS 原子写、重复 put、孤儿 GC、缺失 Blob scan。
 
+### 3.1 单文件 Artifact Upload（UPLOAD-01 服务端/BFF 层，api-contracts.md §7）
+
+- upload-success：真实 `curl -F` multipart（kind + file part）→ 201；artifact_id=`sha256:<hex>` 与内容 sha256 一致（hash 由服务端计算，客户端不可声明）；artifact GET 回读字节与上传字节完全一致；恰好 32 MiB 的文件上传成功；
+- upload-too-large：>32 MiB（含 33 MiB 真实请求）→ 413 `payload_too_large`，错误消息含 limit 与实测字节数，不产生 artifact 行；降低 `ResearchKernel.UPLOAD_MAX_FILE_BYTES` 静态上限后同规则生效（可配置上限）；
+- upload-path-traversal：filename=`../…`、绝对路径、NUL、Windows 盘符、含路径分隔符 → 422 `invalid_file_name`（两种分隔符均拒绝，execution-runtime.md §4 同源约束）；
+- upload-multipart-validation：非 multipart Content-Type → 415 `unsupported_media_type`；boundary 缺失/畸形或 body 解析失败 → 400 `invalid_multipart`；缺 file part → 422 `missing_file`；多个文件 part → 422 `multiple_files`；kind 非枚举 → 422 `invalid_kind`；未知 project → 404 `project_not_found`（无枚举）；
+- upload-hash-binding：stage 与 finalize 各复算一次 sha256 并核对；staged 字节被篡改（hash 不匹配）→ 422 `stage_corrupted` 且 staged 文件回滚、无 artifact 行、无 CAS blob；
+- upload-staged-finalize：stage 后只存在会话 id 命名的 `stage_<id>.part/.json`（CAS root 下 staged-uploads/），无 artifact 行；finalize 原子 rename 进 CAS blob 槽并插行；缺 stage → 409 `artifact_stage_expired`；
+- upload-idempotent：同 project + sha256 + file_name 重传 → HTTP 200 `reused: true`，返回原 artifact_id，artifact 行数与 CAS blob 数不增长（kernel 与 BFF 双面）；
+- upload-gc：`cleanupStagedUploads(maxAgeMs)` 只清理超过 grace period 的 staged 文件（.part+.json），fresh stage 保留；已 finalize 的 blob 永不被 GC 触碰；
+- upload-bff-passthrough：multipart 经 standalone BFF（bearer + 同源 Origin）原样透传 → 201，字节回读一致；BFF 无 bearer → 401、foreign Origin → 403、未知/跨项目 → 404（membership fail-closed 与其它 /v1 写一致）；
+- 浏览器拖拽上传 UI、intake quarantine/scan UI 属浏览器层验收（Playwright 类环境不可用时如实记录为剩余，不宣称关闭）。
+
 ## 4. Runner 与 Manifest
 
 - formal/baseline/pilot/reproduce/latex-compile 拒绝 subprocess；
@@ -136,8 +149,8 @@
 - workspace-vscode-flow：Explorer/create/open/tabs/search/edit/move/delete/upload/download/history/snapshot 全部走 Workspace Revision/CAS；
 - workspace-binary-and-conflict：图片/PDF/随机 bytes hash 一致；大/未知文件只读；并发保存/上传给 base/current/local 且不覆盖；
 - workspace-watch：change seq 重连无重复，retention gap 触发 resync；跨项目/路径越界拒绝；
-- live-preview：保存成功后 debounce 启动 preview，编译结束前 UI 已见日志/诊断；新 revision 使旧 PDF stale 并 supersede 旧 preview；
-- preview-vs-compile：preview 不产 Evidence；显式 Compile 固定 manifest/config/image，且不被后续 preview 取消。
+- live-preview：保存成功后（POST /v1/documents/{id}/preview-builds，或 kernel previewAutoTrigger 自动路径）进入 server 端 debounce（默认 800ms 可配置），Kernel 持有定时器并写持久化 tex_preview_pending；合并窗口内多次保存只产生一个 preview build，编译结束前 UI 已见日志/诊断；新 revision 使旧 PDF stale（build.revision < document.revision → build 记录 stale=true）并 supersede 旧 preview；preview build 记录状态 queued/running/superseded/succeeded/failed（queued 被取代时标 cancelled），带 preview=true 与 superseded_by/superseded_at；preview 提交响应携带 job_id 与输入 revision（同一 Job 的 live Terminal SSE 与 stale 判定）；UI 重连/内核重启后 GET preview-builds 投影（pending+builds）可恢复，preview 状态不只在浏览器 debounce timer（tex-preview.test.ts：debounce 合并、取消 queued、running→superseded、stale、权威 supersede、去重、重启持久化、previewAutoTrigger）；
+- preview-vs-compile：preview 运行同一固定 TeX image/禁网/no-shell-escape（复用 latex-compile runner 路径，payload.preview=true），但不产 Evidence、不冻结/不参与权威 manifest 链；显式 Compile 固定 manifest/config/image，创建权威 latex-compile Job 时 supersede 该 document 全部非终态 preview，且不被后续 preview 取消/取代（活跃权威编译期间 preview flush 跳过，不排队冗余容器）。
 
 ## 8. UI 与 i18n
 
@@ -160,6 +173,7 @@
 - ui-routes：Workspace、Run Terminal、Interactive PTY、Manuscript、Trajectory/Topology、Settings 可由上下文/命令面板/深链到达，URL 无 Token；
 - ui-settings：Accordion 默认折叠；每项展示 effective source/hash/revision/default/restart，reset 与 CAS 冲突工作；secret value 零渲染；
 - ui-simple-responsive：640/720/1024 下 Start、More、树/编辑/Preview/Terminal、固定主 CTA 均键盘可达，不因隐藏高级项丢能力；
+- ui-simple-logic（UI-SIMPLE-01 client 逻辑层，tests/unit/ui-simple.test.ts 12/12）：startActions() 恰三卡（new-project/open-project/import，code/route 稳定、label 随 locale 重求值）；tabGroups() 四 primary（phase/runs/evidence/manuscript）+ More（chat/gates/artifacts/budget/terminal + settings modal）且全覆盖（ALL_TAB_KEYS 每键恰属一组、deepLink 唯一稳定）；settingsSections() 九组（连接/外观/偏好/runner/workspace/terminal/TeX/agent/config provenance）全部 defaultCollapsed，title/summary/row 键在 zh/en 双字典存在且运行时零缺 key；深链 `#tab=<key>`/`#settings` 稳定解析、query 路由不受影响、navOrder() 覆盖全部可达目标；浏览器级剩余（无 Playwright 环境，如实记录）：ui-simple-responsive 的 640/720/1024 视口与键盘导航验收、Start/More/Accordion 的 DOM 有界断言；
 - i18n-new-surfaces：start/guide/workspace/settings/trajectory/topology/PTY/upload/grill 的 zh/en key、状态、error、aria 精确 parity。
 
 ### 8.1 Onboarding、Upload 与继续既有研究

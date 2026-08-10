@@ -3,7 +3,7 @@
  * @module @dsh-scholar/research-kernel
  */
 
-export { ResearchKernel, KernelError, type KernelOptions } from './kernel.js'
+export { ResearchKernel, KernelError, validateUploadFileName, type KernelOptions } from './kernel.js'
 export { nextActionProjection, legacyNextActionStrings, type NextActionContext, type NextActionJob, type NextActionRoute } from './next-action.js'
 export { IMAGES_LOCK, getLockedDigest, validateImageDigest, type ImagesLock, type LockedImageKind, type SecureJobKind } from './images-lock.js'
 export { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
