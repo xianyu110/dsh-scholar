@@ -71,6 +71,14 @@ CodeSnapshot 保存实际文件内容；仅包含文件 hash 的旧 manifest 不
 
 Docker CLI 自身被终止时，finally 仍执行 docker rm -f 兜底。取消必须结束进程组或容器并等待确认，然后才能写 cancelled。
 
+### 5.1 Runner Fleet 与远端 Adapter
+
+Runner Gateway 只依赖 `ExecutionTarget` port：prepare(plan)、start(plan)、attach(run)、cancel(run)、wait(run)。生产 Adapter 至少有 LocalDocker 和 RemoteRunnerAgent；Scheduler 是后续可选 Adapter。ExecutionPlan 在 Kernel 固定 project/job/run/lease/profile/config/image/snapshot/artifact/limits/network/output contract 并签名，target 不得改写。
+
+远端 Agent 通过 mTLS service identity 注册 health/capability/labels，拉取 CAS 输入并复算 hash，在隔离 sandbox 执行，按 generation/token 上报 frames、stage Artifacts 和 complete。网络断开时 spool 有界保存；lease 过期后旧 Agent 只能丢弃或保留本地诊断，不能完成 Job。target offline/capability mismatch 返回明确 retryable 环境错误；没有显式 PI/Operator 新 attempt 时不回退 LocalDocker，更不回退 subprocess。
+
+远端配置中的 address、certificate、SSH bootstrap 等只由服务端 Config/SecretRef 解析；Job/UI 永远只见 opaque profile/target ID 与安全健康摘要。生产执行不支持“输入 hostname + shell command 即运行”的任意 SSH 模式。
+
 ## 6. 实时 Terminal
 
 现有“任务结束后拼接 stdout/stderr”不足以满足产品。Execution adapter 必须接受 onChunk 回调，并同时保留有界本地 spool。
@@ -87,6 +95,12 @@ Docker CLI 自身被终止时，finally 仍执行 docker rm -f 兜底。取消�
 - exit frame 在任务终态之前持久化，但业务终态仍由 complete/cancel transaction 决定。
 
 终端的 inferred_idle 或 timeout 不是命令退出。UI 只在收到 exit 或 Job 权威终态时显示完成。
+
+### 6.1 Interactive Terminal（PTY）
+
+Interactive Terminal 与本节 Run Terminal 是两个 Interface。PTY open 固定 Principal、Project、Workspace、Runner profile/target、allowlisted shell preset、relative cwd、config hash 和 session lease。PTY Adapter 必须分配真实 pseudo-terminal，支持 bytes input、resize、INT/TERM/KILL、detach/reconnect 和显式 close；每个 control frame 使用 client_seq 幂等，输出使用 server seq/gap/retention。
+
+PTY 连接断开不自动结束进程，idle TTL 和 retention 从 Config Schema 读取；权限撤销立即 detach/close。LocalDockerPty 与 RemoteRunnerPty 共享同一 wire，不得向浏览器暴露 Docker socket、SSH credential、Kernel token 或 host path。PTY 输出可审计和有限保留，但不是正式 Job log，不能生成 Metrics、Manifest、accepted Evidence 或 Gate Decision。
 
 ## 7. 指标与 RunManifest
 
@@ -173,6 +187,12 @@ latex-compile Job：
 - PDF、log 和所有输入 manifest 进入 RunManifest。
 
 TeX source 可能不可信，正式构建仍必须容器、禁网、禁 shell escape、非 root 和资源限制。
+
+### 12.1 实时 Preview
+
+文件保存事务成功后，Workspace event 按配置 debounce 创建 preview build。相同 document 新 revision 到达时，queued preview 取消、running preview 标 superseded；旧 PDF 立即 stale。preview 使用同一固定 TeX image、路径安全、禁网与 no-shell-escape，实时发 Terminal/diagnostics/PDF events，但可以使用较短 retention，且不创建 accepted Evidence。
+
+用户点击 Compile 时必须冻结当前 manifest 并创建权威 latex-compile Job；它不被后续 preview 取代，产出完整 RunManifest/Artifact。保存失败或 revision conflict 不触发 preview。build/preview 状态在 UI 重连后可由 Kernel 投影恢复，不能只存在浏览器 debounce timer。
 
 ## 13. Release Bundle 与 clean-room
 

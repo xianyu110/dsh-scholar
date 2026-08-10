@@ -8,6 +8,8 @@ const requiredDocs = [
   'docs/product-spec.md',
   'docs/design-notes.md',
   'docs/domain-model.md',
+  'docs/research-onboarding.md',
+  'docs/trajectory-subagents.md',
   'docs/reconstruction-contracts.md',
   'docs/storage-migrations.md',
   'docs/api-contracts.md',
@@ -45,11 +47,13 @@ for (const relative of requiredDocs) {
 const requiredFragments = new Map([
   ['docs/README.md', ['需求与修复的文档先行规则', 'subagent', '浏览器 UI 只支持独立模式']],
   ['docs/product-spec.md', ['全页面 i18n', 'Manuscript Workbench']],
+  ['docs/research-onboarding.md', ['ResearchOnboarding Module', 'Grill Me', 'NextAction']],
+  ['docs/trajectory-subagents.md', ['Subagent 地址、树与进入', 'Research Trajectory', '稳定地址']],
   ['docs/api-contracts.md', ['Terminal SSE', '/v2/documents/{id}/moves']],
   ['docs/gui-plugin-plan.md', ['实时终端', 'i18n 硬约束']],
   ['docs/security-baseline.md', ['Cordis self-referential', 'Terminal 安全']],
   ['docs/acceptance-tests.md', ['docs-contract-sync', 'TeX Workbench', '根包无 `dshClient`']],
-  ['docs/hardening-v0.2-status.md', ['TERM-01', 'TEX-01', 'UI-02']],
+  ['docs/hardening-v0.2-status.md', ['TERM-01', 'PTY-01', 'ONBOARD-01', 'TRAJ-01', 'TEX-01', 'UI-02']],
   ['configs/research-dev-selfmod.cordis.yml', ['@deepseek-ai/dsh-tool-cordis']],
 ])
 

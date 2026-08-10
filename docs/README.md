@@ -1,7 +1,7 @@
 # DSH Scholar 重建规范
 
-> 规范版本：2.2
-> 更新日期：2026-08-09
+> 规范版本：2.3
+> 更新日期：2026-08-10
 > 目标成熟度：Security Alpha，默认 gate-only
 > 用途：仅依赖本目录 Markdown，即可重新实现、测试和部署 DSH Scholar。
 
@@ -11,7 +11,7 @@
 
 1. 本文件中的全局规则；
 2. product-spec.md、design-notes.md 和 domain-model.md 中的产品、架构与不变量；
-3. api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
+3. research-onboarding.md、trajectory-subagents.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
 4. repository-blueprint.md 与 acceptance-tests.md 中的工程结构和验收规则；
 5. test-instance-plan.md 与 USAGE_GUIDE.md 中的运行说明；
 6. hardening-v0.2-status.md 中的当前实现差距，仅用于迁移，不能覆盖目标规范；
@@ -32,18 +32,20 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 | 1 | product-spec.md | 为谁构建、做什么、不做什么、完成标准是什么 |
 | 2 | design-notes.md | 模块如何划分，权威状态和信任 seam 在哪里 |
 | 3 | domain-model.md | 对象、状态机、ID、约束和事件是什么 |
-| 4 | reconstruction-contracts.md | 固定 ABI、wire 类型、算法、limits 和可生成参数 |
-| 5 | storage-migrations.md | 如何持久化、迁移和恢复 |
-| 6 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
-| 7 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
-| 8 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
-| 9 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
-| 10 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
-| 11 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
-| 12 | acceptance-tests.md | 如何证明生成结果符合规范 |
-| 13 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
-| 14 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
-| 15 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
+| 4 | research-onboarding.md | 如何从 Init、Upload 和 Grill Me 安全接入任意研究阶段 |
+| 5 | trajectory-subagents.md | 如何移植 Trajectory、展示 subagent 拓扑并进入子会话 |
+| 6 | reconstruction-contracts.md | 固定 ABI、wire 类型、算法、limits 和可生成参数 |
+| 7 | storage-migrations.md | 如何持久化、迁移和恢复 |
+| 8 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
+| 9 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
+| 10 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
+| 11 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
+| 12 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
+| 13 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
+| 14 | acceptance-tests.md | 如何证明生成结果符合规范 |
+| 15 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
+| 16 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
+| 17 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
 
 ## 4. 生成约束
 
@@ -57,7 +59,14 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 - baseline、pilot、formal、reproduce、latex-compile 必须在受限容器中执行；
 - 浏览器 UI 只支持独立模式，由独立 HTTP host 和同源 BFF 提供；不得发布 `dshClient`、DSH Web slot、`/research-api` 或 `/research-ui-api` 嵌入面；
 - DSH Adapter 只保留 Agent tools、commands、subagents、Skills、Session 和 headless 能力，不托管浏览器 UI；
-- Runs 必须显示实时终端；Manuscript 必须提供 TeX 文件树、编辑、编译日志、诊断和 PDF 预览；
+- Run Terminal 必须显示可恢复的只读执行账本；Interactive Terminal 必须提供真实 PTY 输入、resize、signal、重连与审计，二者不得混为同一权威语义；
+- Workspace 必须提供 VS Code 式文件树、标签页、搜索、编辑、版本冲突与二进制预览；Manuscript 必须提供保存后增量 LaTeX 预览、权威编译日志、诊断和 PDF freshness；
+- Runner 必须通过同一 Execution interface 支持本机 Docker 与受控远端 Runner；远端机器不能成为业务权威或绕过 Snapshot、lease、Manifest 和 Artifact 契约；
+- 所有可配置行为必须登记到版本化 Config Schema，声明 scope、默认值、约束、来源、secret 属性、热更新/重启规则，并由同一 Schema 生成文件配置、HTTP 校验和 Settings UI；
+- 首次进入必须提供 Init、Resume、Upload 三入口；既有研究先进入隔离 Intake，经 Grill Me 和 Human adoption 后才能写入项目，导入历史不得伪造 Gate、Run、TerminalLog 或 accepted Evidence；
+- 使用过程中必须由 Kernel 权威投影提供结构化 NextAction，页面给出一项主要下一步与原因/阻断/目标路由，未知动作只读展示，不能由 LLM 或浏览器猜测推进；
+- Trajectory 必须区分 Kernel Research Outbox 与展示性的 DSH Session；subagent 以父子拓扑展示并可进入授权 child 查看，one-shot 只读，continuable follow-up 必须 exact-parent 授权且默认脱敏；
+- 主页面只保留 Start、Overview、Workspace、Runs 和 Manuscript 等高频任务；Approvals、Artifacts、Evidence、Budget、Trajectory/Topology 保持深链可达，所有可调项统一进入默认折叠的 Settings；
 - 所有列表、流式日志和 Artifact 读取都执行 Project AuthZ；
 - Human Gate 使用认证 Principal，Agent 接口中不存在 Gate Decision；
 - 所有验收测试必须从公开接口验证行为，不能越过模块接口检查内部实现。
@@ -94,8 +103,13 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 3. Run 真实：除 echo 外，成功必须来自真实执行；正式指标只读固定输出文件。
 4. Evidence 真实：accepted Evidence 只能由受控 Analysis Worker 根据签名 RunManifest 生成。
 5. 文件真实：代码、数据、TeX 和编译输入都是不可变 CAS 快照，保存有版本冲突保护。
-6. 终端真实：UI 展示 Runner 原始 stdout/stderr 的有序、可恢复、可截断流，不能伪造本地流式动画代替执行输出。
-7. 发布真实：Release Bundle 必须自包含并通过 clean-room 验证，公开发布仍需 Human Release Gate。
+6. 终端真实：Run Terminal 展示 Runner 原始 stdout/stderr 的有序、可恢复、可截断流；Interactive Terminal 使用真实 PTY 双向会话，不能用本地动画或一次性 HTTP 响应伪装。
+7. 工作区真实：编辑对象来自版本化 Workspace；保存、搜索、快照、LaTeX preview 与正式 build 共享同一文件/Revision/CAS 契约。
+8. 执行目标真实：本机 Docker 与远端 Runner 都执行同一冻结 ExecutionPlan；切换 target 不改变科研语义或放宽安全策略。
+9. 配置真实：effective config 可解释、可校验、可审计；secret 只以引用出现，运行中的 Job/PTY/Build 固定创建时的 config hash。
+10. 发布真实：Release Bundle 必须自包含并通过 clean-room 验证，公开发布仍需 Human Release Gate。
+11. 接入真实：上传、parser observation、Grill answer 与阶段 proposal 都是不可信输入；只有 Human adoption 事务能映射到项目，且仍不能制造历史 Gate/Run/Evidence。
+12. 轨迹真实：Kernel Outbox 是业务权威，Session/Agent trajectory 是观察面；subagent 拓扑、消息与 usage 不得反向修改科研状态或泄漏 raw secret/tool payload。
 
 ## 6. 文档自包含范围
 

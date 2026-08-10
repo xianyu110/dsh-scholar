@@ -24,6 +24,10 @@ dsh-scholar/
     research-client/
     research-authz/
     research-cas/
+    research-config/
+    research-onboarding/
+    workspace-runtime/
+    trajectory-projection/
     scholar-connectors/
     dsh-research-plugin/
     dsh-research-ui/
@@ -35,6 +39,7 @@ dsh-scholar/
     analysis-worker/
     research-orchestrator/
     clean-room-verifier/
+    remote-runner-agent/
   skills/
     research-core/
     domain-machine-learning/
@@ -75,6 +80,10 @@ dsh-scholar/
 | research-kernel | 业务事务与 projection | schemas、cas |
 | research-client | HTTP/Binary/SSE adapter | schemas |
 | research-authz | Principal、membership、policy | schemas |
+| research-config | canonical Config Schema、layer resolver、SecretRef | schemas、authz |
+| research-onboarding | intake/staging/scanner/grill/proposal/adoption | schemas、cas、config |
+| workspace-runtime | 通用文件/CAS/revision/search/watch/snapshot | schemas、cas、authz |
+| trajectory-projection | Outbox/Session safe projection、tree/history/SSE/redaction | schemas、client、authz |
 | scholar-connectors | 外部论文 adapter | schemas |
 | evidence-engine | Metric/RunSet/Analysis/Claim verify | schemas |
 | manuscript-builder | Ledger→TeX workspace、review、diagnostics parser | schemas |
@@ -82,6 +91,7 @@ dsh-scholar/
 | dsh-research-plugin | DSH Agent 工具/命令/Skill、Session 关联 | client、connectors、authz |
 | dsh-research-ui | standalone client/BFF/sidecar、i18n、Terminal、TeX UI | browser-safe schemas/client types、kernel executable |
 | runner-gateway | snapshot materialize、Docker、terminal、sign | client、schemas |
+| remote-runner-agent | mTLS、ExecutionPlan、CAS transfer、remote Docker/PTY、spool | client、schemas |
 | analysis-worker | evidence-engine CLI/internal adapter | evidence-engine、client |
 | orchestrator | durable actions/state planning | client、connectors |
 | clean-room | bundle verify and rerun | client、release-bundle |
@@ -97,23 +107,23 @@ Kernel 不依赖 DSH、UI、Runner 或 Connector。browser client 不导入 Node
 - project.ts：Brief、Project、Status、Transition；
 - governance.ts：Gate、Decision、Principal；
 - corpus.ts、idea.ts、experiment.ts、evidence.ts；
-- artifact.ts、job.ts、terminal.ts、tex.ts、events.ts；
+- artifact.ts、job.ts、terminal.ts、pty.ts、workspace.ts、config.ts、intake.ts、trajectory.ts、tex.ts、events.ts；
 - ids.ts、errors.ts、index.ts。
 
 ### research-kernel
 
 - kernel.ts：深模块外部接口；
 - store/schema.ts、store/migrations.ts、store/queries/*；
-- transactions/*：Gate、complete、budget、TeX save/build；
+- transactions/*：Gate、complete、budget、Workspace/TeX save/build、Adoption、Config patch；
 - server/router.ts、server/json.ts、server/artifact.ts、server/sse.ts；
-- projections/*；
+- projections/*：Project/NextAction/Trajectory/Intake；
 - bin/kernel.ts。
 
 ### dsh-research-ui
 
 - client/app.tsx 或 app.ts：共享应用入口；
-- client/pages/{chat,overview,approvals,runs,terminal,artifacts,evidence,manuscript,budget}；
-- client/components/{TerminalBlock,TexEditor,PdfPreview,Diagnostics,Modal,Toast}；
+- client/pages/{start,chat,overview,workspace,approvals,runs,run-terminal,interactive-terminal,trajectory,artifacts,evidence,manuscript,budget,settings}；
+- client/components/{NextActionCard,UploadIntake,GrillQuestions,FileExplorer,Editor,TerminalBlock,PtyTerminal,TrajectoryTree,TrajectoryTimeline,TexEditor,PdfPreview,Diagnostics,Modal,Toast}；
 - client/i18n/{service,format,locales/*}；
 - client/state/{api,preferences,streams}；
 - standalone/server.ts、standalone/security.ts、standalone/sidecar.ts、standalone/bootstrap.ts；
@@ -149,14 +159,16 @@ build 先 schemas/cas，再 kernel/client/connectors/evidence/manuscript，后 w
 2. 建立临时 SQLite/CAS 并实现 Kernel 深接口；
 3. 建立 v2 HTTP、ResearchClient 和 contract tests；
 4. 实现 Gate、Artifact、Job/lease/Manifest 事务；
-5. 实现 Runner snapshot/Docker/Terminal；
-6. 实现 Analysis/Evidence/Claim；
-7. 实现 TeX document/build；
-8. 实现 Orchestrator、Connectors 和 Release；
-9. 实现不含浏览器面的 DSH Agent adapter 和 Skills；
-10. 实现 standalone BFF、UI、i18n、Terminal 和 Manuscript Workbench；
-11. 验证包 manifest 和路由不存在任何 DSH embedded UI 面；
-12. 跑 security、recovery、Docker、TeX、Golden、clean-room。
+5. 实现通用 Workspace、Config registry 和浏览器 upload；
+6. 实现 Runner Fleet、Local/Remote Docker、Run Terminal 与 Interactive PTY；
+7. 实现 Analysis/Evidence/Claim；
+8. 实现 TeX document、实时 preview 与权威 build；
+9. 实现 ResearchOnboarding、Grill Me、Adoption 与结构化 NextAction；
+10. 实现 Orchestrator、Connectors 和 Release；
+11. 实现不含浏览器面的 DSH Agent adapter、safe Session source 和 Skills；
+12. 实现 Trajectory/Subagent projection 与 standalone BFF/UI/i18n；
+13. 验证包 manifest 和路由不存在任何 DSH embedded UI 面；
+14. 跑 security、recovery、remote/Docker/PTY、upload/onboarding、trajectory、TeX、Golden、clean-room。
 
 每步先写对应接口验收，再实现。旧浅模块的测试在新深接口测试覆盖后删除，避免同时维护两套行为。
 
@@ -203,6 +215,7 @@ configs/research-dev-selfmod.cordis.yml 只插入 @deepseek-ai/dsh-tool-cordis�
 - production composition 无 tool-cordis；开发 overlay 可用且隔离；
 - zh/en 资源完整，无 UI 硬编码；
 - Terminal、TeX、PDF、binary proxy 和 SSE 在 standalone 模式完整验收；
+- Init/Resume/Upload、Grill Me、NextAction、Workspace/PTY、远端 Runner、Settings、Trajectory/Subagent 拓扑在 standalone 模式完整验收；
 - 根插件无 browser export/dshClient/HTTP bridge，UI 包无 Cordis host/patch；
 - docs/README.md 的所有文档链接和规范条目可达；
 - hardening 状态没有未实现、部分或已实现未验收的 P0/P1；每个已验收条目绑定当前 commit、CI job 和 acceptance 报告；

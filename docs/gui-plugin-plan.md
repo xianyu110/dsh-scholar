@@ -23,19 +23,33 @@ Header：Kernel 状态、Human Gate 数、命令面板、快捷键、活动通�
 
 ### 2.2 页面
 
-| 分组 | Tab | 说明 |
+首屏和主导航必须简洁。未选项目时不显示完整工作台 Tabs，只显示 Init、Resume、Upload 三张行动卡；选中项目后 primary tabs 只有 Overview、Workspace、Runs、Manuscript。Chat、Approvals、Run Terminal、Interactive Terminal、Artifacts、Evidence、Budget、Trajectory/Topology 从 More、上下文 CTA、命令面板或深链进入。Settings 使用齿轮进入独立页面，不占 primary tab。
+
+| 分组 | 页面 | 说明 |
 |---|---|---|
+| Start | Init / Resume / Upload | 新研究、恢复平台项目、接入外部研究 |
 | Research | Chat | /research 命令、结果卡、会话与搜索 |
-| Research | Overview | 状态流水线、Brief、下一步、Idea、Contract、历史 |
+| Research | Overview | 唯一主 NextAction、状态、Brief、可折叠轨迹/拓扑 |
+| Research | Workspace | VS Code 式 Explorer、编辑器、搜索、Problems、PTY |
 | Execution | Approvals | Gate 筛选、Human Decision、理由和审计 |
 | Execution | Runs | Job 列表、状态、Manifest、取消 |
 | Execution | Terminal | 选择 Run，查看 stdout/stderr 实时流 |
+| Execution | Interactive Terminal | 真实可输入 PTY，与 Run Terminal 分离 |
 | Review | Artifacts | 项目产物搜索、预览、下载 |
 | Review | Evidence | Claim–Evidence、CI、效应量、限制 |
 | Review | Manuscript | TeX 文件树、编辑、编译、诊断、PDF |
 | Operations | Budget | 用量、限制、策略和项目内容计数 |
+| Operations | Settings | 所有配置、来源、revision/hash、SecretRef 和 diagnostics |
 
 Tab 可收藏，Alt+1…9 切换。URL 或持久 UI state 保存 active project/tab，但不能把 Token 放 URL。
+
+### 2.3 Start、路由与窄屏
+
+- `/start`：三入口；Resume 按 updated_at 展示 status、pending Gate、下一步并恢复 last route；Upload 显示 preflight/进度/scan/Grill/Proposal；
+- `/p/{id}/overview|workspace|runs|manuscript|approvals|artifacts|evidence|budget|trajectory|topology|settings`；
+- `/p/{id}/runs/{run}/terminal` 是只读 Run Terminal；`/p/{id}/pty/{session}` 是 Interactive PTY；
+- URL 只含 opaque ID；locale/layout/token/secret 不进 URL；未知或无权路由回可见项目列表并显示安全错误；
+- 小于 720 px：sidebar 为抽屉、Start 卡纵向、More 全屏菜单；小于 640 px：Workspace/Manuscript/Terminal 上下分屏或子页面，breadcrumb 和主要 CTA 固定可达。
 
 ## 3. 数据与刷新
 
@@ -45,6 +59,8 @@ Tab 可收藏，Alt+1…9 切换。URL 或持久 UI state 保存 active project/
 - 请求可取消，页面切换时清理 listener、Blob URL 和 stream；
 - 401 只允许一次 session refresh 重试；之后回到解锁/登录，不无限循环；
 - UI 不保存权威业务状态，只缓存选择、布局、草稿和 lastSeq。
+- NextAction、Intake、Trajectory 和 Topology 都读取 Kernel/BFF projection；浏览器不从文案推断状态或因果；
+- route/layout 可恢复，Token 不写 localStorage 普通 preference、URL 或导出文件。
 
 ## 4. Chat
 
@@ -63,6 +79,12 @@ Chat 中的“运行中”只代表 HTTP 命令未完成。真正命令执行输
 - Idea 与 Contract 最近版本，点击详情；
 - Budget 摘要与快速跳转；
 - Project history 默认最近 10 条，可展开全部。
+
+### 5.1 Next-step Guide
+
+Overview 顶部始终显示一张 NextAction 卡：label、state、reason、required human/agent/runner、关联 Gate/Run/Build/gap、required revision 和一项主 CTA。状态为 available、running、waiting-gate、waiting-external、blocked、failed、completed；409 时刷新 projection 并显示最新决定/版本，403 解释只读，429/预算跳 Approvals/Budget，网络失败保留草稿并可重试。
+
+短期 legacy string action 只显示 raw + “查看总览”；不能把字符串匹配成 mutation。Init 草稿、Upload、Grill、失败恢复和每个项目阶段都必须产生下一步；终态项目明确显示已完成/停止/失败以及可用的归档或审计动作。
 
 未知服务器状态原样显示为中性色，不能丢失或硬翻译成错误状态。
 
@@ -101,6 +123,24 @@ Cancel 仅对 queued/running/retryable 可见，要求 reason 并通过 BFF。UI
 打开时读取本地 lastSeq 并连接 Terminal SSE。chunk 按 seq 去重和排序；断线指数退避，恢复携带 after_seq。收到 gap 显示永久警告和 dropped bytes；收到 truncated 显示最终日志不完整。exit frame 或权威 Job 终态才结束 running 状态。
 
 切换 Run 关闭旧 stream；隐藏页面可以保留轻量连接或关闭后恢复，策略必须有界。Terminal 输出通过 text nodes 或安全 ANSI parser 渲染，绝不使用 innerHTML。
+
+### 8.3 Interactive Terminal
+
+Interactive Terminal 使用 xterm-compatible adapter 连接真实 PTY，必须支持键盘/粘贴输入、TUI、resize、INT/TERM/KILL、detach/reconnect、显式 close、状态/exit、backpressure/gap。连接前选择 Workspace、relative cwd、Runner profile 和受控 shell preset；hostname、SSH credential、Docker socket、host path 和任意启动 argv 不出现在页面。
+
+页面持续显示“交互会话不能产出正式 Evidence”。权限撤销、generation stale、idle TTL、target offline 和 parent session failure 都有可恢复状态；关闭浏览器不是成功退出。Run Terminal 不出现输入框，Interactive PTY 不显示为正式 Run 日志。
+
+### 8.4 Workspace Workbench
+
+桌面布局为 Explorer/Search、可多标签编辑区、Problems/Output/Terminal 下方面板；小屏改为树→编辑器→面板的可返回 navigation。支持 create/read/write/move/delete/upload/download/history/watch/search/snapshot，文本行号/高亮/查找替换/撤销重做/快捷键，图片/PDF/JSON 安全预览，大文件/未知二进制只读。
+
+保存与上传显示 file/workspace revision 和 hash；409 提供 base/current/local 或 keep/current/import/rename，禁止覆盖。所有路径根相对；Workspace 中的 Terminal 打开独立 PTY。Monaco/CodeMirror 是可替换 Adapter，不得在 Kernel contract 中出现。
+
+### 8.5 Trajectory 与 Agent Topology
+
+Overview 提供折叠摘要，全页支持 Research/Session 两条泳道、Timeline/Table 和 Tree/Graph。Research 标记 authoritative，Session 标记 observational。subagent 节点显示 role、mode、activity、duration、四桶 token/cost、failure、children；展开懒加载直接 child，点击进入安全 history，breadcrumb 返回 parent。
+
+one-shot/diagnostic/parent offline 只读；continuable 仅在 `can_continue` 时显示 composer。history 读取不激活 Agent；默认不返回 raw prompt/tool args/results/env。>100 rows 虚拟化，10k nodes DOM 有界，prepend 保持 scroll anchor；orphan/cycle fail-soft，普通 fork 不跨边界汇总。详细契约见 trajectory-subagents.md。
 
 ## 9. Artifacts
 
@@ -151,6 +191,8 @@ Compile 先保存所有脏文件，再冻结 workspace manifest 并提交 latex-
 
 诊断按 error/warning/info 分组，显示 file:line:column、pass 和消息；点击定位编辑器。诊断 parser 的本地 code 可翻译，TeX 原始消息保留。undefined citation、missing file、overfull box 和 shell-escape 拒绝有专门类型。
 
+成功保存后按 Settings debounce 自动创建 preview build；状态、编译输出和 diagnostics 实时更新，成功即刷新 PDF。新编辑立即把当前 PDF 标 stale；旧 preview 被新 revision supersede。显式 Compile 仍冻结 manifest 并创建权威 Job，不能被 preview 取消或替代。
+
 ### 11.5 PDF
 
 成功后以安全 Blob URL 预览 PDF，显示页数可选、下载和新窗口。Preview 顶部显示 build input revision；源文件改变后显示 stale banner，仍允许查看旧 PDF，但不能标记最新。切换 build history 可比较不同 PDF/log。
@@ -160,6 +202,12 @@ Compile 先保存所有脏文件，再冻结 workspace manifest 并提交 latex-
 显示模型费用、GPU 小时、API 请求、存储和并发。低于 80% 用正常色，80–100% 警告，超过 100% 错误。越限说明 BLOCKED_GATE 和恢复 Gate，而不是只显示红条。
 
 详情显示数据策略、网络、Runner、完整性、签名和 clean-room 要求。
+
+### 12.1 Settings 渐进披露
+
+Settings section 首次全部折叠：Essentials、Execution advanced、Workspace、Terminal、LaTeX、Agent & Trajectory、Security & Secrets、Diagnostics/Config provenance。每项由 Config Schema 生成，显示 effective value、source scope/revision/hash、default/modified、hot/restart、允许范围和 Reset；secret 只显示 SecretRef 与是否可用。
+
+业务页只显示当前策略摘要和“调整”链接，不常驻展开高级项。运行中 Job/PTY/Build 标注 pinned config hash，修改配置只影响新动作。Patch 使用 revision CAS，409 展示 base/current/local；不支持的 target/capability 不隐藏成默认值。
 
 ## 13. i18n 硬约束
 
@@ -180,6 +228,12 @@ packages/dsh-research-ui/src/client/i18n/locales/
   manuscript.ts
   budget.ts
   standalone.ts
+  start.ts
+  guide.ts
+  workspace.ts
+  settings.ts
+  trajectory.ts
+  topology.ts
 ~~~
 
 每个 namespace 导出 zh 字典，keyof zh 作为 key 类型，en 必须精确完整。Key 使用语义点号，如 terminal.status.reconnecting、manuscript.build.stale、common.action.cancel。禁止使用英文原句作为 key。
@@ -207,6 +261,7 @@ packages/dsh-research-ui/src/client/i18n/locales/
 - persisted locale 优先于浏览器，regional locale 映射正确，storage 失败不阻断；
 - 切换 locale 后所有已打开 modal、Terminal 状态、TeX 诊断 chrome 和 aria 更新；
 - standalone 解锁页在首次渲染前选择 locale；
+- Start/Upload/Grill、NextAction、Workspace、Settings、Trajectory/Topology 和 PTY 的所有状态/错误/aria 都有 zh/en 精确 parity；
 - 动态研究内容和 Terminal 字节不被翻译；
 - 所有页面在 zh/en 下无溢出、截断和不可点击控件。
 

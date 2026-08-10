@@ -22,7 +22,11 @@ DSH Scholar 的目标是辅助研究，而不是代替研究者承担决策和�
 当前仓库已经具备 Research Kernel、DSH Agent 插件、独立 Web UI、Runner、统计分析、学术连接器、持久编排、Claim–Evidence、LaTeX 输出基础、发布包和测试基础。浏览器 UI 只支持独立模式，不再注入 DSH Web。以下 v2 能力仍在开发：
 
 - 实时 Terminal：查看命令、stdout/stderr、退出状态和可恢复日志流；
-- TeX Workbench：编辑 `.tex`/`.bib`、编译、查看诊断和 PDF；
+- 可操作 Interactive Terminal 与 VS Code 式 Workspace：直接浏览、上传、编辑项目文件并运行受控 PTY；
+- TeX Workbench：编辑 `.tex`/`.bib`、保存后实时预览、查看编译日志、诊断和 PDF；
+- 本机 Docker 与受控远端 Runner、统一 Config Schema 和集中 Settings；
+- Init / Resume / Upload、Grill Me、结构化下一步引导，用于接入其他地方已完成的研究；
+- Research Trajectory 与 subagent 父子拓扑、进入 child 查看和授权续问；
 - 全页面中英文 i18n；
 - 完整的认证 Principal、项目级 AuthZ、`/v2` API 和显式数据库迁移。
 

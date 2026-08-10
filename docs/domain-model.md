@@ -5,7 +5,7 @@
 ## 1. 通用约定
 
 - 时间：UTC ISO 8601，数据库保留毫秒；UI 按活动 locale 和 time zone 格式化。
-- ID：小写前缀加不可预测后缀，例如 rsp_、gate_、job_、run_、artifact_、claim_、doc_、build_。
+- ID：小写前缀加不可预测后缀，例如 rsp_、gate_、job_、run_、artifact_、claim_、doc_、build_、intake_、adopt_、traj_、node_、pty_。
 - Hash：sha256: 加 64 位小写十六进制。
 - Revision：从 0 开始的整数，并发修改使用 expected_revision 或 expected_version。
 - JSON：安全关键对象拒绝未知字段；自由 metadata 只能放在明确的 metadata 对象中。
@@ -36,10 +36,12 @@ constraints:
   max_gpu_hours: 120
   max_parallel_jobs: 4
 execution:
-  runner_profile: local-docker-cpu
+  runner_profile_id: local-docker-cpu
+  target_fallback: none
   runner_network_policy: none
   connector_network_policy: scholar-allowlist
   artifact_store: local-cas
+  config_revision: 1
 integrity:
   require_baseline_reproduction: true
   require_experiment_contract: true
@@ -56,6 +58,8 @@ history: []
 ~~~
 
 Project name 去除首尾空白后长度 1–120。archive 是可恢复动作；ARCHIVED 项目默认只读，unarchive 恢复 archive 前状态。
+
+`runner_profile` 是 v1 兼容字段；迁移后由 `runner_profile_id` 取代并映射同名本机 profile。Project/Job 只能引用已登记的 opaque profile ID，不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
 
 ## 3. 状态机
 
@@ -183,6 +187,22 @@ Lease 包含 owner、generation、opaque token、expires_at 和 heartbeat_at。�
 
 RunManifest 必须包含 run_id、project_id、job_id、contract 和版本、代码或 TeX 快照 hash、image digest、数据 hash、命令、Seed、资源、时间、exit_code 或 signal、Artifact 引用、lease generation、runner_key_id、payload hash 和 Ed25519 signature。
 
+### 9.1 RunnerTarget 与 RunnerProfile
+
+`RunnerTarget` 表示一台本机或受控远端执行目标：target_id、placement(local/remote)、adapter(local-docker/remote-agent/scheduler)、ownership=project、capabilities、labels、health、endpoint_label、service_identity_id、created_at、updated_at。endpoint_label 只引用服务端配置，不能包含 secret。
+
+`RunnerProfile` 包含 runner_profile_id、target_id、image allowlist/digest、network policy、resource limits、artifact transport、interaction policy、config_revision/config_sha256 和 enabled/draining 状态。Job submit 固定 profile/config hash；target 变更不会修改已存在 attempt。无 capability、离线或 draining 目标拒绝新 claim；除显式创建新 attempt 外，不得自动从远端回退本机。
+
+远端 Runner 仍由 Kernel 掌握 Job、Run、lease、budget、Artifact、Manifest 和 Outbox；Runner Agent 只执行冻结 `ExecutionPlan` 并回传事实。每次 claim 返回 Kernel 创建的唯一 run_id，任何 adapter 都不得自行生成替代 run_id。
+
+### 9.2 ConfigDocument 与 SecretRef
+
+`ConfigDocument` 包含 config_id、scope(instance/user/project/workspace/session/target)、scope_id、schema_version、revision、values、created_by_principal、created_at、updated_at。每个字段由 canonical Config Schema 声明类型、默认值、范围、allowed_scopes、secret、hot_reload、restart_required、security_floor 和 UI metadata。未知字段拒绝。
+
+effective config 按 built-in < instance < user < project < workspace < session < target < one-shot job override 合并；只有 Schema 明确允许的 scope 可以覆盖，并且安全字段采用单调收紧规则。每个值保留 source scope/revision。修改必须携带 expected_revision；冲突返回 config_revision_conflict。正在运行的 Job/PtySession/TexBuild 保存 config_revision 和 config_sha256。
+
+`SecretRef` 只有 scheme(keyring/file/vault)、name、version 可选和 scope；普通配置、HTTP 响应、浏览器、argv、日志、Manifest 与 Bundle 都不能出现 secret value。env resolver 只允许显式 allowlist，不是隐含兜底。
+
 ## 10. TerminalLog
 
 TerminalLog 是 Job 的有序附属流，不是聊天文本。
@@ -202,6 +222,14 @@ lease_generation: 3
 seq 在单个 run 内严格递增，保留 stdout 和 stderr 交错顺序；stream_seq 用于单通道校验。终态 frame 为 exit，包含 exit_code 或 signal、cancelled、timed_out、truncated、total_bytes、dropped_bytes。旧 lease frame 拒绝写入。
 
 日志可有保留上限，但删除必须产生 gap 或 truncated 元数据；禁止静默丢失。最终完整或明确截断的日志保存为 Artifact。
+
+### 10.1 PtySession
+
+PtySession 与 TerminalLog 分离。它包含 session_id、project_id、workspace_id、principal_id、runner_profile_id、target_id、purpose(shell/debug/build-terminal)、cwd、argv preset、cols、rows、status、session_generation、lease_token_hash、config_sha256、retained_from_seq、last_event_seq、created_at、last_activity_at、expires_at、closed_at。
+
+PtyEvent 为 subscribed、data、gap、input_ack、resize_applied、state、exit。data 保存 raw byte length 和安全显示文本；input/resize 使用单调 client_seq 幂等。write、resize、signal、attach 和 close 都重新校验 project membership、terminal_write capability 与当前 session generation/token。断开浏览器连接不会自动杀进程；idle TTL、显式 close、权限撤销或 Operator policy 才结束会话。
+
+PtySession 只用于交互 shell/debug/构建观察，不得作为 Metrics、accepted Evidence 或正式 RunManifest 的数据来源。正式 Job 默认 `input_policy=none`，仍使用 stdout/stderr Run Terminal。
 
 ## 11. Evidence 与 Claim
 
@@ -223,12 +251,47 @@ TexBuild 包含 build_id、document_id、input_manifest_id、job_id、status、e
 
 Diagnostic 包含 severity、file、line、column、code、message、raw、pass。用户可见的本地诊断 code 可以翻译；TeX 原始消息必须原样保留。
 
-## 13. Budget
+### 12.1 Project Workspace 与实时 Preview
+
+Workspace 包含 workspace_id、project_id、kind(code/manuscript/scratch)、name、revision、active_snapshot_id、config_revision、created_at、updated_at。WorkspaceFileRevision 包含 workspace_id、path、kind、media_type、size_bytes、version、blob_sha256、author Principal、deleted、created_at；文本和二进制都由 CAS 保存。Workspace mutation 同时校验 expected file version 和 expected workspace revision。
+
+WorkspaceSearch 是短期投影，不是科研权威：请求包含 query、glob、case_sensitive、regex、max_results 和 after_cursor；结果包含 path、version、line、column、preview 和 truncated。Search 只读取调用者可见的当前 revision，并受时间/结果/文件大小上限控制。
+
+TexDocument 绑定一个 `workspace_id` 和根相对 subtree。`TexPreview` 是可取消、可 supersede 的非权威 Build，保存成功后按配置 debounce 触发；它包含 preview_id、document_id、input_manifest_id、input_revision、config_sha256、job_id、status、diagnostics、pdf/log Artifact 与 superseded_by。任何 source revision 变化立即使旧 Preview/PDF `fresh=false`。显式 Compile 创建权威 latex-compile Job；Preview 永远不能直接产生 accepted Evidence。
+
+## 13. Intake、Proposal 与 Adoption
+
+Intake 的完整行为由 research-onboarding.md 定义。存储模型必须至少包含：
+
+- `IntakeSession`：owner/tenant、target project 可选、status、revision、expires_at；
+- `IntakeArtifact`：Blob、upload/scan/quarantine 状态、media/magic、parser/version；
+- `IntakeObservation`：source locator、detector/version、warnings、`observed_unverified`；
+- `IntakeQuestion/Answer`：稳定 question code/revision、required、Human Principal、`human_assertion`；
+- `PhaseProposal`：observed_phase、safe_project_status、confidence、gaps、mappings、Gate plan、target revision；
+- `AdoptionReceipt/Mapping`：immutable proposal/adoption refs、idempotency hash、创建的 Project/Artifact/Workspace/Gate/Action refs。
+
+Intake status 为 draft、uploading、scanning、needs_input、grilling、proposal_ready、awaiting_human、accepting、accepted、rejected、expired、failed。pre-accept 对象没有 project authority；accepted 不可变。
+
+`ImportedRunObservation` 只有 source log/result Artifact、用户声明、detector output 和 `legacy_unverified` provenance。它不是 Job、Run、TerminalLog 或 RunManifest，不能加入 accepted RunSet。
+
+## 14. NextAction
+
+NextAction 是 Kernel 投影，不是 UI 本地状态。字段至少有 id、code、label_key、state、target_route、blocking、reason、refs、required principal kind、required_revision、capability 可选和 raw 可选。NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code 只能只读显示。
+
+## 15. Trajectory 与 Subagent Node
+
+`TrajectoryRoot` 包含 trajectory_id、project_id、source(kernel-outbox/dsh-session/external)、source_ref、status、first/last event seq、created_at、retained_until。`TrajectoryNode` 包含 node_id、parent_node_id、relation(root/child/fork)、kind(session/subagent/task/research-event)、mode(one-shot/continuable/read-only)、status、label、safe summary、timing、四桶 token、cost、permissions、retention 和业务 refs。
+
+`SubagentAddress` 固定为 parent_session_id + child_session_id + mode；调用 history/followup 时三者必须共同校验。one-shot 和 parent unavailable 节点只读。普通 fork 的后代不计入 subagent chain；orphan/cycle 只影响展示，不能破坏读取投影。
+
+`TrajectoryEvent` 以 trajectory_id + event_seq 唯一，包含 event_id、version、project/node/parent、type、source、occurred_at 和有界安全 payload。Research Trajectory 可由 Kernel Outbox 重放；Session Trajectory 可过期并产生 redaction/gap。两者不是互相的权威副本。
+
+## 16. Budget
 
 预算记录 model_cost_usd、gpu_hours、api_requests、storage_bytes 和 updated_at。增量必须非负并在事务内原子累计。越限时同一事务把项目置 BLOCKED_GATE、创建 Budget Gate 并写 policy.violation Outbox。恢复状态只接受 Gate payload 中经过校验的 resume_to。
 
-## 14. Outbox Event
+## 17. Outbox Event
 
 事件包含 event_id、project_id、kind、source、payload、created_at、delivered_at。业务事务和对应事件原子提交。消费是 at-least-once，消费者按 event_id 去重。
 
-事件族：project.*、gate.*、artifact.*、job.*、terminal.*、corpus.*、idea.*、contract.*、evidence.*、claim.*、manuscript.*、tex.*、budget.*、policy.*、session.*。DSH SessionEvent 可承载展示和关联事件，但 Kernel Outbox 始终是科研业务审计权威。
+事件族：project.*、gate.*、artifact.*、job.*、terminal.*、corpus.*、idea.*、contract.*、evidence.*、claim.*、manuscript.*、tex.*、budget.*、policy.*、intake.*、adoption.*、session.*。DSH SessionEvent 可承载展示和关联事件，但 Kernel Outbox 始终是科研业务审计权威。trajectory.* 是可重建投影通知，不能反向替代对应业务事件。

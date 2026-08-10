@@ -496,6 +496,63 @@ CREATE TABLE tex_builds (
 
 保存文件在一个事务中校验 expected version、写新 Blob 引用、插入 revision、增加 document revision、生成 tex.file.saved Outbox。Blob 字节先原子落 CAS；若事务失败，孤儿 Blob 可由 GC 处理，不能先覆盖旧文件。
 
+### 5.1 通用 Workspace 与 PTY
+
+~~~sql
+CREATE TABLE workspaces (
+  workspace_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+  name TEXT NOT NULL, revision INTEGER NOT NULL, active_snapshot_id TEXT,
+  config_revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(project_id), UNIQUE(project_id, workspace_id)
+);
+CREATE TABLE workspace_file_revisions (
+  project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, path TEXT NOT NULL, version INTEGER NOT NULL,
+  blob_sha256 TEXT, kind TEXT NOT NULL, media_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+  principal_json TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id,path,version), FOREIGN KEY(project_id,workspace_id) REFERENCES workspaces(project_id,workspace_id),
+  FOREIGN KEY(blob_sha256) REFERENCES blob_objects(sha256)
+);
+CREATE TABLE workspace_events (
+  workspace_id TEXT NOT NULL, workspace_seq INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL, path TEXT, revision INTEGER NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id,workspace_seq), FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+);
+CREATE TABLE pty_sessions (
+  pty_session_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL, runner_profile_id TEXT NOT NULL, target_id TEXT NOT NULL,
+  purpose TEXT NOT NULL, cwd TEXT NOT NULL, argv_preset TEXT NOT NULL, cols INTEGER NOT NULL, rows INTEGER NOT NULL,
+  status TEXT NOT NULL, generation INTEGER NOT NULL, lease_token_hash TEXT NOT NULL, config_sha256 TEXT NOT NULL,
+  retained_from_seq INTEGER NOT NULL, last_event_seq INTEGER NOT NULL, created_at TEXT NOT NULL,
+  last_activity_at TEXT NOT NULL, expires_at TEXT NOT NULL, closed_at TEXT,
+  FOREIGN KEY(project_id,workspace_id) REFERENCES workspaces(project_id,workspace_id)
+);
+CREATE TABLE pty_events (
+  pty_session_id TEXT NOT NULL, seq INTEGER NOT NULL, frame_kind TEXT NOT NULL,
+  client_seq INTEGER, payload_json TEXT NOT NULL, byte_length INTEGER, created_at TEXT NOT NULL,
+  PRIMARY KEY(pty_session_id,seq), FOREIGN KEY(pty_session_id) REFERENCES pty_sessions(pty_session_id)
+);
+~~~
+
+TexDocument 新增 workspace_id，并把 tex_file_revisions 迁入或以 view/facade 指向 workspace_file_revisions；不得长期维护两份 bytes/revision 权威。Tex preview 增加 preview/superseded_by/config_sha256/fresh 字段或独立 `tex_previews` 表。
+
+### 5.2 Runner、Profile 与 Config
+
+`runner_targets(target_id,placement,adapter,labels_json,capabilities_json,health,endpoint_label,service_identity_id,revision,enabled,draining,last_seen_at,created_at,updated_at)`；`runner_profiles(runner_profile_id,target_id,policy_json,config_revision,config_sha256,revision,enabled,draining,created_at,updated_at)`。endpoint_label 只引用服务端 config；证书/credential 不入表明文字段。
+
+`config_documents(config_id,scope,scope_id,schema_version,revision,values_json,created_by_principal_json,created_at,updated_at)` 以 `(scope,scope_id)` 唯一；`config_revisions` 追加保存 redacted diff/hash；`secret_refs` 只保存 scheme/name/version/scope 和 availability metadata，不保存 value。Job/Run/PTY/TexBuild 增加 config_revision/config_sha256 pinned columns。
+
+### 5.3 Intake 与 Adoption
+
+追加式 migration 创建 `intake_sessions`、`intake_artifacts`、`intake_observations`、`intake_questions`、`intake_proposals`、`intake_mappings`、`intake_adoptions`。公共字段必须包含 tenant/owner、revision/status、created/updated/expires；Artifact 绑定 Blob/scan/quarantine；Observation 固定 source locator + detector/parser version + trust；Question answer固定 Human Principal/revision；Proposal 固定 target project/revision；Adoption 以 adoption_id 和 `(target_scope,idempotency_key)` 唯一并保存 request_hash/receipt。
+
+pre-accept 表不能使用 FK 创建 Project/Gate/Job/Run/Evidence 旁路；只有 adoption transaction 写入正常项目表与 mapping refs。temporary Blob 可由 intake_artifacts 引用并按 expiry GC，accepted mapping 转成正式 Artifact/Workspace 引用后才进入正常 retention。
+
+### 5.4 Trajectory projection
+
+`trajectory_roots(trajectory_id,project_id,source,source_ref,status,first_event_seq,last_event_seq,retained_until,created_at,updated_at)`；`trajectory_nodes(node_id,trajectory_id,project_id,parent_node_id,relation,kind,mode,status,label,safe_summary_json,timing_json,tokens_json,cost_json,permissions_json,retention_json,refs_json,created_at,updated_at)`；`trajectory_events(trajectory_id,event_seq,event_id,node_id,parent_node_id,type,source,payload_json,occurred_at)`；`trajectory_cursors(source,source_ref,last_source_seq,updated_at)`；`trajectory_redactions(redaction_id,trajectory_id,node_id,reason,dropped_bytes,principal_json,created_at)`。
+
+`(trajectory_id,event_seq)` 和 event_id 唯一。projection 可从 Kernel Outbox/安全 Session source 重建；不能被 Project transaction 读取为业务权威。raw detail 只保存加密/CAS ref + TTL，有界 preview 存 safe_summary_json。
+
 ## 6. Artifact CAS
 
 CAS path 只由服务端 SHA-256 计算。put 写同目录临时文件、fsync（可配置）、atomic rename；已有 Blob 校验 size/hash 后幂等返回。读取重新验证标识格式，关键发布流程可复算 hash。
@@ -513,6 +570,10 @@ Blob 无 project_id；授权永远从 artifacts 表开始。相同 Blob 在多�
 - Analysis completion + Evidence + Claim re-evaluation + Outbox；
 - TeX save + revision + manifest invalidation + Outbox；
 - TeX build completion + PDF/log/diagnostics + Job + Outbox；
+- Workspace mutation + file revision + workspace revision/event + snapshot invalidation + Outbox；
+- PTY open/control/exit 的 generation/client_seq CAS 与审计；
+- Intake adoption + Project/Artifact/Workspace mappings + pending Gates/Actions + Receipt + Outbox；
+- Config patch + revision/redacted audit；target drain 与 profile disable；
 - Release verification + Bundle + Release Gate Request。
 
 CAS 写与 DB 无法共用事务时采用 stage/finalize：先写不可达 Blob，事务登记可达引用；失败 Blob 后台 GC。Outbox 消费不得与业务事务耦合外部网络。
@@ -528,7 +589,7 @@ CAS 写与 DB 无法共用事务时采用 stage/finalize：先写不可达 Blob�
 7. 失败恢复旧 DB，保留报告；
 8. downgrade 仅在明确脚本中执行，不能靠旧二进制打开新 DB。
 
-编号固定：0001_schema_v2_initial.sql 用于空库并在同一事务插入 meta schema_version=2、database_id=<128-bit random id>、created_at、last_migrated_at；0002_import_legacy_v1.ts 读取旧表、写 v2 staging 表、运行计数/hash/invariant scan，再原子切换；0003_terminal_tex_i18n_capabilities.sql 只用于曾经生成过早期 v2 preview 的数据库。每个迁移在 schema_migrations(id,checksum,applied_at,report_json) 留记录；相同 id/checksum 幂等跳过，checksum 不同 loud fail。
+编号固定：0001_schema_v2_initial.sql 用于空库并在同一事务插入 meta schema_version=2、database_id=<128-bit random id>、created_at、last_migrated_at；0002_import_legacy_v1.ts 读取旧表、写 v2 staging 表、运行计数/hash/invariant scan，再原子切换；0003_terminal_tex_i18n_capabilities.sql 只用于曾经生成过早期 v2 preview 的数据库；后续能力必须依次追加 `0004_workspace_pty.sql`、`0005_runner_config.sql`、`0006_research_onboarding.sql`、`0007_trajectory_projection.sql`（实现仓库已有更高编号时使用下一个空号，禁止改写已发布 migration）。每个迁移在 schema_migrations(id,checksum,applied_at,report_json) 留记录；相同 id/checksum 幂等跳过，checksum 不同 loud fail。
 
 jobs/status/kind、Evidence provenance、Claim status 等 enum 由文中 CHECK 和 Kernel Zod 双重保证；SQLite 无法表达的跨项目/按 kind snapshot 条件在 transaction 函数中校验，并由 invariant scan 与故障测试覆盖。迁移脚本及旧 fixture DB 是仓库必需资产，路径 tests/fixtures/databases/v1-kernel.db。
 
@@ -547,6 +608,6 @@ jobs/status/kind、Evidence provenance、Claim status 等 enum 由文中 CHECK �
 
 ## 10. 备份、恢复与完整性扫描
 
-备份包含 SQLite consistent backup、CAS inventory、schema version 和 instance metadata。恢复后运行：foreign_key_check、Artifact Blob existence/hash、跨项目引用、Job lease、Decision Principal、Evidence provenance、Tex manifest/file refs、Bundle hashes。
+备份包含 SQLite consistent backup、CAS inventory、schema version 和 instance metadata。恢复后运行：foreign_key_check、Artifact Blob existence/hash、跨项目引用、Job lease/run_id、Decision Principal、Evidence provenance、Workspace/Tex manifest/file refs、PTY generation/expiry、Config hash、Intake adoption completeness、Trajectory cursor/event uniqueness、Bundle hashes。
 
-Kernel kill -9 后 WAL 恢复必须保持 Gate、Job、Terminal exit、TeX revision 和 Outbox 一致。恢复流程不得把 running 直接视为 succeeded；过期 lease 进入 retryable。
+Kernel kill -9 后 WAL 恢复必须保持 Gate、Job、Terminal/PTY exit、Workspace/TeX revision、Adoption、Config revision 和 Outbox 一致。恢复流程不得把 running 直接视为 succeeded；过期 lease 进入 retryable，in-progress adoption 只能重驱同一 transaction 或回滚。

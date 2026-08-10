@@ -36,7 +36,19 @@ skills:
   includeCore: true
   includeDomains: [machine-learning, data-science]
   includeVenues: true
+onboarding:
+  enabled: true
+  maxIntakeBytes: 2147483648
+trajectory:
+  publishSafeSessionProjection: true
+  rawDetail: false
+runner:
+  defaultProfileId: local-docker-cpu
+config:
+  source: canonical-registry
 ~~~
+
+该 YAML 只是 Config Schema 的 instance layer；所有字段必须从 canonical registry 生成，未知字段拒绝。Project/Workspace/Session/Target overrides 由 Kernel ConfigDocument 管理，插件不能另建一套 merge/default。Secret 只写 SecretRef。
 
 port=0 必须通过 sidecar handshake 回填，不能把 0 当作客户端 endpoint。Agent 与 headless profile 使用相同 Kernel 数据规则；不同 DSH_HOME 必须得到不同 dataDir。
 
@@ -48,7 +60,7 @@ port=0 必须通过 sidecar handshake 回填，不能把 0 当作客户端 endpo
 
 | 角色 | 工具 |
 |---|---|
-| director | research_project、research_phase、research_gate_request、research_budget、research_status |
+| director | research_project、research_phase、research_gate_request、research_budget、research_status、research_onboarding |
 | scholar/curator | literature_search、paper_resolve、corpus_snapshot、passage_lookup |
 | panel | research_panel、idea_create、idea_compare、novelty_audit |
 | engineer | workspace_snapshot、patch_apply、baseline_prepare、test_run、baseline_verify |
@@ -60,7 +72,9 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 
 ## 5. 命令
 
-唯一顶级命令为 /research，子命令：help、new、list、status、survey、ideas、gates、jobs、reproduce、contract、run、evidence、claims、write、review、export、release。
+唯一顶级命令为 /research，子命令：help、init、new、resume、import、grill、list、status、survey、ideas、gates、jobs、reproduce、contract、run、evidence、claims、write、review、export、release。
+
+`init` 是 new 的引导入口；`import/grill` 只操作 Intake observation/question/proposal。Agent command/tool 不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 只在 standalone Human BFF 完成。
 
 命令只是 ResearchClient adapter，不重复业务逻辑。它使用 invocation.agent.id 解析 session link。错误输出 research: 加稳定错误摘要，不能泄漏内部路径、Token 或上游响应。帮助文本与 i18n 资源生成；宿主命令描述若在注册时固化语言，locale change 时重新注册或保持语言无关。
 
@@ -69,6 +83,8 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 DSH SessionEventMap 可通过 TypeScript declaration merge 扩展。插件可以追加展示事件并调用 session flush，但科研业务审计仍以 Kernel Outbox 为权威。
 
 推荐 Session 事件只保存关联：project_id、kernel_event_id、gate_id/job_id/build_id 和安全摘要。原始 TerminalLog、Artifact 字节和 TeX 文件不复制进 Session 日志。Tool call/result 使用 DSH presentation metadata 生成可回放终端卡和 Artifact link。
+
+独立 UI 的 Session Trajectory 由 `SafeSessionTrajectoryAdapter` 提供：输出稳定 session/node/parent/mode/status/timing/四桶 token/安全 tool summary 与业务 refs，默认删除 prompt、raw tool args/result、provider payload、cwd/env/secret。Kernel Outbox 另行生成 Research Trajectory；两者不能互相覆盖。
 
 ## 7. 子代理与 Durable Orchestrator
 
@@ -81,6 +97,10 @@ research_panel 必须：
 - 将 API/模型用量写预算；
 - 外部文本保持 untrusted；
 - 返回结构化面板结果而不是让子代理直接写权威状态。
+
+每次 `ctx.subagents.start` 保存 exact parent session、child session、role/kind、one-shot/continuable、created_at 与 safe refs。standalone Topology 只通过 BFF adapter 列 direct children、分页读取 cold history，读取不得激活 Agent；进入 child 使用 parent+child+mode address 和 breadcrumb。continuable follow-up 必须由服务端重新验证 exact live parent、项目 membership 和 capability；首版浏览器不提供 spawn/stop/cancel。
+
+DSH Web 的 trajectory/subagent React plugin、slot、SessionHistoryFace 和 localStorage 不能直接打包到 Scholar。只可移植纯折叠、树、时间线、virtual row 和 ARIA 语义，接口以 trajectory-subagents.md 为准。
 
 ## 8. Skill 发现与打包
 

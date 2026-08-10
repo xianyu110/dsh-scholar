@@ -1,6 +1,6 @@
 # 当前实现与目标规范差距
 
-> 信息性文档，校准于 2026-08-09，审阅基线 `main@7adc722`。本文件描述当前仓库，不覆盖规范性文档。状态必须由源码、当前提交的自动化验收和 CI 证据共同决定；历史测试计数、旧 README、手工截图和未绑定提交的日志不能继承为当前证据。
+> 信息性文档，校准于 2026-08-10，最新审阅基线 `main@cf6a8a8`。本文件描述当前仓库，不覆盖规范性文档。状态必须由源码、当前提交的自动化验收和 CI 证据共同决定；历史测试计数、旧 README、手工截图和未绑定提交的日志不能继承为当前证据。
 
 ## 1. 状态定义与证据规则
 
@@ -49,6 +49,17 @@
 | RUN-01c | MetricsFileV1 强制（§4：formal/baseline/pilot/reproduce 成功必须存在 output_contract.metrics 指定路径的 MetricsFileV1） | 已实现未验收 | runner（workers/runner-gateway）对 secure 作业：缺 output_contract.metrics→code_error 失败；缺文件/非 MetricsFileV1（schema_version=1+非空 metrics）/run_id 不匹配/contract_id 不匹配/seed 缺失或非有限数/NaN/Infinity/重复 metric/非 Contract metric→不得 succeeded；secure 作业禁用 stdout fallback（index.ts:908-1011）。kernel submitJob 注入 payload.contract_metrics（contract primary+secondary，kernel.ts:1322、1330）；runner 注入容器环境 DSH_RUN_ID/DSH_CONTRACT_ID/DSH_SEED（index.ts:741-743）。证据（本会话运行）：golden-v2 29/29、clean-room 9/9、release-bundle eval 21/21 + release-bundle-tests 8/8、demo-full 15/15、demo-standalone 15/15，所有 secure 作业真实写 MetricsFileV1 文件；尚未绑定 CI job 报告，待验收 |
 | RUN-02 | 固定容器安全基线（images.lock digest 强制） | 已实现未验收 | Docker flags 基本具备；configs/runner-profiles/images.lock.json 已提交（schema_version=1，node_fixture=node@sha256:c610fcdf…，texlive=texlive/texlive@sha256:8957c916…）。kernel submitJob 对 secure 作业强制：baseline/pilot/formal/reproduce 缺 digest→422 image_digest_required；tag（node:22-alpine）、latest、锁外 digest→422 image_digest_untrusted；latex-compile 缺 digest 由内核注入锁内 texlive 条目，显式提供时也必须与锁完全一致（packages/research-kernel/src/images-lock.ts validateImageDigest；DSH_IMAGES_LOCK 可覆盖 lock 路径）。单元测试新增 4 个 digest P0 用例，pnpm test 228/228。所有 eval/security 脚本已改用锁内 digest。尚未绑定 CI job 报告，待验收 |
 | TERM-01 | 实时有序可恢复 Terminal | 已实现未验收 | reconnect-after-seq（按 seq 续传无重复无缺失）、retention-gap（淘汰 seq 返回 gap+dropped bytes）、overflow truncated+log Artifact 可下载、exit-replay（exit_code/signal/timed_out/cancelled 可读）、log-authz（跨项目 404）、cancel-timeout-distinct。证据：tests/security/run-terminal-tests.sh 11/11、tests/unit/terminal.test.ts；UI 侧 DOM 有界/ANSI 消毒/backpressure 属浏览器层，未纳入本行验收 |
+| PTY-01 | 可操作 Interactive Terminal | 未实现 | 当前 Runner `stdio=['ignore','pipe','pipe']`，UI Terminal 只有 SSE 读取，无 stdin/resize/signal/PTY/reconnect control。关闭条件：独立 PtySession/Events、Local/Remote PTY adapter、WebSocket 或等价双向协议、AuthZ/generation/client_seq/TTL/gap、真实 TUI 浏览器验收；证明不能产 Evidence。 |
+| WORK-01 | VS Code 式通用 Workspace | 部分 | 当前只有 TeX text workspace 与有限 manuscript textarea；无通用 code/scratch tree、binary CAS、tabs/search/watch/upload、move/history UI、Problems 和集成 PTY。关闭条件：统一 Workspace Interface/DB/CAS/Revision/ETag，TeX 作为 facade，桌面/窄屏与冲突/路径/二进制验收。 |
+| TEX-03 | 保存后实时 LaTeX Preview | 未实现 | 当前 save/build 分离且 2s 轮询，无 debounce/supersede preview、live build stream、freshness；保存冲突后仍可能继续 compile。关闭条件：save-success event→preview、旧 PDF stale、live log/diagnostics/PDF、显式 Compile 固定 manifest 且与 preview 权威分离。 |
+| RUN-REMOTE-01 | Local Docker + 受控远端 Runner Fleet | 未实现 | 当前 runner 只有 subprocess/docker，CLI 默认 subprocess；无 target/profile registry、mTLS Remote Agent、capability/health/draining、CAS resume/partition spool/Remote PTY。关闭条件：同一 ExecutionPlan/lease/run_id/Manifest 跨 Local/Remote，离线 fail closed 且不静默降级。 |
+| CONFIG-01 | 所有配置由 canonical Config Schema 管理 | 未实现 | 当前配置散落 Cordis schema、CLI、env 和 UI preferences，仅有极小 ExecutionConfig；无 scope layer、effective provenance、revision/hash、SecretRef、生成 Settings。关闭条件：registry 生成 Zod/JSON Schema/template/CLI/HTTP/UI，覆盖所有运行项和 security floor，运行中对象 pin hash。 |
+| ONBOARD-01 | Init/Resume/Upload + Grill Me 接入任意阶段 | 未实现 | 现有 create/new 总是 DRAFT + Scope Gate；无 Intake、scan、question taxonomy、phase proposal、Human adoption/merge 或安全阶段映射。关闭条件：research-onboarding.md 全契约与 pre-accept 零权威写、Gate/Run/Evidence 防伪、恢复/GC/幂等验收。 |
+| UPLOAD-01 | 用户文件与研究包上传 | 部分 | 现有 v1 JSON/base64 Artifact 和 text-only TeX；BFF 强制 JSON，无 multipart/staged browser intake、binary Workspace asset 或 resume/preflight/quarantine。关闭条件：<=32MiB multipart + intake staged upload、hash/scan/path/archive/security/rollback/recovery UI 验收。 |
+| GUIDE-01 | 全程结构化下一步引导 | 部分 | Kernel 只返回按 status 生成的 `string[]`，UI 只能展示文案，缺 action code/state/reason/required/revision/capability/route 和恢复语义。关闭条件：NextAction[] 权威投影、legacy unknown 安全退化、每阶段/Intake/失败/Gate 浏览器验收。 |
+| TRAJ-01 | 移植 DSH Web Trajectory | 未实现 | Scholar UI 无 trajectory tab/projection/history/timeline；DSH 组件依赖 slot/SessionHistoryFace，不能直接复用。关闭条件：standalone safe projection、Research vs Session 泳道、分页/SSE/gap/redaction/virtualization/inspect 与 10k node 验收。 |
+| SUBAGENT-01 | 可见拓扑并进入 child | 部分 | `research_panel` 能启动独立 child 并返回 summary/child_id，但 UI 无 direct-child tree、实时 activity、breadcrumb/enter/history/followup；无 standalone exact-parent API/redaction。关闭条件：trajectory-subagents.md list/history/stream/followup、one-shot 只读、history 不激活、权限/脱敏/a11y 验收。 |
+| UI-SIMPLE-01 | 简洁页面与 Settings 渐进披露 | 未实现 | 当前首屏只有 Welcome/Create，导航仍是全量 tabs，Settings 只有连接/主题/偏好且无 runner/workspace/terminal/TeX/agent/config provenance。关闭条件：Start 三卡、四个 primary tabs、More/深链可达、Accordion 默认折叠、640/720/1024 与键盘验收。 |
 | TEX-01 | TeX workspace/editor/version | 已实现未验收 | expected_version 语义修正:0=create-if-absent(UI 新建文件路径),HTTP schema 由 positive 改为 nonnegative;已存在+0→409 冲突;tree/GET 返回 path/kind/media/version(TexFileKind + fileMediaType 派生);保存 expected version→新 revision、并发 409、delete/move 版本校验;compile 冻结 manifest(既有)。证据:tests/unit/tex-workspace.test.ts + tex-build.test.ts 12/12、curl 集成(0→200、重复→409、tree 含字段);dirty 判断/窄屏布局属 UI 层待验收 |
 | TEX-02 | latex-compile/诊断/PDF | 已实现未验收 | 锁内 texlive digest 强制（缺 digest 内核注入 texlive@sha256:8957c916…）；compile 冻结 manifest；诊断含 file/line 定位（tex-diagnostics.ts）；shell-escape/network 拒绝（docker flags）；build history 可重放。证据：evals/latex-compile-e2e.sh 13/13（含 write18 inert）、tests/unit/tex-kernel.test.ts；实时 Build Terminal/freshness 展示属 UI 层 |
 | UI-01 | standalone-only 单一浏览器 UI | 已实现未验收 | 根嵌入面和旧 bridge 已删除；需当前提交的 clean package、真实 404、无 host/slot/dshClient 负向 CI 证据 |
@@ -67,9 +78,34 @@
 | SELFMOD-01 | dev-only Cordis self tools | 已实现未验收 | production 静态否定(tarball/lib/src 无 cordis self 工具字符串、依赖图无 dsh-tool-cordis、verify-docs fail-closed)+ **真实 DSH host fixture 动态验收**:隔离 DSH_HOME 下 --profile web --dump-config 生产 0 引用、叠加 dev overlay patch 后 tool-cordis 出现在组合配置树(2 引用)、无 opt-in env 时 start-selfmod-dev.sh 拒绝启动。证据:tests/security/run-selfmod-tests.sh 19/19(含 host fixture 组,已接入聚合器);cordis_inspect 六类信息的会话级 inspect 仍属 harness 深层交互,记录为后续 |
 | REL-01 | 自包含 Release Bundle + bundle-only clean-room | 已实现未验收 | build-bundle.sh 在 manifest 增加 runtime 段（node 版本、kernel_bin/runner_bin sha256、images.lock 的 node_fixture/texlive digest）；reproduce.sh 把 bundle 复制到空目录执行、拒绝指向原 checkout 的 KERNEL_BIN/RUNNER_BIN（external checkout access prohibited）、node 版本不匹配→fail、作业重放强制使用锁内 digest；reproducibility-report.json 增加 bundle_manifest_sha256、runtime_verified、images_used、compared{manifest_hash,metrics,analysis,run_manifest,tex}，任一 false→status=fail。证据：tests/security/run-release-bundle-tests.sh 16/16（含 checkout 拒绝用例与 report 新字段断言）、run-release-eval.sh 21/21（reproduce 段 pass）；尚未绑定 CI job 报告，待验收 |
 | CI-01 | 完整阻断 CI | 已实现未验收(本地网关) | 用户决策不用 GitHub Actions;新增 scripts/ci-gate.sh 本地 CI 网关(一条命令:pnpm test+verify-docs+CI=true 聚合器+plugin typecheck,exit 非零即阻断,--skip-security 可选并注明降级);根 package.json test:ci。证据:bash -n 通过、各步骤单独全绿;DSH host fixture(SELFMOD 动态 overlay、Agent 全链)仍待外部 host 环境 |
-| DOC-01 | Markdown 是生成权威 | 已实现未验收 | 本次校准后文档集一致:verify-docs.mjs 对 16 篇文档的结构/链接/contract 片段/删除面/SELFMOD 违规 fail-closed;--diff-check 覆盖全实现面并要求 ledger 同步移动;矩阵/acceptance/USAGE 无自相矛盾(校准完成)。证据:node scripts/verify-docs.mjs 与 --diff-check origin/main 通过;持续语义一致性由 ci-gate 的 verify-docs 步骤强制,待长期观察 |
+| DOC-01 | Markdown 是生成权威 | 已实现未验收 | 2.3 文档集含 research-onboarding 与 trajectory-subagents；verify-docs.mjs 对 18 篇文档的结构/链接/关键 contract/删除面/SELFMOD 违规 fail-closed，`node scripts/verify-docs.mjs` 当前通过 18/18。`--diff-check` 和持续语义一致仍需当前提交/CI 证据，不能把静态验证当功能验收。 |
 | DOC-02 | change-aware docs sync | 已实现未验收 | --diff-check 覆盖扩展到根 src/、configs/、migrations/、scripts/(除自身)、tests/(unit+security)、docs/、evals/;改动范围必须伴随 ledger 移动;base ref 不可达保持 fail-closed。证据:node scripts/verify-docs.mjs --diff-check origin/main 通过(本会话全量改动已同步);待长期语义一致性持续验证 |
-## 4. 2026-08-09 审阅证据
+
+## 4. 2026-08-10 当前代码审阅阻断项
+
+审阅范围：`7adc722...cf6a8a8`（`main` 与 `origin/main` 一致，109 个文件，约 `+18,252/-8,022`）。本节是对 §3 历史实现声明的当前校准；同一 ID 有冲突时，必须采用本节的较低状态，直至源码修复、负向验收和当前提交证据同时关闭。
+
+| 优先级 | 影响 ID / 当前状态 | 当前阻断 | 强制关闭条件 |
+|---|---|---|---|
+| P0 | GOV-01、API-01：部分 | standalone 默认 `principal=null`，membership 直接放行；v2 create 继续信任 body 的 creator/tenant，项目列表在 Principal 缺失时返回全量。 | 缺失/非法 Principal 对除 health 外的 list/create/read/write 全部 fail-closed；BFF 从认证会话构造 Principal 并覆盖/忽略客户端 creator/actor/tenant；补默认启动、伪造身份和跨项目负向测试。 |
+| P0 | API-01、EVID-01：部分 | `jobs-claim`、`runner-keys`、`recover/leases` 无 service 身份认证；Evidence verified/accept 只比较可伪造的 `x-service-principal` 字符串。 | internal route 使用独立 service bearer/mTLS 或等价不可伪造身份；浏览器 bearer 和自报 header 均拒绝；密钥注册、claim、recovery、verified/accept 各有负向测试。 |
+| P0 | GOV-02、RUN-01a：部分 | v1 contract approve 可绕过 Human Gate；Contract Gate payload 可引用另一项目 Contract，审批只按全局 contract ID 更新。 | 删除/封闭独立 approve 绕行；Decision、Gate、Contract、Project 在同一事务内校验并冻结；跨项目 target 和并发审批必须失败且无部分写。 |
+| P0 | RUN-01、RUN-01b、TERM-01：部分 | claim 写入的 durable `runs.run_id` 未返回给 Runner，Runner另建 run ID；Terminal frame 只校验 generation，不校验 owner/token/当前 attempt，SSE 在首帧前可能锁定 job ID。 | claim 返回唯一 attempt run ID 并贯穿 Manifest/Terminal/Evidence；每帧校验 job/run/owner/generation/token；首帧前连接、retry 新 attempt、replay/gap/exit 和撤权均有真实 SSE 验收。 |
+| P0 | RUN-02、RUN-01c、TEX-02：部分 | TeX engine 与文件路径直接拼入 shell；Metrics 路径可通过 `../` 逃出 outputs；默认 subprocess Runner 允许任意 smoke script 在宿主执行。 | engine 固定 enum/命令数组，TeX path 严格字符与根内校验；metrics realpath 必须位于 outputs；smoke 默认容器，subprocess 仅允许签名/固定 fixture；加入命令注入、路径穿越和宿主执行负向测试。 |
+| P1 | TEX-01、TEX-02、TERM-01：部分 | snapshot 只冻结 hash、Runner 后取当前文件；清空非空文件时 dirty 判断可能为 false，save 409 后 compile 仍继续；Manuscript 未接 build Job 的实时 Terminal，也无 PDF freshness。 | snapshot 冻结可物化字节；保存失败立即终止编译；dirty/clear/revert 与 document revision CAS 覆盖；编译按钮防重复；UI 展示同一 Job 的 live stdout/stderr、完整 log Artifact、输入 revision 与 stale PDF。 |
+| P1 | PTY-01、WORK-01、TEX-03、RUN-REMOTE-01、CONFIG-01：未实现/部分 | 当前只读 Terminal、TeX-only text store、轮询构建、本机 subprocess/docker 和分散配置，不能满足可操作研究工作台。 | 先完成深 Interface/Schema/migrations，再完成 Local/Remote adapter 与 UI；阻断 acceptance 的 workspace/pty/remote/config/live-preview 全部零 SKIP。 |
+| P1 | ONBOARD-01、UPLOAD-01、GUIDE-01：未实现/部分 | 无法安全接入外部已完成研究，普通 upload 会丢 provenance/阶段语义；用户下一步只是字符串提示。 | Intake quarantine/scan/Grill/Proposal/Human Adoption、结构化 NextAction、上传恢复/冲突/GC 和 Gate/Run/Evidence 防伪全部实现。 |
+| P1 | TRAJ-01、SUBAGENT-01、UI-SIMPLE-01：未实现/部分 | DSH Web 轨迹/子代理目录未移植，页面不能看到拓扑或进入 child；导航与配置未按简洁渐进披露重构。 | standalone safe trajectory projection、topology enter/breadcrumb/exact-parent/redaction、四 primary tabs + More + 折叠 Settings、i18n/a11y/10k node 验收。 |
+| P1 | UI-02、UI-03：部分 | Terminal 元数据/exit、已知状态 pill 仍有硬编码英文；tab/pipeline 文案在初始化时翻译，切换 locale 后不会重建，当前静态 parity 不能证明运行时全页 i18n。 | 所有已知 UI chrome 使用 key；locale 切换重建 tab、pipeline、modal、Terminal 与状态；zh/en 浏览器测试覆盖运行时切换、缺 key 告警、键盘和窄屏。 |
+| P1 | DSH-01、SIDE-01：部分 | plugin 在 `sidecar.start()` 前读取 endpoint，`port=0` 直接抛错；tool/listener disposer 未收集，tool context 使用全局 mutable ref，多实例或重载会串线/泄漏。 | 先 await start 再发布 endpoint/client；所有 register/on/plugin 资源纳入 Cordis disposer；上下文改为实例闭包；真实 host fixture 覆盖 port 0、双实例、reload/dispose。 |
+| P1 | REL-01：部分 | bundle reproduce 仍读取外部 `KERNEL_BIN/RUNNER_BIN`；clean-room 复用原 `$WORK/code` 与旧 CAS，比较只覆盖浅层数量/存在性。 | 空目录、无原 checkout/DB/CAS/网络下仅从 Bundle 重放；外部 runtime/path 读取立即失败；逐字段比较 manifest、metrics、analysis、RunManifest、TeX 输入与 PDF 结构。 |
+| P1 | CI-01、DOC-01、DOC-02：部分 | `ci-gate --skip-security` 与 LaTeX 缺依赖会 `SKIP+exit 0`；fencing 套件把不存在的 Artifact finalize（404）计为 PASS；当前 shell 无 `pnpm`，DSH 插件脚本 37/41，且把 `npm pack` prepare 失败误报成四个 skill 缺失。 | CI 必跑项零 SKIP，缺依赖非零；不存在的必需 route 必须 FAIL；先断言 probe/pack 命令成功再判断产物；当前 commit 在完整工具链重跑全部矩阵并绑定机器可读报告。 |
+
+额外阻断：Runner `completeJob(status=succeeded)` 在缺失 RunManifest 时仍可成功，Job 与 Run 更新也不在同一事务；正式 Analysis 对重复 seed 静默覆盖且统计公式与规范 golden vector 不一致；draft/unverified Evidence 可进入 Manuscript。三项分别归入 RUN-01、STAT-01/STAT-01b、EVID-01，在关闭上述 P0 前不得宣称正式研究链可用。
+
+本轮只读验证：`node scripts/verify-docs.mjs` 为 16/16；`bash tests/security/run-fencing-tests.sh` 报 12/12，但包含上述 404 假阳性；`bash tests/security/run-dsh-plugin-tests.sh` 为 37 passed/4 failed，根因为当前环境缺 `pnpm` 导致 `npm pack` prepare 失败后被脚本误诊；`pnpm test` 未运行（`pnpm: command not found`）。这些结果都不能升级状态。
+
+## 5. 2026-08-09 审阅证据
 
 审阅快照：`main@7adc722`，当时与 `origin/main` 一致且工作区干净。
 
@@ -84,21 +120,21 @@
 
 上表是审阅基线（`main@7adc722`）时点的证据快照，只描述当时观察。基线后本会话的变更与新增证据以 §3 矩阵行（尤其 RUN-01a/b/c、STAT-01a、CI-01a、RUN-02）的“当前阻断与关闭条件”为准；与上表冲突处（如聚合器对 SKIP 的处理、lower-is-better 的启用状态）以后者为准。
 
-## 5. 后续执行硬顺序
+## 6. 后续执行硬顺序
 
 以下不是建议顺序，而是关闭状态的依赖顺序。前一批的阻断场景未通过时，不得把后一批宣称为完成或发布就绪：
 
 1. **P0 Governance**：Principal、tenant、membership/role AuthZ、Human Gate、CSRF、service identity；
 2. **P0 Formal execution**：approved Contract、immutable snapshot/data、fixed image digest、strict lease/Run/Manifest、MetricsFile；
 3. **P0 Evidence/Release**：verified→accepted、Claim only accepted、Analysis provenance、bundle-only clean-room；
-4. **P1 Product surfaces**：Terminal 完整日志/cancel、TeX Build Terminal/diagnostics/freshness、全页面 i18n；
+4. **P1 Product surfaces**：Workspace/PTY/Remote Runner/Config、Terminal 完整日志、LaTeX live preview、Init/Upload/Grill/NextAction、Trajectory/Subagent topology、简洁导航与全页面 i18n；
 5. **P1 DSH/package**：实例闭包/disposer、sidecar handshake、canonical tools/commands、Skill 选择、clean install、自修改隔离验收；
 6. **P1 CI/docs**：零 SKIP、root/full/browser/DSH/release jobs、diff base fail-closed、文档语义一致；
 7. **Final validation**：当前提交运行全部阻断命令、Golden Path、100 次 recovery、bundle-only clean-room，并绑定机器可读证据。
 
 任一 P0 为“未实现/部分/已实现未验收”，产品只能保持 Security Alpha，不得用于无人值守正式研究或公开发布。
 
-## 6. 文档与状态更新规则
+## 7. 文档与状态更新规则
 
 每个实现或修复变更必须在同一变更集内：
 
@@ -111,3 +147,5 @@
 7. README、USAGE、acceptance、repository blueprint 与本文件有矛盾时，合并与完成声明均阻断。
 
 只有对应 acceptance 场景在当前提交和目标 CI 环境全部通过，状态才能从“部分”进入“已实现未验收”，再进入“已验收”。修复代码但未补规范、验收或状态，视为未完成。
+
+本次 2.3 规范更新已运行 `node scripts/verify-docs.mjs`（18 documents）与 `git diff --check`；它只证明 Markdown 结构、链接和约束片段一致。PTY、通用 Workspace、实时 Preview、Remote Runner、Config Registry、Onboarding/Upload/Grill/NextAction、Trajectory/Subagent Topology 和简洁 UI 的实现状态仍按 §3 保持“未实现/部分”。

@@ -25,6 +25,8 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 - Project 角色至少为 owner/PI、researcher、operator、auditor、viewer；
 - 读 Terminal 原始日志是独立权限 job_log_read，不能假设查看 status 就可读 secret-bearing log；
 - 编辑 TeX 需要 document_write，编译需要 job_submit 和 document_read；
+- 编辑 Workspace 需要 workspace_write，打开/控制 PTY 需要 terminal_write；读取 Trajectory summary/detail 与 subagent follow-up 是三个独立 capability；
+- Intake begin/upload 可由 researcher 请求，adoption/merge 只允许 PI Human Principal；DSH Agent 不获得 accept；
 - 项目无权限与不存在都返回 404；
 - Gate、target freeze、Decision、Project revision 和 Outbox 单事务提交。
 - 安全回归必须覆盖 forged actor 被忽略、非成员跨项目 404、PI/member 变更、CSRF token 注入/轮换和撤权后 SSE 关闭。
@@ -35,6 +37,7 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 - Cookie 使用 HttpOnly、Secure（HTTPS）、SameSite；mutation 校验 Origin 和 CSRF；
 - standalone Token 保存在 0600 文件，浏览器 localStorage 只用于显式本地解锁；团队部署禁止 localStorage bearer；
 - 默认 16 MiB body、60 req/min/IP；上传和 Terminal 连接有独立配额；
+- research package 使用 intake staged upload，不得暴露 Runner internal stage；每个 stage 绑定 Principal/intake/TTL/offset/hash；
 - 错误脱敏，禁止返回 SQL、绝对路径、环境、Token、stack；
 - Artifact 和 SSE 真正流式，保留媒体类型，禁用代理缓冲；
 - CSP：default-src self、script-src self、object-src none、base-uri none、frame-ancestors self、img-src self blob data、connect-src self；
@@ -48,6 +51,7 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 - 日志写入前过滤 Authorization、Cookie、常见 API key、DSH_HOME 和完整环境 dump；
 - 过滤不能代替最小环境：Runner 只得到白名单变量；
 - CI 运行 secret scan，Release Bundle 运行二次扫描。
+- 所有配置 secret 只以 SecretRef 存储和返回；Settings 不显示 value，effective config、argv、Manifest、Trajectory 和 diagnostic export 都必须脱敏；
 
 ## 5. Runner 隔离
 
@@ -56,6 +60,8 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 禁止 Docker socket、privileged、host namespace、宿主 Home、设备透传（除政策批准的 GPU）、任意 secret 和可变 tag。取消、超时、Runner 崩溃都清理进程树与容器；孤儿扫描是启动恢复的一部分。
 
 TeX source 同样不可信。latex-compile 必须 no-shell-escape、禁网、固定 TeX Live digest、资源限制；.sty/.cls 不能获得宿主访问。
+
+Remote Runner 使用 mTLS service identity、target allowlist、签名 ExecutionPlan、lease generation/token 和 CAS hash。远端地址/证书/SSH bootstrap 只存在服务端 Config/Secret store；浏览器/Job 不得提交 endpoint 或 credential。网络分区、target offline 和 capability mismatch fail closed，不回退宿主 subprocess。
 
 ## 6. 路径与文件
 
@@ -66,6 +72,8 @@ TeX source 同样不可信。latex-compile 必须 no-shell-escape、禁网、固
 - TeX 保存使用 version CAS 和原子 rename，冲突不能覆盖；
 - Patch 使用 git apply --check 和 git apply，不维护宽松自制 parser；
 - Artifact download 必须 project-scoped 并验证 Blob hash。
+- Intake archive 额外拒绝解压炸弹、嵌套深度、大小写冲突和 parser 主动内容；扫描/解析在无网、无执行、受限 sandbox 中，采用前 bytes 只在 quarantine 可见；
+- Workspace watch/search/upload 与 TeX file facade 使用同一 path/CAS/revision policy，不能维护较宽松旁路。
 
 ## 7. Prompt Injection 与外部内容
 
@@ -93,8 +101,20 @@ TeX source 同样不可信。latex-compile 必须 no-shell-escape、禁网、固
 - lease fencing 拒绝旧 Runner 注入 chunk；
 - 下载日志使用 text/plain 或 application/x-ndjson，不能当 HTML；
 - 搜索、复制、导出不得把隐藏的已过滤 secret 恢复出来。
+- Interactive PTY 与 Run Terminal 完全分离；PTY input/resize/signal/attach/close 每次校验 Principal、project、terminal_write、generation 和 client_seq；
+- PTY 只接受 allowlisted shell preset 与根相对 cwd，不接受 hostname、SSH credential、host path、Docker socket 或任意 argv；
+- PTY 输出不能成为 Metrics、Manifest、accepted Evidence 或 Gate Decision；权限撤销立即关闭，idle TTL 与 retention 有界且可审计。
 
-## 9.1 Standalone BFF 与本地监听
+## 9.1 Onboarding、Trajectory 与 Subagent
+
+- pre-accept Intake 只能写隔离表/临时 CAS；Observation、Grill answer、PhaseProposal 永远是 unverified，不得制造 Project history、Gate Decision、Run、TerminalLog、accepted Evidence 或 supported Claim；
+- Adoption 只由 PI Human BFF，校验 proposal/target revision、所有映射与 quarantine，在单事务完成或全部回滚；
+- imported logs/results 仅为 Artifact + ImportedRunObservation/legacy Evidence；没有本 Kernel 接受的签名 Manifest 时要求 clean rerun/reanalysis；
+- Research Trajectory 只投影 Outbox；Session Trajectory 默认只返回 allowlisted summary。raw prompt、tool args/results、provider payload、cwd/env/secret 不得透明暴露；
+- subagent list/history/followup 服务端校验 exact parent/child/mode 和 project membership；history/cold read 不激活 Agent；one-shot、diagnostic、parent offline 或无 capability 必须只读；
+- Session detail 使用 redaction、bounded preview/CAS spill 和 TTL；purge 产生 redacted/gap 审计，不能删除对应 Kernel Outbox。
+
+## 9.2 Standalone BFF 与本地监听
 
 - `--no-token` 只可绑定 `localhost`、`::1` 或 `127.0.0.0/8`；任何 wildcard、LAN 或外部 hostname 必须在 listen 前拒绝；
 - 开启 token 时，明文 token 只存在于 0600 token file/受控进程通道和浏览器当前会话，不进入 argv、服务日志、错误响应或 URL；
@@ -132,12 +152,12 @@ Scholar Connector 只连接 api.openalex.org、api.crossref.org、export.arxiv.o
 
 ## 13. 审计与保留
 
-Gate、Principal、Project mutation、Job、Terminal gap、Artifact、Evidence、TeX save/build、Release 和 self-mod tool call 都可关联 request_id、session_id、event_id。业务审计保存在 Kernel Outbox/DB；DSH Session 只做关联展示。
+Gate、Principal、Project mutation、Intake/Adoption、Job、Terminal/PTY gap、Artifact、Evidence、Workspace/TeX save/build、Trajectory redaction/follow-up、Release 和 self-mod tool call 都可关联 request_id、session_id、event_id。业务审计保存在 Kernel Outbox/DB；DSH Session 只做关联展示。
 
 日志、Artifact、源稿和数据按 Project retention policy 清理。删除先生成审计记录并保证引用完整性；released Bundle 使用不可变 retention。
 
 ## 14. 阻断验收
 
-至少包括：Agent Gate 绕过、伪 Principal、跨项目读取、CSRF、Token 泄漏、恶意 SVG/HTML/ANSI/TeX、路径与 symlink、formal subprocess、message-only success、旧 lease chunk/complete、无签名 Manifest、伪 verified Evidence、Terminal overflow/gap、TeX shell escape、生产 tool-cordis 存在、self-mod 冲突回滚、Release 未批准发布。
+至少包括：Agent Gate/Adoption 绕过、伪 Principal、跨项目读取、CSRF、Token/Config/Trajectory 泄漏、恶意 archive/SVG/HTML/ANSI/TeX、路径与 symlink、formal subprocess、远端降级、message-only success、旧 lease chunk/complete、无签名 Manifest、导入结果伪 Run/Evidence、Terminal/PTY overflow/gap/越权输入、subagent exact-parent 绕过、TeX shell escape、生产 tool-cordis 存在、self-mod 冲突回滚、Release 未批准发布。
 
 i18n 资源也是发布资产：缺失 key 必须 fail loud，不能把 wire error、外部论文或 Terminal 内容送入机器翻译；翻译插值只接受预定义参数并以 text node 渲染，不能通过 locale 字符串引入 HTML。

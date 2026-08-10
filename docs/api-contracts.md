@@ -51,7 +51,7 @@ Zod 错误 details 只返回字段路径和安全消息。上游 5xx、文件系
 
 返回 ok、instance_id、protocol_version、schema_version、database_id、capabilities、time。method 和路径必须精确匹配；错误百分号路径返回 400，不能使进程异常。
 
-capabilities 至少包含 terminal_stream、tex_workspace、latex_compile、signed_manifest、clean_room 和 locales。
+capabilities 至少包含 terminal_stream、interactive_terminal、workspace_files、tex_workspace、latex_compile、latex_live_preview、remote_runner、config_registry、research_onboarding、trajectory、subagent_topology、signed_manifest、clean_room 和 locales。
 
 ## 4. Project 接口
 
@@ -66,7 +66,7 @@ capabilities 至少包含 terminal_stream、tex_workspace、latex_compile、sign
 | POST | /bff/research/projects/{id}/stop | PI；expected_revision、reason |
 | POST | /bff/research/projects/{id}/fail | PI/Policy；expected_revision、reason、failure_class |
 | POST | /bff/research/projects/{id}/refine | PI；expected_revision、target phase、reason |
-| GET | /v2/projects/{id}/projection | Project、pending gates、jobs、budget、counts、next_actions、capabilities |
+| GET | /v2/projects/{id}/projection | Project、pending gates、jobs、budget、counts、结构化 next_actions、capabilities |
 | POST | /v2/projects/{id}/transitions | to、expected_revision、reason；Gate 状态永远 422 |
 | POST | /v2/projects/{id}/session-links | 只绑定调用 Principal 当前 session_id；客户端不能提交任意会话 |
 | GET | /v2/session-links/current | 从调用 Principal 当前 session 返回 project_id |
@@ -114,7 +114,7 @@ Contract approval 只能由 Gate 事务发生，没有独立 approve 路由。
 
 ### POST /v2/projects/{id}/artifacts
 
-浏览器/用户上传只接受 <=32 MiB multipart/form-data；更大输入必须通过受控数据导入模块或 internal staged upload，v2 不提供浏览器大文件 upload session。服务端计算 SHA-256，不信任客户端 hash。请求 metadata 包含 kind、media_type、file_name 和 provenance。
+浏览器/用户上传只接受 <=32 MiB multipart/form-data；更大输入和研究包必须通过 `/v2/intakes` 的受控 staged upload，不能使用 Runner internal stage。服务端计算 SHA-256，不信任客户端 hash。请求 metadata 包含 kind、media_type、file_name 和 provenance。
 
 ### GET /bff/research/projects/{project_id}/artifacts/{artifact_id}
 
@@ -252,3 +252,85 @@ standalone 同源直接暴露 `/v2` 和 `/bff/research`。`/research-api` 与 `/
 ## 15. Locale 与错误文案
 
 zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返回。health.capabilities.locales 返回 ['zh','en'] 和 locale_contract_revision。Kernel/BFF 返回稳定 error.code 和不含 secret 的英文诊断 message；UI 可翻译已知 code 的 chrome，但 details、论文、Terminal 和 TeX raw message 保持原文。Accept-Language 不得改变业务计算、hash、排序或持久化内容。
+
+## 16. Research Onboarding、Upload 与 Grill Me
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/v2/intakes` | Human/Agent request；begin，Idempotency-Key |
+| GET | `/v2/intakes` | 当前 Principal 的可见 Intake 分页 |
+| GET | `/v2/intakes/{id}` | 状态、upload/scan、questions、proposal、安全 refs |
+| POST | `/v2/intakes/{id}/artifact-stages` | 创建 intake-scoped staged upload |
+| PUT | `/v2/intake-artifact-stages/{stage}/content` | Content-Range 分块/幂等重传 |
+| POST | `/v2/intake-artifact-stages/{stage}/finalize` | 复算 hash/size，进入 scanning |
+| DELETE | `/v2/intake-artifact-stages/{stage}` | abort，幂等 |
+| POST | `/v2/intakes/{id}/scan` | 启动/重用静态扫描结果 |
+| POST | `/v2/intakes/{id}/grill-answers` | Human assertion + question revision |
+| POST | `/v2/intakes/{id}/proposals` | 生成确定性阶段/映射 proposal |
+| POST | `/bff/research/intakes/{id}/accept` | PI Human adoption；expected proposal/target revision |
+| POST | `/bff/research/intakes/{id}/reject` | Human reject/cleanup request |
+
+`accept` 只存在于 BFF Human 面；Agent tool schema 不生成该方法。scan/parser/LLM 永远不能直接 mutation Project。单文件 Artifact 上传与 research package intake 是两个明确入口，UI 不得把 internal Runner stage 暴露给用户。状态、映射、错误和幂等见 research-onboarding.md。
+
+## 17. 通用 Workspace 与 Upload
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST/GET | `/v2/projects/{id}/workspaces` | 创建/列出 code、manuscript、scratch workspace |
+| GET | `/v2/workspaces/{id}/tree` | 当前 revision 文件树 |
+| GET/PUT/DELETE | `/v2/workspaces/{id}/files/{path}` | bytes/text 读取；版本化写/删 |
+| POST | `/v2/workspaces/{id}/files` | create-if-absent text |
+| POST | `/v2/workspaces/{id}/assets` | multipart binary upload <=32 MiB |
+| POST | `/v2/workspaces/{id}/moves` | 原子 move/rename |
+| GET | `/v2/workspaces/{id}/history` | 文件/workspace revision |
+| POST | `/v2/workspaces/{id}/search` | 有界全文/路径搜索 |
+| GET | `/bff/research/workspaces/{id}/events?after_seq=N` | watch subscribed/change/gap |
+| POST | `/v2/workspaces/{id}/snapshots` | 冻结 archive + manifest |
+
+所有 path、ETag、Revision 和 multipart 行为以 reconstruction-contracts.md 为准。TeX Document route 是绑定 manuscript workspace subtree 的领域 facade，不能维护第二套文件存储。
+
+## 18. Interactive Terminal
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/bff/research/projects/{id}/pty-sessions` | open；workspace/profile/preset/cwd/size/config revision |
+| GET | `/bff/research/pty-sessions/{id}` | state 和权限摘要 |
+| GET | `/bff/research/pty-sessions/{id}/events?after_seq=N` | SSE fallback：data/gap/state/exit |
+| GET | `/bff/research/pty-sessions/{id}/socket` | authenticated WebSocket 双向 attach |
+| POST | `/bff/research/pty-sessions/{id}/input` | SSE fallback input bytes + client_seq |
+| POST | `/bff/research/pty-sessions/{id}/resize` | cols/rows + client_seq |
+| POST | `/bff/research/pty-sessions/{id}/signals` | allowlisted INT/TERM/KILL |
+| DELETE | `/bff/research/pty-sessions/{id}` | close，幂等 |
+
+Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY 每个 control 操作执行 Project AuthZ、terminal_write、generation/client_seq 和 target policy；revoke 关闭连接。浏览器不能提交 SSH endpoint/credential、Docker socket、host path 或任意 argv。
+
+## 19. Runner Target、Profile 与 Config
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/bff/research/runner-targets` | 可见 target health/capability，不返回 endpoint secret |
+| POST/PATCH | `/bff/research/runner-targets` | PI/Operator 登记、drain、disable；revision CAS |
+| GET/POST/PATCH | `/bff/research/runner-profiles` | profile、资源/网络/image policy；revision CAS |
+| GET | `/bff/research/config/schema` | canonical schema/UI metadata |
+| GET | `/bff/research/config/effective` | scope filters + value/source/revision/hash |
+| PATCH | `/bff/research/config/{scope}/{scope_id}` | expected revision；secret 只接受 SecretRef |
+| POST | `/bff/research/config/{scope}/{scope_id}/reset` | reset field/section to inherited default |
+| GET | `/bff/research/config/revisions/{id}` | redacted provenance/audit |
+
+Remote Agent internal 面提供 enroll/heartbeat/capability/claim/CAS fetch/stage/complete；全部使用 mTLS service identity 与 ExecutionPlan signature。任何 target/profile/config 修改只影响新动作，不能改变运行中 Job/PTY/Build 的 pinned hash。
+
+## 20. Trajectory 与 Subagent Topology
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/bff/research/projects/{project}/trajectories` | Research/Session roots，cursor/source/status |
+| GET | `/bff/research/trajectories/{id}/nodes` | parent_id 的 direct children，懒加载 |
+| GET | `/bff/research/trajectories/{id}/nodes/{node}/history` | message-aligned 安全 history；不激活 Agent |
+| GET | `/bff/research/trajectories/{id}/events?after_seq=N` | subscribed/event/gap SSE |
+| POST | `/bff/research/trajectories/{id}/nodes/{child}/followups` | exact parent + continuable + capability |
+
+每个全局 trajectory/node ID 先解析 project，再做 summary/detail/continue AuthZ。history 默认 safe summary；raw tool args/results/prompt/env 不得透明透传。地址、事件、token/duration、retention 和 DSH 移植边界见 trajectory-subagents.md。
+
+## 21. NextAction 兼容
+
+v2 Project/Intake projection 返回 reconstruction-contracts.md 的 `NextAction[]`。迁移期读取旧 `string[]` 时 BFF 只包装为 `legacy_unknown` + raw，不为其生成 mutation CTA。状态、reason、required revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label_key 与路由。

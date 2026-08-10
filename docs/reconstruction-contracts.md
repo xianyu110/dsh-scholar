@@ -4,7 +4,7 @@
 
 ## 1. 版本与 ABI
 
-规范版本 2.2，Kernel protocol v2，初始数据库 schema v2。
+规范版本 2.3，Kernel protocol v2，初始数据库 schema v2；新增能力以追加 migration 升级 schema revision，不能改写初始 migration。
 
 DSH 兼容基线：
 
@@ -48,6 +48,12 @@ DSH 兼容基线：
 | TeX total workspace | 512 MiB | 2 GiB |
 | page limit default/max | 50 / 200 | fixed |
 | connector query limit | 20 | 100 |
+| Intake total bytes | 2 GiB | 10 GiB |
+| Intake archive entries | 20,000 | 100,000 |
+| Intake expanded bytes | 20 GiB | 100 GiB |
+| PTY sessions/user/project | 2 / 4 | 8 / 32 |
+| PTY retained bytes/session | 4 MiB | 32 MiB |
+| Trajectory page/virtual threshold | 50 / 100 | 200 / fixed |
 
 超限使用明确 413/422，不做隐式截断；Terminal retention 是唯一允许的有标记截断。
 
@@ -147,8 +153,16 @@ interface HealthResponse {
   database_id:string
   capabilities:{
     terminal_stream:true
+    interactive_terminal:true
+    workspace_files:true
     tex_workspace:true
     latex_compile:true
+    latex_live_preview:true
+    remote_runner:true
+    config_registry:true
+    research_onboarding:true
+    trajectory:true
+    subagent_topology:true
     signed_manifest:true
     clean_room:true
     locales:['zh','en']
@@ -183,6 +197,12 @@ Sidecar 只复用 protocol_version、schema_version、database_id 和预期配�
 | evidence_note | yes | yes | no | no | no |
 | evidence_review | yes | no | no | yes | no |
 | audit_read | yes | no | no | yes | no |
+| trajectory_summary_read | yes | yes | yes | yes | yes |
+| trajectory_detail_read | yes | yes | no | yes | no |
+| subagent_continue | yes | yes | no | no | no |
+| terminal_write | yes | yes | yes | no | no |
+| intake_create | yes | yes | no | no | no |
+| intake_accept | yes | no | no | no | no |
 | release_decide | yes | no | no | no | no |
 
 Project creator 成为 pi。成员管理：GET/POST/PATCH/DELETE /bff/research/projects/{id}/members；最后一个 pi 不能删除或降级。standalone local identity 仅在 loopback 映射为单一 pi。
@@ -344,6 +364,7 @@ Canonical Tool registry：
 | research_gate_request | action=create/list；gate-requests/gates |
 | research_budget | action=read/record；budget projection/usage request |
 | research_status | project projection |
+| research_onboarding | action=create/stage/scan/grill/propose/status；只输出 observation/proposal，不提供 accept/Decision |
 | literature_search | Connector search，不写 Kernel |
 | paper_resolve | Connector resolve |
 | corpus_snapshot | Connector search + create corpus snapshot |
@@ -369,3 +390,94 @@ Tool input 不接受 principal、verified/accepted provenance、internal token�
 ## 18. 可观测性
 
 结构化日志 JSON 字段：time、level、module、instance_id、request_id、project_id?、job_id?、event、duration_ms?、error_code?；不记录 secret/完整 payload。指标至少有 request latency/error、outbox backlog、queued/running jobs、lease expiry、terminal dropped bytes/connections、CAS bytes/orphans、TeX build duration/failure、connector source failure、budget usage。桌面默认只暴露 loopback /internal/metrics；团队 adapter 接 OpenTelemetry。
+
+## 19. Workspace wire
+
+~~~typescript
+type WorkspaceKind = 'code'|'manuscript'|'scratch'
+interface WorkspaceFileRef { workspace_id:string; path:string; kind:'text'|'binary'; media_type:string; size_bytes:number; version:number; sha256:string; deleted:false }
+interface WorkspaceMutation { workspace_revision:number; file:WorkspaceFileRef; etag:string; active_snapshot_id:null }
+interface WorkspaceWriteInput { content_utf8:string; expected_file_version:number; expected_workspace_revision:number }
+interface WorkspaceMoveInput { from_path:string; to_path:string; expected_source_version:number; expected_workspace_revision:number }
+interface WorkspaceSearchInput { query:string; glob?:string; regex:false|true; case_sensitive:boolean; max_results:number; cursor?:string }
+interface WorkspaceSearchMatch { path:string; version:number; line:number; column:number; preview:string; truncated:boolean }
+~~~
+
+路径是单次 decode 后的根相对 POSIX path。所有 create/write/move/delete/upload 同时推进 workspace revision 并使 active snapshot 失效；冲突 details 固定返回 base/current refs，不自动覆盖。watch event 使用 workspace_seq 严格递增，支持 after_seq、gap 和 resync。二进制 asset 通过 multipart/CAS，未知媒体只读下载。
+
+## 20. Interactive PTY wire
+
+~~~typescript
+type PtyFrame =
+ | {kind:'subscribed'; pty_session_id:string; generation:number; last_seq:number; retained_from_seq:number}
+ | {kind:'data'; pty_session_id:string; seq:number; byte_length:number; data_base64:string; display_text:string; time:string}
+ | {kind:'gap'; pty_session_id:string; seq:number; requested_after:number; retained_from_seq:number; dropped_bytes:number; time:string}
+ | {kind:'input_ack'; pty_session_id:string; seq:number; client_seq:number; accepted_bytes:number; time:string}
+ | {kind:'resize_applied'; pty_session_id:string; seq:number; client_seq:number; cols:number; rows:number; time:string}
+ | {kind:'state'; pty_session_id:string; seq:number; status:'opening'|'running'|'detached'|'closing'; time:string}
+ | {kind:'exit'; pty_session_id:string; seq:number; exit_code:number|null; signal:string|null; reason:string; time:string}
+~~~
+
+Open 只接受 workspace_id、runner_profile_id、server allowlisted shell preset、cwd relative path、cols/rows、purpose 和 expected config revision；不接受任意 SSH credential、endpoint 或 host argv。input 为 base64 bytes + client_seq；resize/signal/close 同样幂等。WebSocket 每帧重新绑定已认证 session；SSE+POST adapter 必须保持完全相同 generation/client_seq 语义。
+
+## 21. Runner Fleet 与远端握手
+
+~~~typescript
+interface RunnerTargetView { target_id:string; placement:'local'|'remote'; adapter:'local-docker'|'remote-agent'|'scheduler'; labels:string[]; capabilities:string[]; health:'online'|'offline'|'degraded'|'draining'; last_seen_at:string|null; config_revision:number }
+interface ExecutionPlan { plan_version:1; project_id:string; job_id:string; run_id:string; lease_generation:number; runner_profile_id:string; config_sha256:string; image_digest:string; command:string[]; code_snapshot_id?:string; input_artifact_ids:string[]; output_contract:Record<string,unknown>; limits:JobExecutionLimits; network_policy:string; signature:string }
+~~~
+
+Remote Agent 以 mTLS service identity 注册 capability 和 heartbeat；claim 返回 Kernel 已创建的 run_id 与签名 ExecutionPlan。Agent 必须先验证 plan signature/expiry/capability，再断点拉取 CAS 并复算 hash。network partition 时本地 spool 只保留 fenced frames/finalize intent；lease/generation 过期后不得 complete。远端离线、capability 不足或 draining 均 fail closed，不自动回退本机/subprocess。
+
+## 22. Config Schema
+
+每项 canonical descriptor：`key/type/default/allowed_scopes/constraints/secret/hot_reload/restart_required/security_merge/ui{section,label_key,help_key,order,advanced}`。生成器从同一 registry 产生 Zod、JSON Schema、默认配置模板、env/CLI allowlist、HTTP Patch schema、Settings controls 和文档表。
+
+layer 顺序 fixed：built-in < instance < user < project < workspace < session < target < one-shot action。字段只有 descriptor 允许才可覆盖；安全字段使用 `more-restrictive-only` 合并。effective response 对每项返回 value 或 redacted SecretRef、source scope/id/revision、schema version、effective revision/hash、restart_required。Patch 要 expected revision；未知 key、错误 scope 或放宽 security floor 返回 422。运行中 Job/PTY/Build 固定创建时 hash。
+
+生成时必须登记以下 namespace 的每个运行时可调项；代码中不得出现未登记的用户可见 magic default：
+
+| namespace | 最小字段与 desktop 默认 |
+|---|---|
+| `kernel.*` | listen=127.0.0.1、port=0/配置端口、dataDir、request/json limits、sidecar startup/timeout、WAL/backup/GC |
+| `auth.*` | local/SSO mode、session TTL、CSRF/origin、rate/body/stream limits；security floor 不可下层放宽 |
+| `project.*` | mode=gate-only、budget limits、data/network/release/integrity policies、retention |
+| `runner.*` | defaultProfileId=local-docker、claim/heartbeat/lease/cancel/retry、CPU/memory/pids/tmp/disk/log limits、network policy |
+| `runner.target.*` | adapter/capabilities/labels/health intervals/draining、endpoint SecretRef、mTLS identity/CA、CAS chunk/spool/reconnect；只在 instance/target scope |
+| `workspace.*` | file/count/total limits、editable media、autosave=false、save debounce、search/watch limits、conflict policy=prompt、snapshot excludes |
+| `terminal.run.*` | retention bytes/lines、channel=all、autoScroll=true、SSE reconnect/backpressure/download policy |
+| `terminal.pty.*` | enabled、allowed presets/signals、default cols/rows、idle TTL、retention、sessions/user/project、reconnect/backpressure |
+| `latex.*` | engine=pdflatex、bibliography=bibtex、maxPasses=4、image digest、preview enabled/debounce=600ms/concurrency=1、shellEscape=false、network=none、workspace limits |
+| `onboarding.*` | enabled、intake/upload/archive/expanded limits、chunk size、TTL、scanner/parser timeout/versions、quarantine/secret policy |
+| `trajectory.*` | page/max limits、virtual threshold=100、retention、summary/spill limits、rawDetail=false、SSE queue/reconnect |
+| `subagents.*` | allowed role presets、max perspectives/concurrency/depth、default mode、summary/detail/continue ACL；browser spawn/stop=false |
+| `orchestrator.*` | poll/lease/retry/backoff/concurrency、phase action enablement |
+| `connectors.*` | per-source enable/timeout/retry/cache/query limits、endpoint allowlist；credential 为 SecretRef |
+| `analysis.*` | algorithm schema version 和 worker profile；正式 resamples/rounding 不可由项目任意改写 |
+| `ui.*` | locale=auto→zh、theme=system、density=normal、refresh=8s、sidebar/tabs/layout；只影响展示 |
+| `telemetry.*` | log level、redaction、metrics/export/retention；默认 loopback/no external export |
+| `selfmod.*` | production 固定 false；dev overlay opt-in、vmTimeout/allowed services，不能由 project/session 开启 |
+
+Schema descriptor 为每个字段指定 allowed scopes 和 security_merge；不能因为列入 Settings 就允许任意用户修改 instance/service 字段。只读/未安装 capability 仍在 Schema 中显示 unavailable reason，不能静默消失。
+
+## 23. Intake、Grill 与 Adoption wire
+
+~~~typescript
+type IntakeStatus = 'draft'|'uploading'|'scanning'|'needs_input'|'grilling'|'proposal_ready'|'awaiting_human'|'accepting'|'accepted'|'rejected'|'expired'|'failed'
+type ObservedPhase = 'brief'|'survey'|'idea'|'baseline'|'contract'|'experiment'|'evidence'|'writing'|'review'|'release'
+interface IntakeQuestion { code:string; required:boolean; reason:string; question_revision:number; answer:{value:unknown;answered_by:string;answered_at:string;provenance:'human_assertion'}|null }
+interface PhaseProposal { proposal_id:string; intake_id:string; revision:number; observed_phase:ObservedPhase; safe_project_status:string; confidence:number; unresolved_gaps:string[]; required_gate_types:GateType[]; mappings:Array<{source_id:string;target_kind:string;target_path?:string;provenance:'observed_unverified'|'legacy_unverified'}>; target_project_id:string|null; target_project_revision:number|null }
+interface AdoptionReceipt { adoption_id:string; intake_id:string; proposal_id:string; project_id:string; project_revision:number; created_refs:Array<{kind:string;id:string}>; pending_gate_ids:string[]; request_hash:string; accepted_by:string; accepted_at:string }
+~~~
+
+Intake staged upload 复用 Content-Range/offset/hash 幂等规则，但绑定 intake Principal 而非 Runner lease。scan cache key 为 Blob hash + parser/detector versions。accept 仅 `intake_accept` Human Principal，并在单事务物化；proposal/target revision stale 均 409。精确映射和不可信边界见 research-onboarding.md。
+
+## 24. NextAction、Trajectory 与 Subagent wire
+
+~~~typescript
+interface NextAction { id:string; code:string; label_key:string; state:'available'|'running'|'waiting-gate'|'waiting-external'|'blocked'|'failed'|'completed'; target_route:string; blocking:boolean; reason:string; refs:Array<{kind:string;id:string}>; required:'human'|'agent'|'runner'; required_revision:number; capability?:string; raw?:string }
+interface SubagentAddress { parent_session_id:string; child_session_id:string; mode:'one-shot'|'continuable' }
+interface TrajectoryNodeSummary { node_id:string; parent_node_id:string|null; relation:'root'|'child'|'fork'; source:'kernel-outbox'|'dsh-session'|'external'; kind:'session'|'subagent'|'task'|'research-event'; label:string|null; mode:'one-shot'|'continuable'|'read-only'|null; status:string; has_children:boolean; children_count:number|null; duration_ms:number|null; tokens:{uncached_input:number;cache_read:number;cache_write:number;output:number}|null; permissions:{can_read_summary:boolean;can_read_detail:boolean;can_continue:boolean} }
+~~~
+
+Project projection 的 `next_actions` 使用 `NextAction[]`。一版迁移 adapter 可把旧 `string[]` 包装为 `{code:'legacy_unknown',raw,...}`，UI 不得为 unknown 构造 mutation。Trajectory event envelope、分页、SSE、retention、redaction、token/duration 聚合与 exact-parent follow-up 见 trajectory-subagents.md。

@@ -52,6 +52,11 @@
 - complete transaction 故障不出现 succeeded 无 Artifact。
 - formal/baseline/pilot/reproduce 成功必须存在 `output_contract.metrics` 指定路径的 MetricsFileV1；缺文件、空 metrics、NaN/Infinity、重复 metric、非 Contract metric、run/contract/seed 不匹配或 stdout fallback 均不得 succeeded；
 - heartbeat、Terminal frame、Artifact finalize 和 complete 都必须携带当前 owner/generation/token；缺任一字段、旧 generation、未来 generation 或错误 token 均 409，不能保留 owner-only 兼容放行。
+- local/remote-plan-parity：同一 ExecutionPlan 在 LocalDocker/RemoteAgent 使用同一 run_id、snapshot/image/config/output contract；target 不能改写；
+- remote-mtls-capability：未知/撤销 service、plan 签名错误、capability mismatch、offline/draining 均 fail closed；
+- remote-partition-fencing：分区后 spool 有界；lease 过期的旧 Agent frames/finalize/complete 全拒绝，不产生合成成功；
+- no-silent-fallback：remote 失败不自动转 LocalDocker/subprocess；显式新 attempt 才能换 target；
+- remote-cas-resume：断点拉取/上传重试后 hash/size 一致，跨项目或 stale generation 拒绝。
 
 ## 5. Terminal
 
@@ -69,6 +74,11 @@
 - log-authz：无 job_log_read、无 token、跨项目、撤权连接均被拒绝；
 - cancel-kills-process：UI 只有确认停止后显示 cancelled。
 - cancel-timeout-distinct：非合作进程在 deadline 内完成 TERM→KILL 兜底、无孤儿；cancelled 与 timed_out 在 exit、重载和下载日志中保持不同终态。
+- pty-real-interaction：真实 shell/TUI 接受 input、返回 output，resize 生效，INT/TERM/KILL 和 exit 可辨；
+- pty-reconnect-seq：detach/reconnect 使用 generation/after_seq 无重复，retention 淘汰先发 gap；
+- pty-control-authz：跨项目、无 terminal_write、撤权、旧 generation、重复/乱序 client_seq 拒绝；
+- pty-safe-open：任意 endpoint/SSH credential/Docker socket/host cwd/argv 被 schema 拒绝，只能 preset + relative cwd；
+- pty-not-evidence：PTY output 不能被 Metrics/RunManifest/Evidence/Decision 路径引用；Run Terminal 永远没有 input route。
 
 ## 6. Analysis、Evidence 与 Claim
 
@@ -104,6 +114,11 @@
 - PDF Content-Type、Blob preview、download hash 正确；
 - build history 可重放日志和 PDF；
 - clean-room 能用 Bundle 中 TeX 源重新构建同等 PDF 结构。
+- workspace-vscode-flow：Explorer/create/open/tabs/search/edit/move/delete/upload/download/history/snapshot 全部走 Workspace Revision/CAS；
+- workspace-binary-and-conflict：图片/PDF/随机 bytes hash 一致；大/未知文件只读；并发保存/上传给 base/current/local 且不覆盖；
+- workspace-watch：change seq 重连无重复，retention gap 触发 resync；跨项目/路径越界拒绝；
+- live-preview：保存成功后 debounce 启动 preview，编译结束前 UI 已见日志/诊断；新 revision 使旧 PDF stale 并 supersede 旧 preview；
+- preview-vs-compile：preview 不产 Evidence；显式 Compile 固定 manifest/config/image，且不被后续 preview 取消。
 
 ## 8. UI 与 i18n
 
@@ -120,6 +135,36 @@
 - 640/720/1024 px 无不可达控件；
 - 关闭页面后 SSE、interval、Blob URL、listener 清理；
 - 同一 fixture 在 standalone 重启前后产生等价页面和操作结果。
+- ui-start：无项目首屏只有 Init/Resume/Upload 三项主行动，高级设置不可见；Resume 显示 status/pending Gate/NextAction；
+- ui-guide：所有非终态项目显示结构化 NextAction 的 state/reason/required/revision/CTA；409 刷新，unknown action 不执行；
+- ui-routes：Workspace、Run Terminal、Interactive PTY、Manuscript、Trajectory/Topology、Settings 可由上下文/命令面板/深链到达，URL 无 Token；
+- ui-settings：Accordion 默认折叠；每项展示 effective source/hash/revision/default/restart，reset 与 CAS 冲突工作；secret value 零渲染；
+- ui-simple-responsive：640/720/1024 下 Start、More、树/编辑/Preview/Terminal、固定主 CTA 均键盘可达，不因隐藏高级项丢能力；
+- i18n-new-surfaces：start/guide/workspace/settings/trajectory/topology/PTY/upload/grill 的 zh/en key、状态、error、aria 精确 parity。
+
+### 8.1 Onboarding、Upload 与继续既有研究
+
+- intake-preaccept-zero-authority：begin/stage/scan/grill/propose 后 Project/Gate/Artifact/Workspace/Job/Run/Terminal/Evidence/Claim 表与 Outbox 均无业务写；
+- upload-resume-integrity：分块 offset/hash 重传幂等，gap/different bytes 409，pause/resume/finalize 得到相同 Blob；
+- malicious-archive：absolute/..、symlink、device/FIFO、case collision、bomb/nesting/over-limit、active TeX/script/HTML/SVG 都被 quarantine/reject，parser 无网无执行；
+- grill-deterministic：相同 observation/taxonomy version 生成相同 question codes；required 未答保持 needs_input，answer 持久化 Human Principal/revision/human_assertion；
+- safe-phase-adoption：每个 observed phase 只落到允许的 safe status；Scope/Idea/Contract/Release 声称不产生 Decision，创建对应 pending Gate；
+- import-no-forgery：日志只变 log Artifact/ImportedRunObservation，结果只变 legacy/draft Evidence；无签名 Manifest 不产生 RunSet/accepted Evidence/supported Claim；
+- adoption-atomic-idempotent：每个故障点全回滚；同 key/hash 返回同 Receipt，不同 hash 409；target/proposal stale 要重新 propose；
+- merge-conflicts-visible：path/role/revision 冲突必须 Human keep/current/import/rename，禁止静默覆盖；
+- intake-recovery-gc：BFF/Kernel 重启可恢复 upload/scan/questions/proposal；expiry/quarantine/purge 审计，accepted Blob 不被 intake GC。
+
+### 8.2 Trajectory 与 Subagent Topology
+
+- research-vs-session：UI 明确 authoritative Outbox 与 observational Session，Session 事件不能推进 Project；
+- topology-direct-child：树只用 exact direct child；orphan/cycle fail-soft，普通 fork 停止 subagent 聚合；
+- topology-enter-breadcrumb：可展开、进入任意 child、返回 parent、刷新/重启恢复安全 route；
+- subagent-read-no-activate：cold list/history 不激活 Agent；one-shot/diagnostic/parent offline 只读；
+- subagent-followup-authz：只有 continuable + exact live parent + membership + capability 可接收，返回 message_id；伪 parent/mode/跨项目 404/403；
+- trajectory-stream：after_seq replay/dedupe/gap/reconnect/revoke 正确，终态单调，retry 是新 node；
+- trajectory-redaction：raw prompt/tool args/results/env/provider secret 默认不存在；detail allowlist、bounded preview/spill/TTL/purge 审计；
+- topology-usage：四桶 token、active duration 与 cost unknown/estimated 正确，父子不双计；
+- topology-scale-a11y：10k nodes/records DOM 有界，>100 virtualize、prepend anchor 稳定，tree/treeitem keyboard/ARIA 和 zh/en 通过。
 
 ## 9. DSH 集成与 Skills
 
@@ -141,6 +186,8 @@
 - 同一端口已有其他 dataDir/database identity 的 Kernel 时拒绝复用，且不得终止非本实例进程；
 - /research help/list/status/gates/jobs/claims 等文档和 UI starter 命令均有真实 handler，不落入 generic help；
 - Tool catalog 与 reconstruction-contracts.md canonical 名一致，旧 claim_verify/analysis_build/release_bundle 别名返回 deprecation metadata 而非 unknown tool；
+- research_onboarding tool 只含 create/stage/scan/grill/propose/status，Schema/ACL 中不存在 accept/adopt/Decision；
+- standalone Trajectory/Subagent UI 不导入 DSH Web slot/runtime/client；只通过安全 BFF adapter，DSH 不可用时 Research Outbox 仍可读；
 
 ## 9.1 Standalone 负向安全与运维验收
 
@@ -181,10 +228,12 @@
 - Connector SSRF/redirect allowlist；
 - Runner env 不含 DSH/credential；
 - Release 未批准没有外部发布能力。
+- Intake stage/accept、Workspace/PTY、Runner target/config、Trajectory summary/detail/followup 都执行独立 capability 和 Project AuthZ；
+- Config schema/UI/file/CLI key parity；错误 scope/unknown key/放宽 security floor 拒绝；effective provenance 可解释，SecretRef value 不进 browser/log/argv/Manifest/Bundle；
 
 ## 12. Recovery 与 Golden Path
 
-故障矩阵对 Kernel、Runner、Orchestrator、BFF 在 queued/running/complete、Gate transaction、TeX save/build 和 Terminal stream 各点 kill -9。100 次压力要求无重复正式 Run、无不可解释 succeeded、无丢 Gate/Decision、无孤儿容器。
+故障矩阵对 Kernel、Local/Remote Runner、Orchestrator、BFF 在 queued/running/complete、Gate/Adoption transaction、Workspace/TeX save/preview/build、PTY/Terminal/Trajectory stream、Config patch 各点 kill -9。100 次压力要求无重复正式 Run、无不可解释 succeeded、无丢 Gate/Decision/Adoption、无孤儿容器/PTY。
 
 Golden Path：创建项目→Scope Gate→Corpus→Idea Gate→真实 Baseline→Contract Gate→代码 Patch/Snapshot→多 Seed Formal→实时 Terminal→Analysis/Evidence/Claim→生成并人工编辑 TeX→实时编译/诊断/PDF→Review→Bundle→clean-room→Release Gate。不得注入手工指标或跳过容器。
 
@@ -204,6 +253,10 @@ Bundle-only clean-room 必须把 Bundle 复制到空目录，删除或拒绝访�
 | migrations-old-fixtures | 是 |
 | package-install-skills | 是 |
 | docs-contract-sync | 是 |
+| workspace-pty-remote | 是 |
+| onboarding-upload-grill | 是 |
+| trajectory-subagents | 是 |
+| config-schema-parity | 是 |
 
 所有“必跑”Job 在 `CI=true`/GitHub Actions 中必须满足 `skip_count=0`、实际断言数大于 0、`continue-on-error=false`。缺 Docker、pdflatex、镜像、DSH fixture、git base 或其他能力时必须非零退出，不能输出 `SKIP` 后 exit 0，也不能被聚合器计入 PASS。本地非 CI 环境可以显式 allow-skip，但结果只能记为“未运行”，不得更新 hardening 状态。
 

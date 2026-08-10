@@ -11,6 +11,7 @@
 | Scholar standalone | ~/.dsh-scholar-standalone | 18610 | 17413 | 不支持 | 独立 UI |
 | Scholar selfmod dev | 临时独立目录 | 自选 | 自选 | 显式启用 | Cordis 运行时调试 |
 | CI | mktemp workspace | 随机 | 随机/Unix | 仅专门 case | 自动验收 |
+| Remote Runner fixture | 独立临时 Agent data | 无 | CI Kernel | 禁止 | mTLS、CAS、partition/fencing/PTY |
 
 端口只是默认值。真正隔离以 dataDir/database_id 为准；health 必须返回 instance_id、protocol_version、schema_version 和 database_id。
 
@@ -21,6 +22,7 @@
 - DSH Agent/plugin 集成开发才需要 DSH checkout，通过 DSH_SCHOLAR_DSH_ROOT 指定；
 - Docker，用于正式 Job、Terminal、Golden、TeX 和 clean-room；
 - 固定 TeX Live image；本机不要求安装 pdflatex；
+- 远端验收需要第二个受控 Linux/VM/container namespace、mTLS test CA 和可注入网络分区的 transport；不能用同一进程 fake 代替阻断验收；
 - Linux/macOS 文件权限语义；团队部署另需反代/SSO/PostgreSQL/K8s 设计。
 
 ## 3. Clean setup
@@ -92,6 +94,10 @@ wrapper 使用独立 ~/.dsh-scholar-selfmod-dev、loopback Web 3082、Kernel 174
 
 Terminal 测试使用产生交错 stdout/stderr、长输出、非零退出、signal 和 cancel 的 fixture。TeX 使用固定 image digest，不依赖宿主 pdflatex。
 
+本机默认 profile 为 Local Docker。远端开发实例先用 admin 命令把 Remote Runner Agent 的 service identity/certificate、capabilities 和 server-side endpoint label 登记到 Config/Target Registry，再启动 Agent；项目/UI 只选择 profile ID。测试必须覆盖健康、draining、capability mismatch、分区 spool、lease 过期、CAS resume、取消和 Remote PTY。不得在 UI、Job JSON、argv 或日志中输入/打印 SSH credential/endpoint secret。
+
+Interactive PTY fixture 使用真实 pseudo-terminal，覆盖 echo/input、全屏 TUI、Unicode、resize、signal、detach/reconnect、gap/TTL 和撤权。它与正式 Job Terminal fixture 分开运行。
+
 ## 8. 测试命令
 
 以下是目标脚本面，生成项目必须在 package.json 实现；当前迁移仓库使用后面的现有命令：
@@ -104,6 +110,10 @@ pnpm test:ui
 pnpm test:security
 pnpm test:docker
 pnpm test:golden
+pnpm test:workspace-pty-remote
+pnpm test:onboarding
+pnpm test:trajectory
+pnpm test:config
 pnpm test:all
 ~~~
 
@@ -135,5 +145,8 @@ CI 中 Docker、TeX、Golden、clean-room 不允许因为依赖缺失而 skip �
 - TeX build queue、image digest 和 PDF Artifact；
 - Outbox backlog；
 - Runner key 有效期；
+- Remote target health/draining/capability、spool 和 mTLS expiry；
+- PTY session/idle TTL/gap/orphan、Intake upload/quarantine/expiry、Config revision/restart queue；
+- Trajectory cursor/redaction/retention 和 subagent parent availability；
 - production tool catalog 无 cordis_*；
 - zh/en locale 资源 revision 和客户端 bundle 一致。
