@@ -549,6 +549,14 @@ export class ResearchKernel {
    * token. Exposed via the HTTP `x-config-pin` header and /v1|v2 health.
    */
   readonly configPinHash: string
+  /**
+   * CONFIG-01: the REDACTED view of this kernel's effective config (secret
+   * values replaced with `<redacted>` by the registry) — the safe plaintext
+   * for the `/v1/config/effective` HTTP surface. The deployment-level
+   * effective config (computed by the CLI with host/port/token/endpoint-file
+   * included) overrides this via startKernelServer({ configRedacted }).
+   */
+  readonly configRedacted: Record<string, unknown>
   /** §12.1 (TEX-03): debounce window for live preview builds. */
   readonly previewDebounceMs: number
   /** §12.1 (TEX-03): auto-trigger previews on every workspace write. */
@@ -611,6 +619,7 @@ export class ResearchKernel {
       imagesLock: { node_fixture: IMAGES_LOCK.node_fixture, texlive: IMAGES_LOCK.texlive },
     })
     this.configPinHash = pinned.pinHash
+    this.configRedacted = pinned.redacted
     // §12.1 (TEX-03): re-arm debounce timers for pending preview requests
     // that survived a kernel restart — preview state is re-projectable from
     // the kernel, it never lives only in a browser debounce timer.

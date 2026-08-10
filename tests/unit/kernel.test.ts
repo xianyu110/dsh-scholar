@@ -704,6 +704,53 @@ describe('CONFIG-01 canonical Config Registry integration', () => {
       kernel.close()
     }
   })
+
+  it('GET /v1/config/effective serves the redacted deployment config with its pin', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const deploymentRedacted = { 'kernel.port': 7413, 'kernel.token': '<redacted>', 'kernel.service_token': '<redacted>' }
+    const deploymentPin = 'sha256:' + 'a'.repeat(64)
+    const { server, port } = await startKernelServer({
+      kernel, port: 0, configPinHash: deploymentPin, configRedacted: deploymentRedacted,
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/config/effective`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { config_pin?: string; config?: Record<string, unknown> }
+      expect(body.config_pin).toBe(deploymentPin)
+      expect(body.config).toEqual(deploymentRedacted)
+      // secrets are redacted in the plaintext surface
+      expect(JSON.stringify(body)).not.toContain('Bearer')
+      // unknown config sub-resources 404
+      const nope = await fetch(`http://127.0.0.1:${port}/v1/config/whatever`)
+      expect(nope.status).toBe(404)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('GET /v1/config/schema serves the registry-generated JSON Schema', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/config/schema`)
+      expect(res.status).toBe(200)
+      const schema = await res.json() as { $schema?: string; properties?: Record<string, unknown>; additionalProperties?: unknown }
+      expect(schema.$schema).toBe('http://json-schema.org/draft-07/schema#')
+      expect(schema.additionalProperties).toBe(false)
+      // every scope is present in the served schema
+      for (const scope of ['global', 'project', 'job', 'runner-profile', 'orchestrator', 'kernel', 'standalone']) {
+        expect((schema.properties as Record<string, unknown>)[scope]).toBeDefined()
+      }
+      // no secret value can exist in a schema (leaf annotations only)
+      expect(JSON.stringify(schema)).not.toContain('<redacted>')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
 })
 
 describe('corpus + ideas + manuscript', () => {

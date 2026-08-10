@@ -95,6 +95,19 @@
 - remote-not-implemented-fail-closed：真实 mTLS 传输未实现——createRemoteRunnerAgent 的任何执行/注册方法抛 RemoteRunnerAgentNotImplementedError（明确环境错误，绝不静默降级）；
 - 上述场景的端到端形态（remote-mtls-capability/remote-partition-fencing/no-silent-fallback/remote-cas-resume 的真实 mTLS 传输验收）待远端传输实现后关闭，本轮仅接口层（hardening-v0.2-status.md §3 RUN-REMOTE-01）。
 
+### 4.2 RUN-REMOTE-01 wire 协议 + 服务端/代理端（mock 传输；真实 mTLS 证书验证受限）
+
+协议定义见 [remote-runner-wire.md](remote-runner-wire.md)（HTTP+JSON，消息 schema 全 zod：`research-schemas/src/remote-runner-wire.ts`，两端共享；生产必须 mTLS service identity，本地 wire 用 `x-service-token` 等价实现并文档注明生产差异）。覆盖（tests/unit/remote-wire.test.ts 15/15，InMemoryFleetTransport JSON round-trip mock 传输 + 真实 HTTP loopback）：
+
+- remote-wire-register-heartbeat：注册 acknowledged、心跳 accepted（含 draining 与 capability/labels 更新）、未注册 agent → 404 agent_not_registered（fail closed）；wire schema `.strict()` 拒绝 address/certificate → 422 validation_error；
+- remote-wire-claim-match：target_id 精确 + capability（images/os/arch/runner_ver）匹配才分发；claim 响应含签名 ExecutionPlan（Ed25519 可验）+ lease generation/token，run_id/lease 与 kernel claim 一致；**无匹配 target → 任务留在 pending（retryable），绝不静默改派/回退 LocalDocker**；agent 断连期间服务端保留 outstanding，恢复后 resume 返回同一 claim（同一 claim_id/run_id/lease）；
+- remote-wire-cas-hash：CAS 拉取后代理端复算 sha256——响应 hash 与内容不一致、寻址 hash 与内容不一致均拒绝执行（executor 未被调用，fail closed）；自洽则正常执行；
+- remote-wire-frames：全局 seq 单调、stream_seq 按通道、exit 帧最后、逐帧 lease_generation；artifacts staged + finalize 由服务端复算 sha256，篡改 → 409 cas_hash_mismatch / cas_size_mismatch（不落库）；
+- remote-wire-complete-fencing：complete 携带 Ed25519 签名 run_manifest（kernel 侧 §12.7 验签通过）+ fencing 字段；**lease 过期被新 claim 抢占后旧 agent 的 complete → 409 lease_stale，claim 置 settled，后续 frames/complete 全拒，无合成成功**；agent last_seen 超时 → claims 409 agent_offline（retryable），心跳恢复可用；
+- remote-wire-spool：断网期间 frames/stage/finalize/complete 全部本地有界 spool，恢复后按序重放并完成 Job；spool 有界——frames 条目可被淘汰并先补发 gap frame（dropped 区间/字节数可见，不静默丢弃），exit_frame/complete 不可淘汰，spool 满 → 本地失败（fail closed，无合成成功）；resume 幂等（回放同一 claim 不重复执行）；
+- remote-wire-http-auth：HTTP 面 x-service-token 缺失/错误 → 403 service_token_required；正确 token 下 register/heartbeat/claim/CAS/frames/artifacts/complete 全链路可用（HttpRemoteFleetTransport + 真实 HTTP loopback）。
+- **剩余（如实记录，属后续阶段）**：真实 mTLS 证书链（CA 签发/吊销/轮换）验收、真实远端 sandbox 隔离验收、跨主机网络分区故障注入、Remote PTY 与浏览器 UI——本轮协议层用 service-token 等价实现，生产差异见 remote-runner-wire.md §3。
+
 ## 5. Terminal
 
 - interleaved-output：stdout/stderr 按全局 seq 重放，单通道仍完整；

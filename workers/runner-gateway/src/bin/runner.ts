@@ -13,43 +13,58 @@
  *   [--mode subprocess|docker] [--poll-ms 2000] [--owner <id>]
  *   [--timeout-ms 60000] [--heartbeat-ms 15000] [--cancel-poll-ms 5000]
  *   [--key-file <path>]
+ *
+ * CONFIG-01: the CLI surface is parsed by the canonical Config Registry
+ * (parseCli) — flags, defaults and validation are the registry's single
+ * source of truth; `--help` prints the registry-generated help text.
  * @module @dsh-scholar/runner-gateway/bin
  */
 
-import { parseArgs } from 'node:util'
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { ResearchClient, KernelApiError } from '@dsh-scholar/research-client'
 import { cancelRun, executeJob, heartbeatLoop, type RunnerMode, type RunnerSigningKey } from '../index.js'
+import { validateConfig, parseCli, generateCliHelp, ConfigRegistryError } from '@dsh-scholar/research-schemas'
 
-const { values } = parseArgs({
-  options: {
-    kernel: { type: 'string', default: 'http://127.0.0.1:7412' },
-    token: { type: 'string' },
-    // §4 P0 (API-01): internal-route service identity. Sidecar/deployment
-    // environments export DSH_SCHOLAR_SERVICE_TOKEN; the flag overrides it.
-    'service-token': { type: 'string' },
-    mode: { type: 'string', default: 'subprocess' },
-    'poll-ms': { type: 'string', default: '2000' },
-    'timeout-ms': { type: 'string', default: '60000' },
-    'heartbeat-ms': { type: 'string', default: '15000' },
-    'cancel-poll-ms': { type: 'string', default: '5000' },
-    'key-file': { type: 'string' },
-    owner: { type: 'string' },
-  },
-})
+const argv = process.argv.slice(2)
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(`Runner gateway — durable job scheduler (design §12.6)\nUsage: node lib/bin/runner.js [options]\n\n${generateCliHelp('runner-profile')}`)
+  process.exit(0)
+}
 
-const endpoint = values.kernel ?? 'http://127.0.0.1:7412'
-const mode = (values.mode ?? 'subprocess') as RunnerMode
-const pollMs = Number(values['poll-ms'] ?? 2000)
-const timeoutMs = Number(values['timeout-ms'] ?? 60000)
-const heartbeatMs = Number(values['heartbeat-ms'] ?? 15000)
-const cancelPollMs = Number(values['cancel-poll-ms'] ?? 5000)
-const keyFile = values['key-file']
-const owner = values.owner ?? `runner-${randomUUID().slice(0, 8)}`
-const serviceToken = values['service-token'] ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
+let cli: Record<string, unknown>
+try {
+  cli = parseCli(argv, 'runner-profile')
+} catch (error) {
+  console.error(`[runner-gateway] invalid config: ${error instanceof ConfigRegistryError ? error.message : (error as Error).message}`)
+  process.exit(1)
+}
 
-const client = new ResearchClient({ endpoint, token: values.token, serviceToken })
+const endpoint = (cli['runner.kernel'] as string | undefined) ?? 'http://127.0.0.1:7412'
+const mode = (cli['runner.mode'] as RunnerMode | undefined) ?? 'subprocess'
+const pollMs = (cli['runner.poll_ms'] as number | undefined) ?? 2000
+const timeoutMs = (cli['runner.timeout_ms'] as number | undefined) ?? 60000
+const heartbeatMs = (cli['runner.heartbeat_ms'] as number | undefined) ?? 15000
+const cancelPollMs = (cli['runner.cancel_poll_ms'] as number | undefined) ?? 5000
+const keyFile = cli['runner.key_file'] as string | undefined
+const owner = (cli['runner.owner'] as string | undefined) ?? `runner-${randomUUID().slice(0, 8)}`
+const serviceToken = (cli['runner.service_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
+const token = cli['runner.token'] as string | undefined
+
+// CONFIG-01: the runner's effective config is validated through the
+// canonical Config Registry before any claim cycle (unknown keys / invalid
+// values / security-floor violations fail fast; error messages never echo
+// secret values). The one-way sha256 pin is logged so running runners can be
+// correlated with the config that produced them.
+try {
+  const resolved = validateConfig(cli, { scopes: ['runner-profile'] })
+  console.error(`[runner-gateway] config pin ${resolved.pinHash}`)
+} catch (error) {
+  console.error(`[runner-gateway] invalid config: ${error instanceof ConfigRegistryError ? error.message : (error as Error).message}`)
+  process.exit(1)
+}
+
+const client = new ResearchClient({ endpoint, token, serviceToken })
 
 /**
  * Load the Ed25519 signing key from --key-file, or generate an ephemeral one

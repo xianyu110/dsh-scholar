@@ -133,6 +133,10 @@ importers:
         version: 5.9.3
 
   workers/research-orchestrator:
+    dependencies:
+      '@dsh-scholar/research-schemas':
+        specifier: file:../../packages/research-schemas
+        version: link:../../packages/research-schemas
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

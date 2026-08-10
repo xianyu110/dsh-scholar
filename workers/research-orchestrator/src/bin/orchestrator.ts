@@ -10,29 +10,37 @@
  * - `--once`: run a single poll round and exit (used by tests / cron).
  * - `--dry-run`: compute planned actions only; no Kernel writes, no persistence.
  * - SIGINT/SIGTERM stop the loop and close the store gracefully.
+ *
+ * CONFIG-01: the CLI surface is parsed by the canonical Config Registry
+ * (parseCli) — flags, defaults and validation are the registry's single
+ * source of truth; `--help` prints the registry-generated help text.
  * @module @dsh-scholar/research-orchestrator/bin
  */
 
-import { parseArgs } from 'node:util'
 import { Engine } from '../engine.js'
+import { parseCli, generateCliHelp, ConfigRegistryError } from '@dsh-scholar/research-schemas'
 
-const { values } = parseArgs({
-  options: {
-    kernel: { type: 'string' },
-    db: { type: 'string' },
-    'poll-ms': { type: 'string' },
-    once: { type: 'boolean', default: false },
-    'dry-run': { type: 'boolean', default: false },
-  },
-})
+const argv = process.argv.slice(2)
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(`Durable Research Orchestrator (design §8)\nUsage: orchestrator [options]\n\n${generateCliHelp('orchestrator')}`)
+  process.exit(0)
+}
 
-const kernelUrl = values.kernel ?? 'http://127.0.0.1:7412'
-const dbPath = values.db
-const pollMs = values['poll-ms'] === undefined ? undefined : Number(values['poll-ms'])
-const once = values.once ?? false
-const dryRun = values['dry-run'] ?? false
+let cli: Record<string, unknown>
+try {
+  cli = parseCli(argv, 'orchestrator')
+} catch (error) {
+  console.error(`[research-orchestrator] invalid config: ${error instanceof ConfigRegistryError ? error.message : (error as Error).message}`)
+  process.exit(2)
+}
 
-if (pollMs !== undefined && (!Number.isFinite(pollMs) || pollMs <= 0)) {
+const kernelUrl = (cli['orchestrator.kernel'] as string | undefined) ?? 'http://127.0.0.1:7412'
+const dbPath = cli['orchestrator.db'] as string | undefined
+const pollMs = cli['orchestrator.poll_ms'] as number | undefined
+const once = cli['orchestrator.once'] === true
+const dryRun = cli['orchestrator.dry_run'] === true
+
+if (pollMs !== undefined && pollMs <= 0) {
   console.error('[research-orchestrator] --poll-ms must be a positive number')
   process.exit(2)
 }

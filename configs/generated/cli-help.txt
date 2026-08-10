@@ -16,6 +16,13 @@ Options (runner-profile):
   --token <secret> [secret] — Kernel bearer token for the runner client.
   --service-token <secret> [secret] — Service identity for internal kernel routes. (env: DSH_SCHOLAR_SERVICE_TOKEN)
 
+Options (orchestrator):
+  --kernel <string> — Kernel endpoint the orchestrator advances projects over. (default: http://127.0.0.1:7412)
+  --db <string> — SQLite action-store path; empty = ephemeral temp database.
+  --poll-ms <number> — Poll interval between advancement rounds (bin still requires > 0).
+  --once <boolean> — Run a single poll round and exit (tests/cron).
+  --dry-run <boolean> — Compute planned actions only; no kernel writes, no persistence.
+
 Options (kernel):
   --host <string> — Kernel HTTP listen host. (default: 127.0.0.1)
   --port <number> — Kernel HTTP listen port (0 = ephemeral, published via endpoint file).
@@ -26,10 +33,10 @@ Options (kernel):
   --endpoint-file <string> — 0600 endpoint identity file written after bind (SIDE-01). (env: DSH_SCHOLAR_KERNEL_ENDPOINT_FILE)
 
 Options (standalone):
-  --host <string> — Standalone BFF listen host. (default: 127.0.0.1)
-  --port <number> — Standalone BFF listen port.
-  --kernel-port <number> — Research Kernel sidecar port spawned by the BFF.
-  --data-dir <string> — Data directory (token/session/endpoint files); empty = DSH_HOME or ~/.dsh-scholar-standalone.
+  --host <string> — Standalone BFF listen host. (default: 127.0.0.1) (env: DSH_SCHOLAR_STANDALONE_HOST)
+  --port <number> — Standalone BFF listen port. (env: DSH_SCHOLAR_STANDALONE_PORT)
+  --kernel-port <number> — Research Kernel sidecar port spawned by the BFF. (env: DSH_SCHOLAR_STANDALONE_KERNEL_PORT)
+  --data-dir <string> — Data directory (token/session/endpoint files); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone. (env: DSH_SCHOLAR_STANDALONE_DATA)
   --token <secret> [secret] — Loopback bearer token; auto-generated and persisted 0600 when empty.
   --principal <string> — Operator principal identity (GOV-01 local resolver).
-  --no-token <string> — Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).
+  --no-token <boolean> — Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).

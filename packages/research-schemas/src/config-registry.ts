@@ -6,10 +6,12 @@
  * a dotted canonical key, a ConfigScope, a Zod schema, a default, secret and
  * security-floor markers, and the allowed sources (CLI/env/file/HTTP/UI).
  * The registry GENERATES the derived artifacts (JSON Schema, defaults
- * template, CLI help text) so they can never drift from the Zod schema, and
- * it VALIDATES effective configs: merge defaults, reject unknown keys,
- * enforce the security floor and pin the result with a sha256 hash that
- * changes whenever the effective config changes.
+ * template, CLI help text) so they can never drift from the Zod schema, it
+ * PARSES each binary's CLI (`parseCli(argv, scope)` — used by the kernel,
+ * runner, orchestrator and standalone bins) and it VALIDATES effective
+ * configs: merge defaults, reject unknown keys, enforce the security floor
+ * and pin the result with a sha256 hash that changes whenever the effective
+ * config changes.
  *
  * Security floor (security-baseline.md §5, execution-runtime.md §5): Docker
  * socket mounts, `--privileged` containers and host networking are forbidden;
@@ -26,17 +28,19 @@
 
 import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
+import { parseArgs } from 'node:util'
 import { z } from 'zod'
 
 /**
  * ConfigScope of a canonical key. `global`/`project`/`job`/`runner-profile`
- * are the hierarchy layers (project < job < runner-profile); `kernel` and
- * `standalone` scope the two binaries that own their own CLI surface.
+ * are the hierarchy layers (project < job < runner-profile); `orchestrator`,
+ * `kernel` and `standalone` scope the binaries that own their own CLI
+ * surface.
  */
-export const ConfigScope = z.enum(['global', 'project', 'job', 'runner-profile', 'kernel', 'standalone'])
+export const ConfigScope = z.enum(['global', 'project', 'job', 'runner-profile', 'orchestrator', 'kernel', 'standalone'])
 export type ConfigScope = z.infer<typeof ConfigScope>
 
-export const CONFIG_SCOPES: readonly ConfigScope[] = ['global', 'project', 'job', 'runner-profile', 'kernel', 'standalone']
+export const CONFIG_SCOPES: readonly ConfigScope[] = ['global', 'project', 'job', 'runner-profile', 'orchestrator', 'kernel', 'standalone']
 
 /** Where a key may be set. */
 export type ConfigSource = 'cli' | 'env' | 'file' | 'http' | 'ui'
@@ -85,10 +89,10 @@ const ms = (max?: number): z.ZodNumber => {
 /**
  * The full canonical registry — every runtime config item the Research OS
  * actually runs today (ExecutionConfig + IntegrityConfig fields, kernel CLI,
- * runner CLI, standalone CLI, images.lock path/digests, network policy).
- * `job` scope is reserved for per-job policy keys and intentionally has no
- * entries yet: per-job timeouts/retention are currently derived from the
- * runner-profile scope and the job payload.
+ * runner CLI, orchestrator CLI, standalone CLI, images.lock path/digests,
+ * network policy). `job` scope is reserved for per-job policy keys and
+ * intentionally has no entries yet: per-job timeouts/retention are currently
+ * derived from the runner-profile scope and the job payload.
  */
 export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
   // ── global ───────────────────────────────────────────────────────────────
@@ -324,6 +328,53 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     description: 'Docker socket mounts are forbidden by the security floor.',
   },
 
+  // ── orchestrator (research-orchestrator CLI, design §8) ───────────────────
+  {
+    key: 'orchestrator.kernel',
+    scope: 'orchestrator',
+    schema: z.string().min(1),
+    default: 'http://127.0.0.1:7412',
+    cli: { flag: 'kernel' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Kernel endpoint the orchestrator advances projects over.',
+  },
+  {
+    key: 'orchestrator.db',
+    scope: 'orchestrator',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'db' },
+    sources: ['cli', 'env', 'file'],
+    description: 'SQLite action-store path; empty = ephemeral temp database.',
+  },
+  {
+    key: 'orchestrator.poll_ms',
+    scope: 'orchestrator',
+    schema: ms(),
+    default: 5000,
+    cli: { flag: 'poll-ms' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Poll interval between advancement rounds (bin still requires > 0).',
+  },
+  {
+    key: 'orchestrator.once',
+    scope: 'orchestrator',
+    schema: z.boolean(),
+    default: false,
+    cli: { flag: 'once' },
+    sources: ['cli'],
+    description: 'Run a single poll round and exit (tests/cron).',
+  },
+  {
+    key: 'orchestrator.dry_run',
+    scope: 'orchestrator',
+    schema: z.boolean(),
+    default: false,
+    cli: { flag: 'dry-run' },
+    sources: ['cli'],
+    description: 'Compute planned actions only; no kernel writes, no persistence.',
+  },
+
   // ── kernel (research-kernel CLI / sidecar) ────────────────────────────────
   {
     key: 'kernel.host',
@@ -404,13 +455,18 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
   },
 
   // ── standalone (research-ui BFF, design §15.2/§15.3) ─────────────────────
+  // The DSH_SCHOLAR_STANDALONE_* env vars are read by
+  // scripts/start-standalone-ui.sh and translated into CLI flags; they are
+  // declared here so the generated surfaces (JSON Schema x-dsh-env, template)
+  // document the aliases (the BFF itself also honours DSH_HOME).
   {
     key: 'standalone.host',
     scope: 'standalone',
     schema: z.string().min(1),
     default: '127.0.0.1',
     cli: { flag: 'host' },
-    sources: ['cli', 'file'],
+    env: 'DSH_SCHOLAR_STANDALONE_HOST',
+    sources: ['cli', 'env', 'file'],
     description: 'Standalone BFF listen host.',
   },
   {
@@ -419,7 +475,8 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     schema: ms(65535),
     default: 18610,
     cli: { flag: 'port' },
-    sources: ['cli', 'file'],
+    env: 'DSH_SCHOLAR_STANDALONE_PORT',
+    sources: ['cli', 'env', 'file'],
     description: 'Standalone BFF listen port.',
   },
   {
@@ -428,7 +485,8 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     schema: ms(65535),
     default: 17413,
     cli: { flag: 'kernel-port' },
-    sources: ['cli', 'file'],
+    env: 'DSH_SCHOLAR_STANDALONE_KERNEL_PORT',
+    sources: ['cli', 'env', 'file'],
     description: 'Research Kernel sidecar port spawned by the BFF.',
   },
   {
@@ -437,8 +495,9 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     schema: z.string(),
     default: '',
     cli: { flag: 'data-dir' },
-    sources: ['cli', 'file'],
-    description: 'Data directory (token/session/endpoint files); empty = DSH_HOME or ~/.dsh-scholar-standalone.',
+    env: 'DSH_SCHOLAR_STANDALONE_DATA',
+    sources: ['cli', 'env', 'file'],
+    description: 'Data directory (token/session/endpoint files); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone.',
   },
   {
     key: 'standalone.token',
@@ -494,6 +553,64 @@ export function defaultConfigForScopes(scopes?: readonly ConfigScope[]): Record<
   const out: Record<string, unknown> = {}
   for (const def of CONFIG_REGISTRY) {
     if (scopes === undefined || scopes.includes(def.scope)) out[def.key] = def.default
+  }
+  return out
+}
+
+/**
+ * Parse one binary's CLI argv against the registry definitions of its scope
+ * (kernel / runner-profile / orchestrator / standalone). Only flags declared
+ * as `cli` on registry keys are accepted — an unknown flag throws
+ * `unknown_config_key`, an invalid value (e.g. a non-numeric number flag)
+ * throws `validation_error`; error messages never echo secret values.
+ *
+ * Returns a record of **canonical keys → typed values for flags explicitly
+ * provided on argv only** (no defaults merged, no env read) — the caller
+ * merges env fallbacks and validates through `validateConfig()` to obtain
+ * the effective config and its sha256 pin. Numbers are converted from their
+ * CLI string form; booleans (e.g. `--no-token`, `--once`) parse natively.
+ *
+ * The `--help`/`-h` convention is NOT part of parsing: binaries handle it
+ * before calling parseCli and print `generateCliHelp(scope)`.
+ */
+export function parseCli(argv: readonly string[], scope: ConfigScope): Record<string, unknown> {
+  const defs = CONFIG_REGISTRY.filter(def => def.scope === scope && def.cli !== undefined)
+  const byFlag = new Map(defs.map(def => [def.cli?.flag, def]))
+  const options: Record<string, { type: 'string' | 'boolean' }> = {}
+  for (const def of defs) {
+    options[def.cli?.flag as string] = { type: def.schema instanceof z.ZodBoolean ? 'boolean' : 'string' }
+  }
+  let parsed: { values: Record<string, string | boolean | undefined> }
+  try {
+    parsed = parseArgs({ args: [...argv], options, strict: true })
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION') {
+      const flag = /'--?[^']+'/.exec((error as Error).message)?.[0] ?? ''
+      throw new ConfigRegistryError('unknown_config_key', flag.replace(/^'|'$/g, ''),
+        `unknown CLI flag ${flag} for scope ${scope} (canonical registry: config-registry.ts)`)
+    }
+    throw new ConfigRegistryError('validation_error', undefined,
+      `invalid CLI arguments for scope ${scope}: ${(error as Error).message}`)
+  }
+  const out: Record<string, unknown> = {}
+  for (const [flag, value] of Object.entries(parsed.values)) {
+    const def = byFlag.get(flag)
+    if (def === undefined) continue // unreachable under strict:true
+    if (typeof value === 'boolean') {
+      out[def.key] = value
+      continue
+    }
+    if (def.schema instanceof z.ZodNumber) {
+      const num = Number(value)
+      if (!Number.isFinite(num)) {
+        throw new ConfigRegistryError('validation_error', def.key,
+          `--${flag} must be a number, got ${JSON.stringify(value)}`)
+      }
+      out[def.key] = num
+      continue
+    }
+    out[def.key] = value
   }
   return out
 }
@@ -559,6 +676,19 @@ const SECURITY_FLOOR_RULES: ReadonlyArray<{ key: string; check: (cfg: Record<str
     key: 'runner.network',
     check: cfg => cfg['runner.network'] === 'host'
       ? 'runner.network=host is forbidden: host networking breaks the execution security floor (security-baseline.md §5, execution-runtime.md §5)'
+      : null,
+  },
+  {
+    // execution-runtime.md §1: subprocess is the trusted-smoke-fixture-only
+    // compatibility layer — it has NO containers, so any container network
+    // config other than `none` is a fail-closed misconfiguration. The
+    // per-job secure-kind rejection (baseline/pilot/formal/reproduce/
+    // latex-compile in subprocess mode) stays with the runner execution
+    // layer (executeJob SECURE_KINDS) — job kinds are runtime data, not
+    // config, and the kernel-side rejection is tested end to end.
+    key: 'runner.mode',
+    check: cfg => cfg['runner.mode'] === 'subprocess' && cfg['runner.network'] !== undefined && cfg['runner.network'] !== 'none'
+      ? 'runner.mode=subprocess forbids any container network config other than none (subprocess has no containers; execution-runtime.md §1)'
       : null,
   },
   {
@@ -862,7 +992,9 @@ export function generateCliHelp(scope: ConfigScope): string {
   const keys = CONFIG_REGISTRY.filter(def => def.scope === scope && def.cli !== undefined)
   const lines: string[] = [`Options (${scope}):`]
   for (const def of keys) {
-    const typeHint = def.secret === true ? '<secret>' : typeof def.default === 'number' ? '<number>' : '<string>'
+    const typeHint = def.secret === true ? '<secret>'
+      : typeof def.default === 'number' ? '<number>'
+        : typeof def.default === 'boolean' ? '<boolean>' : '<string>'
     const defaultHint = typeof def.default === 'string' && def.default !== '' ? ` (default: ${def.default})` : ''
     const envHint = def.env !== undefined ? ` (env: ${def.env})` : ''
     const secretHint = def.secret === true ? ' [secret]' : ''

@@ -3,55 +3,58 @@
  * Usage: node lib/bin/kernel.js --db <path> --cas <dir> [--port 7412] [--token <t>]
  *        [--service-token <t>] [--endpoint-file <path>]
  *        (or DSH_SCHOLAR_KERNEL_TOKEN / DSH_SCHOLAR_SERVICE_TOKEN)
+ *
+ * CONFIG-01: the CLI surface is parsed by the canonical Config Registry
+ * (parseCli) — flags, defaults and validation are the registry's single
+ * source of truth; `--help` prints the registry-generated help text.
  * @module @dsh-scholar/research-kernel/bin
  */
 
-import { parseArgs } from 'node:util'
 import { basename, dirname, join, resolve } from 'node:path'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { ResearchKernel } from '../kernel.js'
 import { startKernelServer } from '../server.js'
 import { LocalPtyAdapter } from '../pty-local.js'
-import { validateConfig, ConfigRegistryError } from '@dsh-scholar/research-schemas'
+import { validateConfig, parseCli, generateCliHelp, ConfigRegistryError } from '@dsh-scholar/research-schemas'
 
-const { values } = parseArgs({
-  options: {
-    db: { type: 'string' },
-    cas: { type: 'string' },
-    port: { type: 'string' },
-    host: { type: 'string' },
-    token: { type: 'string' },
-    // §4 P0 (API-01/EVID-01): internal-route service identity. Sidecars pass
-    // it via env (0600 file, out-of-band from argv); the flag is the explicit
-    // override for direct deployments.
-    'service-token': { type: 'string' },
-    // SIDE-01: publish the actual bound port (works with --port 0) plus the
-    // kernel's database/dataDir identity so sidecars can verify reuse.
-    'endpoint-file': { type: 'string' },
-  },
-})
+const argv = process.argv.slice(2)
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(`Research Kernel — sidecar process (design §9.1)\nUsage: node lib/bin/kernel.js [options]\n\n${generateCliHelp('kernel')}`)
+  process.exit(0)
+}
 
-const dbPath = values.db ?? join(mkdtempSync(join(tmpdir(), 'research-kernel-')), 'kernel.db')
-const casRoot = values.cas ?? join(process.cwd(), '.research-cas')
-const port = Number(values.port ?? 7412)
-const host = values.host ?? '127.0.0.1'
+let cli: Record<string, unknown>
+try {
+  cli = parseCli(argv, 'kernel')
+} catch (error) {
+  console.error(`[research-kernel] invalid config: ${error instanceof ConfigRegistryError ? error.message : (error as Error).message}`)
+  process.exit(1)
+}
+
+const dbPath = (cli['kernel.db'] as string | undefined) ?? join(mkdtempSync(join(tmpdir(), 'research-kernel-')), 'kernel.db')
+const casRoot = (cli['kernel.cas'] as string | undefined) ?? join(process.cwd(), '.research-cas')
+const port = (cli['kernel.port'] as number | undefined) ?? 7412
+const host = (cli['kernel.host'] as string | undefined) ?? '127.0.0.1'
 // Sidecars pass the token out-of-band from argv so it is not exposed by
 // process listings. The CLI flag remains for explicit backwards compatibility.
-const token = values.token ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
-const serviceToken = values['service-token'] ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
-const endpointFile = values['endpoint-file'] ?? process.env.DSH_SCHOLAR_KERNEL_ENDPOINT_FILE
+const token = (cli['kernel.token'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
+const serviceToken = (cli['kernel.service_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
+const endpointFile = (cli['kernel.endpoint_file'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_ENDPOINT_FILE
 
 // CONFIG-01: the deployment's effective config is validated through the
 // canonical Config Registry BEFORE anything binds — unknown keys, invalid
 // values and security-floor violations fail fast here (error messages never
 // echo secret values). The one-way sha256 pin of the effective config is
-// exposed via the HTTP x-config-pin header, the /v1|v2 health body and the
-// 0600 endpoint file, so running objects can be correlated with the config
-// that produced them (docs/config-registry.md).
+// exposed via the HTTP x-config-pin header, the /v1|v2 health body, the
+// GET /v1/config/effective body and the 0600 endpoint file, so running
+// objects can be correlated with the config that produced them
+// (docs/config-registry.md). The redacted effective config travels with the
+// pin for the HTTP surface — secrets never leave the process in plaintext.
 let configPin: string
+let configRedacted: Record<string, unknown>
 try {
-  configPin = validateConfig({
+  const resolved = validateConfig({
     'kernel.host': host,
     'kernel.port': port,
     'kernel.token': token ?? '',
@@ -60,7 +63,9 @@ try {
     'kernel.cas': casRoot,
     'kernel.endpoint_file': endpointFile ?? '',
     'kernel.require_signed_manifest': true,
-  }, { scopes: ['global', 'project', 'kernel'] }).pinHash
+  }, { scopes: ['global', 'project', 'kernel'] })
+  configPin = resolved.pinHash
+  configRedacted = resolved.redacted
 } catch (error) {
   console.error(`[research-kernel] invalid config: ${error instanceof ConfigRegistryError ? error.message : (error as Error).message}`)
   process.exit(1)
@@ -95,7 +100,7 @@ const kernel = new ResearchKernel({ dbPath, casRoot, serviceToken })
 }
 
 try {
-  const { server, url, port: actualPort } = await startKernelServer({ kernel, host, port, token, configPinHash: configPin })
+  const { server, url, port: actualPort } = await startKernelServer({ kernel, host, port, token, configPinHash: configPin, configRedacted })
   console.error(`[research-kernel] listening on ${url} (db=${dbPath}, cas=${casRoot}, instance=${kernel.instanceId}, config=${configPin})`)
   if (endpointFile !== undefined && endpointFile !== '') {
     // SIDE-01: server.address().port is the REAL port even when --port 0 was

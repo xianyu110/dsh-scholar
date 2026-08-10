@@ -26,8 +26,15 @@ Registry 是生成权威：JSON Schema、默认值 template、CLI 帮助文本�
 | `project` | 项目执行与完整性配置（design §6.2） | `execution.*`、`integrity.*`（ExecutionConfig + IntegrityConfig 全字段） |
 | `job` | 每 Job 策略（timeout、log retention） | 预留：目前由 runner-profile 与 Job payload 派生，无键 |
 | `runner-profile` | Runner 网关 CLI 与容器安全面 | `runner.*`（kernel endpoint/mode/poll/heartbeat/timeout/cancel/owner/key-file/token/service-token/network/privileged/docker_socket） |
+| `orchestrator` | Durable Research Orchestrator CLI（design §8） | `orchestrator.*`（kernel/db/poll_ms/once/dry_run） |
 | `kernel` | Research Kernel 守护进程 | `kernel.*`（host/port/token/service-token/db/cas/endpoint-file/require_signed_manifest） |
 | `standalone` | standalone BFF | `standalone.*`（host/port/kernel_port/data_dir/token/principal/no_token） |
+
+env 别名在键上声明（生成 JSON Schema 的 `x-dsh-env` 注解与 template 注释带出）：
+`DSH_SCHOLAR_KERNEL_TOKEN`、`DSH_SCHOLAR_SERVICE_TOKEN`（kernel/runner）、
+`DSH_SCHOLAR_KERNEL_ENDPOINT_FILE`、`DSH_IMAGES_LOCK`、`DSH_HOME`（standalone
+data_dir 缺省基目录）、`DSH_SCHOLAR_STANDALONE_{HOST,PORT,KERNEL_PORT,DATA}`
+（start-standalone-ui.sh 翻译为 CLI flag 的别名）。
 
 ## 3. 校验语义（`validateConfig`）
 
@@ -40,6 +47,8 @@ Registry 是生成权威：JSON Schema、默认值 template、CLI 帮助文本�
    - `runner.privileged=true`（禁 privileged 容器，security-baseline.md §5）；
    - `runner.docker_socket=true`（禁 Docker socket 挂载，§5）；
    - `runner.network=host`（禁 host network，§5 / execution-runtime.md §5）；
+   - `runner.mode=subprocess` 时 `runner.network` 只能是 `none`（subprocess 无容器；
+     每 Job 的 secure-kind 拒绝由 runner 执行层 enforce，见 execution-runtime.md §1）；
    - `execution.network_policy=none` 时 `runner.network` 只能是 `none`；
    - `integrity.allow_automatic_public_release=true`（自动发布禁止，security-baseline.md §1）；
    - `standalone.no_token=true` 时 host 必须是 loopback（127.0.0.0/8、::1、localhost）；
@@ -53,6 +62,20 @@ Registry 是生成权威：JSON Schema、默认值 template、CLI 帮助文本�
 - `redacted`：明文安全视图——secret 值一律替换为 `<redacted>`；
 - `byScope`：按 scope 分组的 effective；
 - `pinHash`：单向 sha256，**secret 只进入 pin，不进入任何明文输出**。
+
+## 3.1 CLI 解析（`parseCli`）
+
+`parseCli(argv, scope)` 是各二进制 CLI 解析的唯一入口（kernel / runner-profile /
+orchestrator / standalone 四个 scope 全部接入）：
+
+- 只接受注册表 `cli` 声明过的 flag，映射为 canonical key；
+- 数字 flag 从字符串转换（`--port 7413` → `kernel.port: 7413`），布尔 flag
+  原生解析（`--no-token`/`--once`/`--dry-run`）；
+- 未知 flag → `unknown_config_key`，非法数值 → `validation_error`，错误消息
+  永不回显 secret 值；
+- 只返回 **argv 显式提供** 的键（不合并默认、不读 env）——调用方用
+  `validateConfig()` 合并默认并取得 effective + pin；
+- 每个 scope 的 `--help`/`-h` 打印 `generateCliHelp(scope)`（注册表生成）。
 
 ## 4. 生成物
 
@@ -71,11 +94,16 @@ node scripts/generate-config-artifacts.mjs
 
 ## 5. 运行中对象 pin hash
 
-- `ResearchKernel.configPinHash`：kernel 构造时经 registry 对有效配置（global+project
-  默认 + 本实例 db/cas/require_signed_manifest/service identity + images.lock digest）
-  计算，构造期校验失败即 fail fast；
+- `ResearchKernel.configPinHash` / `ResearchKernel.configRedacted`：kernel 构造时
+  经 registry 对有效配置（global+project 默认 + 本实例 db/cas/require_signed_manifest/
+  service identity + images.lock digest）计算，构造期校验失败即 fail fast；
 - kernel HTTP 每个响应带 `x-config-pin` 头；`/v1/health` 与 `/v2/health` 带
   `config_pin` 字段；
+- `GET /v1/config/effective`：部署级 effective config 的 **redacted 明文视图**
+  （secret 一律 `<redacted>`）+ 其 pin（`config_pin`）；CLI 未传时回退 kernel
+  构造级配置；
+- `GET /v1/config/schema`：注册表生成的 JSON Schema（Settings UI 的服务端
+  元数据面）；经 standalone BFF 的 `/v1/*` 代理同样可达；
 - `bin/kernel.ts` 启动时经 registry 校验完整部署配置（host/port/token/service-token/
   db/cas/endpoint-file），并把 pin 写入 0600 endpoint 文件的 `configPin` 字段与启动日志；
 - standalone BFF 启动时经 registry 校验（含 `--no-token` loopback floor），每个响应带
@@ -86,11 +114,26 @@ node scripts/generate-config-artifacts.mjs
 
 ## 6. 接入点与边界
 
-已接入：ResearchKernel 构造（pin + fail fast）、createProject（project scope 经
-registry 校验，security floor 生效）、kernel CLI（部署配置校验 + endpoint file）、
-kernel HTTP（响应头 + health）、standalone BFF（启动校验 + 响应头）。
+已接入（CLI 解析全部走注册表 `parseCli`）：
 
-后续（如实记录，未在本阶段实现）：Settings UI 由 JSON Schema 生成（`x-dsh-*`
-注解已就绪）；runner CLI 与 orchestrator CLI 的 parseArgs 帮助接入；job scope 键；
-SecretRef 存储层（当前 secret 仍以 CLI/env/0600 文件提供，仅 registry 层做脱敏与
-pin 提交）。
+- kernel CLI（`bin/kernel.ts`）：parseCli + validateConfig（fail fast + endpoint
+  文件 configPin + `/v1/config/effective` redacted 配置）；
+- runner CLI（`bin/runner.js`）：parseCli + validateConfig（claim 前 fail fast，
+  启动日志打印 config pin）；
+- orchestrator CLI（`bin/orchestrator.js`）：parseCli（保持 --poll-ms > 0 的
+  bin 级检查）；
+- standalone BFF（`server.js` `loadOptions`）：parseCli + validateConfig
+  （--no-token loopback floor 双保险）；
+- 四个二进制均支持注册表生成的 `--help`；
+- ResearchKernel 构造（pin + fail fast）、createProject（project scope 经
+  registry 校验，security floor 生效）、kernel HTTP（响应头 + health +
+  config/effective + config/schema）、standalone BFF（启动校验 + 响应头）。
+
+后续（如实记录，未在本阶段实现）：
+
+- Settings UI（浏览器层）由 `/v1/config/schema` + `/v1/config/effective` 生成；
+  api-contracts.md §19 的 `/bff/research/config/*`（schema/effective/revisions/
+  PATCH/reset）随 Settings UI 一并落地；
+- job scope 键（每 Job 策略仍由 runner-profile + Job payload 派生）；
+- SecretRef 存储层（当前 secret 仍以 CLI/env/0600 文件提供，仅 registry 层脱敏与
+  pin 提交）。

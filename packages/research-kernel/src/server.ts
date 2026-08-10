@@ -11,7 +11,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -32,6 +32,13 @@ export interface KernelServerOptions {
    * and the `/v1|v2/health` `config_pin` field.
    */
   configPinHash?: string
+  /**
+   * CONFIG-01: redacted view of the deployment's effective config (secret
+   * values already replaced with `<redacted>` by validateConfig) served by
+   * GET /v1/config/effective. When omitted the kernel's own
+   * constructor-level redacted config is served.
+   */
+  configRedacted?: Record<string, unknown>
 }
 
 const idSchema = z.string().min(1)
@@ -672,7 +679,7 @@ function parseLaneParam(raw: string | null): 'research' | 'session' | undefined 
   return raw === 'research' || raw === 'session' ? raw : undefined
 }
 
-function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined, configPin: string | undefined): void {
+function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, token: string | undefined, configPin: string | undefined, configRedacted: Record<string, unknown> | undefined): void {
   currentRequestId = typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id'] !== ''
     ? req.headers['x-request-id']
     : `req_${Math.random().toString(36).slice(2, 12)}`
@@ -765,6 +772,26 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
       switch (resource) {
         case 'health': {
           ok(res, { ok: true, instance: kernel.instanceId, config_pin: configPin ?? kernel.configPinHash, time: new Date().toISOString() })
+          return
+        }
+        // CONFIG-01 HTTP surface: GET /v1/config/effective returns the
+        // deployment's effective config (REDACTED — secrets never leave the
+        // process in plaintext) with its pin; GET /v1/config/schema serves
+        // the registry-generated JSON Schema (canonical UI metadata).
+        case 'config': {
+          if (method === 'GET' && id === 'effective') {
+            ok(res, {
+              config_pin: configPin ?? kernel.configPinHash,
+              config: configRedacted ?? kernel.configRedacted,
+              generated_at: new Date().toISOString(),
+            })
+            return
+          }
+          if (method === 'GET' && id === 'schema') {
+            ok(res, generateJsonSchema())
+            return
+          }
+          send(res, 404, { error: { code: 'not_found', message: 'unknown config resource' } })
           return
         }
         case 'projects': {
@@ -2124,7 +2151,10 @@ export function startKernelServer(options: KernelServerOptions): Promise<{ serve
   if (options.requireSignedManifest !== undefined) kernel.requireSignedManifest = options.requireSignedManifest
   // CONFIG-01: the deployment config pin (CLI-computed) or the kernel's own.
   const configPin = options.configPinHash ?? kernel.configPinHash
-  const server = createServer((req, res) => route(req, res, kernel, token, configPin))
+  // CONFIG-01: the deployment's redacted effective config (CLI-computed) or
+  // the kernel's own — served by GET /v1/config/effective.
+  const configRedacted = options.configRedacted ?? kernel.configRedacted
+  const server = createServer((req, res) => route(req, res, kernel, token, configPin, configRedacted))
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

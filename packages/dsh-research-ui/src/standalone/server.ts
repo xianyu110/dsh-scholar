@@ -24,11 +24,10 @@ import { Readable } from 'node:stream'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { UiKernelSidecar } from './sidecar.js'
-import { validateConfig } from '@dsh-scholar/research-schemas'
+import { validateConfig, parseCli, generateCliHelp } from '@dsh-scholar/research-schemas'
 import {
   MAX_BODY_BYTES,
   SlidingWindowRateLimiter,
@@ -485,30 +484,25 @@ const BOOTSTRAP_HTML = `<!doctype html>
 </html>`
 
 export function loadOptions(argv: string[]): StandaloneOptions {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      host: { type: 'string', default: '127.0.0.1' },
-      port: { type: 'string', default: String(DEFAULT_PORT) },
-      'kernel-port': { type: 'string', default: String(DEFAULT_KERNEL_PORT) },
-      'data-dir': { type: 'string' },
-      token: { type: 'string' },
-      'no-token': { type: 'boolean', default: false },
-      'principal': { type: 'string' },
-    },
-  })
-  const host = values.host ?? '127.0.0.1'
-  if (values['no-token'] === true && !isLoopbackHost(host)) {
+  // CONFIG-01: the standalone CLI surface is parsed by the canonical Config
+  // Registry (parseCli) — flags, defaults and validation are the registry's
+  // single source of truth; the --no-token loopback floor is enforced here
+  // (identical message to the registry's own check in startStandalone) so
+  // CLI behavior is unchanged and rejection still happens before listen.
+  const values = parseCli(argv, 'standalone')
+  const host = (values['standalone.host'] as string | undefined) ?? '127.0.0.1'
+  if (values['standalone.no_token'] === true && !isLoopbackHost(host)) {
     throw new Error('--no-token requires an explicit loopback --host (127.0.0.0/8, ::1, or localhost)')
   }
-  const dataDir = values['data-dir'] ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh-scholar-standalone'), 'research-ui-standalone')
+  const dataDir = (values['standalone.data_dir'] as string | undefined) ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh-scholar-standalone'), 'research-ui-standalone')
   let token: string | null = null
-  if (values['no-token'] !== true) {
+  if (values['standalone.no_token'] !== true) {
     const tokenFile = join(dataDir, 'standalone-token')
     const tokenFileExists = existsSync(tokenFile)
     if (tokenFileExists) secureExistingTokenFile(tokenFile)
-    if (values.token !== undefined && values.token !== '') {
-      token = values.token
+    const explicitToken = values['standalone.token'] as string | undefined
+    if (explicitToken !== undefined && explicitToken !== '') {
+      token = explicitToken
       mkdirSync(dataDir, { recursive: true })
       writeFileSync(tokenFile, token, { mode: 0o600, flag: tokenFileExists ? 'w' : 'wx' })
       chmodSync(tokenFile, 0o600)
@@ -524,11 +518,11 @@ export function loadOptions(argv: string[]): StandaloneOptions {
   }
   return {
     host,
-    port: Number(values.port ?? DEFAULT_PORT),
-    kernelPort: Number(values['kernel-port'] ?? DEFAULT_KERNEL_PORT),
+    port: (values['standalone.port'] as number | undefined) ?? DEFAULT_PORT,
+    kernelPort: (values['standalone.kernel_port'] as number | undefined) ?? DEFAULT_KERNEL_PORT,
     dataDir,
     token,
-    principal: (values['principal'] ?? null) as string | null,
+    principal: ((values['standalone.principal'] as string | undefined) ?? null) as string | null,
   }
 }
 
@@ -1189,6 +1183,12 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
 
 // Direct execution: `node lib/standalone/server.js ...`
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+  // CONFIG-01: `--help` prints the registry-generated CLI help (no server
+  // start, no token file writes).
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(`DSH Scholar standalone web application server (design §15.2/§15.3)\nUsage: node lib/standalone/server.js [options]\n\n${generateCliHelp('standalone')}`)
+    process.exit(0)
+  }
   // SEC-UI-01: startup failures (incl. argument validation) exit non-zero
   // with the STABLE message only — never a raw stack trace that would leak
   // internal paths into the service log.

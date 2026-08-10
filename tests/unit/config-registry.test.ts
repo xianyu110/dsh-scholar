@@ -7,7 +7,7 @@ import { z } from 'zod'
 import {
   CONFIG_REGISTRY, CONFIG_SCOPES, ConfigRegistryError, ExecutionConfig, IntegrityConfig,
   configKeysForScope, defaultConfigForScopes, generateCliHelp, generateJsonSchema,
-  generateTemplateYaml, getConfigKey, isLoopbackHost, pinConfig, validateConfig,
+  generateTemplateYaml, getConfigKey, isLoopbackHost, parseCli, pinConfig, validateConfig,
   zodToJsonSchema,
 } from '@dsh-scholar/research-schemas'
 
@@ -21,8 +21,12 @@ describe('config registry — key coverage', () => {
     for (const key of ['kernel.host', 'kernel.port', 'kernel.token', 'kernel.service_token', 'kernel.db', 'kernel.cas', 'kernel.endpoint_file']) {
       expect(keys.has(key)).toBe(true)
     }
-    // runner CLI (poll/heartbeat/timeout/cancel/owner/mode/kernel/key-file).
-    for (const key of ['runner.poll_ms', 'runner.heartbeat_ms', 'runner.timeout_ms', 'runner.cancel_poll_ms', 'runner.owner', 'runner.mode', 'runner.kernel', 'runner.key_file']) {
+    // runner CLI (poll/heartbeat/timeout/cancel/owner/mode/kernel/key-file/token/service-token).
+    for (const key of ['runner.poll_ms', 'runner.heartbeat_ms', 'runner.timeout_ms', 'runner.cancel_poll_ms', 'runner.owner', 'runner.mode', 'runner.kernel', 'runner.key_file', 'runner.token', 'runner.service_token']) {
+      expect(keys.has(key)).toBe(true)
+    }
+    // orchestrator CLI (kernel/db/poll-ms/once/dry-run).
+    for (const key of ['orchestrator.kernel', 'orchestrator.db', 'orchestrator.poll_ms', 'orchestrator.once', 'orchestrator.dry_run']) {
       expect(keys.has(key)).toBe(true)
     }
     // standalone CLI (--host/--port/--token/--principal/--data-dir/--kernel-port/--no-token).
@@ -33,6 +37,17 @@ describe('config registry — key coverage', () => {
     for (const key of ['global.images_lock.path', 'global.images_lock.node_fixture', 'global.images_lock.texlive', 'execution.network_policy']) {
       expect(keys.has(key)).toBe(true)
     }
+    // env aliases are declared where they exist (DSH_* series).
+    const envs = new Map(CONFIG_REGISTRY.filter(def => def.env !== undefined).map(def => [def.key, def.env]))
+    expect(envs.get('kernel.token')).toBe('DSH_SCHOLAR_KERNEL_TOKEN')
+    expect(envs.get('kernel.service_token')).toBe('DSH_SCHOLAR_SERVICE_TOKEN')
+    expect(envs.get('runner.service_token')).toBe('DSH_SCHOLAR_SERVICE_TOKEN')
+    expect(envs.get('kernel.endpoint_file')).toBe('DSH_SCHOLAR_KERNEL_ENDPOINT_FILE')
+    expect(envs.get('global.images_lock.path')).toBe('DSH_IMAGES_LOCK')
+    expect(envs.get('standalone.host')).toBe('DSH_SCHOLAR_STANDALONE_HOST')
+    expect(envs.get('standalone.port')).toBe('DSH_SCHOLAR_STANDALONE_PORT')
+    expect(envs.get('standalone.kernel_port')).toBe('DSH_SCHOLAR_STANDALONE_KERNEL_PORT')
+    expect(envs.get('standalone.data_dir')).toBe('DSH_SCHOLAR_STANDALONE_DATA')
   })
 
   it('registry invariants: unique keys, valid scopes, schema+default present', () => {
@@ -50,10 +65,11 @@ describe('config registry — key coverage', () => {
     // every key is reachable through the lookups
     expect(CONFIG_REGISTRY.length).toBe(configKeysForScope('global').length + configKeysForScope('project').length +
       configKeysForScope('job').length + configKeysForScope('runner-profile').length +
-      configKeysForScope('kernel').length + configKeysForScope('standalone').length)
+      configKeysForScope('orchestrator').length + configKeysForScope('kernel').length +
+      configKeysForScope('standalone').length)
     for (const def of CONFIG_REGISTRY) expect(getConfigKey(def.key)?.key).toBe(def.key)
     expect(getConfigKey('does.not.exist')).toBeUndefined()
-    expect(CONFIG_SCOPES).toEqual(['global', 'project', 'job', 'runner-profile', 'kernel', 'standalone'])
+    expect(CONFIG_SCOPES).toEqual(['global', 'project', 'job', 'runner-profile', 'orchestrator', 'kernel', 'standalone'])
   })
 
   it('every zod schema accepts its own default and rejects a wrong type', () => {
@@ -126,6 +142,139 @@ describe('config registry — validateConfig', () => {
   })
 })
 
+describe('config registry — parseCli (binary CLI parsing)', () => {
+  it('kernel: every registry flag maps to its canonical key with typed values', () => {
+    const parsed = parseCli(['--db', '/tmp/k.db', '--cas', '/tmp/cas', '--port', '7413', '--host', '0.0.0.0',
+      '--token', 't1', '--service-token', 's1', '--endpoint-file', '/tmp/ep.json'], 'kernel')
+    expect(parsed).toEqual({
+      'kernel.db': '/tmp/k.db',
+      'kernel.cas': '/tmp/cas',
+      'kernel.port': 7413,
+      'kernel.host': '0.0.0.0',
+      'kernel.token': 't1',
+      'kernel.service_token': 's1',
+      'kernel.endpoint_file': '/tmp/ep.json',
+    })
+    // absent flags are NOT merged with defaults — the caller's
+    // validateConfig does that, so the bin keeps one default source.
+    expect(parseCli([], 'kernel')).toEqual({})
+    // --flag=value form works too
+    expect(parseCli(['--port=7414'], 'kernel')['kernel.port']).toBe(7414)
+  })
+
+  it('runner: every registry flag maps to its canonical key', () => {
+    expect(parseCli(['--kernel', 'http://127.0.0.1:9999', '--mode', 'docker', '--poll-ms', '150',
+      '--timeout-ms', '30000', '--heartbeat-ms', '1500', '--cancel-poll-ms', '1000', '--owner', 'x',
+      '--key-file', '/tmp/k.pem', '--token', 'rt', '--service-token', 'rs'], 'runner-profile')).toEqual({
+      'runner.kernel': 'http://127.0.0.1:9999',
+      'runner.mode': 'docker',
+      'runner.poll_ms': 150,
+      'runner.timeout_ms': 30000,
+      'runner.heartbeat_ms': 1500,
+      'runner.cancel_poll_ms': 1000,
+      'runner.owner': 'x',
+      'runner.key_file': '/tmp/k.pem',
+      'runner.token': 'rt',
+      'runner.service_token': 'rs',
+    })
+  })
+
+  it('standalone: every registry flag maps to its canonical key (booleans included)', () => {
+    expect(parseCli(['--host', '127.0.0.1', '--port', '18611', '--kernel-port', '17414',
+      '--data-dir', '/tmp/d', '--token', 'st', '--principal', 'ops-1'], 'standalone')).toEqual({
+      'standalone.host': '127.0.0.1',
+      'standalone.port': 18611,
+      'standalone.kernel_port': 17414,
+      'standalone.data_dir': '/tmp/d',
+      'standalone.token': 'st',
+      'standalone.principal': 'ops-1',
+    })
+    expect(parseCli(['--no-token'], 'standalone')).toEqual({ 'standalone.no_token': true })
+  })
+
+  it('orchestrator: every registry flag maps to its canonical key', () => {
+    expect(parseCli(['--kernel', 'http://127.0.0.1:9999', '--db', '/tmp/a.db', '--poll-ms', '5000', '--once', '--dry-run'], 'orchestrator')).toEqual({
+      'orchestrator.kernel': 'http://127.0.0.1:9999',
+      'orchestrator.db': '/tmp/a.db',
+      'orchestrator.poll_ms': 5000,
+      'orchestrator.once': true,
+      'orchestrator.dry_run': true,
+    })
+  })
+
+  it('rejects unknown CLI flags with unknown_config_key (all scopes)', () => {
+    for (const [argv, scope] of [
+      [['--bogus'], 'kernel'],
+      [['--nope', 'x'], 'runner-profile'],
+      [['--what'], 'standalone'],
+      [['--never'], 'orchestrator'],
+    ] as const) {
+      try {
+        parseCli([...argv], scope)
+        expect.unreachable(`should reject ${argv[0]}`)
+      } catch (error) {
+        expect(error).toBeInstanceOf(ConfigRegistryError)
+        expect((error as ConfigRegistryError).code).toBe('unknown_config_key')
+        expect((error as Error).message).toContain(argv[0])
+      }
+    }
+  })
+
+  it('rejects non-numeric number flags; value-level failures surface at validateConfig', () => {
+    try {
+      parseCli(['--port', 'abc'], 'kernel')
+      expect.unreachable()
+    } catch (error) {
+      expect((error as ConfigRegistryError).code).toBe('validation_error')
+      expect((error as Error).message).toContain('--port must be a number')
+    }
+    expect(() => validateConfig(parseCli(['--port', '99999'], 'kernel'), { scopes: ['kernel'] })).toThrow(ConfigRegistryError)
+    expect(() => validateConfig(parseCli(['--mode', 'bogus'], 'runner-profile'), { scopes: ['runner-profile'] })).toThrow(/invalid value/)
+  })
+
+  it('secret flags never appear in error messages', () => {
+    const secret = 'dsh-top-secret-value-99'
+    try {
+      parseCli(['--token', secret, '--bogus'], 'kernel')
+      expect.unreachable()
+    } catch (error) {
+      expect((error as Error).message).not.toContain(secret)
+    }
+    try {
+      parseCli(['--service-token', secret, '--poll-ms', 'x'], 'runner-profile')
+      expect.unreachable()
+    } catch (error) {
+      expect((error as Error).message).not.toContain(secret)
+    }
+  })
+
+  it('CLI-parsed configs feed validateConfig: defaults merge, pin changes with flags', () => {
+    const base = validateConfig(parseCli([], 'kernel'), { scopes: ['kernel'] })
+    expect(base.effective['kernel.port']).toBe(7412)
+    const tweaked = validateConfig(parseCli(['--port', '7413'], 'kernel'), { scopes: ['kernel'] })
+    expect(tweaked.effective['kernel.port']).toBe(7413)
+    expect(tweaked.pinHash).not.toBe(base.pinHash)
+    // a CLI-provided secret changes the pin one-way and stays redacted
+    const withSecret = validateConfig(parseCli(['--token', 'cli-secret'], 'kernel'), { scopes: ['kernel'] })
+    expect(withSecret.pinHash).not.toBe(base.pinHash)
+    expect(withSecret.redacted['kernel.token']).toBe('<redacted>')
+    expect(JSON.stringify(withSecret.redacted)).not.toContain('cli-secret')
+  })
+
+  it('every scope flag is unique and parseCli round-trips the registry flag list', () => {
+    for (const scope of CONFIG_SCOPES) {
+      const flags = CONFIG_REGISTRY.filter(def => def.scope === scope && def.cli !== undefined).map(def => def.cli?.flag)
+      expect(new Set(flags).size).toBe(flags.length)
+      for (const flag of flags) {
+        const def = CONFIG_REGISTRY.find(d => d.scope === scope && d.cli?.flag === flag)
+        const value = def?.schema instanceof z.ZodBoolean ? `--${flag}` : def?.schema instanceof z.ZodNumber ? [`--${flag}`, '1'] : [`--${flag}`, 'v']
+        const parsed = parseCli(Array.isArray(value) ? value : [value], scope)
+        expect(Object.keys(parsed)).toEqual([def?.key])
+      }
+    }
+  })
+})
+
 describe('config registry — secrets and pin hash', () => {
   it('redacts secret values from plaintext output but commits them in the pin', () => {
     const secret = 'dsh-super-secret-token-123'
@@ -191,10 +340,10 @@ describe('config registry — security floor', () => {
   })
 
   it('network_policy=none forbids any container network other than none', () => {
-    // 'bridge' is legal under allowlist but a violation under network_policy=none
-    expect(validateConfig({ 'execution.network_policy': 'allowlist', 'runner.network': 'bridge' }).pinHash).toMatch(/^sha256:/)
+    // 'bridge' is legal under allowlist in container (docker) mode…
+    expect(validateConfig({ 'execution.network_policy': 'allowlist', 'runner.network': 'bridge', 'runner.mode': 'docker' }).pinHash).toMatch(/^sha256:/)
     try {
-      validateConfig({ 'execution.network_policy': 'none', 'runner.network': 'bridge' })
+      validateConfig({ 'execution.network_policy': 'none', 'runner.network': 'bridge', 'runner.mode': 'docker' })
       expect.unreachable()
     } catch (error) {
       expect((error as ConfigRegistryError).code).toBe('security_floor_violation')
@@ -202,13 +351,38 @@ describe('config registry — security floor', () => {
     }
     // host networking is a violation regardless of policy
     try {
-      validateConfig({ 'execution.network_policy': 'allowlist', 'runner.network': 'host' })
+      validateConfig({ 'execution.network_policy': 'allowlist', 'runner.network': 'host', 'runner.mode': 'docker' })
       expect.unreachable()
     } catch (error) {
       expect((error as ConfigRegistryError).code).toBe('security_floor_violation')
     }
     // none + none is legal
     expect(validateConfig({ 'execution.network_policy': 'none', 'runner.network': 'none' }).pinHash).toMatch(/^sha256:/)
+  })
+
+  it('subprocess mode forbids any container network config other than none', () => {
+    // subprocess has no containers: bridge/host network config is a
+    // fail-closed misconfiguration (execution-runtime.md §1); the default
+    // (mode subprocess + network none) and docker+bridge stay legal.
+    try {
+      validateConfig({ 'runner.mode': 'subprocess', 'runner.network': 'bridge' })
+      expect.unreachable('should reject subprocess + bridge')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigRegistryError)
+      expect((error as ConfigRegistryError).code).toBe('security_floor_violation')
+      expect((error as Error).message).toContain('runner.mode=subprocess')
+    }
+    // host is banned regardless (its own floor rule fires first)
+    try {
+      validateConfig({ 'runner.mode': 'subprocess', 'runner.network': 'host' })
+      expect.unreachable('should reject subprocess + host')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigRegistryError)
+      expect((error as ConfigRegistryError).code).toBe('security_floor_violation')
+    }
+    expect(validateConfig({ 'runner.mode': 'subprocess', 'runner.network': 'none' }).pinHash).toMatch(/^sha256:/)
+    expect(validateConfig({ 'runner.mode': 'docker', 'runner.network': 'bridge' }).pinHash).toMatch(/^sha256:/)
+    expect(validateConfig({ 'runner.mode': 'subprocess' }).pinHash).toMatch(/^sha256:/)
   })
 
   it('tokenless standalone mode is loopback-only', () => {
@@ -323,6 +497,13 @@ describe('config registry — generated artifacts', () => {
     for (const flag of ['--host', '--port', '--token', '--principal', '--no-token']) {
       expect(standaloneHelp).toContain(flag)
     }
+    const orchestratorHelp = generateCliHelp('orchestrator')
+    for (const flag of ['--kernel', '--db', '--poll-ms', '--once', '--dry-run']) {
+      expect(orchestratorHelp).toContain(flag)
+    }
+    // boolean flags render a boolean type hint
+    expect(orchestratorHelp).toContain('--once <boolean>')
+    expect(standaloneHelp).toContain('--no-token <boolean>')
   })
 
   it('zodToJsonSchema fails loud on unsupported types', () => {

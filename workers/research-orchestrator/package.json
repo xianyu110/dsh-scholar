@@ -23,7 +23,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "orchestrator": "node lib/bin/orchestrator.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@dsh-scholar/research-schemas": "file:../../packages/research-schemas"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.7.0"

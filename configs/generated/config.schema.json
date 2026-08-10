@@ -243,6 +243,44 @@
       },
       "additionalProperties": false
     },
+    "orchestrator": {
+      "type": "object",
+      "properties": {
+        "kernel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Kernel endpoint the orchestrator advances projects over.",
+          "default": "http://127.0.0.1:7412",
+          "x-dsh-scope": "orchestrator"
+        },
+        "db": {
+          "type": "string",
+          "description": "SQLite action-store path; empty = ephemeral temp database.",
+          "default": "",
+          "x-dsh-scope": "orchestrator"
+        },
+        "poll_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Poll interval between advancement rounds (bin still requires > 0).",
+          "default": 5000,
+          "x-dsh-scope": "orchestrator"
+        },
+        "once": {
+          "type": "boolean",
+          "description": "Run a single poll round and exit (tests/cron).",
+          "default": false,
+          "x-dsh-scope": "orchestrator"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Compute planned actions only; no kernel writes, no persistence.",
+          "default": false,
+          "x-dsh-scope": "orchestrator"
+        }
+      },
+      "additionalProperties": false
+    },
     "kernel": {
       "type": "object",
       "properties": {
@@ -314,7 +352,8 @@
           "minLength": 1,
           "description": "Standalone BFF listen host.",
           "default": "127.0.0.1",
-          "x-dsh-scope": "standalone"
+          "x-dsh-scope": "standalone",
+          "x-dsh-env": "DSH_SCHOLAR_STANDALONE_HOST"
         },
         "port": {
           "type": "integer",
@@ -322,7 +361,8 @@
           "maximum": 65535,
           "description": "Standalone BFF listen port.",
           "default": 18610,
-          "x-dsh-scope": "standalone"
+          "x-dsh-scope": "standalone",
+          "x-dsh-env": "DSH_SCHOLAR_STANDALONE_PORT"
         },
         "kernel_port": {
           "type": "integer",
@@ -330,13 +370,15 @@
           "maximum": 65535,
           "description": "Research Kernel sidecar port spawned by the BFF.",
           "default": 17413,
-          "x-dsh-scope": "standalone"
+          "x-dsh-scope": "standalone",
+          "x-dsh-env": "DSH_SCHOLAR_STANDALONE_KERNEL_PORT"
         },
         "data_dir": {
           "type": "string",
-          "description": "Data directory (token/session/endpoint files); empty = DSH_HOME or ~/.dsh-scholar-standalone.",
+          "description": "Data directory (token/session/endpoint files); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone.",
           "default": "",
-          "x-dsh-scope": "standalone"
+          "x-dsh-scope": "standalone",
+          "x-dsh-env": "DSH_SCHOLAR_STANDALONE_DATA"
         },
         "token": {
           "type": "string",

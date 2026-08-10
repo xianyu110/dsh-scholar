@@ -17,11 +17,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
-import { createHash, randomUUID, sign, type KeyObject } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { JobRecord } from '@dsh-scholar/research-schemas'
 import { buildExecutionPlan, signExecutionPlan, type ExecutionPlan } from '@dsh-scholar/research-schemas'
 import { LocalDockerAdapter, buildLocalDockerArgs, type DockerExecContext, type RunOutcome } from './execution-target.js'
+import { appendTerminalFramesWithLease } from './kernel-client.js'
+import { canonicalJson, signManifest, type RunnerSigningKey } from './manifest-signing.js'
+import { materializeCodeSnapshot, unpackCodeSnapshot } from './snapshot-materialize.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -30,39 +33,10 @@ const execFileAsync = promisify(execFile)
 export type ClaimedJobRecord = JobRecord & { run_id?: string | null }
 
 /**
- * §4 P0 (TERM-01): upload terminal frames WITH the lease owner/token — the
- * kernel exact-matches them against the job's current lease (a wrong owner or
- * token is 409 lease_stale), so the gateway must always attach both. The
- * ResearchClient's typed method does not carry headers, so this reuses the
- * client's request pipeline (same endpoint/bearer handling) with the lease
- * headers attached.
+ * appendTerminalFramesWithLease 已迁入 ./kernel-client.js（远端 fleet 服务端
+ * 转发 frames 共用同一 lease 头路径），此处保持 re-export。
  */
-type ResearchRequestFn = <T>(method: string, path: string, body?: unknown, headers?: Record<string, string>) => Promise<T>
-
-export function appendTerminalFramesWithLease(
-  client: ResearchClient,
-  jobId: string,
-  runId: string,
-  frames: Array<{
-    seq: number
-    stream_seq?: number | null
-    channel?: 'stdout' | 'stderr' | null
-    text?: string | null
-    byte_offset?: number | null
-    byte_length?: number | null
-    frame_kind: 'chunk' | 'gap' | 'exit'
-    lease_generation?: number
-    payload_json?: string
-  }>,
-  owner: string,
-  token: string | null,
-): Promise<{ appended: number; last_seq: number }> {
-  const request = (client as unknown as { request: ResearchRequestFn }).request
-  return request('POST', `/v1/jobs/${jobId}/terminal-frames`, { run_id: runId, frames }, {
-    'x-lease-owner': owner,
-    'x-lease-token': token ?? '',
-  })
-}
+export { appendTerminalFramesWithLease } from './kernel-client.js'
 
 /**
  * §4 P0 (RUN-02/TEX-02): the TeX build engine is a FIXED enum — a raw string
@@ -108,13 +82,6 @@ export function resolveMetricsFileWithin(outputsDir: string, metricsPath: string
 
 export type RunnerMode = 'subprocess' | 'docker'
 
-export interface RunnerSigningKey {
-  /** Stable public identity, e.g. `runner-<hex>`; goes into the manifest as runner_key_id. */
-  keyId: string
-  /** Ed25519 private key used to sign the canonical RunManifest (design §12.7). */
-  privateKey: KeyObject
-}
-
 export interface RunnerOptions {
   client: ResearchClient
   owner: string
@@ -143,8 +110,12 @@ export type { RunOutcome } from './execution-target.js'
  * gateway 侧实现。调度/注册表/远端接口见：
  * - execution-target.ts：port + LocalDockerAdapter + buildLocalDockerArgs；
  * - agent-registry.ts：远端 Agent 注册表（注册/心跳/offline 判定）；
- * - remote-agent.ts：RemoteRunnerAgent 接口（真实 mTLS 传输未实现，
- *   fail-closed stub）。
+ * - remote-agent.ts：RemoteRunnerAgent 代理端（register/heartbeat/claim/
+ *   执行/上报/spool；未配置传输时 fail-closed stub）；
+ * - remote-fleet-server.ts：RemoteFleetServer 服务端（注册/心跳/claim/
+ *   frames/artifacts/complete/CAS + HTTP 路由 + x-service-token）；
+ * - agent-spool.ts：代理端有界本地 spool（离线 fail closed，恢复重放）；
+ * - in-memory-transport.ts：mock 传输（测试/loopback，不依赖真实远端）。
  */
 export {
   LocalDockerAdapter,
@@ -167,9 +138,34 @@ export {
   createRemoteRunnerAgent,
   RemoteRunnerAgentError,
   RemoteRunnerAgentNotImplementedError,
+  RemoteRunnerAgentImpl,
+  RemoteWireError,
+  HttpRemoteFleetTransport,
+  defaultSubprocessExecutor,
+  isSpoolableWireError,
   type RemoteRunnerAgent,
+  type RemoteFleetTransport,
   type RemoteTransport,
+  type AgentExecutor,
+  type AgentExecutionContext,
+  type AgentRunHandle,
+  type RemoteAgentOptions,
 } from './remote-agent.js'
+export {
+  RemoteFleetServer,
+  FleetServerError,
+  mapKernelError,
+  fleetErrorEnvelope,
+  createFleetKernelClient,
+  attachRemoteFleetRoutes,
+  startFleetHttpServer,
+  type FleetKernelClient,
+  type RemoteFleetServerOptions,
+  type RemoteFleetServerStats,
+  type RemoteFleetHttpOptions,
+} from './remote-fleet-server.js'
+export { AgentOutboundSpool, type AgentSpoolEntry, type AgentSpoolOverflowGap } from './agent-spool.js'
+export { InMemoryFleetTransport, FailingFleetTransport } from './in-memory-transport.js'
 
 /** Deterministic metrics extraction from stdout JSON-lines (`{"metric":...,"value":...}`). */
 export function extractMetrics(stdout: string): Array<{ metric: string; value: number; seed?: number }> {
@@ -192,73 +188,10 @@ export function extractMetrics(stdout: string): Array<{ metric: string; value: n
 }
 
 /**
- * §11.3 (SCH-EXEC-002): unpack a code-snapshot archive artifact (JSON
- * `{schema_version: 1, files: {rel: {sha256, content_base64}}}`) into
- * `Map<relativePath, Buffer>`. Verifies each entry's sha256 — a tampered or
- * truncated archive is rejected instead of silently materialized.
+ * unpackCodeSnapshot / materializeCodeSnapshot 已迁入 ./snapshot-materialize.js
+ * （远端 Agent 的 CAS 输入物化共用同一契约），此处保持 re-export。
  */
-export function unpackCodeSnapshot(content: string | Buffer): Map<string, Buffer> {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(Buffer.isBuffer(content) ? content.toString('utf8') : content)
-  } catch (error) {
-    throw new Error(`code snapshot archive is not valid JSON: ${(error as Error).message}`)
-  }
-  if (typeof parsed !== 'object' || parsed === null) throw new Error('code snapshot archive must be a JSON object')
-  const record = parsed as { schema_version?: unknown; files?: unknown }
-  if (record.schema_version !== 1) {
-    throw new Error(`code snapshot archive has unsupported schema_version: ${String(record.schema_version)}`)
-  }
-  if (typeof record.files !== 'object' || record.files === null) {
-    throw new Error('code snapshot archive is missing the files map')
-  }
-  const files = new Map<string, Buffer>()
-  for (const [rel, info] of Object.entries(record.files)) {
-    if (typeof rel !== 'string' || rel === '' || rel.startsWith('/') || rel.startsWith('..')) {
-      throw new Error(`code snapshot archive contains an unsafe path: ${rel}`)
-    }
-    const entry = info as { sha256?: unknown; content_base64?: unknown }
-    if (typeof entry.content_base64 !== 'string') continue
-    const buf = Buffer.from(entry.content_base64, 'base64')
-    if (typeof entry.sha256 === 'string' && entry.sha256 !== '') {
-      const actual = createHash('sha256').update(buf).digest('hex')
-      if (actual !== entry.sha256) {
-        throw new Error(`code snapshot integrity mismatch for ${rel}: got ${actual}, archive claims ${entry.sha256}`)
-      }
-    }
-    files.set(rel, buf)
-  }
-  return files
-}
-
-/**
- * §11.3 (SCH-EXEC-002): write an unpacked code snapshot into `workDir` with
- * path-traversal protection (every target must resolve inside workDir).
- * The container mounts workDir read-only at /work — this is the ONLY code
- * the Runner executes; agent host dirs are never mounted.
- */
-export function materializeCodeSnapshot(files: Map<string, Buffer>, workDir: string): number {
-  const absRoot = resolve(workDir)
-  let count = 0
-  for (const [rel, buf] of files) {
-    const target = resolve(absRoot, rel)
-    if (!target.startsWith(`${absRoot}${sep}`) && target !== absRoot) {
-      throw new Error(`code snapshot path escapes workDir: ${rel}`)
-    }
-    mkdirSync(resolve(target, '..'), { recursive: true })
-    // The container mounts /work read-only as uid 65534: directories need
-    // traversal (+x) for ALL — mkdirSync honors umask (0077 → 0700), so force
-    // 0755 on every created directory.
-    chmodSync(resolve(target, '..'), 0o755)
-    writeFileSync(target, buf)
-    // The container runs as uid 65534 against a READ-ONLY /work mount:
-    // umask (e.g. 0077) must not strip the world-read bits, or the
-    // container cannot open the materialized files (EACCES).
-    chmodSync(target, 0o644)
-    count++
-  }
-  return count
-}
+export { unpackCodeSnapshot, materializeCodeSnapshot } from './snapshot-materialize.js'
 
 /**
  * §12 (TEX-02): frozen TeX workspace manifest carried in the latex-compile
@@ -537,24 +470,11 @@ function killProcessTree(child: ChildProcess): void {
 }
 
 /**
- * Canonical JSON for manifest signing (design §12.7): top-level keys sorted,
- * no whitespace. `JSON.stringify(obj, keys)` serializes exactly the listed
- * keys in the given order — the verifier must use the same canonicalization.
+ * canonicalJson / signManifest / RunnerSigningKey 已迁入 ./manifest-signing.js
+ * （远端 Agent 的 complete 路径共用同一 canonical 签名规则），此处保持
+ * re-export，既有导入路径不变。
  */
-export function canonicalJson(manifest: Record<string, unknown>): string {
-  return JSON.stringify(manifest, Object.keys(manifest).sort())
-}
-
-/** Sign the canonical RunManifest; returns signature/runner_key_id/payload_sha256. */
-export function signManifest(manifest: Record<string, unknown>, key: RunnerSigningKey): Record<string, unknown> {
-  const payloadSha256 = createHash('sha256').update(canonicalJson(manifest)).digest('hex')
-  const signed = { ...manifest, runner_key_id: key.keyId, payload_sha256: payloadSha256 }
-  // Ed25519 signs the raw payload directly: the one-shot `sign(null, ...)`
-  // API (a digest name like 'ed25519' throws "Invalid digest"; the kernel
-  // verifies with the matching `verify(null, ...)`).
-  const signature = sign(null, Buffer.from(canonicalJson(signed), 'utf8'), key.privateKey).toString('base64')
-  return { ...signed, signature }
-}
+export { canonicalJson, signManifest, type RunnerSigningKey } from './manifest-signing.js'
 
 interface SpawnResult {
   stdout: string
