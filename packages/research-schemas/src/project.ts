@@ -56,6 +56,12 @@ export const KernelEventKind = z.enum([
   'policy.violation',
   'terminal.frame',
   'project.membership.updated',
+  // ONBOARD-01 (research-onboarding.md §7): adoption/rejection/expiry of an
+  // Intake session. Pre-accept stages intentionally emit NOTHING (the outbox
+  // only moves on the adoption transaction boundary — zero-authority test).
+  'intake.accepted',
+  'intake.rejected',
+  'intake.expired',
 ])
 export type KernelEventKind = z.infer<typeof KernelEventKind>
 

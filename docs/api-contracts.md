@@ -309,6 +309,8 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 `accept` 只存在于 BFF Human 面；Agent tool schema 不生成该方法。scan/parser/LLM 永远不能直接 mutation Project。单文件 Artifact 上传与 research package intake 是两个明确入口，UI 不得把 internal Runner stage 暴露给用户。状态、映射、错误和幂等见 research-onboarding.md。
 
+**kernel/服务端层已实现（commit 待定，ONBOARD-01）**：v1 项目域路由 `POST/GET /v1/projects/{id}/intake`（begin/list）、`GET .../intake/{iid}`（resume 投影）、`POST .../intake/{iid}/artifacts`（multipart stage，≤32 MiB，隔离 staging CAS）、`DELETE .../intake/{iid}/artifacts/{aid}`、`POST .../intake/{iid}/scan`（静态扫描）、`GET .../intake/{iid}/questions`、`POST .../intake/{iid}/answers`、`POST .../intake/{iid}/propose`、`POST .../intake/{iid}/adopt`（Human Principal 必填；Idempotency-Key）、`POST .../intake/{iid}/reject`。所有路由按路径项目解析（跨项目→404 intake_not_found）；pre-accept 只写 intake_* 表与隔离 staging CAS，业务表与 Outbox 在 adopt 事务边界才动；错误码见 research-onboarding.md §9（intake_not_found/intake_state_conflict/intake_expired/artifact_quarantined/question_required/proposal_stale/project_revision_conflict/idempotency_conflict 等）。v2/BFF accept 面（`/v2/intakes*`、`/bff/research/intakes/{id}/accept`）、分块 intake staged upload（Content-Range）、Agent tool 面与浏览器向导 UI 为剩余项。
+
 ## 17. 通用 Workspace 与 Upload
 
 | 方法 | 路径 | 说明 |

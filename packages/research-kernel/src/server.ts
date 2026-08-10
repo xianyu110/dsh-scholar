@@ -11,7 +11,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -382,6 +382,100 @@ async function handleUpload(req: IncomingMessage, res: ServerResponse, kernel: R
   send(res, reused ? 200 : 201, { ...record, reused })
 }
 
+/**
+ * ONBOARD-01 (api-contracts.md §16, research-onboarding.md §4): intake
+ * artifact staging — multipart/form-data single-file upload bound to an
+ * Intake session. Same hard caps/parser as UPLOAD-01 (≤32 MiB per file,
+ * server-side sha256, path-safe basename) but the bytes land in the ISOLATED
+ * intake staging CAS — NO project artifact row is written before adoption
+ * (pre-accept zero authority).
+ */
+async function handleIntakeArtifactUpload(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, projectId: string, intakeId: string): Promise<void> {
+  const contentType = req.headers['content-type']
+  if (typeof contentType !== 'string' || !contentType.trim().toLowerCase().startsWith('multipart/form-data')) {
+    throw new KernelError(415, 'unsupported_media_type', 'intake artifact upload requires multipart/form-data')
+  }
+  const boundary = extractBoundary(contentType)
+  if (boundary === null || boundary === '') {
+    throw new KernelError(400, 'invalid_multipart', 'multipart/form-data boundary is missing or malformed')
+  }
+  const body = await readBodyBytes(req, UPLOAD_MAX_BODY_BYTES)
+  let parts: MultipartPart[]
+  try {
+    parts = parseMultipart(body, boundary)
+  } catch (error) {
+    throw new KernelError(400, 'invalid_multipart', `malformed multipart body: ${(error as Error).message}`)
+  }
+  const fileParts = parts.filter(p => p.fileName !== undefined)
+  if (fileParts.length === 0) {
+    throw new KernelError(422, 'missing_file', 'intake artifact upload requires exactly one file part (name="file", with a filename)')
+  }
+  if (fileParts.length > 1) {
+    throw new KernelError(422, 'multiple_files', 'single-file uploads must not carry more than one file part')
+  }
+  const filePart = fileParts[0]!
+  // Cross-project scope guard: 404 unless the intake belongs to the route project.
+  kernel.assertIntakeInProject(intakeId, projectId)
+  const rawName = fieldText(parts, 'file_name') ?? filePart.fileName!
+  const mediaType = fieldText(parts, 'media_type')
+  const artifact = kernel.stageIntakeArtifact(intakeId, {
+    file_name: rawName,
+    media_type: mediaType,
+    content: filePart.data,
+  })
+  send(res, 201, artifact)
+}
+
+/** ONBOARD-01 request schemas (research-onboarding.md §5/§7). */
+const intakeBeginSchema = z.object({
+  source_label: z.string().min(1),
+  target_phase: ObservedPhase.nullable().optional(),
+  principal: HumanPrincipal.optional(),
+  expires_in_ms: z.number().int().positive().optional(),
+  idempotency_key: z.string().optional(),
+  request_hash: z.string().optional(),
+}).strict()
+
+const intakeAnswersSchema = z.object({
+  answers: z.array(z.object({
+    question_code: z.string().min(1),
+    answer: z.string().min(1),
+    question_revision: z.number().int().positive(),
+  })).min(1).max(64),
+  principal: HumanPrincipal,
+}).strict()
+
+const intakeAdoptSchema = z.object({
+  principal: HumanPrincipal,
+  expected_proposal_revision: z.number().int().positive(),
+  expected_target_revision: z.number().int().nonnegative().optional(),
+  idempotency_key: z.string().optional(),
+  request_hash: z.string().optional(),
+}).strict()
+
+const intakeRejectSchema = z.object({
+  principal: HumanPrincipal,
+}).strict()
+
+/**
+ * GOV-01 fail-closed pattern for intake Human actions: a request without an
+ * authenticated `principal.principal_id` is 422 principal_required BEFORE
+ * zod parsing — anonymous/actor-only requests never reach the kernel.
+ */
+function requireIntakePrincipal(body: unknown, res: ServerResponse, action: string): boolean {
+  const bodyObj = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
+  const p = bodyObj.principal as Record<string, unknown> | undefined
+  const principalId = typeof p === 'object' && p !== null && !Array.isArray(p)
+    && typeof p.principal_id === 'string'
+    ? p.principal_id
+    : ''
+  if (principalId === '') {
+    send(res, 422, { error: errorEnvelope('principal_required', `${action} requires an authenticated principal (principal.principal_id); anonymous or actor-only requests are rejected`) })
+    return false
+  }
+  return true
+}
+
 function errorEnvelope(code: string, message: string): Record<string, unknown> {
   // api-contracts.md §1: stable retryable flags for the documented codes.
   const retryableCodes = new Set(['lease_conflict', 'lease_stale', 'upload_offset_conflict', 'document_version_conflict'])
@@ -523,6 +617,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     void handleUpload(req, res, kernel, id).catch((error: unknown) => fail(res, error))
     return
   }
+  // ONBOARD-01: intake artifact staging — multipart, isolated staging CAS
+  // (research-onboarding.md §4). Routed before readJson like UPLOAD-01.
+  if (method === 'POST' && version === 'v1' && resource === 'projects' && id !== undefined && sub === 'intake' && subId !== undefined && url.pathname.endsWith('/artifacts')) {
+    void handleIntakeArtifactUpload(req, res, kernel, id, subId).catch((error: unknown) => fail(res, error))
+    return
+  }
   if (version === 'v2') {
     void readJson(req).then(async (body) => {
       try {
@@ -557,6 +657,82 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (id !== undefined) {
+            // ONBOARD-01 (research-onboarding.md / api-contracts.md §16):
+            // intake sessions are project-scoped on this surface — every
+            // route re-resolves the intake under the path project (cross-
+            // project access → 404 intake_not_found, log-authz style).
+            if (sub === 'intake') {
+              if (method === 'POST' && subId === undefined) {
+                const input = intakeBeginSchema.parse(body)
+                const session = kernel.beginIntake({
+                  project_id: id,
+                  source_label: input.source_label,
+                  target_phase: input.target_phase ?? null,
+                  owner: input.principal,
+                  expires_in_ms: input.expires_in_ms,
+                  idempotency_key: input.idempotency_key,
+                  request_hash: input.request_hash,
+                })
+                send(res, 201, session)
+                return
+              }
+              if (method === 'GET' && subId === undefined) {
+                ok(res, kernel.listIntakes(id))
+                return
+              }
+              if (subId !== undefined) {
+                // Cross-project scope guard: 404 unless the intake belongs to
+                // the route project (membership fail-closed, log-authz style).
+                kernel.assertIntakeInProject(subId, id)
+                const segments = parts as Array<string | undefined>
+                const action = segments[5]
+                if (method === 'GET' && action === undefined) {
+                  ok(res, kernel.getIntakeProjection(subId))
+                  return
+                }
+                if (method === 'POST' && action === 'scan') {
+                  ok(res, kernel.scanIntake(subId))
+                  return
+                }
+                if (method === 'GET' && action === 'questions') {
+                  ok(res, kernel.getIntakeQuestions(subId))
+                  return
+                }
+                if (method === 'POST' && action === 'answers') {
+                  if (!requireIntakePrincipal(body, res, 'intake answers')) return
+                  const input = intakeAnswersSchema.parse(body)
+                  ok(res, kernel.submitIntakeAnswers(subId, input.answers, input.principal))
+                  return
+                }
+                if (method === 'POST' && action === 'propose') {
+                  send(res, 201, kernel.proposeIntake(subId))
+                  return
+                }
+                if (method === 'POST' && action === 'adopt') {
+                  if (!requireIntakePrincipal(body, res, 'intake adoption')) return
+                  const input = intakeAdoptSchema.parse(body)
+                  ok(res, kernel.adoptIntake({
+                    intake_id: subId,
+                    expected_proposal_revision: input.expected_proposal_revision,
+                    expected_target_revision: input.expected_target_revision,
+                    idempotency_key: input.idempotency_key,
+                    request_hash: input.request_hash,
+                  }, input.principal))
+                  return
+                }
+                if (method === 'POST' && action === 'reject') {
+                  if (!requireIntakePrincipal(body, res, 'intake rejection')) return
+                  const input = intakeRejectSchema.parse(body)
+                  ok(res, kernel.rejectIntake(subId, input.principal))
+                  return
+                }
+                if (method === 'DELETE' && action === 'artifacts' && segments[6] !== undefined) {
+                  kernel.removeIntakeArtifact(subId, segments[6]!)
+                  ok(res, { ok: true })
+                  return
+                }
+              }
+            }
             if (method === 'GET' && sub === undefined) {
               ok(res, kernel.getProject(id))
               return
@@ -1177,27 +1353,48 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
         }
         case 'pty': {
           // PTY-01 (execution-runtime.md §6.1, api-contracts.md §18) —
-          // Interactive Terminal interface layer. Wire shape: the client
-          // never sends endpoint/SSH credential/Docker socket/host path —
-          // only opaque profile/target ids, a preset and a relative cwd
-          // (pty-safe-open). The REAL tty allocation is the adapter
-          // (LocalDockerPty/RemoteRunnerPty, later round): while no adapter
-          // is registered the HTTP open route is 501 and control frames are
-          // applied to the state machine with delivered=false. Sessions are
-          // created through the kernel API (kernel.ptyOpen — the adapter
-          // injection point) and then driven over these routes.
+          // Interactive Terminal. Wire shape: the client never sends
+          // endpoint/SSH credential/Docker socket/host path — only opaque
+          // profile/target ids, a preset and a relative cwd (pty-safe-open).
+          // The REAL tty allocation is the adapter (LocalPtyAdapter in the
+          // kernel bin / LocalDockerPty / RemoteRunnerPty, all behind the
+          // same PtyAdapter contract). While no adapter is registered the
+          // HTTP open route stays 501 and no inert session row is created
+          // (an adapter-less session would mislead the UI).
           if (id === 'sessions') {
             if (sub === undefined && method === 'POST') {
-              // Open: schema + semantics validation ONLY — a session row is
-              // intentionally NOT created until an adapter can serve a real
-              // pseudo-terminal (an inert session would mislead the UI).
+              // Open: schema + semantics validation first, then the adapter
+              // gate, then the authenticated principal + project membership.
               const input = PtyOpenRequest.parse(body)
               kernel.getProject(input.project_id) // 404 project_not_found
               kernel.resolveWorkspace(input.workspace_id) // 404 workspace_not_found
-              send(res, 501, {
-                error: errorEnvelope('pty_adapter_not_implemented',
-                  'no PTY adapter is registered (LocalDockerPty/RemoteRunnerPty pending) — the interface layer state machine is exercised via the kernel API'),
-              })
+              if (!kernel.hasPtyAdapter()) {
+                send(res, 501, {
+                  error: errorEnvelope('pty_adapter_not_implemented',
+                    'no PTY adapter is registered (LocalPtyAdapter/RemoteRunnerPty pending) — the interface layer state machine is exercised via the kernel API'),
+                })
+                return
+              }
+              // PTY-01 (API-01): the BFF resolves the authenticated operator
+              // and injects x-principal-id (never trusted from the client);
+              // the kernel fails closed without it and pins it on the row.
+              const principalId = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== ''
+                ? req.headers['x-principal-id']
+                : ''
+              if (principalId === '') {
+                send(res, 422, {
+                  error: errorEnvelope('principal_required',
+                    'pty open requires an authenticated principal (x-principal-id); the BFF injects it from the operator session'),
+                })
+                return
+              }
+              // Project membership (mirrors handleV2 memberOr404): a
+              // non-member cannot open a terminal in the project.
+              if (!kernel.listProjectMembers(input.project_id).some(m => m.principal_id === principalId)) {
+                throw new KernelError(404, 'project_not_found', 'project not found or access denied')
+              }
+              const session = kernel.ptyOpen(input, { principal: { principal_id: principalId } })
+              send(res, 201, session)
               return
             }
             if (sub !== undefined && subId === undefined && method === 'GET') {
@@ -1208,8 +1405,21 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             if (sub !== undefined && subId === 'control' && method === 'POST') {
               // Control with client_seq idempotency: 422 on schema failure,
               // 404 on unknown session, 409 on reorder/closed, 200 with
-              // delivered=false while no adapter is attached.
+              // delivered=false while no adapter is attached. When the BFF
+              // forwarded an operator identity it must be the session owner
+              // (defense in depth — the wire is authorized at open).
               const input = PtyControlRequest.parse(body)
+              const ownerCheck = req.headers['x-principal-id']
+              if (typeof ownerCheck === 'string' && ownerCheck !== '') {
+                const session = kernel.ptyGet(sub)
+                if (session.principal_id !== ownerCheck) {
+                  send(res, 403, {
+                    error: errorEnvelope('pty_principal_mismatch',
+                      'the authenticated principal does not own this pty session'),
+                  })
+                  return
+                }
+              }
               const result = kernel.ptyControl(sub, input)
               ok(res, result)
               return

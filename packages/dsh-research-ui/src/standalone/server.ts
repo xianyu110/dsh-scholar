@@ -1025,6 +1025,38 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             if (role !== null) proxyHeaders['x-principal-role'] = role
           }
         }
+        // PTY-01 (execution-runtime.md §6.1): the kernel demands the
+        // authenticated principal on pty open (x-principal-id, fail-closed)
+        // and pins it on the session row. The BFF resolves BOTH here:
+        // membership of the operator in the body's project is enforced
+        // BEFORE forwarding (unknown/foreign project → 404, no session row,
+        // no tty spawned) and the identity header is derived server-side
+        // from the operator session — a client-supplied value is never
+        // trusted. viewer/auditor are read-only surfaces → 403 (same role
+        // policy as project-scoped v2 writes).
+        if (options.principal !== null && method === 'POST' && url.pathname === '/v1/pty/sessions') {
+          let ptyProjectId: string | null = null
+          if (typeof body === 'string' && body !== '') {
+            try {
+              const parsed = JSON.parse(body) as { project_id?: unknown }
+              if (typeof parsed.project_id === 'string' && parsed.project_id !== '') ptyProjectId = parsed.project_id
+            } catch { /* invalid JSON → the kernel answers 422 validation_error */ }
+          }
+          if (ptyProjectId === null) {
+            sendJson(res, 422, { ok: false, error: 'project_id required' })
+            return
+          }
+          if (!(await isProjectMember(ptyProjectId))) {
+            sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
+            return
+          }
+          const ptyRole = await projectRole(ptyProjectId)
+          if (ptyRole === 'viewer' || ptyRole === 'auditor') {
+            sendJson(res, 403, { ok: false, error: 'role forbidden' })
+            return
+          }
+          proxyHeaders['x-principal-id'] = options.principal
+        }
         // GOV-01 principal resolver: the authenticated operator session is a
         // DURABLE identity derived from the bearer token (session.json,
         // 0600, stable across restarts — "Session link 在重启后恢复"). Every

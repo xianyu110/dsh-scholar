@@ -14,9 +14,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import { PTY_DDL } from './pty-session.js'
 import { WORKSPACE_DDL } from './workspace-store.js'
+import { INTAKE_DDL } from './intake.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 10
+export const SCHEMA_VERSION = 11
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -717,6 +718,22 @@ const ptyAndWorkspaceTables = (db: DatabaseSync, report: MigrationReport): void 
 }
 
 /**
+ * 0012 — ONBOARD-01 (research-onboarding.md): Research Intake sessions.
+ * Four isolated tables (sessions/artifacts/observations/questions) that the
+ * pre-accept pipeline may write — business tables stay untouched until the
+ * adoption transaction. DDL shared with kernel.ts via INTAKE_DDL (CREATE IF
+ * NOT EXISTS keeps it idempotent on databases from older releases).
+ */
+const intakeTables = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(INTAKE_DDL)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.intake_sessions = (db.prepare('SELECT COUNT(*) AS n FROM intake_sessions').get() as { n: number }).n
+  report.rows.intake_artifacts = (db.prepare('SELECT COUNT(*) AS n FROM intake_artifacts').get() as { n: number }).n
+  report.rows.intake_observations = (db.prepare('SELECT COUNT(*) AS n FROM intake_observations').get() as { n: number }).n
+  report.rows.intake_questions = (db.prepare('SELECT COUNT(*) AS n FROM intake_questions').get() as { n: number }).n
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -787,6 +804,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'PTY-01 + WORK-01: pty_sessions/pty_frames + workspaces/workspace_nodes/workspace_ops (interface layer)',
     body: ptyAndWorkspaceTables.toString(),
     up: ptyAndWorkspaceTables,
+  },
+  {
+    id: '0012_intake',
+    description: 'ONBOARD-01: intake_sessions/intake_artifacts/intake_observations/intake_questions (Research Intake)',
+    body: intakeTables.toString(),
+    up: intakeTables,
   },
 ]
 

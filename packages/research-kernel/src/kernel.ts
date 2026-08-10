@@ -6,7 +6,7 @@
  */
 
 import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
@@ -16,6 +16,9 @@ import {
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
   buildProjectId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
+  type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
+  type IntakeStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
@@ -26,6 +29,12 @@ import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
 import { IMAGES_LOCK } from './images-lock.js'
 import { STAGED_UPLOAD_TTL_MS as STAGED_TTL, UPLOAD_MAX_FILE_BYTES as UPLOAD_LIMIT_BYTES } from './upload-limits.js'
+import {
+  INTAKE_DEFAULT_TTL_MS, INTAKE_STAGED_TTL_MS, INTAKE_DDL, GRILL_TAXONOMY_VERSION, GRILL_QUESTION_REVISION,
+  questionsForTargetPhase, requiredQuestionCodes, scanIntakeArtifactStatic, artifactKindForFile,
+  isImportableMetricsFile, parseMetricsFileV1, buildPhaseProposal, questionViews,
+  SAFE_PHASE_LANDING, type StaticScanVerdict,
+} from './intake.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -149,6 +158,13 @@ export interface KernelOptions {
    * deployments that want zero client involvement.
    */
   previewAutoTrigger?: boolean
+  /**
+   * PTY-01: idle-TTL sweep cadence in ms (default 30s). The kernel owns the
+   * sweep timer so sessions close even when no client ever reconnects; the
+   * per-session idle_ttl_s (resolved from the Config Schema / request at
+   * open) decides each session's deadline. 0 disables the timer.
+   */
+  ptyIdleSweepMs?: number
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -328,6 +344,65 @@ interface OutboxEventRow {
   dead_lettered_at: string | null
 }
 
+/** Row shapes for the ONBOARD-01 Intake tables (research-onboarding.md §3). */
+interface IntakeSessionRow {
+  intake_id: string
+  project_id: string | null
+  owner_principal_id: string
+  owner_tenant_id: string
+  owner_auth_method: string
+  owner_session_id: string | null
+  status: string
+  revision: number
+  source_label: string
+  target_phase: string | null
+  expires_at: string
+  scan_summary: string
+  proposal_json: string | null
+  receipt_json: string | null
+  audit_json: string
+  idempotency_key: string | null
+  request_hash: string | null
+  created_at: string
+  updated_at: string
+}
+
+interface IntakeArtifactRow {
+  intake_id: string
+  artifact_id: string
+  file_name: string
+  media_type: string
+  size_bytes: number
+  sha256: string
+  quarantine: string
+  scan_result: string
+  created_at: string
+}
+
+interface IntakeObservationRow {
+  observation_id: string
+  intake_id: string
+  artifact_id: string
+  locator: string
+  detector: string
+  detector_version: string
+  value: string
+  warnings: string
+  trust: string
+  created_at: string
+}
+
+interface IntakeQuestionRow {
+  intake_id: string
+  question_code: string
+  question_revision: number
+  required: number
+  answer: string | null
+  answered_by_principal: string | null
+  answered_by_session: string | null
+  answered_at: string | null
+}
+
 function eventFromRow(row: OutboxEventRow): KernelEvent {
   return {
     event_id: row.event_id,
@@ -401,6 +476,12 @@ export class ResearchKernel {
   /** Default staged-upload TTL for cleanupStagedUploads (24 h). */
   static STAGED_UPLOAD_TTL_MS = STAGED_TTL
 
+  /** ONBOARD-01: default Intake session TTL before expireIntakes (7 days). */
+  static INTAKE_DEFAULT_TTL_MS = INTAKE_DEFAULT_TTL_MS
+
+  /** ONBOARD-01: default staged-intake-blob TTL for cleanupIntakeStaged. */
+  static INTAKE_STAGED_TTL_MS = INTAKE_STAGED_TTL_MS
+
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
   readonly instanceId: string
@@ -413,6 +494,17 @@ export class ResearchKernel {
    * CAS blob at finalize or are collected by cleanupStagedUploads.
    */
   readonly stagedUploadsRoot: string
+  /**
+   * ONBOARD-01: ISOLATED staging CAS for intake sessions
+   * (research-onboarding.md §2.1 — pre-accept writes only Intake tables and
+   * this isolated temp area, never the project artifact space). A SIBLING of
+   * staged-uploads/ under the CAS root (so the UPLOAD-01 staging directory
+   * and its GC stay untouched). Files live under
+   * `intake-staged/<intake_id>/<sha256>.part`; cas.list() never sees them,
+   * adopted blobs are promoted into the real CAS inside the adoption
+   * transaction, and reject/expiry/cleanupIntakeStaged remove them.
+   */
+  readonly intakeStagedRoot: string
   /** TeX workspace store (execution-runtime.md §12). */
   readonly tex: import('./tex-workspace.js').TexWorkspaceStore
   /**
@@ -454,17 +546,24 @@ export class ResearchKernel {
   private readonly previewTimers = new Map<string, NodeJS.Timeout>()
   /**
    * PTY-01: the registered PTY adapter (null = no real tty yet). The
-   * interface layer ships NullPtyAdapter; LocalDockerPty/RemoteRunnerPty
-   * replace it in the adapter round. PTY output never becomes Job log,
-   * Metrics, Manifest, Evidence or Gate Decision regardless of adapter.
+   * interface layer ships NullPtyAdapter; LocalPtyAdapter (pty-local.ts)
+   * replaces it in the kernel bin; LocalDockerPty/RemoteRunnerPty share the
+   * same contract. PTY output never becomes Job log, Metrics, Manifest,
+   * Evidence or Gate Decision regardless of adapter.
    */
   private ptyAdapter: PtyAdapter | null = null
+  /** PTY-01: idle-TTL sweep timer (kernel-owned, see KernelOptions). */
+  private readonly ptySweepTimer: NodeJS.Timeout | null
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
     this.stagedUploadsRoot = join(this.cas.root, 'staged-uploads')
     mkdirSync(this.stagedUploadsRoot, { recursive: true })
+    // ONBOARD-01: isolated intake staging area (sibling dir — the upload
+    // staging root and cleanupStagedUploads stay untouched by intake).
+    this.intakeStagedRoot = join(this.cas.root, 'intake-staged')
+    mkdirSync(this.intakeStagedRoot, { recursive: true })
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.pty = openPtySessionStore(options.dbPath ?? ':memory:')
     this.workspaces = openWorkspaceStore(options.dbPath ?? ':memory:', options.casRoot ?? join(process.cwd(), '.research-cas'))
@@ -500,11 +599,35 @@ export class ResearchKernel {
     for (const pending of this.tex.listPendingPreviews()) {
       this.armPreviewTimer(pending.document_id, pending.debounce_ms)
     }
+    // PTY-01: idle-TTL sweep. Sessions idle longer than their pinned
+    // idle_ttl_s are closed (and their real tty torn down via the adapter)
+    // even when no client ever reconnects. The timer is unref'd — it never
+    // keeps the process alive and is cleared on close().
+    const sweepMs = options.ptyIdleSweepMs ?? 30_000
+    if (sweepMs > 0) {
+      const timer = setInterval(() => {
+        try {
+          this.ptySweepIdle()
+        } catch {
+          // A sweep failure must never take the kernel down.
+        }
+      }, sweepMs)
+      timer.unref()
+      this.ptySweepTimer = timer
+    } else {
+      this.ptySweepTimer = null
+    }
   }
 
   close(): void {
+    if (this.ptySweepTimer !== null) clearInterval(this.ptySweepTimer)
     for (const timer of this.previewTimers.values()) clearTimeout(timer)
     this.previewTimers.clear()
+    // PTY-01: tear down every live real tty before the stores close (the
+    // adapter processes are children of this kernel — no orphans).
+    for (const session of this.pty.listSessions()) {
+      if (session.state !== 'closed') this.ptyNotifyClosed(session.pty_session_id)
+    }
     this.tex.close()
     this.pty.close()
     this.workspaces.close()
@@ -1446,6 +1569,787 @@ export class ResearchKernel {
           removed += 1
         } catch { /* raced — another collector won */ }
       }
+    }
+    return removed
+  }
+
+  // ── Research Intake (ONBOARD-01, research-onboarding.md) ────────────────
+  //
+  // Pre-accept zero authority (§2.1): begin/stage/scan/grill/propose write
+  // ONLY intake_sessions/intake_artifacts/intake_observations/intake_questions
+  // and the isolated staging CAS (intake-staged/<intake_id>/…, a sibling of
+  // staged-uploads/ under the CAS root) — never
+  // Project/Gate/ProjectArtifact/Workspace/Job/Run/TerminalLog/Evidence/
+  // Claim, and NOTHING to the outbox. The only writes to business tables and
+  // the outbox happen inside the adoption transaction (adoptIntake). There is
+  // no Gate/Run/Evidence write path in any intake method (asserted by
+  // tests/unit/intake.test.ts — pre-accept table counts stay zero).
+
+  /** Absolute staged-file path for one intake artifact. */
+  intakeStagedPath(intakeId: string, sha256: string): string {
+    return join(this.intakeStagedRoot, intakeId, `${sha256}.part`)
+  }
+
+  private intakeSessionFromRow(row: IntakeSessionRow): IntakeSession {
+    return {
+      intake_id: row.intake_id,
+      project_id: row.project_id,
+      owner: {
+        principal_id: row.owner_principal_id,
+        tenant_id: row.owner_tenant_id,
+        auth_method: row.owner_auth_method,
+        session_id: row.owner_session_id,
+      },
+      status: row.status as IntakeStatus,
+      revision: row.revision,
+      source_label: row.source_label,
+      target_phase: (row.target_phase ?? null) as ObservedPhase | null,
+      expires_at: row.expires_at,
+      scan_summary: jsonParse(row.scan_summary, {}),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      audit: jsonParse(row.audit_json, []),
+    }
+  }
+
+  /**
+   * ONBOARD-01 scope guard (cross-project 404, log-authz style): a route
+   * scoped to `/v1/projects/{id}/intake/{iid}` must not observe an intake
+   * that belongs to another project — 404 intake_not_found either way.
+   */
+  assertIntakeInProject(intakeId: string, projectId: string): void {
+    this.getIntakeSessionRow(intakeId, projectId)
+  }
+
+  /** Session row lookup with 404 intake_not_found (project-scoped). */
+  private getIntakeSessionRow(intakeId: string, projectId?: string): IntakeSessionRow {
+    const row = this.db.prepare('SELECT * FROM intake_sessions WHERE intake_id = ?').get(intakeId) as IntakeSessionRow | undefined
+    if (row === undefined || (projectId !== undefined && row.project_id !== projectId)) {
+      throw new KernelError(404, 'intake_not_found', `intake ${intakeId} not found`)
+    }
+    return row
+  }
+
+  private appendIntakeAudit(intakeId: string, action: string, detail = ''): void {
+    const row = this.getIntakeSessionRow(intakeId)
+    const audit = jsonParse(row.audit_json, [] as Array<{ at: string; action: string; detail?: string }>)
+    audit.push({ at: nowIso(), action, detail })
+    this.db.prepare('UPDATE intake_sessions SET audit_json = ?, updated_at = ? WHERE intake_id = ?')
+      .run(JSON.stringify(audit), nowIso(), intakeId)
+  }
+
+  /** Throw 409 intake_state_conflict for terminal sessions. */
+  private assertIntakeMutable(session: IntakeSession): void {
+    if (['accepted', 'rejected', 'expired', 'failed'].includes(session.status)) {
+      throw new KernelError(409, 'intake_state_conflict', `intake ${session.intake_id} is ${session.status} and cannot be modified`)
+    }
+  }
+
+  /** Throw 409 intake_expired for active sessions past their TTL. */
+  private assertIntakeNotExpired(session: IntakeSession, now = Date.now()): void {
+    if (Date.parse(session.expires_at) < now && ['accepted', 'rejected', 'expired', 'failed'].includes(session.status) === false) {
+      throw new KernelError(409, 'intake_expired', `intake ${session.intake_id} expired at ${session.expires_at} — reject it or start a new intake`)
+    }
+  }
+
+  private intakeArtifacts(intakeId: string): IntakeArtifact[] {
+    const rows = this.db.prepare('SELECT * FROM intake_artifacts WHERE intake_id = ? ORDER BY created_at').all(intakeId) as unknown as IntakeArtifactRow[]
+    return rows.map(row => ({
+      intake_id: row.intake_id,
+      artifact_id: row.artifact_id,
+      file_name: row.file_name,
+      media_type: row.media_type,
+      size_bytes: row.size_bytes,
+      sha256: row.sha256,
+      quarantine: row.quarantine as IntakeArtifact['quarantine'],
+      scan_result: jsonParse(row.scan_result, {}),
+      created_at: row.created_at,
+    }))
+  }
+
+  private intakeObservations(intakeId: string): IntakeObservation[] {
+    const rows = this.db.prepare('SELECT * FROM intake_observations WHERE intake_id = ? ORDER BY created_at').all(intakeId) as unknown as IntakeObservationRow[]
+    return rows.map(row => ({
+      observation_id: row.observation_id,
+      intake_id: row.intake_id,
+      artifact_id: row.artifact_id,
+      locator: row.locator,
+      detector: row.detector,
+      detector_version: row.detector_version,
+      value: row.value,
+      warnings: jsonParse(row.warnings, []),
+      trust: 'observed_unverified' as const,
+      created_at: row.created_at,
+    }))
+  }
+
+  private intakeAnswerMap(intakeId: string): Map<string, { answer: string; answered_at: string; answered_by: string | null }> {
+    const rows = this.db.prepare('SELECT * FROM intake_questions WHERE intake_id = ?').all(intakeId) as unknown as IntakeQuestionRow[]
+    const map = new Map<string, { answer: string; answered_at: string; answered_by: string | null }>()
+    for (const row of rows) {
+      if (row.answer === null) continue
+      map.set(row.question_code, { answer: row.answer, answered_at: row.answered_at ?? '', answered_by: row.answered_by_principal })
+    }
+    return map
+  }
+
+  /**
+   * ONBOARD-01 begin (research-onboarding.md §1/§3): create an Intake session
+   * for the target project. Pre-accept: only an intake row is written.
+   * Idempotent: the same Idempotency-Key replays the SAME session (different
+   * request hash → 409 idempotency_conflict), and at most ONE active intake
+   * exists per project (reuse). Expiry defaults to 7 days.
+   */
+  beginIntake(input: {
+    project_id?: string | null
+    source_label: string
+    target_phase?: ObservedPhase | null
+    owner?: HumanPrincipal
+    expires_in_ms?: number
+    idempotency_key?: string
+    request_hash?: string
+  }): IntakeSession {
+    if (input.source_label === undefined || input.source_label.trim() === '') {
+      throw new KernelError(422, 'validation_error', 'source_label is required')
+    }
+    if (input.project_id !== undefined && input.project_id !== null) {
+      this.getProject(input.project_id) // 404 project_not_found
+    }
+    // Idempotency-Key replay.
+    if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+      const existing = this.db.prepare('SELECT * FROM intake_sessions WHERE idempotency_key = ?').get(input.idempotency_key) as IntakeSessionRow | undefined
+      if (existing !== undefined) {
+        if (existing.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict', `intake idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        return this.intakeSessionFromRow(existing)
+      }
+    }
+    // One active intake per project (recovery-friendly reuse).
+    if (input.project_id !== undefined && input.project_id !== null) {
+      const active = this.db.prepare(
+        "SELECT * FROM intake_sessions WHERE project_id = ? AND status IN ('draft','uploading','scanning','needs_input','grilling','proposal_ready','awaiting_human') ORDER BY created_at LIMIT 1",
+      ).get(input.project_id) as IntakeSessionRow | undefined
+      if (active !== undefined) return this.intakeSessionFromRow(active)
+    }
+    const owner: HumanPrincipal = input.owner ?? { principal_id: 'agent', auth_method: 'agent' }
+    const now = nowIso()
+    const intakeId = `intk_${randomUUID().replaceAll('-', '').slice(0, 20)}`
+    const session: IntakeSession = {
+      intake_id: intakeId,
+      project_id: input.project_id ?? null,
+      owner,
+      status: 'draft',
+      revision: 1,
+      source_label: input.source_label.trim(),
+      target_phase: input.target_phase ?? null,
+      expires_at: new Date(Date.now() + (input.expires_in_ms ?? ResearchKernel.INTAKE_DEFAULT_TTL_MS)).toISOString(),
+      scan_summary: {},
+      created_at: now,
+      updated_at: now,
+      audit: [{ at: now, action: 'begin', detail: input.source_label }],
+    }
+    this.db.prepare(
+      `INSERT INTO intake_sessions (intake_id, project_id, owner_principal_id, owner_tenant_id, owner_auth_method, owner_session_id,
+         status, revision, source_label, target_phase, expires_at, scan_summary, audit_json, idempotency_key, request_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      session.intake_id, session.project_id,
+      session.owner.principal_id, session.owner.tenant_id ?? '', session.owner.auth_method ?? 'agent', session.owner.session_id ?? null,
+      session.status, session.revision, session.source_label, session.target_phase, session.expires_at,
+      JSON.stringify(session.scan_summary), JSON.stringify(session.audit),
+      input.idempotency_key ?? null, input.request_hash ?? '', session.created_at, session.updated_at,
+    )
+    return session
+  }
+
+  /**
+   * ONBOARD-01 stage (research-onboarding.md §4): register ONE file into the
+   * intake — server-computed sha256, plain-basename path safety, size cap
+   * (reuses UPLOAD-01 limits). Bytes land in the ISOLATED staging CAS
+   * (stagedUploadsRoot/intake/<intake_id>/<sha256>.part), never in the
+   * project artifact space. Content-addressed: re-staging identical bytes
+   * returns the existing artifact row. Changing files invalidates any
+   * generated proposal (proposal_stale semantics).
+   */
+  stageIntakeArtifact(intakeId: string, input: {
+    file_name: string
+    media_type?: string
+    content: Uint8Array | string
+  }): IntakeArtifact {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    this.assertIntakeMutable(session)
+    this.assertIntakeNotExpired(session)
+    validateUploadFileName(input.file_name)
+    const bytes = typeof input.content === 'string' ? Buffer.from(input.content, 'utf8') : Buffer.from(input.content)
+    if (bytes.byteLength > ResearchKernel.UPLOAD_MAX_FILE_BYTES) {
+      throw new KernelError(413, 'payload_too_large',
+        `intake file exceeds the size limit: ${bytes.byteLength} bytes (max_file_bytes=${ResearchKernel.UPLOAD_MAX_FILE_BYTES})`)
+    }
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const artifactId = `sha256:${sha256}`
+    const existing = this.db.prepare('SELECT * FROM intake_artifacts WHERE intake_id = ? AND artifact_id = ?')
+      .get(intakeId, artifactId) as IntakeArtifactRow | undefined
+    if (existing !== undefined) {
+      return {
+        intake_id: existing.intake_id,
+        artifact_id: existing.artifact_id,
+        file_name: existing.file_name,
+        media_type: existing.media_type,
+        size_bytes: existing.size_bytes,
+        sha256: existing.sha256,
+        quarantine: existing.quarantine as IntakeArtifact['quarantine'],
+        scan_result: jsonParse(existing.scan_result, {}),
+        created_at: existing.created_at,
+      }
+    }
+    const partPath = this.intakeStagedPath(intakeId, sha256)
+    try {
+      mkdirSync(join(this.intakeStagedRoot, intakeId), { recursive: true })
+      writeFileSync(partPath, bytes, { mode: 0o600 })
+    } catch (error) {
+      throw new KernelError(500, 'stage_write_failed', `intake staged write failed: ${(error as Error).message}`)
+    }
+    const now = nowIso()
+    const artifact: IntakeArtifact = {
+      artifact_id: artifactId,
+      intake_id: intakeId,
+      file_name: input.file_name,
+      media_type: input.media_type ?? 'application/octet-stream',
+      size_bytes: bytes.byteLength,
+      sha256,
+      quarantine: 'staged',
+      scan_result: {},
+      created_at: now,
+    }
+    this.db.prepare(
+      'INSERT INTO intake_artifacts (intake_id, artifact_id, file_name, media_type, size_bytes, sha256, quarantine, scan_result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(intakeId, artifactId, artifact.file_name, artifact.media_type, artifact.size_bytes, artifact.sha256, artifact.quarantine, '{}', now)
+    this.setIntakeStatus(intakeId, 'uploading', row.status, 'artifact_staged')
+    return artifact
+  }
+
+  private setIntakeStatus(intakeId: string, to: IntakeStatus, from: string, auditAction: string): void {
+    // A file change after a proposal invalidates it (accept pins the revision).
+    if ((from === 'proposal_ready' || from === 'awaiting_human') && to !== 'awaiting_human') {
+      this.db.prepare('UPDATE intake_sessions SET proposal_json = NULL WHERE intake_id = ?').run(intakeId)
+      this.appendIntakeAudit(intakeId, 'proposal_invalidated', `files changed while ${from}`)
+    }
+    this.db.prepare('UPDATE intake_sessions SET status = ?, revision = revision + 1, updated_at = ? WHERE intake_id = ?')
+      .run(to, nowIso(), intakeId)
+    this.appendIntakeAudit(intakeId, auditAction, `${from} -> ${to}`)
+  }
+
+  /** Remove one staged artifact (quarantine resolution: delete/replace). */
+  removeIntakeArtifact(intakeId: string, artifactId: string): void {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    this.assertIntakeMutable(session)
+    this.assertIntakeNotExpired(session)
+    const artifact = this.db.prepare('SELECT * FROM intake_artifacts WHERE intake_id = ? AND artifact_id = ?')
+      .get(intakeId, artifactId) as IntakeArtifactRow | undefined
+    if (artifact === undefined) {
+      throw new KernelError(404, 'intake_artifact_not_found', `intake artifact ${artifactId} not found in intake ${intakeId}`)
+    }
+    try { unlinkSync(this.intakeStagedPath(intakeId, artifact.sha256)) } catch { /* already gone */ }
+    this.db.prepare('DELETE FROM intake_artifacts WHERE intake_id = ? AND artifact_id = ?').run(intakeId, artifactId)
+    this.db.prepare('DELETE FROM intake_observations WHERE intake_id = ? AND artifact_id = ?').run(intakeId, artifactId)
+    this.setIntakeStatus(intakeId, 'uploading', row.status, 'artifact_removed')
+  }
+
+  /**
+   * ONBOARD-01 scan (research-onboarding.md §4.2): verify every staged
+   * artifact's server-side sha256 and run the STATIC security scan
+   * (extension allow/deny/quarantine, magic bytes, static secret patterns;
+   * NO AV in this environment — recorded honestly in scan_result). Verdicts:
+   * clean | quarantined | rejected. Observations are replaced per scan.
+   */
+  scanIntake(intakeId: string): IntakeProjection {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    this.assertIntakeMutable(session)
+    this.assertIntakeNotExpired(session)
+    const artifacts = this.intakeArtifacts(intakeId)
+    let clean = 0
+    let quarantined = 0
+    let rejected = 0
+    this.db.prepare('DELETE FROM intake_observations WHERE intake_id = ?').run(intakeId)
+    const insertObservation = this.db.prepare(
+      'INSERT INTO intake_observations (observation_id, intake_id, artifact_id, locator, detector, detector_version, value, warnings, trust, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    )
+    for (const artifact of artifacts) {
+      const partPath = this.intakeStagedPath(intakeId, artifact.sha256)
+      let staged: Buffer
+      try {
+        staged = readFileSync(partPath)
+      } catch {
+        throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} staged bytes are missing — re-upload (stage GC?)`)
+      }
+      const actualSha = createHash('sha256').update(staged).digest('hex')
+      if (actualSha !== artifact.sha256 || staged.byteLength !== artifact.size_bytes) {
+        throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} content hash mismatch (recorded ${artifact.sha256}, got ${actualSha})`)
+      }
+      const verdict = scanIntakeArtifactStatic(artifact.file_name, artifact.media_type, staged)
+      this.db.prepare('UPDATE intake_artifacts SET quarantine = ?, scan_result = ? WHERE intake_id = ? AND artifact_id = ?')
+        .run(verdict.quarantine, JSON.stringify(verdict.scan_result), intakeId, artifact.artifact_id)
+      if (verdict.quarantine === 'clean') clean += 1
+      else if (verdict.quarantine === 'quarantined') quarantined += 1
+      else rejected += 1
+      for (const observation of verdict.observations) {
+        insertObservation.run(
+          `obs_${randomUUID().replaceAll('-', '').slice(0, 16)}`, intakeId, artifact.artifact_id,
+          observation.locator, observation.detector, observation.detector_version, observation.value,
+          JSON.stringify(observation.warnings), 'observed_unverified', nowIso(),
+        )
+      }
+    }
+    const scanSummary: Record<string, unknown> = {
+      scanned_at: nowIso(),
+      scanner: 'static-rules-v1',
+      av_available: false,
+      artifact_count: artifacts.length,
+      clean,
+      quarantined,
+      rejected,
+    }
+    this.db.prepare('UPDATE intake_sessions SET scan_summary = ? WHERE intake_id = ?').run(JSON.stringify(scanSummary), intakeId)
+    // Questions are always answerable after a scan; when every required
+    // question is already answered the session is proposal_ready.
+    const required = requiredQuestionCodes(session.target_phase)
+    const answers = this.intakeAnswerMap(intakeId)
+    const allAnswered = [...required].every(code => {
+      const a = answers.get(code)
+      return a !== undefined && a.answer !== ''
+    })
+    this.setIntakeStatus(intakeId, allAnswered ? 'proposal_ready' : 'needs_input', row.status, 'scan_completed')
+    return this.getIntakeProjection(intakeId)
+  }
+
+  /** ONBOARD-01 resume: full durable intake state (survives restarts). */
+  getIntakeProjection(intakeId: string): IntakeProjection {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    const proposal = row.proposal_json === null || row.proposal_json === '' ? null : jsonParse(row.proposal_json, null) as unknown as PhaseProposal
+    const receipt = row.receipt_json === null || row.receipt_json === '' ? null : jsonParse(row.receipt_json, null) as unknown as AdoptionReceipt
+    return {
+      session,
+      artifacts: this.intakeArtifacts(intakeId),
+      observations: this.intakeObservations(intakeId),
+      questions: questionViews(
+        questionsForTargetPhase(session.target_phase),
+        this.intakeAnswerMap(intakeId),
+      ),
+      proposal,
+      receipt,
+    }
+  }
+
+  /** ONBOARD-01: list intake sessions (optionally per project). */
+  listIntakes(projectId?: string): IntakeSession[] {
+    const rows = projectId === undefined
+      ? this.db.prepare('SELECT * FROM intake_sessions ORDER BY created_at DESC').all() as unknown as IntakeSessionRow[]
+      : this.db.prepare('SELECT * FROM intake_sessions WHERE project_id = ? ORDER BY created_at DESC').all(projectId) as unknown as IntakeSessionRow[]
+    return rows.map(row => this.intakeSessionFromRow(row))
+  }
+
+  /** ONBOARD-01 Grill: deterministic versioned question set + answer state. */
+  getIntakeQuestions(intakeId: string): {
+    intake_id: string
+    taxonomy_version: number
+    question_revision: number
+    target_phase: ObservedPhase | null
+    questions: GrillAnswerView[]
+  } {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    return {
+      intake_id: intakeId,
+      taxonomy_version: GRILL_TAXONOMY_VERSION,
+      question_revision: GRILL_QUESTION_REVISION,
+      target_phase: session.target_phase,
+      questions: questionViews(questionsForTargetPhase(session.target_phase), this.intakeAnswerMap(intakeId)),
+    }
+  }
+
+  /**
+   * ONBOARD-01 Grill answers (research-onboarding.md §5): record
+   * human_assertion answers with the Human Principal + question revision.
+   * All required answered → proposal_ready; otherwise stays grilling.
+   * `unknown` answers are stored as answers but keep their gap (and lower
+   * the proposal confidence). Pre-accept: only intake_questions rows.
+   */
+  submitIntakeAnswers(intakeId: string, answers: GrillAnswerInput[], principal: HumanPrincipal): IntakeProjection {
+    if (principal === undefined || typeof principal.principal_id !== 'string' || principal.principal_id === '') {
+      throw new KernelError(422, 'principal_required', 'intake answers require an authenticated principal (principal.principal_id)')
+    }
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    this.assertIntakeNotExpired(session)
+    if (!['needs_input', 'grilling', 'proposal_ready'].includes(session.status)) {
+      throw new KernelError(409, 'intake_state_conflict', `intake ${intakeId} is ${session.status}; answers require needs_input/grilling/proposal_ready (scan first)`)
+    }
+    const taxonomy = questionsForTargetPhase(session.target_phase)
+    const byCode = new Map(taxonomy.map(q => [q.question_code, q] as const))
+    const upsert = this.db.prepare(
+      `INSERT INTO intake_questions (intake_id, question_code, question_revision, required, answer, answered_by_principal, answered_by_session, answered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(intake_id, question_code) DO UPDATE SET answer = excluded.answer, answered_by_principal = excluded.answered_by_principal, answered_by_session = excluded.answered_by_session, answered_at = excluded.answered_at`,
+    )
+    for (const answer of answers) {
+      const question = byCode.get(answer.question_code)
+      if (question === undefined) {
+        throw new KernelError(422, 'unknown_question', `question ${answer.question_code} does not exist in taxonomy version ${GRILL_TAXONOMY_VERSION}`)
+      }
+      if (answer.question_revision !== GRILL_QUESTION_REVISION) {
+        throw new KernelError(409, 'question_revision_conflict',
+          `question ${answer.question_code} revision ${answer.question_revision} does not match current revision ${GRILL_QUESTION_REVISION}`)
+      }
+      if (answer.answer === undefined || answer.answer.trim() === '') {
+        throw new KernelError(422, 'question_required', `question ${answer.question_code} answer must not be empty ('unknown' is allowed)`)
+      }
+      upsert.run(
+        intakeId, answer.question_code, GRILL_QUESTION_REVISION, question.required ? 1 : 0,
+        answer.answer.trim(), principal.principal_id, principal.session_id ?? null, nowIso(),
+      )
+    }
+    const required = requiredQuestionCodes(session.target_phase)
+    const answersMap = this.intakeAnswerMap(intakeId)
+    const allAnswered = [...required].every(code => {
+      const a = answersMap.get(code)
+      return a !== undefined && a.answer !== ''
+    })
+    this.setIntakeStatus(intakeId, allAnswered ? 'proposal_ready' : 'grilling', row.status, 'answers_submitted')
+    return this.getIntakeProjection(intakeId)
+  }
+
+  /**
+   * ONBOARD-01 propose (research-onboarding.md §6): deterministically build
+   * the PhaseProposal from the human answers + scan verdicts. All REQUIRED
+   * questions must be answered (422 question_required lists the missing
+   * codes). observed_phase is metadata; safe_project_status comes from the
+   * KERNEL state machine (a fresh DRAFT project stays DRAFT); the proposal's
+   * required gates are created PENDING at adoption — never decided here.
+   */
+  proposeIntake(intakeId: string): PhaseProposal {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    this.assertIntakeNotExpired(session)
+    if (!['needs_input', 'grilling', 'proposal_ready', 'awaiting_human'].includes(session.status)) {
+      throw new KernelError(409, 'intake_state_conflict', `intake ${intakeId} is ${session.status}; propose requires a scanned, answered intake`)
+    }
+    const answers = this.intakeAnswerMap(intakeId)
+    const required = requiredQuestionCodes(session.target_phase)
+    const missing: string[] = []
+    for (const code of required) {
+      const a = answers.get(code)
+      if (a === undefined || a.answer === '') missing.push(code)
+    }
+    if (missing.length > 0) {
+      throw new KernelError(422, 'question_required', `required questions unanswered: ${missing.join(', ')} — answer them before proposing`)
+    }
+    const projectStatus = session.project_id === null ? 'DRAFT' : this.getProject(session.project_id).status
+    const previous = row.proposal_json === null || row.proposal_json === '' ? null : jsonParse(row.proposal_json, null) as unknown as PhaseProposal
+    const proposal = buildPhaseProposal({
+      intakeId,
+      revision: (previous?.revision ?? 0) + 1,
+      targetPhase: session.target_phase,
+      answers,
+      artifacts: this.intakeArtifacts(intakeId),
+      observations: this.intakeObservations(intakeId),
+      projectStatus,
+      now: nowIso(),
+    })
+    this.db.prepare('UPDATE intake_sessions SET proposal_json = ?, status = ?, revision = revision + 1, updated_at = ? WHERE intake_id = ?')
+      .run(JSON.stringify(proposal), 'awaiting_human', nowIso(), intakeId)
+    this.appendIntakeAudit(intakeId, 'proposal_generated', `revision ${proposal.revision} (observed_phase=${proposal.observed_phase})`)
+    return proposal
+  }
+
+  /**
+   * ONBOARD-01 adopt (research-onboarding.md §7): the ONLY intake write to
+   * business tables. Runs in ONE Kernel transaction:
+   *  - validates the Human PI Principal, proposal freshness (revision),
+   *    target project revision (409 project_revision_conflict) and that all
+   *    artifacts are clean (422 artifact_quarantined);
+   *  - promotes staged blobs into CAS + registers project Artifact rows;
+   *  - creates the phase's required gates PENDING (never decided);
+   *  - imports metrics/results files as draft (legacy_unverified) Evidence
+   *    and logs as log Artifact + ImportedRunObservation — NEVER TerminalLog,
+   *    RunSet, verified/accepted Evidence or supported Claim;
+   *  - writes the AdoptionReceipt (pinned revisions + idempotency hash).
+   * The project stays on its kernel state machine status (DRAFT for fresh
+   * projects) — adoption never skips the Scope Gate or any other gate.
+   * Idempotent: same intake + Idempotency-Key + request hash → same receipt;
+   * different hash → 409 idempotency_conflict; a second adopt without a key
+   * replays the stored receipt.
+   */
+  adoptIntake(input: {
+    intake_id: string
+    expected_proposal_revision: number
+    expected_target_revision?: number
+    idempotency_key?: string
+    request_hash?: string
+  }, principal: HumanPrincipal): AdoptionReceipt {
+    if (principal === undefined || typeof principal.principal_id !== 'string' || principal.principal_id === '') {
+      throw new KernelError(422, 'principal_required', 'intake adoption requires an authenticated Human Principal (principal.principal_id)')
+    }
+    const row = this.getIntakeSessionRow(input.intake_id)
+    const session = this.intakeSessionFromRow(row)
+    const storedReceipt = row.receipt_json === null || row.receipt_json === '' ? null : jsonParse(row.receipt_json, null) as unknown as AdoptionReceipt
+    if (session.status === 'accepted' && storedReceipt !== null) {
+      // Idempotent replay: same key + request hash returns the SAME receipt;
+      // a different key OR a different hash under the same key is a 409.
+      if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+        if (storedReceipt.idempotency_key !== input.idempotency_key) {
+          throw new KernelError(409, 'idempotency_conflict', `intake ${input.intake_id} was already adopted under a different idempotency key`)
+        }
+        if (storedReceipt.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict', `intake idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+      }
+      return storedReceipt
+    }
+    if (session.status !== 'awaiting_human') {
+      throw new KernelError(409, 'intake_state_conflict', `intake ${input.intake_id} is ${session.status}; adoption requires awaiting_human (propose first)`)
+    }
+    if (Date.parse(session.expires_at) < Date.now()) {
+      throw new KernelError(409, 'intake_expired', `intake ${input.intake_id} expired at ${session.expires_at}`)
+    }
+    const proposal = row.proposal_json === null || row.proposal_json === '' ? null : jsonParse(row.proposal_json, null) as unknown as PhaseProposal
+    if (proposal === null) {
+      throw new KernelError(422, 'proposal_stale', `intake ${input.intake_id} has no proposal — propose first`)
+    }
+    if (input.expected_proposal_revision !== proposal.revision) {
+      throw new KernelError(409, 'proposal_stale',
+        `proposal revision ${input.expected_proposal_revision} is stale; current revision is ${proposal.revision} — re-propose`)
+    }
+    if (session.project_id === null) {
+      throw new KernelError(422, 'phase_unadoptable', `intake ${input.intake_id} has no target project — merge into a project first`)
+    }
+    const project = this.getProject(session.project_id)
+    if (input.expected_target_revision !== undefined && input.expected_target_revision !== project.revision) {
+      throw new KernelError(409, 'project_revision_conflict',
+        `target project revision ${input.expected_target_revision} is stale; current revision is ${project.revision} — re-propose`)
+    }
+    if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+      const replay = this.db.prepare('SELECT * FROM intake_sessions WHERE intake_id = ? AND idempotency_key = ?')
+        .get(input.intake_id, input.idempotency_key) as IntakeSessionRow | undefined
+      if (replay !== undefined && replay.receipt_json !== null && replay.receipt_json !== '') {
+        const receipt = jsonParse(replay.receipt_json, null) as unknown as AdoptionReceipt
+        if (receipt.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict', `intake idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        return receipt
+      }
+    }
+    const artifacts = this.intakeArtifacts(input.intake_id)
+    const blocked = artifacts.filter(a => a.quarantine !== 'clean')
+    if (blocked.length > 0) {
+      throw new KernelError(422, 'artifact_quarantined',
+        `intake artifacts are not clean: ${blocked.map(a => `${a.file_name} (${a.quarantine})`).join(', ')} — remove or replace them`)
+    }
+    return withTransaction(this.db, () => {
+      const now = nowIso()
+      const createdObjectRefs: string[] = []
+      const draftEvidenceRefs: string[] = []
+      const pendingGateRefs: string[] = []
+      for (const artifact of artifacts) {
+        const partPath = this.intakeStagedPath(input.intake_id, artifact.sha256)
+        let staged: Buffer
+        try {
+          staged = readFileSync(partPath)
+        } catch {
+          throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} staged bytes are missing — re-upload`)
+        }
+        const actualSha = createHash('sha256').update(staged).digest('hex')
+        if (actualSha !== artifact.sha256 || staged.byteLength !== artifact.size_bytes) {
+          throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} content hash mismatch — re-upload`)
+        }
+        const kind = artifactKindForFile(artifact.file_name)
+        const record = this.registerArtifact({
+          project_id: session.project_id!,
+          kind,
+          content: staged,
+          media_type: artifact.media_type,
+          file_name: artifact.file_name,
+          metadata: { intake_id: input.intake_id, imported: true, source: 'intake' },
+        })
+        createdObjectRefs.push(record.artifact_id)
+        // §6.1: logs → log Artifact + ImportedRunObservation (NEVER TerminalLog).
+        if (kind === 'log') {
+          this.db.prepare(
+            'INSERT INTO intake_observations (observation_id, intake_id, artifact_id, locator, detector, detector_version, value, warnings, trust, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          ).run(
+            `obs_${randomUUID().replaceAll('-', '').slice(0, 16)}`, input.intake_id, artifact.artifact_id,
+            artifact.file_name, 'imported_run', '1',
+            `imported run observation from ${artifact.file_name} — imported logs never become TerminalLog rows`,
+            '[]', 'observed_unverified', now,
+          )
+        }
+        // §6.1: metrics/results → data Artifact + draft (legacy_unverified) Evidence.
+        if (isImportableMetricsFile(artifact.file_name)) {
+          const parsed = parseMetricsFileV1(staged)
+          if (parsed !== null) {
+            const first = parsed.metrics[0]!
+            const evidence = this.ingestEvidence({
+              project_id: session.project_id!,
+              source_type: 'reproduction',
+              run_ids: [],
+              artifact_refs: [record.artifact_id],
+              analysis_method: 'imported-unverified',
+              result: {
+                primary_metric: first.name,
+                value: first.value,
+                n_seeds: 0,
+                direction: undefined,
+              },
+              provenance_status: 'legacy_unverified',
+            })
+            draftEvidenceRefs.push(evidence.evidence_id)
+          }
+        }
+      }
+      // §6: the phase's gates are created PENDING — never decided by intake.
+      for (const gateType of SAFE_PHASE_LANDING[proposal.observed_phase].required_gates) {
+        const gate = this.createGate({
+          project_id: session.project_id!,
+          type: gateType as GateType,
+          title: `${gateType} gate (imported material)`,
+          summary: `created by intake adoption ${input.intake_id} — pending human decision; the intake never decides gates`,
+          payload: { intake_id: input.intake_id, imported: true },
+        })
+        pendingGateRefs.push(gate.gate_id)
+      }
+      const receipt: AdoptionReceipt = {
+        adoption_id: `adopt_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
+        intake_id: input.intake_id,
+        project_id: session.project_id!,
+        proposal_revision: proposal.revision,
+        target_project_revision: project.revision,
+        created_object_refs: createdObjectRefs,
+        pending_gate_refs: pendingGateRefs,
+        draft_evidence_refs: draftEvidenceRefs,
+        idempotency_key: input.idempotency_key ?? null,
+        request_hash: input.request_hash ?? '',
+        adopted_by: principal,
+        adopted_at: now,
+      }
+      this.db.prepare(
+        'UPDATE intake_sessions SET status = ?, receipt_json = ?, revision = revision + 1, updated_at = ? WHERE intake_id = ?',
+      ).run('accepted', JSON.stringify(receipt), now, input.intake_id)
+      this.appendIntakeAudit(input.intake_id, 'adopted', `adoption ${receipt.adoption_id} (proposal r${proposal.revision})`)
+      // GC the isolated staging files (blobs now live in the real CAS).
+      this.gcIntakeStagedDir(input.intake_id)
+      this.emit(session.project_id, 'intake.accepted', {
+        intake_id: input.intake_id, project_id: session.project_id, adoption_id: receipt.adoption_id,
+        proposal_revision: proposal.revision, artifact_count: artifacts.length,
+      })
+      return receipt
+    })
+  }
+
+  private gcIntakeStagedDir(intakeId: string): void {
+    const dir = join(this.intakeStagedRoot, intakeId)
+    let entries: string[]
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      return // already gone
+    }
+    for (const entry of entries) {
+      try { unlinkSync(join(dir, entry)) } catch { /* raced */ }
+    }
+    try { rmdirSync(dir) } catch { /* raced */ }
+  }
+
+  /**
+   * ONBOARD-01 reject (research-onboarding.md §7): Human rejection — GC the
+   * isolated staged blobs and mark the session rejected (audited). Accepted
+   * sessions cannot be rejected; an already-rejected replay is a no-op.
+   */
+  rejectIntake(intakeId: string, principal: HumanPrincipal): IntakeProjection {
+    if (principal === undefined || typeof principal.principal_id !== 'string' || principal.principal_id === '') {
+      throw new KernelError(422, 'principal_required', 'intake rejection requires an authenticated principal (principal.principal_id)')
+    }
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    if (session.status === 'accepted') {
+      throw new KernelError(409, 'intake_state_conflict', `intake ${intakeId} was adopted and cannot be rejected`)
+    }
+    if (session.status === 'rejected') {
+      return this.getIntakeProjection(intakeId) // idempotent replay
+    }
+    this.gcIntakeStagedDir(intakeId)
+    this.db.prepare('UPDATE intake_sessions SET status = ?, revision = revision + 1, updated_at = ? WHERE intake_id = ?')
+      .run('rejected', nowIso(), intakeId)
+    this.appendIntakeAudit(intakeId, 'rejected', `rejected by ${principal.principal_id}`)
+    this.emit(session.project_id, 'intake.rejected', { intake_id: intakeId, project_id: session.project_id })
+    return this.getIntakeProjection(intakeId)
+  }
+
+  /**
+   * ONBOARD-01 recovery/GC (research-onboarding.md §7): expire sessions past
+   * their TTL that were never adopted — GC staged blobs, mark expired
+   * (audited + outbox). Accepted sessions are never touched. Returns the
+   * number of sessions expired.
+   */
+  expireIntakes(now = Date.now()): number {
+    const rows = this.db.prepare(
+      "SELECT * FROM intake_sessions WHERE status IN ('draft','uploading','scanning','needs_input','grilling','proposal_ready','awaiting_human','accepting') AND expires_at < ?",
+    ).all(new Date(now).toISOString()) as unknown as IntakeSessionRow[]
+    for (const row of rows) {
+      this.gcIntakeStagedDir(row.intake_id)
+      this.db.prepare('UPDATE intake_sessions SET status = ?, revision = revision + 1, updated_at = ? WHERE intake_id = ?')
+        .run('expired', nowIso(), row.intake_id)
+      this.appendIntakeAudit(row.intake_id, 'expired', `expired at ${row.expires_at}`)
+      this.emit(row.project_id, 'intake.expired', { intake_id: row.intake_id, project_id: row.project_id })
+    }
+    return rows.length
+  }
+
+  /**
+   * ONBOARD-01 recovery/GC: remove ISOLATED staged intake blobs older than
+   * `maxAgeMs` (research-onboarding.md §7: unadopted temp blobs GC after
+   * 24 h). Adopted blobs already live in the real CAS (never touched);
+   * session rows survive (re-uploadable) until expireIntakes collects them.
+   * Returns the number of files removed.
+   */
+  cleanupIntakeStaged(maxAgeMs: number = ResearchKernel.INTAKE_STAGED_TTL_MS): number {
+    let sessions: string[]
+    try {
+      sessions = readdirSync(this.intakeStagedRoot)
+    } catch {
+      return 0
+    }
+    const now = Date.now()
+    let removed = 0
+    for (const intakeId of sessions) {
+      const dir = join(this.intakeStagedRoot, intakeId)
+      let entries: string[]
+      try {
+        entries = readdirSync(dir)
+      } catch {
+        continue // raced
+      }
+      for (const entry of entries) {
+        const full = join(dir, entry)
+        let mtime: number
+        try {
+          mtime = statSync(full).mtimeMs
+        } catch {
+          continue
+        }
+        if (now - mtime > maxAgeMs) {
+          try {
+            unlinkSync(full)
+            removed += 1
+          } catch { /* raced */ }
+        }
+      }
+      try {
+        if (readdirSync(dir).length === 0) rmdirSync(dir)
+      } catch { /* raced */ }
     }
     return removed
   }
@@ -2950,9 +3854,32 @@ export class ResearchKernel {
     this.ptyAdapter = adapter
   }
 
+  /** True when a real adapter is registered (HTTP open creates sessions
+   * only then — an inert session would mislead the UI). */
+  hasPtyAdapter(): boolean {
+    return this.ptyAdapter !== null
+  }
+
   /** The active adapter (NullPtyAdapter when none is registered). */
   getPtyAdapter(): PtyAdapter {
     return this.ptyAdapter ?? new NullPtyAdapter()
+  }
+
+  /**
+   * PTY-01: a session transitioned to CLOSED (explicit close control,
+   * explicit close, idle TTL sweep, lease expiry) — the adapter must tear
+   * down the real process. The store owns the state machine, the adapter
+   * owns the process; a delivery failure never breaks the transition (the
+   * adapter surfaces its own error channel).
+   */
+  private ptyNotifyClosed(sessionId: string): void {
+    const adapter = this.ptyAdapter
+    if (adapter === null) return
+    try {
+      adapter.kill(sessionId)
+    } catch {
+      // ignore — the state transition is already committed
+    }
   }
 
   /**
@@ -3025,19 +3952,24 @@ export class ResearchKernel {
     return this.pty.revoke(sessionId)
   }
 
-  /** Explicit close (idempotent). */
+  /** Explicit close (idempotent) — the real process is torn down too. */
   ptyClose(sessionId: string, reason: import('@dsh-scholar/research-schemas').PtyCloseReason = 'explicit'): import('@dsh-scholar/research-schemas').PtySession {
-    return this.pty.closeSession(sessionId, reason)
+    const session = this.pty.closeSession(sessionId, reason)
+    this.ptyNotifyClosed(sessionId)
+    return session
   }
 
   /**
    * Apply one control frame with client_seq idempotency (duplicate → replay
    * no-op, reordered/gapped → 409 pty_client_seq_out_of_order). Frames are
    * audited in pty_frames; delivery to the real tty happens only when an
-   * adapter is attached (`delivered` in the result).
+   * adapter is attached (`delivered` in the result). A `close` control also
+   * tears the real process down.
    */
   ptyControl(sessionId: string, request: import('@dsh-scholar/research-schemas').PtyControlRequest, adapter?: PtyAdapter | null): PtyControlResult {
-    return this.pty.applyControl(sessionId, request, adapter !== undefined ? adapter : this.ptyAdapter)
+    const result = this.pty.applyControl(sessionId, request, adapter !== undefined ? adapter : this.ptyAdapter)
+    if (request.type === 'close') this.ptyNotifyClosed(sessionId)
+    return result
   }
 
   /** Append adapter output (output/exit frames) with monotonic server seq
@@ -3053,9 +3985,12 @@ export class ResearchKernel {
   }
 
   /** Idle TTL sweep — closes every session idle longer than its
-   * idle_ttl_s (read from the Config Schema / session row). */
+   * idle_ttl_s (read from the Config Schema / session row) and tears the
+   * real tty down. Runs on the kernel-owned timer plus explicit calls. */
   ptySweepIdle(now = Date.now()): string[] {
-    return this.pty.sweepIdle(now)
+    const closed = this.pty.sweepIdle(now)
+    for (const sessionId of closed) this.ptyNotifyClosed(sessionId)
+    return closed
   }
 
   /** Touch activity (a reconnecting wire resets the idle TTL). */

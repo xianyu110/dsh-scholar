@@ -12,6 +12,7 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { ResearchKernel } from '../kernel.js'
 import { startKernelServer } from '../server.js'
+import { LocalPtyAdapter } from '../pty-local.js'
 import { validateConfig, ConfigRegistryError } from '@dsh-scholar/research-schemas'
 
 const { values } = parseArgs({
@@ -66,6 +67,32 @@ try {
 }
 
 const kernel = new ResearchKernel({ dbPath, casRoot, serviceToken })
+
+// PTY-01 (execution-runtime.md §6.1): the production kernel serves REAL
+// pseudo-terminals through the LocalPtyAdapter (python3 pty bridge). The
+// workspace sandbox root lives under the kernel dataDir — never a host
+// workspace path — and output flows into the session store (server_seq /
+// bounded retention) which is NOT a formal Job log. A missing python3 makes
+// every open fail with pty_adapter_failed (honest), never a fake tty.
+{
+  const ptyWorkspaceRoot = join(resolve(dirname(dbPath)), 'pty-workspaces')
+  const ptyAdapter = new LocalPtyAdapter({
+    workspaceRoot: ptyWorkspaceRoot,
+    onOutput: (sessionId, frames) => {
+      try {
+        kernel.ptyAppendOutput(sessionId, frames)
+      } catch {
+        // Session already closed (race with close/sweep) — output after
+        // close is dropped by the store's own rule; nothing to do here.
+      }
+    },
+    log: (message) => console.error(`[research-kernel] ${message}`),
+  })
+  kernel.setPtyAdapter(ptyAdapter)
+  if (!ptyAdapter.available) {
+    console.error('[research-kernel] WARNING: python3 not available — PTY open will fail with pty_adapter_failed')
+  }
+}
 
 try {
   const { server, url, port: actualPort } = await startKernelServer({ kernel, host, port, token, configPinHash: configPin })
