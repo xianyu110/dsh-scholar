@@ -35,7 +35,10 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"experime
 ok "project $PROJ created with hard budget (max_gpu_hours=10)"
 
 submit_script() { # <idempotency> <kind> <script>
-  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"$1\",\"kind\":\"$2\",\"payload\":{\"script\":$(node -e "console.log(JSON.stringify(process.argv[1]))" "$3")}}" | jqf job_id
+  # RUN-02 (execution-runtime.md §1): smoke defaults to container — this eval
+  # is an explicit test fixture, so its smoke jobs carry trusted_fixture=true
+  # to run in the isolated subprocess.
+  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"$1\",\"kind\":\"$2\",\"payload\":{\"trusted_fixture\":true,\"script\":$(node -e "console.log(JSON.stringify(process.argv[1]))" "$3")}}" | jqf job_id
 }
 
 echo "Experiment eval: failure classification (design §4.6.2)"

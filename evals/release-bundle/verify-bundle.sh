@@ -5,6 +5,8 @@
 #
 #   - manifest.json present, bundle_schema_version = 2
 #   - every manifest.artifacts entry: file exists + sha256 matches
+#   - every manifest.tex document file: tex-workspace/<doc>/<path> exists +
+#     sha256 matches (TeX inputs, §4 REL-01; when the tex section is present)
 #   - manuscript/paper.md (or .tex) + manuscript/references.bib present
 #   - reproduce.sh + verify.sh present and executable
 #   - runs/metrics/ has ≥1 valid §12.5 JSON (schema_version + metrics array)
@@ -69,6 +71,29 @@ if [ -f "$BUNDLE_DIR/manuscript/references.bib" ]; then
   ok "manuscript references.bib present"
 else
   bad "manuscript references.bib missing"
+fi
+
+# TeX workspace inputs (§4 REL-01): when manifest.tex declares documents,
+# every tex-workspace/<document_id>/<path> file must exist and match the
+# recorded sha256 (the clean-room rerun rebuilds these inputs in a fresh
+# kernel and compares them field-by-field).
+TEX_N=0
+if node -e "const m=require('$MANIFEST');process.exit(m.tex&&Array.isArray(m.tex.documents)&&m.tex.documents.length>0?0:1)"; then
+  while IFS=$'\t' read -r doc path sha; do
+    TEX_N=$((TEX_N + 1))
+    if [ ! -f "$BUNDLE_DIR/tex-workspace/$doc/$path" ]; then
+      bad "tex input missing: $doc/$path"
+    elif [ "$(sha256sum "$BUNDLE_DIR/tex-workspace/$doc/$path" | awk '{print $1}')" != "$sha" ]; then
+      bad "tex input sha256 MISMATCH: $doc/$path (recorded $sha)"
+    fi
+  done < <(node -e "const m=require('$MANIFEST');for (const d of m.tex.documents) for (const f of d.files) console.log(d.document_id + '\t' + f.path + '\t' + f.sha256)")
+  if [ "$TEX_N" -gt 0 ]; then
+    ok "$TEX_N TeX input file(s) verified (tex-workspace/ matches manifest.tex sha256)"
+  else
+    bad "manifest.tex declares documents but no files"
+  fi
+else
+  ok "no TeX inputs in manifest (manifest.tex absent)"
 fi
 
 # Executable clean-room entry points.

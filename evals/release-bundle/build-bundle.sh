@@ -102,6 +102,49 @@ fs.writeFileSync(`${out}/manuscript/manuscript.json`, JSON.stringify(ms, null, 2
 console.log(`  paper.md (${ms.text.length} bytes), references.bib (${(ms.bibtex ?? '').length} bytes), format=${ms.format}`)
 DHSH_NODE
 
+echo "== tex workspace export (§4 REL-01: TeX inputs into the bundle) =="
+# Every TeX document referenced by a SUCCEEDED latex-compile job is exported:
+# the file bytes land in tex-workspace/<document_id>/<path> and the manifest
+# tex section records the per-file list + sha256 + size (recomputed from disk),
+# so the clean-room rerun can rebuild the same workspace in a FRESH kernel and
+# compare TeX inputs field-by-field. Documents with no succeeded build are not
+# replayed and therefore not exported.
+: > "$TMP/tex.json"
+BASE="$BASE" TEX_JSON="$TMP/tex.json" OUT="$OUT" node - "$TMP/jobs.json" <<'DHSH_NODE'
+const fs = require('fs')
+const path = require('path')
+const crypto = require('crypto')
+const jobs = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const base = process.env.BASE
+const docs = [...new Set(jobs
+  .filter(j => j.kind === 'latex-compile' && j.status === 'succeeded'
+    && j.payload && typeof j.payload.tex_document_id === 'string')
+  .map(j => j.payload.tex_document_id))]
+;(async () => {
+  const section = { documents: [] }
+  for (const docId of docs) {
+    const treeRes = await fetch(`${base}/v1/documents/${docId}/tree`)
+    if (!treeRes.ok) throw new Error(`tex tree ${treeRes.status} for ${docId}`)
+    const tree = await treeRes.json()
+    const docDir = path.join(process.env.OUT, 'tex-workspace', docId)
+    const files = []
+    for (const f of tree.files) {
+      const fileRes = await fetch(`${base}/v1/documents/${docId}/file?path=${encodeURIComponent(f.path)}`)
+      if (!fileRes.ok) throw new Error(`tex file ${fileRes.status} for ${docId}/${f.path}`)
+      const file = await fileRes.json()
+      const target = path.join(docDir, f.path)
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, file.content)
+      const sha = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex')
+      files.push({ path: f.path, version: f.version, sha256: sha, size_bytes: fs.statSync(target).size })
+    }
+    section.documents.push({ document_id: docId, root_file: tree.document.root_file, revision: tree.document.revision, files })
+  }
+  fs.writeFileSync(process.env.TEX_JSON, JSON.stringify(section, null, 2) + '\n')
+  console.log(`  tex export: ${section.documents.length} document(s)`)
+})().catch(e => { console.error(e.message); process.exit(1) })
+DHSH_NODE
+
 echo "== downloading artifacts (GET /v1/artifacts/{id}?project_id=$PROJ) =="
 mkdir -p "$TMP/dl"
 : > "$TMP/downloads.tsv"
@@ -335,6 +378,15 @@ const runtime = {
   runner_bin: process.env.RT_RUNNER_SHA || null,
   images,
 }
+// §4 REL-01: TeX inputs exported alongside the artifacts (file list + sha256
+// + size per document); null when the project has no succeeded latex-compile
+// build. The rerun rebuilds these inputs in a fresh kernel and compares them
+// field-by-field (compared.tex).
+let tex = null
+if (fs.existsSync(`${tmp}/tex.json`)) {
+  const t = JSON.parse(fs.readFileSync(`${tmp}/tex.json`, 'utf8'))
+  if (Array.isArray(t.documents) && t.documents.length > 0) tex = t
+}
 const manifest = {
   bundle_id: rb.bundle_id,
   bundle_schema_version: 2,
@@ -342,6 +394,7 @@ const manifest = {
   contracts,
   jobs,
   artifacts,
+  tex,
   claims,
   evidence,
   corpus: snapshots,

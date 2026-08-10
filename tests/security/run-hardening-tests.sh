@@ -6,6 +6,10 @@
 #   formal-run-rejects-message-only    message-only (no command) -> failed
 #   job-rejects-unapproved-contract    formal job without approved contract -> rejected
 #   kernel-submit-rejects-subprocess   kernel rejects formal on isolated-subprocess profile
+#   smoke-rejects-host-subprocess      untrusted smoke + subprocess runner -> failed,
+#                                      host marker file must NOT exist (RUN-02)
+#   smoke-trusted-fixture-ok           explicit payload.trusted_fixture=true smoke
+#                                      + subprocess runner -> succeeded (RUN-02)
 #
 # Usage: bash tests/security/run-hardening-tests.sh
 set -eu
@@ -92,7 +96,11 @@ C=$(api "http://127.0.0.1:$PORT/v1/jobs/$J1" | node -e "let d='';process.stdin.o
 [[ "$C" == environment* ]] && ok "formal + subprocess runner -> failed/environment: ${C#*|}" || bad "expected environment got $C"
 
 echo "== non-echo must-execute-real-code / message-only rejected =="
-J2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"b1","kind":"smoke","payload":{"message":"{\"metric\":\"f1\",\"value\":0.8}"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+# RUN-02: smoke defaults to container — the subprocess runner only accepts
+# smoke jobs explicitly marked payload.trusted_fixture=true (execution-runtime.md
+# §1). This message-only fixture is marked trusted so the test exercises the
+# empty-command invariant below, not the container gate.
+J2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"b1","kind":"smoke","payload":{"trusted_fixture":true,"message":"{\"metric\":\"f1\",\"value\":0.8}"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 for _ in $(seq 1 60); do
   S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
   [[ "$S" == "failed" ]] && break
@@ -102,6 +110,47 @@ E2=$(api "http://127.0.0.1:$PORT/v1/jobs/$J2" | node -e "let d='';process.stdin.
 [[ "$E2" == *"empty command"* ]] && ok "non-echo empty command/message-only -> failed (no synthetic success)" || bad "expected empty-command failure got: $E2"
 M2=$(api "http://127.0.0.1:$PORT/v1/jobs/$J2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.run_manifest?.metrics_artifact??'none'))})")
 [[ "$M2" == "none" ]] && ok "no metrics artifact for fake run" || bad "metrics artifact should be absent"
+
+echo "== smoke-rejects-host-subprocess (RUN-02: smoke defaults to container) =="
+# execution-runtime.md §1: only an EXPLICIT trusted-smoke-fixture
+# (payload.trusted_fixture=true) may use the isolated subprocess. The script
+# would `touch` a host marker file — if the runner ever executed it on the
+# host, the marker would exist and the assertion below fails loudly.
+MARKER="/tmp/dsh-smoke-host-executed-$RANDOM"
+J3=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"s1\",\"kind\":\"smoke\",\"payload\":{\"script\":\"touch $MARKER\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+for _ in $(seq 1 60); do
+  S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J3" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+  [[ "$S" == "failed" ]] && break
+  sleep 0.3
+done
+C3=$(api "http://127.0.0.1:$PORT/v1/jobs/$J3" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.failure_class??'')+'|'+(j.error??''))})")
+if [[ "$C3" == environment* && "$C3" == *"trusted-smoke-fixture"* ]]; then
+  ok "untrusted smoke + subprocess runner -> failed/environment (trusted-smoke-fixture): ${C3#*|}"
+else
+  bad "untrusted smoke expected environment + trusted-smoke-fixture message, got: $C3"
+fi
+if [ ! -e "$MARKER" ]; then
+  ok "host marker $MARKER absent — smoke script never executed on the host"
+else
+  bad "host marker $MARKER EXISTS — smoke script executed on the host!"
+fi
+
+echo "== smoke-trusted-fixture-ok (RUN-02: explicit trusted fixture may use subprocess) =="
+J4=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"s2","kind":"smoke","payload":{"trusted_fixture":true,"script":"echo \"{\\\"metric\\\":\\\"f1\\\",\\\"value\\\":0.5}\""}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+for _ in $(seq 1 60); do
+  S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J4" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+  [[ "$S" == "succeeded" ]] && break
+  sleep 0.3
+done
+M4=$(api "http://127.0.0.1:$PORT/v1/jobs/$J4" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.run_manifest?.metrics_artifact??'none'))})")
+if [[ "$S" == "succeeded" && "$M4" == sha256:* ]]; then
+  ok "trusted smoke fixture + subprocess runner -> succeeded, script metrics artifact $M4"
+else
+  bad "trusted smoke expected succeeded + metrics artifact, got status=$S metrics=$M4"
+fi
+# Docker mode smoke (unmarked) is covered by evals/docker-eval.sh and
+# evals/release-bundle/run-release-eval.sh (both run smoke scripts with
+# --mode docker) — no separate case needed here.
 
 echo "== SCH-JOB-001/002: subprocess heartbeat renews lease; cancel terminates the real process =="
 # Dedicated kernel+runner pair with fast heartbeat/cancel polling (the main
@@ -120,8 +169,10 @@ ok "durable-jobs project $PROJ2"
 # Long-running subprocess (node timeout 90s; the runner's 30s timeout would
 # only fire if cancel failed — the assertions below would then fail loudly).
 # The marker is split across variables so pgrep never matches this script.
+# RUN-02: the subprocess runner requires the explicit trusted-smoke-fixture
+# marker for smoke jobs (execution-runtime.md §1).
 M1="zzq-cancel"; M2="marker-98765"
-JL=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects/$PROJ2/jobs" -d "{\"idempotency_key\":\"h-cancel\",\"kind\":\"smoke\",\"payload\":{\"script\":\"node -e \\\"setTimeout(function(){},90000); //$M1-$M2\\\"\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+JL=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects/$PROJ2/jobs" -d "{\"idempotency_key\":\"h-cancel\",\"kind\":\"smoke\",\"payload\":{\"trusted_fixture\":true,\"script\":\"node -e \\\"setTimeout(function(){},90000); //$M1-$M2\\\"\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 S=""
 for _ in $(seq 1 40); do
   S=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")

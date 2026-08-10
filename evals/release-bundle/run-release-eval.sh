@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # §14.4 / §14.5 Release Bundle eval (Ticket SCH-REL-001) — end-to-end:
 #
-#   fresh kernel (random port, mkdtemp DB) + subprocess runner
+#   fresh kernel (random port, mkdtemp DB) + docker-mode runner
 #   → project + contract
 #   → 2 real smoke jobs whose scripts emit metrics JSON lines (non-echo,
 #     empty-command jobs are prohibited — kind=smoke + payload.script is the
 #     allowed path, per evals/golden-path-v2)
 #   → POST /v1/projects/{id}/analysis (aggregate with mean/effect_size)
+#   → TeX workspace + latex-compile job (real texlive container → PDF; the
+#     bundle's TeX inputs + PDF structure are compared in the clean-room)
 #   → corpus snapshot + evidence + claim (bundle manifest sections)
 #   → POST /v1/projects/{id}/release-bundle (JSON manifest, bundle_id/artifact_id)
 #   → build-bundle.sh assembles the REAL self-contained archive (§14.4)
@@ -167,6 +169,66 @@ if AN_JSON="$AN" node -e '
   ok "analysis aggregated over real runs: mean=0.55, n=2, effect_size field present"
 else
   bad "analysis assertions failed"; printf '%s' "$AN" | head -c 300; echo
+fi
+
+say "tex workspace + latex-compile job (real texlive container, §4 REL-01)"
+DOC=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscript-drafts" -d '{}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document_id))")
+if [[ "$DOC" == doc_* ]]; then
+  ok "tex workspace document $DOC"
+else
+  bad "tex document id '$DOC'"
+fi
+cat > "$WORK/paper.tex" <<'TEX'
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\begin{document}
+\section{Intro}
+Release-bundle clean-room fixture \cite{knuth1984}.
+\bibliographystyle{plain}
+\bibliography{main}
+\end{document}
+TEX
+cat > "$WORK/main.bib" <<'BIB'
+@book{knuth1984,
+  author = {Donald E. Knuth},
+  title = {The {TeX}book},
+  publisher = {Addison-Wesley},
+  year = {1984}
+}
+BIB
+V0=$(api "http://127.0.0.1:$PORT/v1/documents/$DOC/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const t=JSON.parse(d);const f=t.files.find(x=>x.path==='paper.tex');console.log(f?f.version:'')})")
+V1=$(api "http://127.0.0.1:$PORT/v1/documents/$DOC/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const t=JSON.parse(d);const f=t.files.find(x=>x.path==='main.bib');console.log(f?f.version:'')})")
+if [[ "$V0" =~ ^[0-9]+$ && "$V1" =~ ^[0-9]+$ ]]; then
+  node -e "console.log(JSON.stringify({path:'paper.tex',content:require('fs').readFileSync('$WORK/paper.tex','utf8'),expected_version:Number('$V0')}))" > "$WORK/put-paper.json"
+  api -X PUT "http://127.0.0.1:$PORT/v1/documents/$DOC/file" -d @"$WORK/put-paper.json" > /dev/null
+  node -e "console.log(JSON.stringify({path:'main.bib',content:require('fs').readFileSync('$WORK/main.bib','utf8'),expected_version:Number('$V1')}))" > "$WORK/put-bib.json"
+  api -X PUT "http://127.0.0.1:$PORT/v1/documents/$DOC/file" -d @"$WORK/put-bib.json" > /dev/null
+  ok "paper.tex + main.bib written to the workspace (versions $V0/$V1)"
+else
+  bad "cannot read workspace file versions ('$V0'/'$V1')"
+fi
+REV=$(api "http://127.0.0.1:$PORT/v1/documents/$DOC/tree" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document.revision))")
+TXRESP=$(api -X POST "http://127.0.0.1:$PORT/v1/documents/$DOC/builds" -d "{\"expected_document_revision\":$REV,\"image_digest\":\"texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4\"}")
+TXBUILD=$(printf '%s' "$TXRESP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).build.build_id))")
+TXJOB=$(printf '%s' "$TXRESP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job.job_id))")
+if [[ "$TXBUILD" == build_* && "$TXJOB" == job_* ]]; then
+  ok "latex-compile queued (build $TXBUILD, job $TXJOB)"
+else
+  bad "latex-compile queue failed: '$TXRESP'"
+fi
+TSTATUS=""
+TPDF=""
+for _ in $(seq 1 120); do
+  ROW=$(api "http://127.0.0.1:$PORT/v1/documents/$DOC/builds/$TXBUILD")
+  TSTATUS=$(printf '%s' "$ROW" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+  TPDF=$(printf '%s' "$ROW" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).pdf_artifact||''))")
+  case "$TSTATUS" in succeeded|failed|cancelled) break;; esac
+  sleep 0.5
+done
+if [[ "$TSTATUS" == "succeeded" && "$TPDF" == sha256:* ]]; then
+  ok "latex-compile succeeded; pdf artifact $TPDF"
+else
+  bad "latex build status=$TSTATUS pdf=${TPDF:-none}"; tail -5 "$WORK/runner.log" >&2 || true
 fi
 
 say "corpus snapshot + evidence + claim (bundle manifest sections)"

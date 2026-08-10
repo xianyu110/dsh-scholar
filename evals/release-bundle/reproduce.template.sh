@@ -14,6 +14,9 @@
 #     read afterwards happens against that copy, never against the original
 #     checkout/DB/CAS location (the report is written in the copy and copied
 #     back at the end when the original dir is writable);
+#   - the FRESH kernel gets a fresh --db/--cas under the SAME mktemp work
+#     dir — no original DB/CAS is ever opened (report cleanroom section
+#     records snapshot_dir/kernel_db/kernel_cas for proof);
 #   - KERNEL_BIN/RUNNER_BIN must be explicitly provided AND their sha256 must
 #     equal the digests declared in manifest.runtime (kernel_bin/runner_bin).
 #     Any binary whose real path resolves inside a dsh-scholar checkout while
@@ -26,6 +29,14 @@
 #   - baseline/pilot/formal/reproduce jobs are replayed with image_digest
 #     pinned to manifest.runtime.images.node_fixture, latex-compile to
 #     manifest.runtime.images.texlive — overriding any other source;
+#   - TeX inputs (manifest.tex + tex-workspace/) are re-created in the FRESH
+#     kernel document store; replayed latex-compile payloads are rebound to
+#     the fresh document (old→new map);
+#   - compared is FIELD-LEVEL: manifest hash (sha256 of the snapshot vs the
+#     pre-copy original), metrics (name/unit/value within tolerance + seed),
+#     analysis (mean tolerance + n/effect_size/baseline_value), run manifest
+#     (idempotency-key set + count + kind per key + run_manifest presence),
+#     TeX inputs (file list + per-file sha256) and PDF structure (byte size);
 #   - a manifest WITHOUT a runtime section is an old/foreign bundle → fail.
 #
 # The bundle is self-contained; the ONLY external dependency is the DSH
@@ -146,11 +157,15 @@ case "$MODE" in
   subprocess) ;;
   *) echo "reproduce.sh: unknown mode $MODE" >&2; exit 2 ;;
 esac
-if [ "$MODE" = "subprocess" ] && node -e "const m=require('$MANIFEST');process.exit(m.jobs.some(j=>['baseline','pilot','formal','reproduce'].includes(j.kind))?1:0)"; then
-  : # echo/smoke-only bundle — subprocess rerun acceptable
+# RUN-02 (execution-runtime.md §1): smoke defaults to container — a
+# subprocess rerun is acceptable ONLY for echo jobs and smoke jobs that are
+# explicitly marked trusted-smoke-fixture (payload.trusted_fixture=true);
+# unmarked smoke must be replayed in a container like every formal class.
+if [ "$MODE" = "subprocess" ] && node -e "const m=require('$MANIFEST');process.exit(m.jobs.some(j=>['baseline','pilot','formal','reproduce'].includes(j.kind) || (j.kind==='smoke' && !(j.payload && j.payload.trusted_fixture===true)))?1:0)"; then
+  : # echo-only / explicitly trusted smoke fixture bundle — subprocess rerun acceptable
 else
   if [ "$MODE" = "subprocess" ]; then
-    echo "reproduce.sh: bundle contains formal-class jobs; MODE=docker required (v2 §3.2)" >&2
+    echo "reproduce.sh: bundle contains formal-class or unmarked smoke jobs; MODE=docker required (v2 §3.2 / execution-runtime.md §1)" >&2
     exit 2
   fi
 fi
@@ -237,6 +252,55 @@ NA=$(MANIFEST="$MANIFEST" BUNDLE_DIR="$BUNDLE_COPY" BASE="$BASE" PROJ="$PROJ" no
 ') || true
 [ -n "$NA" ] && [ "$NA" -gt 0 ] && echo "reproduce.sh: re-registered $NA artifact(s)" || echo "reproduce.sh: WARNING no artifacts re-registered"
 
+# §4 REL-01 (bundle-only clean-room): rebuild the TeX workspace in the FRESH
+# kernel from the bundle SNAPSHOT only (manifest.tex + tex-workspace/). The
+# original document id maps to the fresh one so every replayed latex-compile
+# payload binds a REAL frozen document in the rerun kernel (texSnapshot()
+# rejects unknown documents/revisions at submit) and the field-level
+# compared.tex comparison has a rerun side to compare against.
+TEX_MAP=""
+if node -e "const m=require('$MANIFEST');process.exit(m.tex&&Array.isArray(m.tex.documents)&&m.tex.documents.length>0?0:1)"; then
+  TEX_MAP=$(MANIFEST="$MANIFEST" BUNDLE_COPY="$BUNDLE_COPY" BASE="$BASE" PROJ="$PROJ" node -e '
+    const fs=require("fs")
+    const m=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"))
+    const base=process.env.BUNDLE_COPY
+    const api=process.env.BASE
+    ;(async()=>{
+      const out=[]
+      for(const doc of m.tex.documents){
+        const res=await fetch(api+"/v1/projects/"+process.env.PROJ+"/manuscript-drafts",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})
+        if(!res.ok) throw new Error("manuscript-drafts "+res.status)
+        const created=await res.json()
+        const nd=created.document_id
+        const tree=await (await fetch(api+"/v1/documents/"+nd+"/tree")).json()
+        const versions=new Map(tree.files.map(f=>[f.path,f.version]))
+        const bundlePaths=new Set(doc.files.map(f=>f.path))
+        for(const f of doc.files){
+          const src=base+"/tex-workspace/"+doc.document_id+"/"+f.path
+          if(!fs.existsSync(src)) throw new Error("tex input missing in snapshot: "+doc.document_id+"/"+f.path)
+          const body={path:f.path,content:fs.readFileSync(src,"utf8"),expected_version:versions.has(f.path)?versions.get(f.path):0}
+          const wr=await fetch(api+"/v1/documents/"+nd+"/file",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(body)})
+          if(!wr.ok) throw new Error("tex write "+wr.status+" for "+doc.document_id+"/"+f.path)
+        }
+        // Drop files the generated workspace has but the bundle input set
+        // does not (e.g. a deleted main.bib), so the rerun file LIST equals
+        // the bundle TeX input list exactly.
+        const tree2=await (await fetch(api+"/v1/documents/"+nd+"/tree")).json()
+        for(const f of tree2.files){
+          if(bundlePaths.has(f.path)) continue
+          const dr=await fetch(api+"/v1/documents/"+nd+"/file?path="+encodeURIComponent(f.path)+"&expected_version="+f.version,{method:"DELETE"})
+          if(!dr.ok) throw new Error("tex delete "+dr.status+" for "+f.path)
+        }
+        const tree3=await (await fetch(api+"/v1/documents/"+nd+"/tree")).json()
+        out.push(doc.document_id+"="+nd+":"+tree3.document.revision)
+      }
+      process.stdout.write(out.join(" "))
+    })().catch(e=>{console.error(e.message);process.exit(1)})
+  ')
+  NDOCS=$(node -e "const m=require('$MANIFEST');console.log(m.tex.documents.length)")
+  echo "reproduce.sh: re-created $NDOCS TeX document(s) in the fresh kernel (old→new: $TEX_MAP)"
+fi
+
 # Replay the succeeded jobs with their original idempotency keys, kinds,
 # commands and payloads. P0 (acceptance-tests.md §4): secure jobs must bind an
 # APPROVED contract — the original contract id (from the run manifest) is
@@ -244,21 +308,46 @@ NA=$(MANIFEST="$MANIFEST" BUNDLE_DIR="$BUNDLE_COPY" BASE="$BASE" PROJ="$PROJ" no
 # baseline/pilot/formal/reproduce jobs are FORCED to the declared
 # node_fixture image digest and latex-compile to the texlive digest —
 # overriding any digest recorded in the original payload.
+#
+# latex-compile jobs are NOT submitted through the HTTP jobs route (its
+# schema does not accept that kind — the kernel only creates them from a
+# frozen TeX snapshot via POST /v1/documents/{id}/builds): they are re-created
+# through the SAME builds route, bound to the FRESH document from TEX_MAP,
+# with the ORIGINAL idempotency key (idempotent re-submission).
 KEYS=$(node -e "const m=require('$MANIFEST');console.log(m.jobs.filter(j=>j.status==='succeeded').map(j=>j.idempotency_key).join(' '))")
 NKEYS=0
 for KEY in $KEYS; do
-  BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" CT_MAP="$CT_MAP" node -e '
-    const m=require(process.env.MANIFEST)
-    const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY)
-    const pairs=process.env.CT_MAP.trim().split(/\s+/).filter(Boolean).map(p=>p.split("="))
-    const oldRef=j.run_manifest && typeof j.run_manifest.contract_id==="string" ? j.run_manifest.contract_id : null
-    const pair=oldRef!==null?pairs.find(p=>p[0]===oldRef):undefined
-    const imgs=(m.runtime && m.runtime.images) || {}
-    const forced=["baseline","pilot","formal","reproduce"].includes(j.kind)?imgs.node_fixture:(j.kind==="latex-compile"?imgs.texlive:null)
-    const payload=j.payload && typeof j.payload==="object" ? {...j.payload} : j.payload
-    if(forced && payload && typeof payload==="object") payload.image_digest=forced
-    console.log(JSON.stringify({idempotency_key:j.idempotency_key,kind:j.kind,command:j.command,payload,...(j.code_snapshot_id?{code_snapshot_id:j.code_snapshot_id}:{}),...(pair!==undefined?{contract_id:pair[1]}:{}),...(forced?{image_digest:forced}:{})}))')
-  api -X POST "$BASE/v1/projects/$PROJ/jobs" -d "$BODY" > /dev/null
+  KIND=$(KEY="$KEY" MANIFEST="$MANIFEST" node -e "const m=require(process.env.MANIFEST);const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY);console.log(j?j.kind:'')")
+  if [ "$KIND" = "latex-compile" ]; then
+    TEXREQ=$(KEY="$KEY" MANIFEST="$MANIFEST" TEX_MAP="$TEX_MAP" node -e '
+      const m=require(process.env.MANIFEST)
+      const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY)
+      const tp=(process.env.TEX_MAP||"").trim().split(/\s+/).filter(Boolean)
+        .map(p=>{const [o,rest]=p.split("=");const [nw,rv]=rest.split(":");return {old:o,new:nw,rev:Number(rv)}})
+        .find(t=>t.old===(j.payload&&j.payload.tex_document_id))
+      if(!tp){console.error("reproduce.sh: latex-compile job "+process.env.KEY+" has no fresh TeX document mapping (manifest.tex missing?)");process.exit(2)}
+      const engine=(j.payload&&j.payload.engine)||(Array.isArray(j.command)&&j.command.length>0?j.command[0]:"pdflatex")
+      const imgs=(m.runtime&&m.runtime.images)||{}
+      console.log(JSON.stringify({document_id:tp.new,revision:tp.rev,engine,image_digest:imgs.texlive??""}))')
+    TNEWDOC=$(printf '%s' "$TEXREQ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).document_id))")
+    TREV=$(printf '%s' "$TEXREQ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+    TENGINE=$(printf '%s' "$TEXREQ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).engine))")
+    TEXIMG=$(printf '%s' "$TEXREQ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).image_digest))")
+    api -X POST "$BASE/v1/documents/$TNEWDOC/builds" -d "{\"expected_document_revision\":$TREV,\"engine\":\"$TENGINE\",\"idempotency_key\":\"$KEY\",\"image_digest\":\"$TEXIMG\"}" > /dev/null
+  else
+    BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" CT_MAP="$CT_MAP" node -e '
+      const m=require(process.env.MANIFEST)
+      const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY)
+      const pairs=process.env.CT_MAP.trim().split(/\s+/).filter(Boolean).map(p=>p.split("="))
+      const oldRef=j.run_manifest && typeof j.run_manifest.contract_id==="string" ? j.run_manifest.contract_id : null
+      const pair=oldRef!==null?pairs.find(p=>p[0]===oldRef):undefined
+      const imgs=(m.runtime && m.runtime.images) || {}
+      const forced=["baseline","pilot","formal","reproduce"].includes(j.kind)?imgs.node_fixture:null
+      const payload=j.payload && typeof j.payload==="object" ? {...j.payload} : j.payload
+      if(forced && payload && typeof payload==="object") payload.image_digest=forced
+      console.log(JSON.stringify({idempotency_key:j.idempotency_key,kind:j.kind,command:j.command,payload,...(j.code_snapshot_id?{code_snapshot_id:j.code_snapshot_id}:{}),...(pair!==undefined?{contract_id:pair[1]}:{}),...(forced?{image_digest:forced}:{})}))')
+    api -X POST "$BASE/v1/projects/$PROJ/jobs" -d "$BODY" > /dev/null
+  fi
   NKEYS=$((NKEYS + 1))
 done
 echo "reproduce.sh: re-submitted $NKEYS job(s)"
@@ -304,7 +393,7 @@ TOL="${TOL:-0.001}"
 NODE_OK="$NODE_OK" KERNEL_OK="$KERNEL_OK" RUNNER_OK="$RUNNER_OK" \
 NODE_VER="$NODE_VER" DECL_NODE="$DECL_NODE" \
 MANIFEST="$MANIFEST" REPORT="$REPORT" WORK="$WORK" MODE="$MODE" PROJ="$PROJ" TOL="$TOL" \
-STATS="$STATS" NKEYS="$NKEYS" BASE="$BASE" BUNDLE_COPY="$BUNDLE_COPY" \
+STATS="$STATS" NKEYS="$NKEYS" BASE="$BASE" BUNDLE_COPY="$BUNDLE_COPY" TEX_MAP="$TEX_MAP" \
 ORIG_MANIFEST_SHA="$ORIG_MANIFEST_SHA" node -e '
   const fs=require("fs")
   const crypto=require("crypto")
@@ -331,9 +420,10 @@ ORIG_MANIFEST_SHA="$ORIG_MANIFEST_SHA" node -e '
 
     // compared.metrics: original metrics artifact content (from the bundle
     // snapshot, i.e. the archived original kernel CAS) vs the rerun metrics
-    // artifact content (read back from the FRESH kernel CAS), JSON-compared
-    // with numeric tolerance on values.
-    const norm=e=>({name:e.name??e.metric??"",value:Number(e.value),unit:e.unit??"ratio"})
+    // artifact content (read back from the FRESH kernel CAS), compared
+    // FIELD-LEVEL: name, unit, value (numeric tolerance) and seed (when both
+    // sides carry one — run ids/contract ids are per-instance and excluded).
+    const norm=e=>({name:e.name??e.metric??"",value:Number(e.value),unit:e.unit??"ratio",seed:e.seed??null})
     const metricsDetail=[]
     let metricsOk=true
     for(const j of origJobs){
@@ -356,46 +446,117 @@ ORIG_MANIFEST_SHA="$ORIG_MANIFEST_SHA" node -e '
       if(!oa||!ra){metricsOk=false;metricsDetail.push(j.idempotency_key+": original/rerun metrics artifact unreadable");continue}
       const om=(oa.metrics??[]).map(norm)
       const rm=(ra.metrics??[]).map(norm)
-      const same=om.length===rm.length && om.every((x,i)=>x.name===rm[i].name && x.unit===rm[i].unit && Math.abs(x.value-rm[i].value)<=tol)
+      const same=om.length===rm.length && om.every((x,i)=>x.name===rm[i].name && x.unit===rm[i].unit && Math.abs(x.value-rm[i].value)<=tol && (x.seed===null||rm[i].seed===null||x.seed===rm[i].seed))
       if(!same)metricsOk=false
-      metricsDetail.push(j.idempotency_key+": "+om.length+" metrics "+(same?"match":"DIFFER"))
+      metricsDetail.push(j.idempotency_key+": "+om.length+" metrics "+(same?"match":"DIFFER")+" (name/unit/value/seed field compare)")
     }
     checks.push({check:"metrics comparison",pass:metricsOk,detail:metricsDetail.join("; ")||"no succeeded jobs"})
 
     // compared.run_manifest: run_id values are runner-generated per run
     // (run_<uuid>, workers/runner-gateway), so byte equality can never hold
     // across independent runs — the compared invariant is the run SET: the
-    // same idempotency keys succeeded, same count, and every rerun run
-    // carries a run_manifest with a metrics_artifact.
+    // same idempotency keys succeeded, same count, same job kind per key,
+    // and every rerun run carries a run_manifest with a metrics_artifact.
     const origKeys=origJobs.map(j=>j.idempotency_key).sort()
     const rerunSuc=origKeys.map(k=>byKey.get(k)).filter(j=>j && j.status==="succeeded")
     const rerunKeys=rerunSuc.map(j=>j.idempotency_key).sort()
     const setOk=origKeys.length===rerunKeys.length && origKeys.every((k,i)=>k===rerunKeys[i])
     const manOk=rerunSuc.every(j=>j.run_manifest && typeof j.run_manifest.metrics_artifact==="string")
-    const runManifestOk=setOk&&manOk
-    checks.push({check:"run manifest comparison",pass:runManifestOk,detail:"orig "+origKeys.length+" succeeded run(s), rerun "+rerunKeys.length+"; invariant = idempotency-key set + run count + run_manifest presence (run_ids are runner-generated per run)"})
+    const kindOk=origKeys.every(k=>{const o=origJobs.find(x=>x.idempotency_key===k);const r=byKey.get(k);return !!o&&!!r&&r.kind===o.kind})
+    const runManifestOk=setOk&&manOk&&kindOk
+    checks.push({check:"run manifest comparison",pass:runManifestOk,detail:"orig "+origKeys.length+" succeeded run(s), rerun "+rerunKeys.length+"; invariant = idempotency-key set + run count + kind per key + run_manifest presence (run_ids are runner-generated per run)"})
 
-    // compared.tex: when the manifest carries TeX/PDF structure (latex
-    // manuscript or succeeded latex-compile jobs), compare the EXISTENCE of
-    // the tex/pdf artifacts on both sides; otherwise true with a skip note.
-    const texJobs=origJobs.filter(j=>j.kind==="latex-compile")
+    // compared.tex (§4 REL-01): FIELD-LEVEL comparison when manifest.tex is
+    // present — TeX INPUTS: file list equality + per-file sha256 (bundle
+    // snapshot file vs the file re-created in the FRESH kernel document);
+    // PDF STRUCTURE: byte-size of the pdf artifact on both sides (original
+    // from the bundle snapshot, rerun read back from the fresh kernel CAS).
+    // Bundles without manifest.tex fall back to the legacy existence-count
+    // comparison (or a skip note when there is no TeX structure at all).
+    const texSection=(m.tex&&Array.isArray(m.tex.documents))?m.tex.documents:[]
+    const texMap=(process.env.TEX_MAP||"").trim().split(/\s+/).filter(Boolean)
+      .map(p=>{const [o,rest]=p.split("=");const [nw,rv]=rest.split(":");return {old:o,new:nw,rev:Number(rv)}})
+    const texComparison={inputs:{documents:0,files:0,files_matched:0,list_matched:true},pdf:{original:0,rerun:0,size_matched:true,details:[]}}
     let texOk=true
-    let texNote="no TeX structure in manifest; skipped"
-    if((m.manuscript && (m.manuscript.format==="latex" || m.manuscript.tex_document_id || m.manuscript.pdf_artifact)) || texJobs.length>0){
-      const origTex=texJobs.filter(j=>j.run_manifest && typeof j.run_manifest.tex_pdf_artifact==="string").length
-      const rerunTex=rerunSuc.filter(j=>j.kind==="latex-compile" && j.run_manifest && typeof j.run_manifest.tex_pdf_artifact==="string").length
-      texOk=origTex>0 && origTex===rerunTex
-      texNote="orig "+origTex+" tex/pdf artifact(s), rerun "+rerunTex
+    if(texSection.length>0){
+      for(const doc of texSection){
+        texComparison.inputs.documents++
+        const tp=texMap.find(t=>t.old===doc.document_id)
+        if(!tp){texOk=false;texComparison.inputs.list_matched=false;continue}
+        let rerunTree=null
+        try{rerunTree=await (await fetch(process.env.BASE+"/v1/documents/"+tp.new+"/tree")).json()}catch{}
+        if(!rerunTree){texOk=false;texComparison.inputs.list_matched=false;continue}
+        const origPaths=doc.files.map(f=>f.path).sort()
+        const rerunPaths=(rerunTree.files??[]).map(f=>f.path).sort()
+        const listOk=origPaths.length===rerunPaths.length && origPaths.every((p,i)=>p===rerunPaths[i])
+        if(!listOk)texOk=false
+        texComparison.inputs.list_matched=texComparison.inputs.list_matched&&listOk
+        for(const f of doc.files){
+          texComparison.inputs.files++
+          let file=null
+          try{const fr=await fetch(process.env.BASE+"/v1/documents/"+tp.new+"/file?path="+encodeURIComponent(f.path));if(fr.ok)file=await fr.json()}catch{}
+          const rerunHash=file&&typeof file.content==="string"?crypto.createHash("sha256").update(file.content).digest("hex"):null
+          if(rerunHash!==null&&rerunHash===f.sha256)texComparison.inputs.files_matched++
+          else texOk=false
+        }
+      }
+      // PDF structure: byte size of the original pdf artifact (bundle
+      // snapshot artifacts/<id>) vs the rerun pdf artifact (fresh CAS).
+      for(const j of origJobs.filter(x=>x.kind==="latex-compile")){
+        const aid=j.run_manifest && typeof j.run_manifest.tex_pdf_artifact==="string" ? j.run_manifest.tex_pdf_artifact : null
+        let origSize=null
+        if(aid){
+          const rec=m.artifacts?.[aid]??m.artifacts?.[String(aid).replace(/^sha256:/,"")]
+          const p=rec?process.env.BUNDLE_COPY+"/"+rec.path:null
+          if(p&&fs.existsSync(p))origSize=fs.statSync(p).size
+        }
+        let rerunSize=null
+        const rj=byKey.get(j.idempotency_key)
+        if(rj&&rj.run_manifest&&typeof rj.run_manifest.tex_pdf_artifact==="string"){
+          try{
+            const ar=await fetch(process.env.BASE+"/v1/artifacts/"+encodeURIComponent(rj.run_manifest.tex_pdf_artifact)+"?project_id="+process.env.PROJ)
+            if(ar.ok)rerunSize=(await ar.arrayBuffer()).byteLength
+          }catch{}
+        }
+        if(origSize!==null)texComparison.pdf.original++
+        if(rerunSize!==null)texComparison.pdf.rerun++
+        const sizeOk=origSize!==null&&rerunSize!==null&&origSize===rerunSize
+        if(!sizeOk)texOk=false
+        texComparison.pdf.size_matched=texComparison.pdf.size_matched&&sizeOk
+        texComparison.pdf.details.push(j.idempotency_key+": original pdf "+origSize+" bytes, rerun pdf "+rerunSize+" bytes "+(sizeOk?"MATCH":"DIFFER"))
+      }
+      if(texComparison.pdf.original<1||texComparison.pdf.rerun<1)texOk=false
+      texComparison.detail="TeX inputs: "+texComparison.inputs.documents+" document(s), "+texComparison.inputs.files+" file(s), "+texComparison.inputs.files_matched+" hash-matched, list "+(texComparison.inputs.list_matched?"MATCH":"DIFFER")+"; PDF: "+texComparison.pdf.original+" original / "+texComparison.pdf.rerun+" rerun artifact(s), sizes "+(texComparison.pdf.size_matched?"MATCH":"DIFFER")
+    } else {
+      const texJobs=origJobs.filter(j=>j.kind==="latex-compile")
+      if(texJobs.length>0){
+        const origTex=texJobs.filter(j=>j.run_manifest && typeof j.run_manifest.tex_pdf_artifact==="string").length
+        const rerunTex=rerunSuc.filter(j=>j.kind==="latex-compile" && j.run_manifest && typeof j.run_manifest.tex_pdf_artifact==="string").length
+        texOk=origTex>0 && origTex===rerunTex
+        texComparison.detail="legacy existence-count comparison (bundle has no manifest.tex): orig "+origTex+" tex/pdf artifact(s), rerun "+rerunTex
+      } else {
+        texComparison.detail="no TeX structure in manifest; skipped"
+      }
     }
-    checks.push({check:"tex comparison",pass:texOk,detail:texNote})
+    checks.push({check:"tex comparison (inputs field-level + PDF structure)",pass:texOk,detail:texComparison.detail})
 
-    // compared.analysis: rerun mean vs original mean within tolerance.
+    // compared.analysis: FIELD-LEVEL — mean within tolerance, n equal,
+    // effect_size and baseline_value equal (both-null counts as equal;
+    // numeric fields compared within tolerance).
     let meanDiff=null
     let analysisOk=false
     if(orig&&rerun){
       meanDiff=Math.abs(orig.mean-rerun.mean)
-      analysisOk=meanDiff<=tol
-      checks.push({check:"analysis mean within tolerance",pass:analysisOk,detail:"|"+orig.mean+"-"+rerun.mean+"|="+meanDiff.toFixed(6)+" <= "+tol})
+      const nOk=((orig.n??null)===(rerun.n??null))
+      const effBoth=(orig.effect_size??null)!==null&&(rerun.effect_size??null)!==null
+      const effOk=effBoth?Math.abs(orig.effect_size-rerun.effect_size)<=tol:(orig.effect_size??null)===(rerun.effect_size??null)
+      const baseBoth=(orig.baseline_value??null)!==null&&(rerun.baseline_value??null)!==null
+      const baseOk=baseBoth?Math.abs(orig.baseline_value-rerun.baseline_value)<=tol:(orig.baseline_value??null)===(rerun.baseline_value??null)
+      analysisOk=meanDiff<=tol&&nOk&&effOk&&baseOk
+      checks.push({check:"analysis mean within tolerance",pass:meanDiff<=tol,detail:"|"+orig.mean+"-"+rerun.mean+"|="+meanDiff.toFixed(6)+" <= "+tol})
+      checks.push({check:"analysis n equal",pass:nOk,detail:"orig n="+(orig.n??null)+" rerun n="+(rerun.n??null)})
+      checks.push({check:"analysis effect_size equal",pass:effOk,detail:"orig "+(orig.effect_size??null)+" rerun "+(rerun.effect_size??null)})
+      checks.push({check:"analysis baseline_value equal",pass:baseOk,detail:"orig "+(orig.baseline_value??null)+" rerun "+(rerun.baseline_value??null)})
     } else if(orig&&!rerun){
       checks.push({check:"analysis rerun",pass:false,detail:"original analysis exists but rerun failed"})
     } else {
@@ -417,6 +578,11 @@ ORIG_MANIFEST_SHA="$ORIG_MANIFEST_SHA" node -e '
       runtime:{declared_node:rt.node??null,used_node:process.env.NODE_VER,declared_kernel_bin_sha256:rt.kernel_bin??null,declared_runner_bin_sha256:rt.runner_bin??null},
       images_used:{node_fixture:images.node_fixture??null,texlive:images.texlive??null},
       compared,
+      // §4 REL-01: clean-room proof — the kernel/DB/CAS and the bundle copy
+      // all live under ONE fresh mktemp work dir (never the original
+      // checkout/DB/CAS location); every read happens against the snapshot.
+      cleanroom:{snapshot_dir:process.env.BUNDLE_COPY,kernel_db:process.env.WORK+"/kernel.db",kernel_cas:process.env.WORK+"/cas",work_dir:process.env.WORK},
+      tex_comparison:texComparison,
       mode:process.env.MODE,rerun_project_id:process.env.PROJ,
       jobs:{expected:Number(process.env.NKEYS),succeeded,failed},
       original_analysis:orig?{mean:orig.mean,n:orig.n,effect_size:orig.effect_size,baseline_value:orig.baseline_value}:null,

@@ -6,7 +6,7 @@
 
 - echo 是唯一允许不启动命令的 Job；
 - baseline、pilot、formal、reproduce、latex-compile、clean-room 必须容器执行；
-- smoke 默认容器，只有 trusted-smoke-fixture 可显式使用隔离 subprocess；
+- smoke 默认容器，只有显式标记 trusted-smoke-fixture（payload.trusted_fixture=true）的 smoke 作业可显式使用隔离 subprocess；
 - Runner 不接受任意宿主路径，只接受 Kernel 已登记的 Snapshot 和 Artifact；
 - stdout 是日志，不是正式指标来源；
 - 成功以 Kernel 验证签名 Manifest、Artifact 和 lease fencing 后的事务结果为准。
@@ -25,6 +25,8 @@ Kernel 接收 JobSpec 后依次：
 8. 同一 project/key 重试返回原 Job，不创建重复 Run。
 
 正式 Run 推荐键：formal:{contract}:{version}:{codeSha}:{dataSha}:{metric}:{seed}。TeX 键：latex:{document}:{revision}:{engine}:{imageDigest}。
+
+trusted-smoke-fixture 的标记方式：在 JobSpec 的 payload 中显式设置 `trusted_fixture: true`。该标记只在 Runner 为 subprocess 模式时有意义——未标记的 smoke job 在 subprocess 模式被 Runner 以 failure_class=environment 拒绝（execution-runtime.md §1）；docker 模式下 smoke 始终容器执行，无需也不受该标记影响。
 
 ## 3. Claim、Heartbeat 与 Fencing
 

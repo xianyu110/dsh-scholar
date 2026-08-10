@@ -744,14 +744,21 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   // §3.2 / ADR-004: formal-class jobs must run in a container runtime.
   // Subprocess is only for trusted smoke fixtures and echoes — never for
   // baseline/pilot/formal/reproduce (design §1.2 "明确不做", §12.3).
+  // execution-runtime.md §1 (RUN-02): smoke ALSO defaults to container — the
+  // isolated subprocess is allowed only for an EXPLICIT trusted-smoke-fixture,
+  // i.e. a smoke job whose payload carries trusted_fixture === true.
   const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
-  if (SECURE_KINDS.includes(job.kind) && mode !== 'docker') {
+  const untrustedSmokeSubprocess = job.kind === 'smoke' && mode !== 'docker'
+    && (job.payload as Record<string, unknown>).trusted_fixture !== true
+  if ((SECURE_KINDS.includes(job.kind) && mode !== 'docker') || untrustedSmokeSubprocess) {
     const rejected = await client.completeJob({
       job_id: job.job_id,
       owner,
       status: 'failed',
       failure_class: 'environment',
-      error: `job kind ${job.kind} requires container execution (runner mode=docker); host subprocess is prohibited (v2 §3.2)`,
+      error: untrustedSmokeSubprocess
+        ? 'smoke jobs require container execution unless explicitly marked trusted-smoke-fixture (execution-runtime.md §1); host subprocess is prohibited'
+        : `job kind ${job.kind} requires container execution (runner mode=docker); host subprocess is prohibited (v2 §3.2)`,
       // §12.6 fencing (P0): a leased job's completion MUST carry the claim's
       // generation/token or the kernel rejects it (409 lease_stale).
       lease_generation: job.lease_generation,
@@ -762,7 +769,7 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
       stdout: '', stderr: '', error: `rejected: ${job.kind} requires container execution`,
     } }
-    throw new Error(`formal job ${job.job_id} rejected before execution (subprocess mode)`)
+    throw new Error(`job ${job.job_id} rejected before execution (subprocess mode)`)
   }
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-scholar-run-'))
   // Container mode runs as a non-root uid (65534): the workdir and the
@@ -863,7 +870,10 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       error: 'empty command: non-echo jobs must execute real code (v2 §3.2)',
     }
   } else if (job.kind === 'smoke' && job.payload.script !== undefined && typeof job.payload.script === 'string') {
-    // Injected smoke script runs inside the isolated workdir.
+    // Injected smoke script runs inside the isolated workdir. Reaching this
+    // branch in subprocess mode requires payload.trusted_fixture === true —
+    // the untrusted smoke gate above rejects everything else (RUN-02,
+    // execution-runtime.md §1).
     writeFileSync(join(workDir, 'run.sh'), job.payload.script, { mode: 0o755 })
     // umask may strip the world bits (e.g. 0077 → 0700): the container user
     // (65534) must be able to READ the script — force the mode explicitly.

@@ -21,7 +21,22 @@
 #      ('external checkout access prohibited', non-zero exit, fail report);
 #   7. reproducibility-report.json carries bundle_manifest_sha256 /
 #      runtime_verified / images_used / compared, and status=pass implies
-#      every compared + runtime_verified entry is true.
+#      every compared + runtime_verified entry is true;
+#   8. manifest.tex TeX inputs: every tex-workspace/<doc>/<path> file exists
+#      with a matching sha256, and the latex-compile pdf artifact is in the
+#      bundle with its recorded size (PDF structure input);
+#   9. report.tex_comparison is field-level (inputs files_matched == files,
+#      pdf size_matched) and report.cleanroom records fresh snapshot/DB/CAS
+#      paths that never point into the original checkout or bundle dir;
+#  10. clean-room replay still passes when the ORIGINAL CHECKOUT IS RENAMED
+#      AWAY (KERNEL_BIN/RUNNER_BIN point at the renamed tree; any read of the
+#      original path would fail the run) — empty-dir, no-original-checkout
+#      replay (§4 REL-01);
+#  11. preflight refuses a KERNEL_BIN/RUNNER_BIN OUTSIDE the checkout whose
+#      sha256 does not match manifest.runtime ('sha256 do not match',
+#      non-zero exit, fail report) — external runtime fails immediately;
+#  12. node version mismatch → runtime_verified.node=false, status=fail (the
+#      replay still completes and the compared fields stay computed).
 #
 # Usage: bash tests/security/run-release-bundle-tests.sh
 set -eu
@@ -34,7 +49,17 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
-cleanup() { rm -rf "$WORK"; }
+# Assertion 10 renames the original checkout away during the replay; the
+# EXIT trap restores it even when the replay fails or the script aborts.
+HIDDEN="$REPO.rel01-cleanroom-hidden"
+REPO_RENAMED=0
+restore_repo() {
+  if [ "$REPO_RENAMED" = "1" ]; then
+    mv "$HIDDEN" "$REPO" 2>/dev/null || true
+    REPO_RENAMED=0
+  fi
+}
+cleanup() { restore_repo; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 say "run-release-eval.sh (main entry) with --keep-bundle"
@@ -197,6 +222,171 @@ if [ -f "$RPT" ]; then
   fi
 else
   bad "reproducibility-report.json missing"
+fi
+
+say "blocking assertion 8: manifest.tex TeX inputs (file list + per-file sha256) and pdf artifact in the bundle"
+TEX_DOCS=$(node -e "const m=require('$MANIFEST');console.log((m.tex&&Array.isArray(m.tex.documents))?m.tex.documents.length:0)" 2>/dev/null || echo '0')
+if [ "$TEX_DOCS" -gt 0 ]; then
+  TX_TOTAL=0
+  TX_OK=0
+  while IFS=$'\t' read -r doc path sha; do
+    TX_TOTAL=$((TX_TOTAL + 1))
+    if [ -f "$BUNDLE_DIR/tex-workspace/$doc/$path" ] && [ "$(sha256sum "$BUNDLE_DIR/tex-workspace/$doc/$path" | awk '{print $1}')" = "$sha" ]; then
+      TX_OK=$((TX_OK + 1))
+    else
+      bad "tex input missing or hash mismatch: $doc/$path"
+    fi
+  done < <(node -e "const m=require('$MANIFEST');for (const d of m.tex.documents) for (const f of d.files) console.log(d.document_id + '\t' + f.path + '\t' + f.sha256)")
+  if [ "$TX_TOTAL" -gt 0 ] && [ "$TX_OK" = "$TX_TOTAL" ]; then
+    ok "all $TX_TOTAL TeX input file(s) across $TEX_DOCS document(s) match recorded sha256"
+  else
+    bad "TeX input verification incomplete ($TX_OK/$TX_TOTAL)"
+  fi
+  if node -e "
+    const m=require('$MANIFEST')
+    const j=m.jobs.find(x=>x.kind==='latex-compile'&&x.status==='succeeded')
+    if(!j||!j.run_manifest||typeof j.run_manifest.tex_pdf_artifact!=='string'){console.error('no succeeded latex-compile job with tex_pdf_artifact');process.exit(1)}
+    const aid=j.run_manifest.tex_pdf_artifact
+    const rec=m.artifacts?.[aid]??m.artifacts?.[String(aid).replace(/^sha256:/,'')]
+    if(!rec){console.error('pdf artifact not in manifest.artifacts: '+aid);process.exit(2)}
+    const fs=require('fs')
+    const p='$BUNDLE_DIR'+'/'+rec.path
+    if(!fs.existsSync(p)){console.error('pdf artifact file missing: '+p);process.exit(3)}
+    const size=fs.statSync(p).size
+    if(size<1){console.error('pdf artifact empty');process.exit(4)}
+    if(rec.size_bytes!==size){console.error('pdf size mismatch: recorded '+rec.size_bytes+' got '+size);process.exit(5)}
+  " > /dev/null 2>&1; then
+    ok "latex-compile pdf artifact present in the bundle with recorded byte size"
+  else
+    bad "pdf artifact assertion failed (rc=$?)"
+  fi
+else
+  bad "manifest.tex missing — the eval must produce TeX inputs (latex-compile job)"
+fi
+
+say "blocking assertion 9: report tex_comparison (field-level) + cleanroom fresh-state fields"
+RPT="$BUNDLE_DIR/reproducibility-report.json"
+if [ -f "$RPT" ]; then
+  if REPO_ABS="$REPO" BUNDLE_ABS="$BUNDLE_DIR" node -e "
+    const r=require('$RPT')
+    const tc=r.tex_comparison
+    if(!tc||typeof tc.inputs!=='object'||typeof tc.pdf!=='object'){console.error('tex_comparison missing');process.exit(1)}
+    if(tc.inputs.files<1||tc.inputs.files_matched!==tc.inputs.files){console.error('tex inputs not fully hash-matched: '+JSON.stringify(tc.inputs));process.exit(2)}
+    if(tc.inputs.list_matched!==true){console.error('tex input file list DIFFER');process.exit(3)}
+    if(tc.pdf.original<1||tc.pdf.rerun<1||tc.pdf.size_matched!==true){console.error('pdf structure not size-matched: '+JSON.stringify(tc.pdf));process.exit(4)}
+    const cr=r.cleanroom
+    if(!cr||!cr.snapshot_dir||!cr.kernel_db||!cr.kernel_cas||!cr.work_dir){console.error('cleanroom fields missing');process.exit(5)}
+    for(const k of ['snapshot_dir','kernel_db','kernel_cas','work_dir']){
+      const v=String(cr[k]||'')
+      if(v.includes(process.env.REPO_ABS)){console.error('cleanroom path resolves into the original checkout: '+k+'='+v);process.exit(6)}
+      if(v.includes(process.env.BUNDLE_ABS)){console.error('cleanroom path resolves into the original bundle dir: '+k+'='+v);process.exit(7)}
+    }
+    if(cr.snapshot_dir===process.env.BUNDLE_ABS){console.error('snapshot_dir equals the original bundle dir');process.exit(8)}
+    if(r.compared.tex!==true){console.error('compared.tex not true');process.exit(9)}
+  "; then
+    ok "tex_comparison field-level (inputs files+hashes, pdf byte size) and cleanroom fresh-state fields verified"
+  else
+    bad "report tex_comparison/cleanroom assertions failed (rc=$?)"; cat "$RPT" >&2 || true
+  fi
+else
+  bad "reproducibility-report.json missing (cannot assert tex_comparison/cleanroom)"
+fi
+
+say "blocking assertion 11: external runtime digest mismatch fails immediately (preflight, no kernel start)"
+mkdir -p "$WORK/fakebin"
+printf '#!/bin/sh\necho fake kernel\n' > "$WORK/fakebin/fake-kernel.js"
+printf '#!/bin/sh\necho fake runner\n' > "$WORK/fakebin/fake-runner.js"
+BAD2="$WORK/bad-bundle-digest"
+cp -a "$BUNDLE_DIR" "$BAD2"
+if KERNEL_BIN="$WORK/fakebin/fake-kernel.js" RUNNER_BIN="$WORK/fakebin/fake-runner.js" bash "$BAD2/reproduce.sh" --mode subprocess > "$WORK/digest-mismatch.log" 2>&1; then
+  bad "reproduce.sh unexpectedly accepted a non-declared runtime binary"
+else
+  if grep -q "sha256 do not match" "$WORK/digest-mismatch.log"; then
+    ok "reproduce.sh refused digest-mismatched external runtime ('sha256 do not match')"
+  else
+    bad "reproduce.sh failed but without the digest-mismatch message"; cat "$WORK/digest-mismatch.log" >&2 || true
+  fi
+  if [ -f "$BAD2/reproducibility-report.json" ]; then
+    if node -e "
+      const r=require('$BAD2/reproducibility-report.json')
+      if(r.status!=='fail'){console.error('status='+r.status);process.exit(1)}
+      if(r.runtime_verified.kernel_bin!==false||r.runtime_verified.runner_bin!==false){console.error('runtime_verified not false');process.exit(2)}
+      const c=r.compared
+      if(c.manifest_hash||c.metrics||c.analysis||c.run_manifest||c.tex){console.error('compared not all false: '+JSON.stringify(c));process.exit(3)}
+    "; then
+      ok "preflight fail report recorded (status=fail, runtime_verified false, compared all false)"
+    else
+      bad "preflight fail report wrong (rc=$?)"; cat "$BAD2/reproducibility-report.json" >&2 || true
+    fi
+  else
+    bad "no fail report written by the preflight"
+  fi
+fi
+
+say "blocking assertion 12: node version mismatch -> runtime_verified.node=false, status=fail"
+REAL_NODE=$(command -v node)
+mkdir -p "$WORK/node-shim"
+cat > "$WORK/node-shim/node" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--version" ] || [ "\$1" = "-v" ]; then
+  echo "v99.0.0"
+  exit 0
+fi
+exec "$REAL_NODE" "\$@"
+EOF
+chmod +x "$WORK/node-shim/node"
+NODEB="$WORK/node-mismatch-bundle"
+cp -a "$BUNDLE_DIR" "$NODEB"
+rm -f "$NODEB/reproducibility-report.json"
+if PATH="$WORK/node-shim:$PATH" KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js" RUNNER_BIN="$REPO/workers/runner-gateway/lib/bin/runner.js" bash "$NODEB/reproduce.sh" --mode auto > "$WORK/node-mismatch.log" 2>&1; then
+  bad "reproduce.sh passed despite node version mismatch (v99.0.0 vs declared)"
+else
+  if [ -f "$NODEB/reproducibility-report.json" ]; then
+    if node -e "
+      const r=require('$NODEB/reproducibility-report.json')
+      if(r.status!=='fail'){console.error('status='+r.status);process.exit(1)}
+      if(r.runtime_verified.node!==false){console.error('runtime_verified.node not false');process.exit(2)}
+      if(r.compared.manifest_hash!==true||r.compared.metrics!==true||r.compared.analysis!==true||r.compared.run_manifest!==true||r.compared.tex!==true){console.error('compared not all true: '+JSON.stringify(r.compared));process.exit(3)}
+    "; then
+      ok "node mismatch replay finished: status=fail + runtime_verified.node=false, compared fields still computed true"
+    else
+      bad "node-mismatch report wrong (rc=$?)"; head -60 "$NODEB/reproducibility-report.json" >&2 || true
+    fi
+  else
+    bad "no report written by the node-mismatch replay"; tail -30 "$WORK/node-mismatch.log" >&2 || true
+  fi
+fi
+
+say "blocking assertion 10: clean-room replay from an empty dir — original checkout renamed away"
+CLEAN="$WORK/clean-bundle"
+cp -a "$BUNDLE_DIR" "$CLEAN"
+rm -f "$CLEAN/reproducibility-report.json"
+if [ -e "$HIDDEN" ]; then
+  bad "leftover hidden checkout dir exists: $HIDDEN"
+else
+  mv "$REPO" "$HIDDEN"
+  REPO_RENAMED=1
+  if KERNEL_BIN="$HIDDEN/packages/research-kernel/lib/bin/kernel.js" RUNNER_BIN="$HIDDEN/workers/runner-gateway/lib/bin/runner.js" bash "$CLEAN/reproduce.sh" --mode auto > "$WORK/renamed-checkout.log" 2>&1; then
+    ok "replay passed with the original checkout renamed away (no original path is ever read)"
+  else
+    bad "replay failed with the original checkout renamed away"; tail -30 "$WORK/renamed-checkout.log" >&2 || true
+  fi
+  restore_repo
+  if [ -d "$REPO" ]; then
+    ok "original checkout restored"
+  else
+    bad "original checkout NOT restored — manual recovery: mv '$HIDDEN' '$REPO'"
+  fi
+  if [ -f "$CLEAN/reproducibility-report.json" ]; then
+    RPT2=$(node -e "console.log(require('$CLEAN/reproducibility-report.json').status)")
+    if [ "$RPT2" = "pass" ]; then
+      ok "renamed-checkout replay report status=pass"
+    else
+      bad "renamed-checkout replay report status=$RPT2"; cat "$CLEAN/reproducibility-report.json" >&2 || true
+    fi
+  else
+    bad "no report generated by the renamed-checkout replay"
+  fi
 fi
 
 say "summary"

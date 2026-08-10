@@ -38,6 +38,8 @@
 ## 4. Runner 与 Manifest
 
 - formal/baseline/pilot/reproduce/latex-compile 拒绝 subprocess；
+- smoke 默认容器（RUN-02）：subprocess runner 下未标记 trusted_fixture 的 smoke job（script 尝试写宿主 marker 文件）必须 failed/environment，错误消息含 trusted-smoke-fixture（execution-runtime.md §1），且宿主 marker 文件必须不存在——证明脚本从未在宿主执行；
+- trusted-smoke-fixture 放行（RUN-02）：同一 subprocess runner 下显式 `payload.trusted_fixture=true` 的 smoke job 正常 succeeded，脚本输出/metrics artifact 可断言；docker 模式 smoke 无需标记，始终容器执行、不受影响；
 - 非 echo 空 command 和 message-only payload 失败；
 - secure Job 缺 approved Contract、Snapshot、digest 被拒绝；
 - formal/baseline/pilot/reproduce 必须绑定同项目、`status=approved`、带 Human Gate Decision 且版本冻结的 Contract；draft/foreign/missing Contract 一律 422；
@@ -238,6 +240,17 @@
 Golden Path：创建项目→Scope Gate→Corpus→Idea Gate→真实 Baseline→Contract Gate→代码 Patch/Snapshot→多 Seed Formal→实时 Terminal→Analysis/Evidence/Claim→生成并人工编辑 TeX→实时编译/诊断/PDF→Review→Bundle→clean-room→Release Gate。不得注入手工指标或跳过容器。
 
 Bundle-only clean-room 必须把 Bundle 复制到空目录，删除或拒绝访问原 checkout、DB、CAS 和网络，仅允许 Bundle 文件及其中声明的固定 runtime/image digest。外部 `KERNEL_BIN`/`RUNNER_BIN`、原 `$WORK/code`、旧 CAS 或手工重建 payload 一旦被读取即失败。重跑报告必须比较 Bundle manifest hash、正式 metrics/analysis、RunManifest、TeX 输入和 PDF 结构。
+
+REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
+
+- clean-room-empty-dir：把原 checkout 目录改名后仍仅从 Bundle 重放成功（KERNEL_BIN/RUNNER_BIN 指向改名后的同一 runtime 树，sha256 与 manifest.runtime 一致）；任何对原 checkout 路径的读取都会使重放失败；
+- clean-room-fresh-state：报告 `cleanroom` 字段记录 snapshot_dir/kernel_db/kernel_cas/work_dir，全部位于本次重放新建的临时目录，不得解析进原 checkout 或原 bundle 目录——证明 kernel DB 与 CAS 是全新实例，未复用旧 DB/CAS；
+- clean-room-external-runtime：`KERNEL_BIN`/`RUNNER_BIN` 解析进原 dsh-scholar checkout 且 sha256 与声明 digest 不一致 → preflight 立即失败（`external checkout access prohibited`，非零退出，fail report 记录 status=fail 且 compared 全 false）；checkout 之外任意文件的 sha256 与 manifest.runtime 不一致 → 同样立即失败（`sha256 do not match`），均不启动 kernel/runner；
+- clean-room-node-mismatch：`node --version` 与 manifest.runtime.node 不一致 → 重放完成但 runtime_verified.node=false、status=fail，其余 compared 字段仍逐字段计算；
+- clean-room-tex-field-compare：compared.tex 对 manifest.tex 声明的每个 TeX 输入逐文件比较路径清单与 sha256（bundle 快照 vs 重放内核重建的 document），并对 latex-compile 的 PDF 比较结构（字节大小）；
+- clean-room-metrics-field-compare：compared.metrics 对每个成功作业的每个 metric 比较 name/unit/value（数值容差内）与 seed；
+- clean-room-analysis-field-compare：compared.analysis 比较 mean（容差内）、n 相等、effect_size 与 baseline_value 相等（双 null 视为相等）；
+- clean-room-runmanifest-field-compare：compared.run_manifest 比较成功作业的 idempotency-key 集合、数量、每个 key 的 kind 与 run_manifest/metrics_artifact 存在性（run_id 为 runner 每次运行生成，不做字节相等）。
 
 ## 13. CI 阻断矩阵
 
