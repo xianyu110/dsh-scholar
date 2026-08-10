@@ -141,6 +141,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       workspace: OPT_STRING,
       brief_json: OPT_STRING,
       mode: { type: 'string', enum: ['gate-only', 'full-auto'] },
+      // reconstruction-contracts.md §5: full-auto is fixture-only — bind a
+      // REGISTERED FixtureProfile id (kernel rejects unknown/missing ids).
+      fixture_id: OPT_STRING,
       project_id: OPT_STRING,
     },
     output: {
@@ -173,6 +176,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
               domain: String(brief.domain ?? 'machine-learning'),
             },
             mode: args.mode,
+            ...(args.fixture_id !== undefined && args.fixture_id !== ''
+              ? { execution: { fixture_id: args.fixture_id } }
+              : {}),
             session_id: sessionId ?? null,
           })
           // §9: deterministic domain/venue -> skill pack selection from the Brief.

@@ -83,4 +83,13 @@ describe('CAS orphan GC + blob scan', () => {
     expect(kernel.cas.remove(p1.sha256)).toBe(false)
     kernel.close()
   })
+
+  it('put re-verifies an EXISTING blob by size — a corrupted blob at the content address is rejected (storage-migrations.md §6)', () => {
+    const kernel = freshKernel()
+    const p = kernel.cas.put('original bytes')
+    // Corrupt the blob in place (same content address, different size).
+    writeFileSync(kernel.cas.pathFor(p.sha256), 'x')
+    expect(() => kernel.cas.put('original bytes')).toThrowError(/blob corruption/)
+    kernel.close()
+  })
 })

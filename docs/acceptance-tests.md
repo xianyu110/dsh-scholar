@@ -413,3 +413,17 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 - 流程验收不要求为了单文件小改强行派代理，但若存在两个以上独立重任务而未并行，需在记录中说明原因。
 
 缺少 Docker、TeX、DSH fixture 或其他能力的本地环境可以明确标记“未运行”，但不得计入 PASS。CI 不允许 skip 成功。历史 README 中的测试计数仅作记录，不能代替当前提交和精确 CI job 的结果。
+
+## 15. 最终差距审计轮新增场景（2026-08）
+
+- full-auto-fixture-required：`mode=full-auto` 且 execution.fixture_id 缺失或未登记 → 422 `fixture_required`，零项目行落库；已登记 fixture → 201 且绑定持久化（tests/unit/full-auto.test.ts）；
+- full-auto-job-inside-profile：full-auto 项目提交作业时 data_artifact_ids 的 blob sha256 必须 ∈ fixture profile.data（否则 422 `fixture_artifact_outside_profile`）；镜像 digest 必须等于 profile.image（否则 422 `fixture_image_mismatch`，缺省绑定 profile.image）；profile.code.archive_sha256 钉定时 code snapshot 不匹配 → 422 `fixture_code_mismatch`（tests/unit/full-auto.test.ts）；
+- fixture-guardrails-forced：FixtureProfile 的 automatic_release/allow_private_data/allow_external_release 由 z.literal 强制 false，任何覆写 parse 失败（tests/unit/full-auto.test.ts）；
+- archive-running-jobs-409：项目存在 queued/running/retryable 作业时 archive → 409 `jobs_running`，项目保持未归档（reconstruction-contracts.md §4，tests/unit/kernel.test.ts）；
+- high-risk-domain-rejected：brief.domain ∈ {clinical, human-trial(s), wet-lab, weapons, biosecurity} → 422 `domain_unsupported`，零落库；默认纯计算域不受影响（product-spec.md §1，tests/unit/kernel.test.ts）；
+- orchestrator-lease-election：orchestrator_leases 首占/同 owner 续约 generation+1/过期抢占/他人 live lease 跳过（detail.skipped 不双推进）、每轮 refresh、close() 释放、--token-file 附 Authorization（缺失 fail fast）——tests/unit/orchestrator.test.ts 41/41；
+- v2-health-canonical：GET /v2/health 返回 protocol_version='v2'、capabilities 对象（14 项能力布尔 + locales ['zh','en'] + locale_contract_revision 1）+ config_pin（tests/unit/v2.test.ts）；
+- v1-health-identity：GET /v1/health 返回 instance_id/protocol_version/schema_version/database_id（test-instance-plan.md §1，保留 ok/instance/config_pin）；
+- sqlite-busy-timeout：openDatabase 设置 WAL + foreign_keys + busy_timeout=5000（storage-migrations.md §2，tests/unit/migrations.test.ts）；
+- cas-put-reverify-size：CAS put 对已存在 Blob 复验 size，不匹配（内容地址损坏）→ 拒绝（storage-migrations.md §6，tests/unit/cas-gc.test.ts）；
+- evidence-provenance-visible：Evidence 面板按 item.provenance_status 原样渲染，不硬编码 verified（gui-plugin-plan.md §10）。

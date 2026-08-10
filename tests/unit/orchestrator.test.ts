@@ -19,7 +19,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -61,7 +61,7 @@ interface FakeKernelProject {
 interface FakeKernelHandle {
   url: string
   close: () => Promise<void>
-  requests: Array<{ method: string; path: string; body: unknown }>
+  requests: Array<{ method: string; path: string; body: unknown; authorization: string | undefined }>
 }
 
 /** Embedded fake Kernel: /v1/projects, /v1/projects/{id}/projection,
@@ -76,7 +76,7 @@ function startFakeKernel(projects: FakeKernelProject[], failGates = false): Prom
       for await (const chunk of req) chunks.push(chunk as Buffer)
       const bodyText = Buffer.concat(chunks).toString('utf8')
       const body = bodyText === '' ? null : JSON.parse(bodyText) as unknown
-      requests.push({ method: req.method ?? 'GET', path: url.pathname, body })
+      requests.push({ method: req.method ?? 'GET', path: url.pathname, body, authorization: req.headers.authorization })
       const send = (status: number, payload: unknown): void => {
         res.writeHead(status, { 'content-type': 'application/json' })
         res.end(JSON.stringify(payload))
@@ -408,6 +408,98 @@ describe('Engine — poll loop over the fake Kernel', () => {
     } finally {
       await fake.close()
     }
+  })
+})
+
+// ── §15 leader election (orchestrator_leases) ───────────────────────────────
+
+describe('orchestrator_leases leader election (§15)', () => {
+  it('claims grant the first owner, deny a live second owner, and allow takeover after expiry', async () => {
+    const store = new ActionStore({ dbPath: freshDbPath() })
+    // 1-second leases so the expiry path is testable without long waits.
+    const first = store.claimLease('rsp_a', 'orch-one', 1)
+    expect(first.granted).toBe(true)
+    expect(first.generation).toBe(1)
+    // Same owner renews (generation+1).
+    const renew = store.claimLease('rsp_a', 'orch-one', 1)
+    expect(renew.granted).toBe(true)
+    expect(renew.generation).toBe(2)
+    // A live second owner is denied.
+    const second = store.claimLease('rsp_a', 'orch-two', 1)
+    expect(second.granted).toBe(false)
+    expect(store.leaseHolder('rsp_a')?.owner).toBe('orch-one')
+    // Expiry (1s) allows takeover with a fresh generation.
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    const takeover = store.claimLease('rsp_a', 'orch-two', 1)
+    expect(takeover.granted).toBe(true)
+    expect(takeover.generation).toBe(3)
+    expect(store.leaseHolder('rsp_a')?.owner).toBe('orch-two')
+    store.close()
+  })
+
+  it('refreshLease extends the expiry; releaseLease frees the project for another owner', async () => {
+    const store = new ActionStore({ dbPath: freshDbPath() })
+    store.claimLease('rsp_a', 'orch-one', 60)
+    const before = store.leaseHolder('rsp_a')
+    expect(before).not.toBeNull()
+    // A refresh from a non-owner is a no-op (false).
+    expect(store.refreshLease('rsp_a', 'orch-two', 60)).toBe(false)
+    // Owner refresh extends the expiry.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(store.refreshLease('rsp_a', 'orch-one', 60)).toBe(true)
+    const after = store.leaseHolder('rsp_a')
+    expect(after !== null && after.expires_at > (before?.expires_at ?? '')).toBe(true)
+    // Release frees the lease for the next owner.
+    store.releaseLease('rsp_a', 'orch-one')
+    expect(store.leaseHolder('rsp_a')).toBeNull()
+    const next = store.claimLease('rsp_a', 'orch-two', 60)
+    expect(next.granted).toBe(true)
+    store.close()
+  })
+
+  it('Engine skips a project held by another live owner, then takes over after release', async () => {
+    const dbPath = freshDbPath()
+    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
+    try {
+      const engineA = new Engine({ kernelUrl: fake.url, dbPath, owner: 'orch-a' })
+      const first = await engineA.pollOnce()
+      expect(first.planned).toBe(1)
+      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(1)
+      // A second instance (different owner, same store) must NOT double-advance.
+      const engineB = new Engine({ kernelUrl: fake.url, dbPath, owner: 'orch-b' })
+      const second = await engineB.pollOnce()
+      expect(second.planned).toBe(0)
+      expect(second.details[0]?.skipped.join(' ')).toContain('lease held by another orchestrator owner')
+      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(1)
+      // Graceful close releases the lease; B can now drive the project.
+      engineA.close()
+      const third = await engineB.pollOnce()
+      expect(third.planned).toBe(0) // action already blocked — no duplicate
+      expect(engineB.store.get('rsp_a', 'scope-gate')?.status).toBe('blocked')
+      engineB.close()
+    } finally {
+      await fake.close()
+    }
+  })
+
+  it('Engine sends Authorization Bearer from --token-file and fails fast on a missing file', async () => {
+    const dbPath = freshDbPath()
+    const tokenDir = mkdtempSync(join(tmpdir(), 'orch-token-'))
+    const tokenFile = join(tokenDir, 'kernel-token')
+    writeFileSync(tokenFile, 's3cret-token\n', { mode: 0o600 })
+    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
+    try {
+      const engine = new Engine({ kernelUrl: fake.url, dbPath, tokenFile })
+      await engine.pollOnce()
+      expect(fake.requests.length).toBeGreaterThan(0)
+      for (const req of fake.requests) {
+        expect(req.authorization).toBe('Bearer s3cret-token')
+      }
+      engine.close()
+    } finally {
+      await fake.close()
+    }
+    expect(() => new Engine({ kernelUrl: 'http://127.0.0.1:1', dbPath: freshDbPath(), tokenFile: join(tokenDir, 'missing') })).toThrow(/does not exist/)
   })
 })
 

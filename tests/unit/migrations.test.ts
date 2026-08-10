@@ -33,6 +33,18 @@ describe('explicit migrations', () => {
     while (MIGRATIONS.length > 13) MIGRATIONS.pop()
   })
 
+  it('opens with WAL + foreign_keys + bounded busy_timeout (storage-migrations.md §2)', () => {
+    // File-backed DB: WAL is reported as 'wal' (in-memory DBs report 'memory').
+    const db = openDatabase(tmpDbPath())
+    const journal = (db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode
+    const foreignKeys = (db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number }).foreign_keys
+    const busyTimeout = (db.prepare('PRAGMA busy_timeout').get() as { timeout: number }).timeout
+    expect(journal.toLowerCase()).toBe('wal')
+    expect(foreignKeys).toBe(1)
+    expect(busyTimeout).toBe(5000)
+    db.close()
+  })
+
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
     expect(SCHEMA_VERSION).toBe(12)

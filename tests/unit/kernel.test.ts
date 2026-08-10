@@ -168,6 +168,39 @@ describe('project state machine', () => {
     kernel.close()
   })
 
+  it('reconstruction-contracts.md §4: archiving a project with active jobs is 409 jobs_running', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k1', kind: 'echo', command: [], payload: { message: 'x' } })
+    try {
+      kernel.archiveProject(project.project_id)
+      throw new Error('expected jobs_running 409')
+    } catch (error) {
+      expect((error as { code?: string; status?: number }).code).toBe('jobs_running')
+      expect((error as { status?: number }).status).toBe(409)
+    }
+    // The project stays unarchived.
+    expect(kernel.getProject(project.project_id).status).not.toBe('ARCHIVED')
+    kernel.close()
+  })
+
+  it('product-spec.md §1: high-risk domains (clinical/wet-lab/weapons/biosecurity) are rejected at creation', () => {
+    const kernel = freshKernel()
+    for (const domain of ['clinical', 'wet-lab', 'weapons', 'biosecurity', 'human-trials']) {
+      try {
+        kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief({ domain }) })
+        throw new Error(`expected domain_unsupported for ${domain}`)
+      } catch (error) {
+        expect((error as { code?: string }).code).toBe('domain_unsupported')
+      }
+    }
+    // Nothing was persisted for any of them.
+    expect(kernel.listProjects()).toHaveLength(0)
+    // The default pure-computation domain still works.
+    expect(kernel.createProject({ name: 'ok', workspace: '/w', brief: makeBrief() }).status).toBe('DRAFT')
+    kernel.close()
+  })
+
   it('v2 §6.2: generic transition cannot enter gate-controlled states', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })

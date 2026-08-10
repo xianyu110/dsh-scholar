@@ -4,12 +4,18 @@
  *
  * Usage:
  *   orchestrator --kernel http://127.0.0.1:7412 [--db <path>] [--poll-ms 5000]
+ *                [--owner <id>] [--lease-seconds 60] [--token-file <0600 file>]
  *                [--once] [--dry-run]
  *
  * - default: poll the Kernel forever, advancing projects per §8.3.
  * - `--once`: run a single poll round and exit (used by tests / cron).
  * - `--dry-run`: compute planned actions only; no Kernel writes, no persistence.
- * - SIGINT/SIGTERM stop the loop and close the store gracefully.
+ * - leader election (§15): `--owner` names this instance in
+ *   orchestrator_leases (default orch-<hostname>-<pid>); `--lease-seconds`
+ *   sets the lease expiry; a project whose live lease is held by another
+ *   owner is skipped. `--token-file` supplies the kernel bearer token
+ *   (Authorization: Bearer) for token-protected kernels.
+ * - SIGINT/SIGTERM stop the loop, release all held leases and close the store.
  *
  * CONFIG-01: the CLI surface is parsed by the canonical Config Registry
  * (parseCli) — flags, defaults and validation are the registry's single
@@ -39,13 +45,16 @@ const dbPath = cli['orchestrator.db'] as string | undefined
 const pollMs = cli['orchestrator.poll_ms'] as number | undefined
 const once = cli['orchestrator.once'] === true
 const dryRun = cli['orchestrator.dry_run'] === true
+const owner = (cli['orchestrator.owner'] as string | undefined) ?? ''
+const leaseSeconds = (cli['orchestrator.lease_seconds'] as number | undefined) ?? 60
+const tokenFile = (cli['orchestrator.token_file'] as string | undefined) ?? ''
 
 if (pollMs !== undefined && pollMs <= 0) {
   console.error('[research-orchestrator] --poll-ms must be a positive number')
   process.exit(2)
 }
 
-const engine = new Engine({ kernelUrl, dbPath, pollMs, dryRun })
+const engine = new Engine({ kernelUrl, dbPath, pollMs, dryRun, owner: owner === '' ? undefined : owner, leaseSeconds, tokenFile: tokenFile === '' ? undefined : tokenFile })
 
 const shutdown = (signal: string): void => {
   console.error(`[research-orchestrator] ${signal} — stopping`)

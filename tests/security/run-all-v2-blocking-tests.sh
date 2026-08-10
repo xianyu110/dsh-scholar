@@ -48,6 +48,17 @@
 #                               (no cordis_inspect/tool-cordis/dump-config
 #                               in the published plugin; dev overlay opt-in)
 #
+# Deliberately NOT in SCRIPTS (documented so the list stays auditable):
+#   * run-latex-tests.sh   — SKIPs (exit 0) when pdflatex is absent, so it is
+#                            invoked by the dedicated CI "latex-compile" job
+#                            (.github/workflows/ci.yml) after installing TeX,
+#                            never by this aggregator (a SKIP here would fail
+#                            CI=true fail-closed runs on TeX-less machines).
+#   * run-standalone-http-tests.sh — nested INSIDE run-hardening-tests.sh
+#                            (invoked at its tail; its non-zero exits and any
+#                            SKIP text propagate through hardening into this
+#                            aggregator's fail-closed checks).
+#
 # Usage: bash tests/security/run-all-v2-blocking-tests.sh
 # The local CI gateway (scripts/ci-gate.sh, `pnpm test:ci`) runs this script
 # with CI=true, so every SKIP/zero-assertion/unexecuted sub-script is

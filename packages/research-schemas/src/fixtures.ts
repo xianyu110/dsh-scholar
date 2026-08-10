@@ -40,7 +40,7 @@ export function fixtureProject(overrides: Partial<ResearchProject> = {}): Resear
       max_gpu_hours: 120,
       max_parallel_jobs: 4,
     },
-    execution: { runner_profile: 'local-docker-cpu', network_policy: 'allowlist', artifact_store: 'local-cas' },
+    execution: { runner_profile: 'local-docker-cpu', network_policy: 'allowlist', artifact_store: 'local-cas', fixture_id: null },
     integrity: {
       require_baseline_reproduction: true,
       require_experiment_contract: true,

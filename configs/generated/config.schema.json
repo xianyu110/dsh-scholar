@@ -77,6 +77,12 @@
               "description": "Artifact store backing the project.",
               "default": "local-cas",
               "x-dsh-scope": "project"
+            },
+            "fixture_id": {
+              "type": "string",
+              "description": "Registered FixtureProfile id for full-auto projects (reconstruction-contracts.md §5); full-auto without a registered fixture is rejected at project create and job submit.",
+              "default": null,
+              "x-dsh-scope": "project"
             }
           },
           "additionalProperties": false
@@ -276,6 +282,25 @@
           "type": "boolean",
           "description": "Compute planned actions only; no kernel writes, no persistence.",
           "default": false,
+          "x-dsh-scope": "orchestrator"
+        },
+        "owner": {
+          "type": "string",
+          "description": "Leader-election owner id for orchestrator_leases (reconstruction-contracts.md §15); empty = orch-<hostname>-<pid>.",
+          "default": "",
+          "x-dsh-scope": "orchestrator"
+        },
+        "lease_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "orchestrator_leases expiry in seconds (§15); the owning instance refreshes every poll round and releases on close.",
+          "default": 60,
+          "x-dsh-scope": "orchestrator"
+        },
+        "token_file": {
+          "type": "string",
+          "description": "0600 file with the kernel bearer token; every kernel request carries Authorization: Bearer <token>.",
+          "default": "",
           "x-dsh-scope": "orchestrator"
         }
       },

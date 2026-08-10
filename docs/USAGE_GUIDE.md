@@ -18,7 +18,7 @@ bash scripts/start-standalone-ui.sh
 - **Resume**：选择最近项目，根据 status、pending Gate 和 NextAction 回到上次页面；
 - **Upload**：上传外部论文、TeX、代码、数据、日志或结果。系统先 hash/scan，再用 Grill Me 询问缺失的 scope、license、commit、dataset/split/seed、metric direction、Manifest、统计与隐私信息。
 
-Upload 可以创建新项目或合并有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。当前代码尚未完整实现 Init/Upload/Grill/Adoption，不能用普通 Artifact/TeX 上传模拟安全接入。
+Upload 可以创建新项目或合并有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI、分块 offset/hash 恢复上传与研究包 archive 解包扫描、Agent tool 面与 v2/BFF accept 面仍属后续阶段。不能用普通 Artifact/TeX 上传模拟安全接入。
 
 ## 3. 创建项目与 Scope Gate
 
@@ -52,7 +52,7 @@ PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预
 
 ## 6. 运行实验与查看终端
 
-> 当前已有 Terminal SSE、seq/gap/reconnect、stdout/stderr 筛选和安全 ANSI 文本渲染。仍缺完整日志 Artifact 下载、严格 Job/Run/lease AuthZ、cwd、cancel/timeout 权威展示和有界 DOM；以下列表含目标 v2 行为，未关闭项不能视为已验收。
+> 服务端/SSE 层已完成:Terminal SSE、seq/gap/reconnect、stdout/stderr 分通道与筛选、安全 ANSI 文本渲染、lease fencing 与 job_log_read AuthZ、cancelled/timed_out/exit 权威终态、最终 log Artifact 与截断记账(tests/unit/terminal.test.ts、tests/security/run-terminal-tests.sh)。仍缺(浏览器层,Playwright 类环境不可用,未验收):严格的有界 DOM 渲染、完整日志 Artifact 下载(当前“Download log”只导出浏览器保留窗口,不等同于完整日志 Artifact;长日志和取消/超时结果必须回到 Runs/Artifact 核对)。
 
 ~~~text
 /research run formal {"contract_id":"...","code_snapshot_id":"..."}
@@ -76,11 +76,11 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 目标 UI 的 Workspace 像 VS Code：Explorer 打开 code/manuscript/scratch 文件，使用标签、搜索、Problems、查看图片/PDF/JSON、编辑文本、上传/移动/删除/历史并冻结 Snapshot。并发冲突会显示 base/current/local，不自动覆盖。
 
-点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset 后可以输入命令、使用 TUI、resize、发送 INT/TERM/KILL、detach/reconnect/close。PTY 不是正式 Run，输出不能成为 Evidence。当前代码只有只读 Run Terminal，没有可操作 PTY，也没有通用 Workspace Explorer。
+点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset 后可以输入命令、使用 TUI、resize、发送 INT/TERM/KILL、detach/reconnect/close。PTY 不是正式 Run，输出不能成为 Evidence。服务端已实现:真实 PTY 会话(LocalPtyAdapter,preset 白名单、env 白名单、detach 不杀进程、idle TTL、client_seq 幂等、输出永不进入 Metrics/Evidence/Gate)与通用 Workspace 磁盘 adapter(节点读写/移动/删除/二进制 asset/历史回退/watch/路径搜索,tex-facade 同一契约);浏览器 TUI 与 Workspace Explorer(标签/搜索/上传/移动/历史/Problems UI)仍属浏览器层剩余(Playwright 类环境不可用,未验收)。
 
 ### 6.2 本机与远端执行
 
-Settings → Execution 选择已经登记的 Local Docker 或 Remote Runner profile。页面只显示 target label、capability、health、resources 和 policy；不输入 SSH credential/hostname/任意命令。远端离线时任务明确失败或等待，不会静默改在本机/subprocess 运行。当前代码只支持本机 subprocess/docker，远端 Runner Fleet 未实现。
+Settings → Execution 选择已经登记的 Local Docker 或 Remote Runner profile。页面只显示 target label、capability、health、resources 和 policy；不输入 SSH credential/hostname/任意命令。远端离线时任务明确失败或等待，不会静默改在本机/subprocess 运行。服务端已实现:RUN-REMOTE-01 wire 协议、RemoteFleetServer(注册/心跳/claim/CAS/frames/artifacts/complete,含 service-token 传输等价实现)与 RemoteRunnerAgentImpl(验签、CAS hash 复算、有界 spool、fail-closed);真实 mTLS 证书链与真实远端 sandbox 验收、跨主机网络分区故障注入、Remote PTY 与浏览器 UI 仍属后续阶段。
 
 ## 7. Evidence 与 Claim
 
@@ -122,11 +122,11 @@ Diagnostics 将错误整理为 file:line；点击可跳到编辑器。TeX 原始
 
 Overview 的 Research Trajectory 显示权威 Gate/Job/Evidence/Manuscript 事件；Session Trajectory 显示 Agent 的消息和工具过程，后者不是科研事实。打开 Agent Topology 可展开 parent→child、查看 role/mode/running、时长、token/cost 和失败，点击 child 进入其安全 history，并用 breadcrumb 返回。
 
-one-shot child 只读；continuable child 只有 parent 在线且有权限才出现续问框。读取历史不会唤醒 Agent，原始 prompt、工具参数/结果、环境和 secret 默认不展示。当前 Scholar UI 尚未移植 DSH Web Trajectory/Topology，现有 research_panel 返回 child 结果但没有独立树和进入能力。
+one-shot child 只读；continuable child 只有 parent 在线且有权限才出现续问框。读取历史不会唤醒 Agent，原始 prompt、工具参数/结果、环境和 secret 默认不展示。服务端已实现:TRAJ-01/SUBAGENT-01 投影与拓扑 API 层(Outbox 只读投影、redaction、10k 事件分页、exact direct-child、breadcrumb、只读 history、followup 记录 message_id 不冒充执行);浏览器 Trajectory/Topology 树、进入 child 与 SSE 实时流仍属 UI 浏览器层剩余(Playwright 类环境不可用,未验收)。
 
 ## 10. Review 与 Release
 
-> Review/Bundle 当前只有基础清单和脚本。2026-08-09 审阅时 release-bundle 阻断测试为 0/2，clean-room 仍会复用 checkout/CAS/外部 binary，不是 bundle-only；不得据此声明可复现或进入 Release Gate。
+> Review/Bundle:REL-01 已关闭(commit 040e796)——build-bundle.sh 生成自包含 Bundle(manifest runtime 段 + TeX workspace 导出),reproduce.sh 在全新空目录以全新 DB/CAS 重放,拒绝指向原 checkout 的 runtime(bundle-only clean-room),并逐字段比较 manifest/metrics/analysis/RunManifest/TeX 输入与 PDF 结构;tests/security/run-release-bundle-tests.sh 已接入聚合器。尚未绑定 CI job 报告前仍不得据此声明正式可复现性。
 
 ~~~text
 /research review
@@ -142,7 +142,7 @@ Budget 页面显示模型、API、GPU、存储和并发。超过硬上限时项�
 
 Overview 顶部 NextAction 说明当前一步、原因、需要 Human/Agent/Runner、阻断项和目标页面。未知旧动作只显示原文，不提供猜测的执行按钮。
 
-所有配置集中在 Settings，默认折叠 Essentials、Execution、Workspace、Terminal、LaTeX、Agent/Trajectory、Security & Secrets、Diagnostics。每项显示 effective value、来源 scope/revision/hash、默认/修改和热更新/重启；Secret 只显示引用。修改只影响新 Job/PTY/Build。当前配置仍散落在 Cordis/CLI/env，Config Registry 和完整 Settings 未实现。
+所有配置集中在 Settings，默认折叠 Essentials、Execution、Workspace、Terminal、LaTeX、Agent/Trajectory、Security & Secrets、Diagnostics。每项显示 effective value、来源 scope/revision/hash、默认/修改和热更新/重启；Secret 只显示引用。修改只影响新 Job/PTY/Build。服务端已实现:canonical Config Registry(CONFIG-01,单一注册表 + parseCli 四二进制接入 + security floor + effective pin/redacted 视图 + 生成物 configs/generated/)与 kernel/standalone 的 x-config-pin 响应头、/v1/config/effective、/v1/config/schema;Settings UI(浏览器层,由 /v1/config/schema + /v1/config/effective 生成)与 /bff/research/config/*、job scope 键、SecretRef 存储层仍属后续阶段。
 
 ## 12. 常见问题
 

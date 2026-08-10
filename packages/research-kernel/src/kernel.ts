@@ -15,7 +15,7 @@ import {
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  buildProjectId, getFixtureProfile, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
   type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus,
@@ -822,11 +822,31 @@ export class ResearchKernel {
     for (const [key, value] of Object.entries(execution)) projectConfig[`execution.${key}`] = value
     for (const [key, value] of Object.entries(integrity)) projectConfig[`integrity.${key}`] = value
     validateConfig(projectConfig, { scopes: ['project'] })
+    // product-spec.md §1 / README 使用边界: high-risk domains (clinical
+    // decision-making, human trials, wet-lab, weapons, biosecurity) are
+    // OUTSIDE the product boundary — the system must not proceed with them.
+    // Fail closed at creation with a stable code (default-denial posture);
+    // an independent policy extension would relax this list explicitly.
+    const HIGH_RISK_DOMAINS = ['clinical', 'clinical-decision', 'human-trial', 'human-trials', 'wet-lab', 'wetlab', 'weapon', 'weapons', 'biosecurity', 'bio-safety']
+    const domain = (brief.domain ?? '').toLowerCase().trim()
+    if (HIGH_RISK_DOMAINS.includes(domain)) {
+      throw new KernelError(422, 'domain_unsupported',
+        `domain '${brief.domain}' is a high-risk domain (clinical decision-making / human trials / wet-lab / weapons / biosecurity) — DSH Scholar is for pure-computation research only (product-spec.md §1)`)
+    }
+    // reconstruction-contracts.md §5 / security-baseline.md §1: full-auto is
+    // fixture-only — the project must bind a REGISTERED FixtureProfile at
+    // creation; job submit re-checks below. Unknown/missing -> 422, nothing
+    // is persisted (no unbound full-auto project rows can exist).
+    const mode = input.mode ?? 'gate-only'
+    if (mode === 'full-auto' && getFixtureProfile(execution.fixture_id ?? '') === null) {
+      throw new KernelError(422, 'fixture_required',
+        'full-auto projects require execution.fixture_id bound to a REGISTERED FixtureProfile (reconstruction-contracts.md §5); unknown fixture ids are rejected')
+    }
     const project: ResearchProject = {
       project_id: buildProjectId(),
       name: input.name,
       workspace: input.workspace,
-      mode: input.mode ?? 'gate-only',
+      mode,
       status: 'DRAFT',
       revision: 0,
       brief,
@@ -1046,6 +1066,17 @@ export class ResearchKernel {
   archiveProject(projectId: string): ResearchProject {
     const project = this.getProject(projectId)
     if (project.status === 'ARCHIVED') return project
+    // reconstruction-contracts.md §4: "any non-ARCHIVED → ARCHIVED | PI |
+    // no running jobs; otherwise 409" — archiving a project with active
+    // (queued/running/retryable) jobs would orphan lease ownership and
+    // terminal streams, so it is rejected outright.
+    const active = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'retryable')",
+    ).get(projectId) as { n: number }
+    if (Number(active.n) > 0) {
+      throw new KernelError(409, 'jobs_running',
+        `project ${projectId} has ${active.n} active job(s) (queued/running/retryable) — stop or finish them before archiving`)
+    }
     const now = nowIso()
     this.db.prepare('UPDATE projects SET status = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ?')
       .run('ARCHIVED', now, JSON.stringify([...project.history, `${project.status}->ARCHIVED (archived)`]), projectId)
@@ -2857,6 +2888,17 @@ export class ResearchKernel {
     output_contract?: { metrics: string; logs: string }
   }): JobSpecBound {
     const project = this.getProject(input.project_id)
+    // reconstruction-contracts.md §5 / security-baseline.md §1: full-auto is
+    // fixture-only. A full-auto project must stay bound to its REGISTERED
+    // FixtureProfile and every job input must stay INSIDE the profile:
+    // pinned image digest, data artifact content hashes and (when the
+    // profile pins one) the code archive hash. Referencing anything outside
+    // the profile is 422 — never queued.
+    const fixtureProfile = project.mode === 'full-auto' ? getFixtureProfile(project.execution.fixture_id ?? '') : null
+    if (project.mode === 'full-auto' && fixtureProfile === null) {
+      throw new KernelError(422, 'fixture_required',
+        `full-auto project ${project.project_id} is not bound to a REGISTERED FixtureProfile (reconstruction-contracts.md §5)`)
+    }
     // v2 §3.4: idempotency is project-scoped — the same key in two projects
     // yields two independent jobs.
     const existing = this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?')
@@ -2943,6 +2985,26 @@ export class ResearchKernel {
         }
       }
     }
+    // Full-auto fixture jobs: when the profile pins the code archive hash,
+    // the bound snapshot's blob hash must match EXACTLY (fixture code can
+    // never be swapped for private/external code).
+    if (fixtureProfile !== null && fixtureProfile.code.archive_sha256 !== null) {
+      if (boundCodeSnapshotId === null || boundCodeSnapshotId === '') {
+        throw new KernelError(422, 'code_snapshot_required',
+          'full-auto fixture jobs require code_snapshot_id (the fixture code archive is pinned)')
+      }
+      let boundHash: string
+      try {
+        boundHash = this.getArtifact(project.project_id, boundCodeSnapshotId).sha256
+      } catch {
+        throw new KernelError(422, 'code_snapshot_unknown',
+          `full-auto fixture job requires code_snapshot_id bound to an in-project artifact`)
+      }
+      if (boundHash !== fixtureProfile.code.archive_sha256) {
+        throw new KernelError(422, 'fixture_code_mismatch',
+          `full-auto job code snapshot ${boundCodeSnapshotId} (${boundHash}) is not the fixture profile's pinned archive ${fixtureProfile.code.archive_sha256}`)
+      }
+    }
     // P0 (acceptance-tests.md §4): formal-class jobs MUST bind an approved
     // contract of the SAME project, frozen by a Human Gate Decision.
     // draft/foreign/missing contracts are 422, never queued.
@@ -2996,6 +3058,16 @@ export class ResearchKernel {
           throw new KernelError(422, 'data_artifact_hash_unverifiable',
             `data artifact ${id} blob ${record.sha256} is missing from CAS and cannot be re-verified`)
         }
+        // Full-auto fixture jobs: every data artifact must be part of the
+        // fixture profile's fixed inputs (by content hash) — private or
+        // external data can never enter a fixture job.
+        if (fixtureProfile !== null) {
+          const inProfile = fixtureProfile.data.some(d => d.sha256 === record.sha256)
+          if (!inProfile) {
+            throw new KernelError(422, 'fixture_artifact_outside_profile',
+              `data artifact ${id} (${record.sha256}) is not part of the full-auto fixture profile ${fixtureProfile.fixture_id}`)
+          }
+        }
       }
     }
     // §12.2 (P0, acceptance-tests.md §4): image_digest MUST equal the trusted
@@ -3004,6 +3076,17 @@ export class ResearchKernel {
     // missing digest is injected with the locked texlive entry. An explicit
     // digest inside payload (the HTTP TeX builds route forwards it there) is
     // validated too, so it can never silently diverge from the lock.
+    // Full-auto fixture jobs additionally MUST use the profile's pinned
+    // image: a different caller-supplied digest is 422 fixture_image_mismatch
+    // and an absent digest is bound to the profile image.
+    let digestInput = input.image_digest ?? (typeof input.payload?.image_digest === 'string' && input.payload.image_digest !== '' ? input.payload.image_digest : undefined)
+    if (fixtureProfile !== null && SECURE_KINDS.includes(input.kind)) {
+      if (digestInput !== undefined && digestInput !== fixtureProfile.image) {
+        throw new KernelError(422, 'fixture_image_mismatch',
+          `full-auto jobs must use the fixture profile image ${fixtureProfile.image} (got ${digestInput})`)
+      }
+      digestInput = fixtureProfile.image
+    }
     const payload = {
       ...(input.payload ?? {}),
       // §12.5 (P0): the Runner validates the metrics FILE against the bound
@@ -3011,10 +3094,7 @@ export class ResearchKernel {
       // runner never trusts client-supplied names.
       ...(contractMetricNames !== undefined ? { contract_metrics: contractMetricNames } : {}),
       image_digest: SECURE_KINDS.includes(input.kind)
-        ? validateImageDigest(
-            input.kind as SecureJobKind,
-            input.image_digest ?? (typeof input.payload?.image_digest === 'string' && input.payload.image_digest !== '' ? input.payload.image_digest : undefined),
-          )
+        ? validateImageDigest(input.kind as SecureJobKind, digestInput)
         : (input.image_digest ?? ''),
       ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
       ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
@@ -3108,8 +3188,16 @@ export class ResearchKernel {
       const payload = jsonParse(row.payload, {} as Record<string, unknown>)
       const leaseToken = `lt_${randomUUID().replaceAll('-', '')}${randomUUID().slice(0, 8)}`
       payload.__lease_token = leaseToken
-      const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
-      if (Number(result.changes) === 1) {
+      // execution-runtime.md §3 / storage-migrations.md §4: a claim is ONE
+      // transaction — UPDATE jobs (running + lease + generation) and INSERT
+      // runs (durable attempt identity) commit atomically, so a crash
+      // between them can never leave a running job without its run row or
+      // a run row on an unclaimed job. (The tex_builds status sync below
+      // runs AFTER the commit: TexWorkspaceStore owns a separate connection
+      // to the same file, so it must not write inside the kernel txn.)
+      const claimedRow = withTransaction(this.db, () => {
+        const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
+        if (Number(result.changes) !== 1) return null
         const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow, this.db)
         // §3.1 / RUN-01 (Run attempt): every claim records a runs row — the
         // durable per-attempt identity (attempt_no = attempts after claim).
@@ -3125,12 +3213,15 @@ export class ResearchKernel {
           runId, claimedJob.project_id, claimedJob.job_id, claimedJob.attempts,
           claimedJob.contract_id, this.resolveSnapshotSha256(claimedJob.code_snapshot_id), now,
         )
-        claimed.push({ ...claimedJob, run_id: runId })
+        return { claimedJob, runId }
+      })
+      if (claimedRow !== null) {
+        claimed.push({ ...claimedRow.claimedJob, run_id: claimedRow.runId })
         // §12.1 (TEX-03): a claimed latex-compile job moves its tex_builds
         // row queued → running, so preview supersede can distinguish a
         // never-started queued preview (→ cancelled) from a running one
         // (→ superseded).
-        const texBuildRow = this.db.prepare('SELECT build_id, status FROM tex_builds WHERE job_id = ?').get(claimedJob.job_id) as { build_id: string; status: string } | undefined
+        const texBuildRow = this.db.prepare('SELECT build_id, status FROM tex_builds WHERE job_id = ?').get(claimedRow.claimedJob.job_id) as { build_id: string; status: string } | undefined
         if (texBuildRow !== undefined && texBuildRow.status === 'queued') {
           this.tex.updateBuild(texBuildRow.build_id, { status: 'running' })
         }

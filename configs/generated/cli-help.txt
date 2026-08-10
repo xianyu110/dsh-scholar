@@ -22,6 +22,9 @@ Options (orchestrator):
   --poll-ms <number> — Poll interval between advancement rounds (bin still requires > 0).
   --once <boolean> — Run a single poll round and exit (tests/cron).
   --dry-run <boolean> — Compute planned actions only; no kernel writes, no persistence.
+  --owner <string> — Leader-election owner id for orchestrator_leases (reconstruction-contracts.md §15); empty = orch-<hostname>-<pid>.
+  --lease-seconds <number> — orchestrator_leases expiry in seconds (§15); the owning instance refreshes every poll round and releases on close.
+  --token-file <string> — 0600 file with the kernel bearer token; every kernel request carries Authorization: Bearer <token>.
 
 Options (kernel):
   --host <string> — Kernel HTTP listen host. (default: 127.0.0.1)

@@ -27,20 +27,31 @@ export class ArtifactCas {
     const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : Buffer.from(content)
     const sha256 = createHash('sha256').update(bytes).digest('hex')
     const target = this.pathFor(sha256)
-    if (!existsSync(target)) {
-      // Atomic-ish write: temp file + rename so a concurrent writer never
-      // observes a partial blob.
-      const tmp = `${target}.tmp-${randomBytes(4).toString('hex')}`
-      writeFileSync(tmp, bytes)
-      try {
-        // Rename over an existing (identical) target is fine on POSIX.
-        mkdirSync(this.root, { recursive: true })
-        renameSync(tmp, target)
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code
-        if (code !== 'EEXIST') throw error
-        // Another writer won the race with identical content — keep the blob.
+    if (existsSync(target)) {
+      // storage-migrations.md §6: an existing blob is only reused after a
+      // SIZE verification — a size mismatch means the blob at this content
+      // address is corrupted (hash collision or torn write) and MUST NOT be
+      // silently treated as the same content.
+      const existingSize = statSync(target).size
+      if (existingSize !== bytes.byteLength) {
+        throw new Error(
+          `CAS blob ${sha256} exists with size ${existingSize} but content-addressed put has size ${bytes.byteLength} — blob corruption at ${target}`,
+        )
       }
+      return { sha256, size_bytes: bytes.byteLength }
+    }
+    // Atomic-ish write: temp file + rename so a concurrent writer never
+    // observes a partial blob.
+    const tmp = `${target}.tmp-${randomBytes(4).toString('hex')}`
+    writeFileSync(tmp, bytes)
+    try {
+      // Rename over an existing (identical) target is fine on POSIX.
+      mkdirSync(this.root, { recursive: true })
+      renameSync(tmp, target)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'EEXIST') throw error
+      // Another writer won the race with identical content — keep the blob.
     }
     return { sha256, size_bytes: bytes.byteLength }
   }

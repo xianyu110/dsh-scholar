@@ -72,6 +72,7 @@ export const CHAT_COMMANDS: Array<[string, string, string]> = [
   ['status', '/research status', 'phase, gates, jobs, budget of the active project'],
   ['survey', '/research survey temporal action localization', 'multi-source literature search + frozen snapshot'],
   ['ideas', '/research ideas', 'list IdeaCards of the active project'],
+  ['reproduce', '/research reproduce {"command":["node","baseline.js"]}', 'prepare + run a Baseline reproduction (isolated)'],
   ['gates', '/research gates', 'gate list + decisions of the active project'],
   ['jobs', '/research jobs', 'job list of the active project'],
   ['contract', '/research contract {"idea_id":"...","dataset_id":"fixture","baseline":"b","treatment":"a","primary_metric":"macro_f1","seeds":[11,23,47]}', 'pre-register an ExperimentContract'],

@@ -89,6 +89,13 @@ export const ExecutionConfig = z.object({
   runner_profile: z.enum(['local-docker-gpu', 'local-docker-cpu', 'isolated-subprocess']).default('local-docker-cpu'),
   network_policy: z.enum(['allowlist', 'none']).default('allowlist'),
   artifact_store: z.enum(['local-cas']).default('local-cas'),
+  /**
+   * reconstruction-contracts.md §5 / security-baseline.md §1: full-auto mode
+   * is fixture-only — a full-auto project must bind a REGISTERED
+   * FixtureProfile id (kernel enforces fixture_required/fixture_unknown at
+   * createProject and submitJob). Ignored for gate-only projects.
+   */
+  fixture_id: z.string().nullable().default(null),
 })
 export type ExecutionConfig = z.infer<typeof ExecutionConfig>
 

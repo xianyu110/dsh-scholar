@@ -82,7 +82,7 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 5. 在 hardening-v0.2-status.md 记录当前实现与目标的状态；
 6. 实现、测试、文档在同一个变更集内保持一致。
 
-当前 `scripts/verify-docs.mjs` 自动检查文档结构、链接、关键契约片段和旧嵌入面否定断言；`--diff-check` 只检查部分 packages/workers 源码与 eval shell 变更是否触达 hardening ledger。它不能证明负责规范、acceptance、USAGE 和状态语义已经同步，且当前实现对缺失 base ref 会 fail-open。修复 DOC-02 前，CI 必须显式 fetch/校验精确 base SHA，主代理/评审仍按上述六项逐项确认；verifier 通过绝不等同于 docs-first 或功能验收完成。
+当前 `scripts/verify-docs.mjs` 自动检查文档结构、链接、关键契约片段和旧嵌入面否定断言；`--diff-check` 检查 packages/workers 源码与 eval shell 变更是否触达 hardening ledger，且对缺失/歧义 base ref 已 fail-closed（`base_ref_unavailable` 非零退出，绝不把 changed files 当空集）。它不能证明负责规范、acceptance、USAGE 和状态语义已经同步；主代理/评审仍按上述六项逐项确认；verifier 通过绝不等同于 docs-first 或功能验收完成。
 
 代码与 Markdown 冲突时，不得静默选择代码现状；必须先确认目标并修正文档或实现。只改代码不更新规范、只记录修复建议不落入规范，均视为未完成。
 

@@ -343,6 +343,8 @@ interface SearchResult { papers:Paper[]; queries:QueryRecord[]; citation_edges:C
 
 CLI 参数：--kernel、--token-file、--db、--poll-ms=5000、--owner、--lease-seconds=60、--once、--dry-run。一个 Project Phase Controller 通过 orchestrator_leases(project_id,owner,generation,expires_at) 选主；实验 Job 仍可并行。
 
+**现状（本轮已实现）**：orchestrator CLI 全参数已实现——--kernel/--db/--poll-ms/--once/--dry-run/--owner/--lease-seconds/--token-file（Config Registry orchestrator scope，parseCli 接入，bin 保留 --poll-ms>0 检查）；ActionStore（orchestrator_actions，SQLite）与幂等推进已实现，新增 orchestrator_leases 表（project_id PK、owner、generation、expires_at）：engine 每轮 claim（INSERT OR IGNORE、同 owner 续约 generation+1、过期抢占 generation+1、他人 live lease 持有则跳过该项目不静默双推进）、每轮 refresh、close() 释放全部持有租约；--token-file 读取 0600 kernel bearer token 并附 Authorization 头（缺失文件 fail fast）；owner 缺省 orch-<hostname>-<pid>。证据：tests/unit/orchestrator.test.ts 41/41（含选主抢占/过期/释放/跳过/Authorization 用例）。
+
 Action 包含 action_id、project_id、phase、type、idempotency_key、status、attempt/max_attempts、depends_on、input_refs、output_refs、lease、error、created/updated。执行前 running+lease 事务提交；外部写用 action key；恢复先查询 Kernel projection，对已存在输出标 done，否则 retry。永久 validation/policy 错误 blocked，环境错误有界 retry。
 
 ## 16. Outbox envelope
@@ -390,6 +392,8 @@ Tool input 不接受 principal、verified/accepted provenance、internal token�
 ## 18. 可观测性
 
 结构化日志 JSON 字段：time、level、module、instance_id、request_id、project_id?、job_id?、event、duration_ms?、error_code?；不记录 secret/完整 payload。指标至少有 request latency/error、outbox backlog、queued/running jobs、lease expiry、terminal dropped bytes/connections、CAS bytes/orphans、TeX build duration/failure、connector source failure、budget usage。桌面默认只暴露 loopback /internal/metrics；团队 adapter 接 OpenTelemetry。
+
+**现状（如实记录，属后续阶段）**：结构化 JSON 日志字段已落地（kernel/runner 日志模块）；`/internal/metrics` 端点与上述指标计数尚未实现。实现指引：kernel 增加内存 MetricsStore（counter/histogram 极简实现），在 request 完成、outbox append/dead-letter、job claim/complete、lease expiry、terminal dropped_bytes、CAS GC/orphan、TeX build 完成、connector 失败、budget 记账处打点；server 增加 GET /internal/metrics（仅 loopback 可达，JSON 输出，不要求 service token——与 /v1/health 同级公开面或按部署配置）；团队 OpenTelemetry adapter 留作未来 export 面。
 
 ## 19. Workspace wire
 

@@ -159,19 +159,32 @@ describe('v2 project adapter', () => {
     })
   })
 
-  it('GET /v2/health reports protocol/schema versions and capabilities', async () => {
+  it('GET /v2/health reports the canonical HealthResponse (protocol/schema versions + capability object)', async () => {
     const kernel = freshKernel()
     await withServer(kernel, async (base) => {
       const r = await fetch(`${base}/v2/health`)
       expect(r.status).toBe(200)
-      const h = await r.json() as { ok: boolean; protocol_version: number; schema_version: number; database_id: string; capabilities: string[] }
+      const h = await r.json() as {
+        ok: boolean
+        protocol_version: string
+        schema_version: number
+        database_id: string
+        config_pin: string
+        capabilities: Record<string, unknown> & { locales: string[]; locale_contract_revision: number }
+      }
       expect(h.ok).toBe(true)
-      expect(h.protocol_version).toBe(2)
+      // reconstruction-contracts.md §5: protocol_version is the string 'v2'.
+      expect(h.protocol_version).toBe('v2')
       expect(h.schema_version).toBeGreaterThanOrEqual(6)
       expect(h.database_id.length).toBeGreaterThan(0)
-      for (const cap of ['terminal_stream', 'tex_workspace', 'latex_compile', 'signed_manifest', 'clean_room', 'locales']) {
-        expect(h.capabilities).toContain(cap)
+      expect(h.config_pin.startsWith('sha256:')).toBe(true)
+      // api-contracts.md §3: capabilities must be an OBJECT listing every
+      // implemented server-side capability; locales + contract revision.
+      for (const cap of ['terminal_stream', 'interactive_terminal', 'workspace_files', 'tex_workspace', 'latex_compile', 'latex_live_preview', 'remote_runner', 'config_registry', 'research_onboarding', 'trajectory', 'subagent_topology', 'signed_manifest', 'clean_room']) {
+        expect(h.capabilities[cap]).toBe(true)
       }
+      expect(h.capabilities.locales).toEqual(['zh', 'en'])
+      expect(h.capabilities.locale_contract_revision).toBe(1)
     })
   })
 

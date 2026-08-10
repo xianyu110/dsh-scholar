@@ -771,7 +771,22 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     try {
       switch (resource) {
         case 'health': {
-          ok(res, { ok: true, instance: kernel.instanceId, config_pin: configPin ?? kernel.configPinHash, time: new Date().toISOString() })
+          // test-instance-plan.md §1: instance identity (instance_id /
+          // protocol_version / schema_version / database_id) is exposed on
+          // BOTH health surfaces so sidecars and operators can verify they
+          // talk to the expected kernel instance. v1 keeps the legacy
+          // ok/instance/config_pin fields; v2 carries the canonical
+          // HealthResponse (reconstruction-contracts.md §5).
+          ok(res, {
+            ok: true,
+            instance: kernel.instanceId,
+            instance_id: kernel.instanceId,
+            protocol_version: 'v1',
+            schema_version: kernel.schemaVersion(),
+            database_id: kernel.databaseId(),
+            config_pin: configPin ?? kernel.configPinHash,
+            time: new Date().toISOString(),
+          })
           return
         }
         // CONFIG-01 HTTP surface: GET /v1/config/effective returns the
@@ -2039,15 +2054,35 @@ async function handleV2(ctx: {
     }
   }
   if (id === undefined && sub === undefined && method === 'GET' && url.pathname === '/v2/health') {
-    // api-contracts.md §3: capability discovery with protocol/schema version.
+    // api-contracts.md §3 / reconstruction-contracts.md §5: canonical
+    // HealthResponse — capability discovery with protocol/schema version.
+    // capabilities is the OBJECT form with one boolean per implemented
+    // server-side capability (locales + locale_contract_revision included);
+    // protocol_version is the string 'v2' per the canonical wire type.
     send(res, 200, {
       ok: true,
       instance_id: kernel.instanceId,
-      protocol_version: 2,
+      protocol_version: 'v2',
       schema_version: kernel.schemaVersion(),
       database_id: kernel.databaseId(),
       config_pin: configPin ?? kernel.configPinHash,
-      capabilities: ['terminal_stream', 'tex_workspace', 'latex_compile', 'signed_manifest', 'clean_room', 'locales'],
+      capabilities: {
+        terminal_stream: true,
+        interactive_terminal: true,
+        workspace_files: true,
+        tex_workspace: true,
+        latex_compile: true,
+        latex_live_preview: true,
+        remote_runner: true,
+        config_registry: true,
+        research_onboarding: true,
+        trajectory: true,
+        subagent_topology: true,
+        signed_manifest: true,
+        clean_room: true,
+        locales: ['zh', 'en'],
+        locale_contract_revision: 1,
+      },
       time: new Date().toISOString(),
     })
     return

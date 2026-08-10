@@ -26,6 +26,9 @@ project:
     # Artifact store backing the project.
     # sources: http/ui/file
     artifact_store: local-cas
+    # Registered FixtureProfile id for full-auto projects (reconstruction-contracts.md §5); full-auto without a registered fixture is rejected at project create and job submit.
+    # sources: http/ui/file
+    fixture_id: null
   integrity:
     # Baseline reproduction is required before experiments.
     # sources: http/ui/file
@@ -106,6 +109,15 @@ orchestrator:
   # Compute planned actions only; no kernel writes, no persistence.
   # sources: cli
   dry_run: false
+  # Leader-election owner id for orchestrator_leases (reconstruction-contracts.md §15); empty = orch-<hostname>-<pid>.
+  # sources: cli
+  owner: ''
+  # orchestrator_leases expiry in seconds (§15); the owning instance refreshes every poll round and releases on close.
+  # sources: cli
+  lease_seconds: 60
+  # 0600 file with the kernel bearer token; every kernel request carries Authorization: Bearer <token>.
+  # sources: cli/file
+  token_file: ''
 
 kernel:
   # Kernel HTTP listen host.

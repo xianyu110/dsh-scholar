@@ -66,7 +66,14 @@ CREATE TABLE IF NOT EXISTS orchestrator_actions (
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL,
   UNIQUE(project_id, idempotency_key)
-)`
+);
+CREATE TABLE IF NOT EXISTS orchestrator_leases (
+  project_id  TEXT PRIMARY KEY,
+  owner       TEXT NOT NULL,
+  generation  INTEGER NOT NULL DEFAULT 1,
+  expires_at  TEXT NOT NULL
+)
+`
 
 export function buildActionId(): string {
   return `act_${randomUUID().replaceAll('-', '')}`
@@ -193,6 +200,58 @@ export class ActionStore {
       "UPDATE orchestrator_actions SET status = 'queued', updated_at = ? WHERE status = 'running'",
     ).run(nowIso())
     return Number(result.changes)
+  }
+
+  // ── orchestrator_leases leader election (reconstruction-contracts.md §15) ─
+
+  /**
+   * Try to become the phase controller for `projectId` (§15: one Project
+   * Phase Controller per project via orchestrator_leases(project_id, owner,
+   * generation, expires_at)). Granted when:
+   *   - no lease row exists (first claimant), or
+   *   - the caller already owns the lease (renew: generation+1), or
+   *   - the current lease has EXPIRED (takeover: generation+1).
+   * A live lease owned by another instance is NOT granted — the caller must
+   * skip the project this round (no silent double-advance).
+   */
+  claimLease(projectId: string, owner: string, leaseSeconds: number): { granted: boolean; generation: number } {
+    const expiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString()
+    const row = this.db.prepare('SELECT owner, generation, expires_at FROM orchestrator_leases WHERE project_id = ?')
+      .get(projectId) as { owner: string; generation: number; expires_at: string } | undefined
+    if (row === undefined) {
+      this.db.prepare('INSERT INTO orchestrator_leases (project_id, owner, generation, expires_at) VALUES (?, ?, 1, ?)')
+        .run(projectId, owner, expiresAt)
+      return { granted: true, generation: 1 }
+    }
+    const expired = row.expires_at < nowIso()
+    if (row.owner === owner || expired) {
+      const generation = Number(row.generation) + 1
+      this.db.prepare('UPDATE orchestrator_leases SET owner = ?, generation = ?, expires_at = ? WHERE project_id = ?')
+        .run(owner, generation, expiresAt, projectId)
+      return { granted: true, generation }
+    }
+    return { granted: false, generation: Number(row.generation) }
+  }
+
+  /** Renew the lease for a project this instance owns; false when not the owner. */
+  refreshLease(projectId: string, owner: string, leaseSeconds: number): boolean {
+    const expiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString()
+    const result = this.db.prepare(
+      'UPDATE orchestrator_leases SET expires_at = ? WHERE project_id = ? AND owner = ?',
+    ).run(expiresAt, projectId, owner)
+    return Number(result.changes) === 1
+  }
+
+  /** Voluntarily give up the lease (graceful shutdown); no-op when not the owner. */
+  releaseLease(projectId: string, owner: string): void {
+    this.db.prepare('DELETE FROM orchestrator_leases WHERE project_id = ? AND owner = ?').run(projectId, owner)
+  }
+
+  /** Current lease holder (diagnostics/tests). */
+  leaseHolder(projectId: string): { owner: string; generation: number; expires_at: string } | null {
+    const row = this.db.prepare('SELECT owner, generation, expires_at FROM orchestrator_leases WHERE project_id = ?')
+      .get(projectId) as { owner: string; generation: number; expires_at: string } | undefined
+    return row === undefined ? null : { owner: row.owner, generation: Number(row.generation), expires_at: row.expires_at }
   }
 
   /** Create a fresh Action row (not yet persisted). */

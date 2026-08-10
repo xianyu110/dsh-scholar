@@ -20,6 +20,11 @@ export function openDatabase(path: string, log?: (line: string) => void): Databa
   const db = new DatabaseSync(path)
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA foreign_keys = ON')
+  // storage-migrations.md §2: bounded busy retry for concurrent writers —
+  // short transactions + Revision CAS already limit contention; busy_timeout
+  // (5s) converts SQLITE_BUSY into a bounded wait instead of an immediate
+  // throw when another writer holds the (single-writer) lock briefly.
+  db.exec('PRAGMA busy_timeout = 5000')
   // storage-migrations.md §8: explicit ordered migrations (checksummed,
   // idempotent, transactional); schema_version only bumps after success.
   runMigrations(db, log)

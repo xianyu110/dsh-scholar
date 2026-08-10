@@ -19,16 +19,17 @@ DSH Scholar 的目标是辅助研究，而不是代替研究者承担决策和�
 
 项目仍处于 **Security Alpha / Architecture Prototype** 阶段，适合开发、评测和人工监督下的私有实验，不应作为无人值守的正式科研系统使用。
 
-当前仓库已经具备 Research Kernel、DSH Agent 插件、独立 Web UI、Runner、统计分析、学术连接器、持久编排、Claim–Evidence、LaTeX 输出基础、发布包和测试基础。浏览器 UI 只支持独立模式，不再注入 DSH Web。以下 v2 能力仍在开发：
+当前仓库已经具备 Research Kernel、DSH Agent 插件、独立 Web UI、Runner、统计分析、学术连接器、持久编排、Claim–Evidence、LaTeX 输出基础、发布包和测试基础。浏览器 UI 只支持独立模式，不再注入 DSH Web。以下 v2 能力的**服务端/契约层已实现**（浏览器 UI 层与真实环境验收仍待 Playwright 类环境）：
 
-- 实时 Terminal：查看命令、stdout/stderr、退出状态和可恢复日志流；
-- 可操作 Interactive Terminal 与 VS Code 式 Workspace：直接浏览、上传、编辑项目文件并运行受控 PTY；
-- TeX Workbench：编辑 `.tex`/`.bib`、保存后实时预览、查看编译日志、诊断和 PDF；
-- 本机 Docker 与受控远端 Runner、统一 Config Schema 和集中 Settings；
-- Init / Resume / Upload、Grill Me、结构化下一步引导，用于接入其他地方已完成的研究；
-- Research Trajectory 与 subagent 父子拓扑、进入 child 查看和授权续问；
-- 全页面中英文 i18n；
-- 完整的认证 Principal、项目级 AuthZ、`/v2` API 和显式数据库迁移。
+- 实时 Terminal：SSE、seq/gap/reconnect、分通道、lease fencing、权威终态与最终日志 Artifact（tests/unit/terminal.test.ts、run-terminal-tests.sh）；
+- Interactive Terminal（PTY）与通用 Workspace：真实 PTY adapter、磁盘 workspace adapter、TeX facade（tests/unit/pty-local/pty-session/workspace-store.test.ts、run-workspace-tests.sh）；浏览器 TUI/Explorer 剩余；
+- TeX Workbench：版本化编辑、冻结字节编译、实时 Preview（TEX-01/TEX-03,tex-preview/tex-build/tex-kernel.test.ts）；浏览器同页实时 Terminal/Preview 剩余；
+- 本机 Docker 与受控远端 Runner：ExecutionTarget port、Remote Fleet wire 协议与代理端（RUN-REMOTE-01）；真实 mTLS/远端 sandbox 验收剩余；
+- 统一 Config Schema：canonical Config Registry、parseCli 四二进制、pin/redaction、生成物（CONFIG-01）；Settings UI 与 SecretRef 存储剩余；
+- Init / Resume / Upload、Grill Me、结构化下一步引导：Intake 服务端全链 + NextAction 结构化投影（ONBOARD-01/GUIDE-01）；浏览器向导与 Agent tool 面剩余；
+- Research Trajectory 与 subagent 父子拓扑：只读投影、redaction、direct-child、followup 记账（TRAJ-01/SUBAGENT-01）；浏览器树/SSE 剩余；
+- 全页面中英文 i18n：运行时 locale 模型与静态 parity 检查已实现；浏览器全表面验收剩余；
+- 完整的认证 Principal、项目级 AuthZ、`/v2` API 和显式数据库迁移：v2 project adapter 与 BFF AuthZ 已实现，v2 全表面为迁移目标（v1 为当前迁移 adapter）。
 
 当前状态与目标差距见 [docs/hardening-v0.2-status.md](docs/hardening-v0.2-status.md)。
 

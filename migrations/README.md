@@ -1,22 +1,31 @@
 # Schema migrations
 
-The Research Kernel owns its schema version in `packages/research-kernel/src/store.ts`:
+The Research Kernel owns its schema version and ordered migration steps in
+`packages/research-kernel/src/migrations.ts` (storage-migrations.md §8):
 
-- `SCHEMA_VERSION` — the current database schema version (integer).
-- `MIGRATION_V1` — the initial schema: projects, gates, decisions, ideas,
-  contracts, corpus_snapshots, artifacts, jobs, evidence, claims, events,
-  session_links, budget, manuscripts, meta.
+- `SCHEMA_VERSION` — the current database schema version (integer, currently 12
+  after migrations 0001–0013).
+- `MIGRATIONS` — the ordered, checksummed, idempotent migration steps
+  (`0001_schema_v2_initial` … `0013_trajectory_topology`). Each step records
+  `(id, checksum, applied_at, report_json)` in `schema_migrations`; re-running
+  the same id+checksum is a no-op, a different checksum fails loud.
+- The legacy v1 fixture for upgrade drills lives at
+  `tests/fixtures/databases/v1-kernel.db` (rebuilt by
+  `tests/fixtures/databases/build-v1-fixture.mjs`).
 
-Open behavior (design §9.3): `openDatabase` verifies the stored
-`schema_version` matches `SCHEMA_VERSION` and rejects mismatches loudly.
+Open behavior (design §9.3): `openDatabase` (`packages/research-kernel/src/store.ts`)
+runs WAL + foreign_keys + bounded busy_timeout, then runs pending migrations in
+order and rejects a stored `schema_version` above the supported version loudly
+(downgrade requires an explicit script).
 
 ## Adding a migration (v2+)
 
-1. Append `MIGRATION_V2 = \`ALTER TABLE ...\`` (plus indexes) in `store.ts`.
-2. Bump `SCHEMA_VERSION` to 2.
-3. In `openDatabase`, run the pending migrations in order after `MIGRATION_V1`,
-   then update `meta.schema_version`.
-4. Add a fixture + upgrade drill test under `tests/unit/`.
+1. Append a new step to `MIGRATIONS` in `packages/research-kernel/src/migrations.ts`
+   (`id: '0014_...'`, runnable body, checksum auto-derived).
+2. Bump `SCHEMA_VERSION` to the next integer.
+3. Never edit an already-released step; new changes are new versions
+   (storage-migrations.md §8.1).
+4. Add/refresh an upgrade-drill test under `tests/unit/migrations.test.ts`.
 
 ## Policy
 

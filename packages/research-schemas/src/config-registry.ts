@@ -151,6 +151,14 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     description: 'Artifact store backing the project.',
   },
   {
+    key: 'execution.fixture_id',
+    scope: 'project',
+    schema: z.string().nullable(),
+    default: null,
+    sources: ['http', 'ui', 'file'],
+    description: 'Registered FixtureProfile id for full-auto projects (reconstruction-contracts.md §5); full-auto without a registered fixture is rejected at project create and job submit.',
+  },
+  {
     key: 'integrity.require_baseline_reproduction',
     scope: 'project',
     schema: z.boolean(),
@@ -373,6 +381,33 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     cli: { flag: 'dry-run' },
     sources: ['cli'],
     description: 'Compute planned actions only; no kernel writes, no persistence.',
+  },
+  {
+    key: 'orchestrator.owner',
+    scope: 'orchestrator',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'owner' },
+    sources: ['cli'],
+    description: 'Leader-election owner id for orchestrator_leases (reconstruction-contracts.md §15); empty = orch-<hostname>-<pid>.',
+  },
+  {
+    key: 'orchestrator.lease_seconds',
+    scope: 'orchestrator',
+    schema: ms(),
+    default: 60,
+    cli: { flag: 'lease-seconds' },
+    sources: ['cli'],
+    description: 'orchestrator_leases expiry in seconds (§15); the owning instance refreshes every poll round and releases on close.',
+  },
+  {
+    key: 'orchestrator.token_file',
+    scope: 'orchestrator',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'token-file' },
+    sources: ['cli', 'file'],
+    description: '0600 file with the kernel bearer token; every kernel request carries Authorization: Bearer <token>.',
   },
 
   // ── kernel (research-kernel CLI / sidecar) ────────────────────────────────

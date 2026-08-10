@@ -114,7 +114,15 @@ export async function renderEvidence(body: HTMLElement, projectId: string): Prom
       }
       row.appendChild(delta)
       row.appendChild(el('span', 'grow'))
-      row.appendChild(pill('verified'))
+      // gui-plugin-plan.md §10: provenance_status is displayed as-is (raw
+      // wire value per the i18n rule "unknown enums render verbatim") —
+      // never a hardcoded 'verified' pill. Accepted evidence gets green.
+      const provenance = item.provenance_status ?? 'unknown'
+      const badge = pill(provenance)
+      badge.style.color = provenance === 'accepted' ? 'var(--tone-green)'
+        : provenance === 'verified' ? 'var(--tone-blue)'
+          : 'var(--tone-slate)'
+      row.appendChild(badge)
       // dsh-web drawer: one-click evidence details (double-click still works).
       const detailsBtn = el('button', 'hbtn', '⧉')
       detailsBtn.title = t('evidence', 'evidence.evidenceDetails')

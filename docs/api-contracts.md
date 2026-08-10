@@ -41,7 +41,7 @@
 | 500 | internal_error | 脱敏内部失败 |
 | 502 | kernel_unreachable、connector_unavailable | 依赖不可用 |
 
-稳定补充 code：invalid_cursor(400,false)、unsupported_media_type(415,false)、idempotency_conflict(409,false)、upload_offset_conflict(409,true)、artifact_stage_expired(409,false)、document_version_conflict(409,true)、tex_root_not_found(422,false)、lease_conflict/lease_stale(409,true)、job_finished(409,false)、manifest_invalid/signature_invalid(422,false)、project_required(422,false)。括号第二项是 retryable；未登记 code 默认 retryable=false。
+稳定补充 code：invalid_cursor(400,false)、unsupported_media_type(415,false)、idempotency_conflict(409,false)、upload_offset_conflict(409,true)、artifact_stage_expired(409,false)、document_version_conflict(409,true)、tex_root_not_found(422,false)、lease_conflict/lease_stale(409,true)、job_finished(409,false)、manifest_invalid/signature_invalid(422,false)、project_required(422,false)、fixture_required(422,false)、fixture_image_mismatch(422,false)、fixture_artifact_outside_profile(422,false)、fixture_code_mismatch(422,false)、jobs_running(409,false)、domain_unsupported(422,false)。括号第二项是 retryable；未登记 code 默认 retryable=false。
 
 Zod 错误 details 只返回字段路径和安全消息。上游 5xx、文件系统绝对路径、SQL、环境变量和 Token 不得传到浏览器。
 

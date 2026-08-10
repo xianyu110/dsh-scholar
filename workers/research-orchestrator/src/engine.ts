@@ -9,9 +9,11 @@
  *
  * Recovery (§8.5): on startup the Engine reads every action from its store and
  * continues purely from the Kernel projection. Each step is idempotent per
- * (project_id, idempotency_key), so a crashed poll is replayed safely. Exactly
- * one orchestrator instance should run per project (single phase controller);
- * this process is that single instance.
+ * (project_id, idempotency_key), so a crashed poll is replayed safely. Leader
+ * election (§15): one Project Phase Controller per project is enforced via the
+ * orchestrator_leases table — this instance claims a lease per project every
+ * round (expiry + takeover), skips projects held by another live owner, and
+ * releases its leases on close().
  *
  * Failure policy (§8.4, simplified): a failed Kernel call records last_error,
  * bumps attempt, and the step is retried on the next round while
@@ -21,8 +23,31 @@
  * @module @dsh-scholar/research-orchestrator/engine
  */
 
+import { hostname } from 'node:os'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ActionStore, type Action, type ActionLike } from './actions.js'
+
+/** §15: orchestrator_leases default expiry (seconds). */
+const DEFAULT_LEASE_SECONDS = 60
+
+/**
+ * Read the Kernel bearer token from --token-file (0600 file, §15). Fails fast
+ * when the file was requested but is missing/unreadable — a wrongly configured
+ * orchestrator must not silently run without kernel auth.
+ */
+function readTokenFile(tokenFile: string | undefined, log: (message: string) => void): string | null {
+  if (tokenFile === undefined || tokenFile === '') return null
+  if (!existsSync(tokenFile)) {
+    throw new Error(`--token-file ${tokenFile} does not exist (kernel bearer token required)`)
+  }
+  const token = readFileSync(tokenFile, 'utf8').trim()
+  if (token === '') {
+    throw new Error(`--token-file ${tokenFile} is empty`)
+  }
+  log(`using kernel bearer token from ${tokenFile}`)
+  return token
+}
 
 /**
  * Project lifecycle statuses as reported by the Kernel projection
@@ -116,6 +141,16 @@ export interface EngineOptions {
   dryRun?: boolean
   /** Max attempts before an action is marked failed (§8.4). Default 3. */
   maxAttempts?: number
+  /** Leader-election owner id (§15, orchestrator_leases). Defaults to
+   * `orch-<hostname>-<pid>`. One owner holds the lease per project; other
+   * instances skip the project until the lease expires or is released. */
+  owner?: string
+  /** orchestrator_leases expiry in seconds (§15). Default 60. */
+  leaseSeconds?: number
+  /** Path to a 0600 file holding the Kernel bearer token (--token-file).
+   * When set, every Kernel request carries `Authorization: Bearer <token>`.
+   * Missing/unreadable file fails fast at construction. */
+  tokenFile?: string
 }
 
 export class KernelApiError extends Error {
@@ -213,25 +248,42 @@ export class Engine {
   readonly maxAttempts: number
   readonly dryRun: boolean
   readonly store: ActionStore
+  /** Leader-election identity (§15, orchestrator_leases). */
+  readonly owner: string
+  /** orchestrator_leases expiry in seconds (§15). */
+  readonly leaseSeconds: number
+  /** Kernel bearer token (--token-file) or null when not configured. */
+  readonly token: string | null
 
   private stopped = false
   private timer: ReturnType<typeof setTimeout> | undefined
   private log: (message: string) => void
+  /** Projects this instance currently holds the phase-controller lease for. */
+  private ownedProjects = new Set<string>()
 
   constructor(options: EngineOptions, log: (message: string) => void = (m) => { console.error(`[research-orchestrator] ${m}`) }) {
     this.kernelUrl = options.kernelUrl.replace(/\/+$/, '')
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
     this.dryRun = options.dryRun ?? false
+    this.owner = options.owner ?? `orch-${hostname()}-${process.pid}`
+    this.leaseSeconds = options.leaseSeconds ?? DEFAULT_LEASE_SECONDS
+    this.token = readTokenFile(options.tokenFile, log)
     this.log = log
     this.store = new ActionStore({ dbPath: options.dbPath ?? join(process.cwd(), '.orchestrator', 'actions.db') })
     // §8.5: startup recovery — stale `running` rows from a crashed process
     // become retryable again; everything else is read as-is.
     const recovered = this.store.recover()
     if (recovered > 0) this.log(`recovered ${recovered} stale running action(s) from crash`)
+    if (!this.dryRun) this.log(`leader election: owner=${this.owner} lease=${this.leaseSeconds}s${this.token !== null ? ' (kernel bearer token: yes)' : ''}`)
   }
 
+  /** Release every held lease, then close the store. */
   close(): void {
+    if (!this.dryRun) {
+      for (const projectId of this.ownedProjects) this.store.releaseLease(projectId, this.owner)
+      this.ownedProjects.clear()
+    }
     this.store.close()
   }
 
@@ -242,7 +294,7 @@ export class Engine {
     try {
       response = await fetch(`${this.kernelUrl}${path}`, {
         ...init,
-        headers: { 'content-type': 'application/json', ...init?.headers },
+        headers: { 'content-type': 'application/json', ...(this.token !== null ? { authorization: `Bearer ${this.token}` } : {}), ...init?.headers },
       })
     } catch (error) {
       throw new KernelApiError(0, 'network_error', `cannot reach kernel at ${this.kernelUrl}${path}: ${(error as Error).message}`)
@@ -304,6 +356,20 @@ export class Engine {
     for (const project of projects) {
       const detail: ProjectPollDetail = { project_id: project.project_id, status: project.status, planned: [], executed: [], skipped: [], errors: [] }
       try {
+        // §15 leader election: one Phase Controller per project via
+        // orchestrator_leases. When another instance holds a live lease,
+        // SKIP the project entirely — no silent double-advance. Leases are
+        // refreshed every round and released on close(). (dry-run never
+        // persists, so it never claims.)
+        if (!this.dryRun) {
+          const claim = this.store.claimLease(project.project_id, this.owner, this.leaseSeconds)
+          if (!claim.granted) {
+            detail.skipped.push(`lease held by another orchestrator owner (generation ${claim.generation})`)
+            result.details.push(detail)
+            continue
+          }
+          this.ownedProjects.add(project.project_id)
+        }
         const projection = await this.getProjection(project.project_id)
         detail.status = projection.project.status
         const existing = this.dryRun ? [] : this.store.listByProject(project.project_id)
@@ -316,6 +382,9 @@ export class Engine {
             result.executed += 1
           }
         }
+        // Renew the lease for the next round (§15: lease expiry must not
+        // fire while this instance is actively driving the project).
+        if (!this.dryRun) this.store.refreshLease(project.project_id, this.owner, this.leaseSeconds)
       } catch (error) {
         detail.errors.push((error as Error).message)
         result.errors.push(`${project.project_id}: ${(error as Error).message}`)

@@ -135,7 +135,7 @@ const ALLOWED_HARDCODED: Record<string, string> = {
   'packages/dsh-research-ui/src/client/index.ts:999': 'stamp line: t(updatedAt) + Intl time + raw lastError (nested template)',
   // nested-template edge case: raw wire join of verification history
   // (timestamp · reason), displayed verbatim.
-  'packages/dsh-research-ui/src/client/panels/evidence.ts:246': 'raw history join: when · reason (nested template)',
+  'packages/dsh-research-ui/src/client/panels/evidence.ts:254': 'raw history join: when · reason (nested template)',
   // nested-template edge cases on raw wire/number joins (§8 line 115 keeps
   // wire/model/Terminal/TeX raw text verbatim):
   'packages/dsh-research-ui/src/client/panels/budget.ts:120': 'raw budget numbers: value / max (nested template)',
