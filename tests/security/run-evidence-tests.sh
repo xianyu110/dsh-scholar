@@ -30,7 +30,11 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): the kernel runs with the fixed eval service token;
+# positive internal calls (verified/accept) carry x-service-token via the
+# helper. Negative tests below use RAW curl WITHOUT the token on purpose.
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 
@@ -119,18 +123,28 @@ C2=$(api -X POST "$BASE/v1/projects/$PROJ/claims" -d '{"statement":"verified but
 S2=$(api -X POST "$BASE/v1/claims/verify" -d "{\"claim_id\":\"$C2\",\"evidence_ids\":[\"$E2\"]}" | jfield '.status')
 [[ "$S2" == "inconclusive" ]] && ok "verified (unaccepted) evidence verify -> inconclusive" || bad "verified-unaccepted evidence verify became '$S2' (expected inconclusive)"
 
-say "Test: accept without service identity -> 403"
+say "Test: verified/accept without service token -> 403 (service identity gate)"
+# §4 P0 (EVID-01): the internal routes demand x-service-token FIRST — a
+# self-reported x-service-principal alone (even with the right value) must
+# NOT unlock them; the browser bearer credential is equally rejected.
+CODE_V0=$(curl -s -o "$WORK/resp-v0.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -H 'content-type: application/json' -H 'x-service-principal: analysis-worker' -d '{"source_type":"analysis","run_ids":[],"artifact_refs":["'"$ART"'"],"analysis_method":"bootstrap-95","result":{"primary_metric":"accuracy","value":0.91}}')
+ERR_V0=$(jfield '.error.code' < "$WORK/resp-v0.json")
+if [[ "$CODE_V0" == "403" && "$ERR_V0" == "service_token_required" ]]; then
+  ok "verified ingestion without x-service-token -> HTTP 403 service_token_required (self-reported principal rejected)"
+else
+  bad "expected 403 service_token_required for verified without token, got HTTP $CODE_V0 (error=$ERR_V0)"
+fi
 CODE4=$(curl -s -o "$WORK/resp4.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ/evidence/$E2/accept" -H 'content-type: application/json' -d '{"request_id":"req-ev-4"}')
 ERR4=$(jfield '.error.code' < "$WORK/resp4.json")
-if [[ "$CODE4" == "403" && "$ERR4" == "service_identity_required" ]]; then
-  ok "accept without x-service-principal -> HTTP 403 service_identity_required"
+if [[ "$CODE4" == "403" && "$ERR4" == "service_token_required" ]]; then
+  ok "accept without x-service-token -> HTTP 403 service_token_required"
 else
-  bad "expected 403 service_identity_required, got HTTP $CODE4 (error=$ERR4)"
+  bad "expected 403 service_token_required, got HTTP $CODE4 (error=$ERR4)"
 fi
-CODE4B=$(curl -s -o "$WORK/resp4b.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ/evidence/$E2/accept" -H 'content-type: application/json' -H 'x-service-principal: public-user' -d '{"request_id":"req-ev-4b"}')
+CODE4B=$(curl -s -o "$WORK/resp4b.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ/evidence/$E2/accept" -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -H 'x-service-principal: public-user' -d '{"request_id":"req-ev-4b"}')
 ERR4B=$(jfield '.error.code' < "$WORK/resp4b.json")
 if [[ "$CODE4B" == "403" && "$ERR4B" == "service_identity_required" ]]; then
-  ok "accept with a non-verifier/auditor principal -> HTTP 403 service_identity_required"
+  ok "accept with token but a non-verifier/auditor principal -> HTTP 403 service_identity_required"
 else
   bad "expected 403 for non-service principal, got HTTP $CODE4B (error=$ERR4B)"
 fi
@@ -147,7 +161,7 @@ else
 fi
 
 say "Test: cross-project accept -> 422"
-CODE6=$(curl -s -o "$WORK/resp6.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ2/evidence/$E2/accept" -H 'content-type: application/json' -H 'x-service-principal: verifier' -d '{"request_id":"req-ev-6"}')
+CODE6=$(curl -s -o "$WORK/resp6.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ2/evidence/$E2/accept" -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -H 'x-service-principal: verifier' -d '{"request_id":"req-ev-6"}')
 ERR6=$(jfield '.error.code' < "$WORK/resp6.json")
 if [[ "$CODE6" == "422" && "$ERR6" == "evidence_foreign" ]]; then
   ok "accepting evidence of another project -> HTTP 422 evidence_foreign"

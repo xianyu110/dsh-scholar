@@ -138,14 +138,27 @@ describe('computePairedAnalysis — direction (§13.4, §13.5)', () => {
     const plan = makePlan({ minimum_n: 2 })
     expect(computePairedAnalysis(plan, up, positive).direction_ok).toBe(true)
     expect(computePairedAnalysis(plan, up, negative).direction_ok).toBe(false)
-    expect(computePairedAnalysis(plan, up, zero).direction_ok).toBe(false)
+    const zeroResult = computePairedAnalysis(plan, up, zero)
+    expect(zeroResult.direction_ok).toBe(false)
+    // §12: zero paired difference ⇒ direction_ok=false and raw p=1.
+    expect(zeroResult.raw_p_value).toBe(1)
   })
 
   it('lower_is_better: negative effect is direction_ok, positive/zero is not', () => {
     const plan = makePlan({ minimum_n: 2, metric: { name: 'loss', direction: 'lower_is_better', aggregation: 'mean' } })
     expect(computePairedAnalysis(plan, up, positive).direction_ok).toBe(false)
     expect(computePairedAnalysis(plan, up, negative).direction_ok).toBe(true)
-    expect(computePairedAnalysis(plan, up, zero).direction_ok).toBe(false)
+    const zeroResult = computePairedAnalysis(plan, up, zero)
+    expect(zeroResult.direction_ok).toBe(false)
+    expect(zeroResult.raw_p_value).toBe(1)
+  })
+
+  it('reports a two-sided bootstrap raw_p_value in (0,1] with adjusted_p_value == raw_p for one metric', () => {
+    const plan = makePlan({ minimum_n: 2 })
+    const r = computePairedAnalysis(plan, up, positive)
+    expect(r.raw_p_value).toBeGreaterThan(0)
+    expect(r.raw_p_value).toBeLessThanOrEqual(1)
+    expect(r.adjusted_p_value).toBe(r.raw_p_value) // Holm identity for one metric
   })
 })
 
@@ -184,6 +197,7 @@ describe('parseMetricsFile (§12.5)', () => {
     ['empty metrics', { schema_version: 1, run_id: 'r', contract_id: 'c', seed: 1, metrics: [] }],
     ['metric without name', { schema_version: 1, run_id: 'r', contract_id: 'c', seed: 1, metrics: [{ value: 1, unit: 'u' }] }],
     ['non-numeric value', { schema_version: 1, run_id: 'r', contract_id: 'c', seed: 1, metrics: [{ name: 'm', value: 'high', unit: 'u' }] }],
+    ['duplicate metric names', { schema_version: 1, run_id: 'r', contract_id: 'c', seed: 1, metrics: [{ name: 'm', value: 1 }, { name: 'm', value: 2 }] }],
     ['top-level array', [1, 2, 3]],
   ])('rejects malformed metrics file: %s', (_label, obj) => {
     const content = typeof obj === 'string' ? obj : JSON.stringify(obj)
@@ -225,6 +239,9 @@ describe('validation (§13.2, §13.3)', () => {
     expect(() => validateAnalysisPlan(makePlan({ paired_by: 'run_id' as never }))).toThrow(/paired_by/)
     expect(() => validateAnalysisPlan(makePlan({ method: { ...plan.method, estimator: 'ttest' as never } }))).toThrow(/estimator/)
     expect(() => validateAnalysisPlan(makePlan({ method: { ...plan.method, resamples: 0 } }))).toThrow(/resamples/)
+    // §12: bootstrap resamples are production-fixed at 10,000.
+    expect(() => validateAnalysisPlan(makePlan({ method: { ...plan.method, resamples: 1000 } }))).toThrow(/10000/)
+    expect(() => validateAnalysisPlan(makePlan({ method: { ...plan.method, resamples: 10001 } }))).toThrow(/10000/)
     expect(() => validateAnalysisPlan(makePlan({ minimum_n: 0 }))).toThrow(/minimum_n/)
     expect(() => validateAnalysisPlan(makePlan({ baseline_run_set_id: 'same' as never, treatment_run_set_id: 'same' }))).toThrow(/differ/)
     expect(() => validateAnalysisPlan(makePlan({ multiple_testing: 'bonferroni' as never }))).toThrow(/multiple_testing/)
@@ -236,9 +253,22 @@ describe('holmAdjust', () => {
     expect(holmAdjust([0.05])).toEqual([0.05])
   })
 
-  it('applies the Holm step-down adjustment', () => {
-    expect(holmAdjust([0.01, 0.04])).toEqual([0.02, 0.02])
-    expect(holmAdjust([0.04, 0.01])).toEqual([0.02, 0.02])
+  it('applies the classic Holm step-down adjustment (monotone, capped at 1)', () => {
+    // sorted [0.01, 0.04]: steps 2*0.01=0.02, 1*0.04=0.04 → input order [0.02, 0.04]
+    expect(holmAdjust([0.01, 0.04])).toEqual([0.02, 0.04])
+    // input order: 0.04→0.04, 0.01→0.02
+    expect(holmAdjust([0.04, 0.01])).toEqual([0.04, 0.02])
+    // steps 2*0.7=1 → cap 1, 1*0.9=0.9 → running max 1
+    expect(holmAdjust([0.7, 0.9])).toEqual([1, 1])
+    // steps 2*0.4=0.8, 1*0.7=0.7 → monotone max [0.8, 0.8]
+    expect(holmAdjust([0.4, 0.7])).toEqual([0.8, 0.8])
+  })
+
+  it('breaks ties by metric name ascending and stays monotone (§12)', () => {
+    // equal raw p: adjusted values are identical; the order only decides the
+    // tie-break, never the values
+    expect(holmAdjust([0.01, 0.01], ['z_metric', 'a_metric'])).toEqual([0.02, 0.02])
+    expect(() => holmAdjust([0.1], ['a', 'b'])).toThrow(/names/)
   })
 })
 
@@ -293,6 +323,7 @@ describe('computePairedAnalysis — §6 byte determinism & §12 golden vector', 
       'ci_low',
       'ci_high',
       'n_pairs',
+      'raw_p_value',
       'adjusted_p_value',
       'direction_ok',
     ])
@@ -318,9 +349,22 @@ describe('computePairedAnalysis — §6 byte determinism & §12 golden vector', 
       'ci_low',
       'ci_high',
       'n_pairs',
+      'raw_p_value',
       'adjusted_p_value',
       'direction_ok',
     ])
+  })
+
+  it('matches the golden vector additional case (mz zero difference) byte-for-byte', () => {
+    const extra = fixture.additional_cases?.[1]
+    expect(extra).toBeDefined()
+    const result = computePairedAnalysis(extra!.input.plan, extra!.input.baseline_runs, extra!.input.treatment_runs)
+    expect(JSON.stringify(result)).toBe(extra!.canonical_output)
+    // §12: a zero paired difference forces direction_ok=false and raw p=1.
+    expect(result.paired_mean_difference).toBe(0)
+    expect(result.raw_p_value).toBe(1)
+    expect(result.adjusted_p_value).toBe(1)
+    expect(result.direction_ok).toBe(false)
   })
 
   it('run array order does not change the output bytes (canonicalized by seed)', () => {
@@ -345,16 +389,28 @@ describe('computePairedAnalysis — §6 byte determinism & §12 golden vector', 
     )
   })
 
-  it('differs when the plan identity differs (RNG seed is plan-derived)', () => {
-    const { plan, baseline_runs: baseline, treatment_runs: treatment } = fixture.input
-    const otherContract = computePairedAnalysis({ ...plan, contract_id: 'expc_other_contract' }, baseline, treatment)
-    const otherMetric = computePairedAnalysis(
-      { ...plan, metric: { ...plan.metric, name: 'other_metric' } },
-      baseline,
-      treatment,
+  it('differs when the plan identity differs (RNG seed is plan-derived, §12)', () => {
+    // §12 canonical seed = FNV-1a(canonical JSON of plan + ordered run IDs +
+    // metric values): changing the plan identity must move the mulberry32
+    // stream. The golden dataset is too coarse for that to show through the
+    // 12-significant-digit rounding (all bootstrap means stay positive, CI
+    // quantiles land on the same rounded values), so this assertion uses
+    // diffs that straddle zero — the pLow/pHigh tail counts then vary
+    // observably with the stream.
+    const base = [run('b1', 1, 0.5), run('b2', 2, 0.5), run('b3', 3, 0.5)]
+    const treat = [run('t1', 1, 1.0), run('t2', 2, 0.2), run('t3', 3, 0.6)] // diffs 0.5, −0.3, 0.1
+    const plan = makePlan({ minimum_n: 3, analysis_plan_id: 'seed_drift_plan' })
+    const canonical = computePairedAnalysis(plan, base, treat)
+    const otherContract = computePairedAnalysis({ ...plan, contract_id: 'expc_other_contract' }, base, treat)
+    const otherMetric = computePairedAnalysis({ ...plan, metric: { ...plan.metric, name: 'other_metric' } }, base, treat)
+    const otherRunSets = computePairedAnalysis(
+      { ...plan, baseline_run_set_id: 'runset_other_baseline', treatment_run_set_id: 'runset_other_treatment' },
+      base,
+      treat,
     )
-    expect(JSON.stringify(otherContract)).not.toBe(fixture.canonical_output)
-    expect(JSON.stringify(otherMetric)).not.toBe(fixture.canonical_output)
+    const outs = [canonical, otherContract, otherMetric, otherRunSets].map((r) => JSON.stringify(r))
+    // the four plan identities must produce four distinct byte strings
+    expect(new Set(outs).size).toBe(4)
   })
 })
 

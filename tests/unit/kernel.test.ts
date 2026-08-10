@@ -2212,3 +2212,171 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
     rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('service token auth on internal routes (hardening §4 P0 API-01/EVID-01)', () => {
+  const SERVICE_TOKEN = 'unit-test-service-token-0001'
+
+  function tokenKernel(): ResearchKernel {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-svc-'))
+    return new ResearchKernel({
+      dbPath: join(dir, 'kernel.db'),
+      casRoot: join(dir, 'cas'),
+      requireSignedManifest: false,
+      serviceToken: SERVICE_TOKEN,
+    })
+  }
+
+  const claimBody = () => ({ owner: 'svc-unit', limit: 1, lease_ttl_seconds: 60 })
+  const evidenceBody = (artifact: string) => ({
+    source_type: 'analysis', run_ids: [], artifact_refs: [artifact],
+    analysis_method: 'bootstrap_95',
+    result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 2 },
+  })
+
+  async function post(port: number, path: string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; code: string }> {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    })
+    const envelope = await res.json().catch(() => ({})) as { error?: { code?: string } }
+    return { status: res.status, code: envelope.error?.code ?? '' }
+  }
+
+  it('kernel methods are unaffected by a configured serviceToken (no client layer impact)', () => {
+    const kernel = tokenKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'svc-1', kind: 'echo', payload: { message: 'x' } })
+    expect(job.status).toBe('queued')
+    const claimed = kernel.claimJobs('svc-unit', 60, 8)
+    expect(claimed.some(c => c.job_id === job.job_id)).toBe(true)
+    expect(kernel.recoverExpiredLeases()).toBeGreaterThanOrEqual(0)
+    const { publicKey } = generateKeyPairSync('ed25519')
+    kernel.registerRunnerKey({ key_id: 'k1', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() })
+    const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: '{}' })
+    const item = kernel.ingestVerifiedEvidence({ project_id: project.project_id, source_type: 'analysis', run_ids: [], artifact_refs: [artifact.artifact_id], analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 2 } })
+    expect(kernel.acceptEvidence({ project_id: project.project_id, evidence_id: item.evidence_id, service_principal: 'verifier', request_id: 'req_svc' }).provenance_status).toBe('accepted')
+    const contract = kernel.registerContract({ project_id: project.project_id, idea_id: 'idea_svc', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' }, metrics: { primary: 'm' } })
+    expect(kernel.approveContract(contract.contract_id, 'dec_svc', 'pi').status).toBe('approved')
+    kernel.close()
+  })
+
+  it('server: every internal route rejects missing/bearer/wrong credentials with 403 service_token_required and accepts the correct x-service-token', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = tokenKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: '{}' })
+    const contract = kernel.registerContract({ project_id: project.project_id, idea_id: 'idea_svc', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' }, metrics: { primary: 'm' } })
+    const { publicKey } = generateKeyPairSync('ed25519')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      // Every internal route, probed four ways: no token / bearer / wrong / correct.
+      const routes: Array<{ path: string; body: unknown; ok: number; extraHeaders?: Record<string, string> }> = [
+        { path: '/v1/jobs-claim/run', body: claimBody(), ok: 200 },
+        { path: '/v1/runner-keys', body: { key_id: 'k-svc', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }, ok: 201 },
+        { path: '/v1/recover/leases', body: {}, ok: 200 },
+        { path: `/v1/projects/${project.project_id}/evidence/verified`, body: evidenceBody(artifact.artifact_id), ok: 201, extraHeaders: { 'x-service-principal': 'analysis-worker' } },
+        { path: `/v1/projects/${project.project_id}/contracts/${contract.contract_id}/approve`, body: { actor: 'svc-unit' }, ok: 200 },
+      ]
+      for (const route of routes) {
+        // 1. no credential at all -> 403 service_token_required
+        const none = await post(port, route.path, route.body, route.extraHeaders)
+        expect(none.status).toBe(403)
+        expect(none.code).toBe('service_token_required')
+        // 2. the token in the browser bearer slot -> STILL 403
+        const bearer = await post(port, route.path, route.body, { authorization: `Bearer ${SERVICE_TOKEN}`, ...route.extraHeaders })
+        expect(bearer.status).toBe(403)
+        expect(bearer.code).toBe('service_token_required')
+        // 3. a wrong x-service-token -> 403
+        const wrong = await post(port, route.path, route.body, { 'x-service-token': 'wrong-token', ...route.extraHeaders })
+        expect(wrong.status).toBe(403)
+        expect(wrong.code).toBe('service_token_required')
+        // 4. the correct x-service-token -> success
+        const right = await post(port, route.path, route.body, { 'x-service-token': SERVICE_TOKEN, ...route.extraHeaders })
+        expect(right.status).toBe(route.ok)
+        expect(right.code).toBe('')
+      }
+      // The accept route needs a REAL verified evidence row (capture the id
+      // from the successful verified POST above — the fourth probe).
+      const verifiedRes = await fetch(`${base}/v1/projects/${project.project_id}/evidence/verified`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-service-token': SERVICE_TOKEN, 'x-service-principal': 'analysis-worker' },
+        body: JSON.stringify(evidenceBody(artifact.artifact_id)),
+      })
+      expect(verifiedRes.status).toBe(201)
+      const verifiedRow = await verifiedRes.json() as { evidence_id?: string }
+      const evidenceId = verifiedRow.evidence_id ?? ''
+      expect(evidenceId).not.toBe('')
+      const acceptPath = `/v1/projects/${project.project_id}/evidence/${evidenceId}/accept`
+      for (const [label, headers, status] of [
+        ['no token', {}, 403],
+        ['bearer only', { authorization: `Bearer ${SERVICE_TOKEN}`, 'x-service-principal': 'verifier' }, 403],
+        ['wrong token', { 'x-service-token': 'wrong-token', 'x-service-principal': 'verifier' }, 403],
+        ['correct token', { 'x-service-token': SERVICE_TOKEN, 'x-service-principal': 'verifier' }, 200],
+      ] as Array<[string, Record<string, string>, number]>) {
+        const r = await post(port, acceptPath, { request_id: `req_${label.replaceAll(' ', '_')}` }, headers)
+        expect(r.status).toBe(status)
+        if (status === 403) expect(r.code).toBe('service_token_required')
+      }
+      // Browser-bearing a forged x-service-principal on the public route is
+      // still impossible: the verified route demanded the service token above.
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('server: a kernel WITHOUT a serviceToken keeps internal routes open (dev compatibility)', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const res = await post(port, '/v1/jobs-claim/run', claimBody())
+      expect(res.status).toBe(200)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('ResearchClient with serviceToken authenticates internal calls; without it the kernel answers 403', async () => {
+    const { ResearchClient, KernelApiError } = await import('@dsh-scholar/research-client')
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = tokenKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'svc-c', kind: 'echo', payload: { message: 'x' } })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    const endpoint = `http://127.0.0.1:${port}`
+    try {
+      // Without the service token the internal calls are rejected 403.
+      const anonymous = new ResearchClient({ endpoint })
+      await expect(anonymous.claimJobs('svc-unit', 1)).rejects.toMatchObject({ status: 403 })
+      await expect(anonymous.claimJobs('svc-unit', 1)).rejects.toThrow(/x-service-token/)
+      // With the service token the internal calls succeed.
+      const service = new ResearchClient({ endpoint, serviceToken: SERVICE_TOKEN })
+      const claimed = await service.claimJobs('svc-unit', 1)
+      expect(claimed).toHaveLength(1)
+      const { publicKey } = generateKeyPairSync('ed25519')
+      const key = await service.registerRunnerKey({ key_id: 'k-client', public_key_pem: publicKey.export({ type: 'spki', format: 'pem' }).toString() })
+      expect(key.key_id).toBe('k-client')
+      expect((await service.recoverExpiredLeases()).recovered).toBeGreaterThanOrEqual(0)
+      const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: '{}' })
+      const item = await service.ingestVerifiedEvidence({ project_id: project.project_id, source_type: 'analysis', run_ids: [], artifact_refs: [artifact.artifact_id], analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 2 } })
+      expect(item.provenance_status).toBe('verified')
+      const accepted = await service.acceptEvidence(project.project_id, item.evidence_id, { request_id: 'req_client' })
+      expect(accepted.provenance_status).toBe('accepted')
+      const contract = kernel.registerContract({ project_id: project.project_id, idea_id: 'idea_c', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' }, metrics: { primary: 'm' } })
+      const approved = await service.approveContract(project.project_id, contract.contract_id, 'svc-client')
+      expect(approved.status).toBe('approved')
+      // A forged browser bearer never satisfies the internal gate.
+      const bearerOnly = new ResearchClient({ endpoint, token: SERVICE_TOKEN })
+      await expect(bearerOnly.claimJobs('svc-unit', 1)).rejects.toBeInstanceOf(KernelApiError)
+      await expect(bearerOnly.claimJobs('svc-unit', 1)).rejects.toMatchObject({ status: 403 })
+      await expect(bearerOnly.claimJobs('svc-unit', 1)).rejects.toThrow(/x-service-token/)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+})

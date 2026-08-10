@@ -32,7 +32,10 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01): the kernel runs with the fixed eval service token; the
+# helper attaches x-service-token so the internal approve route works.
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 
@@ -125,7 +128,7 @@ else
 fi
 
 say "Test: formal-job-contract-approved (approve route + positive submission)"
-APPROVE_CODE=$(curl -s -o "$WORK/approve.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ1/contracts/$CT_OK/approve" -H 'content-type: application/json' -d '{"actor":"formal-binding-eval"}')
+APPROVE_CODE=$(curl -s -o "$WORK/approve.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$PROJ1/contracts/$CT_OK/approve" -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -d '{"actor":"formal-binding-eval"}')
 APPROVED_STATUS=$(jfield '.status' < "$WORK/approve.json")
 if [[ "$APPROVE_CODE" == "200" && "$APPROVED_STATUS" == "approved" ]]; then
   ok "internal approve route froze contract -> HTTP 200 status=approved"

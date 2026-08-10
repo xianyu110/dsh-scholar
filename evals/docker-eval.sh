@@ -32,6 +32,11 @@ else
   docker image inspect node:22-alpine > /dev/null 2>&1 && ok "node:22-alpine pulled" || bad "image pull failed"
 fi
 
+# §4 P0 (API-01/EVID-01): the kernel is configured with the fixed eval
+# service token (runners inherit the env and authenticate their own internal
+# calls: claim / runner-keys / recover).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KERNEL_PID=$!
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && break; sleep 0.1; done

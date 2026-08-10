@@ -1,7 +1,8 @@
 /**
  * Research Kernel entry — sidecar process (design §9.1 Local Desktop Profile).
  * Usage: node lib/bin/kernel.js --db <path> --cas <dir> [--port 7412] [--token <t>]
- *        [--endpoint-file <path>]  (or DSH_SCHOLAR_KERNEL_ENDPOINT_FILE)
+ *        [--service-token <t>] [--endpoint-file <path>]
+ *        (or DSH_SCHOLAR_KERNEL_TOKEN / DSH_SCHOLAR_SERVICE_TOKEN)
  * @module @dsh-scholar/research-kernel/bin
  */
 
@@ -19,6 +20,10 @@ const { values } = parseArgs({
     port: { type: 'string' },
     host: { type: 'string' },
     token: { type: 'string' },
+    // §4 P0 (API-01/EVID-01): internal-route service identity. Sidecars pass
+    // it via env (0600 file, out-of-band from argv); the flag is the explicit
+    // override for direct deployments.
+    'service-token': { type: 'string' },
     // SIDE-01: publish the actual bound port (works with --port 0) plus the
     // kernel's database/dataDir identity so sidecars can verify reuse.
     'endpoint-file': { type: 'string' },
@@ -32,9 +37,10 @@ const host = values.host ?? '127.0.0.1'
 // Sidecars pass the token out-of-band from argv so it is not exposed by
 // process listings. The CLI flag remains for explicit backwards compatibility.
 const token = values.token ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
+const serviceToken = values['service-token'] ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
 const endpointFile = values['endpoint-file'] ?? process.env.DSH_SCHOLAR_KERNEL_ENDPOINT_FILE
 
-const kernel = new ResearchKernel({ dbPath, casRoot })
+const kernel = new ResearchKernel({ dbPath, casRoot, serviceToken })
 
 try {
   const { server, url, port: actualPort } = await startKernelServer({ kernel, host, port, token })

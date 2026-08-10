@@ -44,7 +44,11 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): the kernel runs with the fixed eval service token;
+# positive internal calls carry x-service-token via the helper (runners inherit
+# the env var and authenticate their claim/runner-keys/recover calls themselves).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 

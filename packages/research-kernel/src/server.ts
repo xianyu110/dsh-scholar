@@ -5,7 +5,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
 import { ResearchKernel, KernelError, TEX_ENGINES } from './kernel.js'
 import { TexError } from './tex-workspace.js'
@@ -255,6 +255,36 @@ function errorEnvelope(code: string, message: string): Record<string, unknown> {
   return { code, message, request_id: currentRequestId, retryable: retryableCodes.has(code) }
 }
 
+/**
+ * §4 P0 (hardening API-01/EVID-01): INTERNAL service routes. When the kernel
+ * was configured with a service token, EVERY one of these demands the
+ * `x-service-token` header — the loopback bearer credential (browser) and
+ * self-reported `x-service-principal` headers do NOT satisfy it, so a
+ * browser session can never claim jobs, register runner keys, recover
+ * leases, write verified evidence, accept evidence or freeze contracts.
+ * Route patterns are matched on the RAW pathname; the handlers below also
+ * require the correct x-service-principal on the evidence routes.
+ */
+const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string }> = [
+  { method: 'POST', re: /^\/v1\/jobs-claim\/run$/, label: 'jobs-claim' },
+  { method: 'POST', re: /^\/v1\/runner-keys$/, label: 'runner-keys' },
+  { method: 'POST', re: /^\/v1\/recover\/leases$/, label: 'recover/leases' },
+  { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/verified$/, label: 'evidence/verified' },
+  { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/[^/]+\/accept$/, label: 'evidence/accept' },
+  { method: 'POST', re: /^\/v1\/projects\/[^/]+\/contracts\/[^/]+\/approve$/, label: 'contracts/approve' },
+]
+
+function isServiceRoute(method: string, pathname: string): boolean {
+  return SERVICE_ROUTES.some(r => r.method === method && r.re.test(pathname))
+}
+
+/** Constant-time comparison: hash both sides then timingSafeEqual. */
+function serviceTokenEquals(provided: string, expected: string): boolean {
+  const a = createHash('sha256').update(provided).digest()
+  const b = createHash('sha256').update(expected).digest()
+  return timingSafeEqual(a, b)
+}
+
 let currentRequestId = 'req_unknown'
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -315,6 +345,20 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   }
 
   const method = req.method ?? 'GET'
+  // §4 P0 (API-01/EVID-01): internal service routes require the configured
+  // service token via `x-service-token` — the loopback bearer (Authorization)
+  // and any self-reported x-service-principal do NOT unlock these routes.
+  // A missing/wrong/misplaced credential is 403 service_token_required.
+  if (kernel.serviceToken !== undefined && isServiceRoute(method, url.pathname)) {
+    const provided = req.headers['x-service-token']
+    if (typeof provided !== 'string' || !serviceTokenEquals(provided, kernel.serviceToken)) {
+      send(res, 403, {
+        error: errorEnvelope('service_token_required',
+          'internal route requires x-service-token (service identity); browser bearer credentials are not accepted'),
+      })
+      return
+    }
+  }
   const [version, resource, id, sub, subId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
   if (version !== 'v1' && version !== 'v2') {
     send(res, 404, { error: { code: 'not_found', message: 'unknown api version' } })

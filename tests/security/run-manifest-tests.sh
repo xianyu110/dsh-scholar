@@ -35,7 +35,11 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01): the kernel runs with the fixed eval service token; positive
+# internal calls (runner-keys/claim/recover) carry x-service-token via the
+# helper. Negative tests below use RAW curl WITHOUT the token on purpose.
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 
@@ -70,6 +74,28 @@ start_kernel || { echo "kernel failed to start"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"manifest\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
+
+say "Test: internal routes reject requests without the service token (API-01)"
+# runner-keys registration, claim and lease recovery are SERVICE routes: no
+# x-service-token -> 403 service_token_required (browser bearer is not enough).
+NEG_KEY=$(curl -s -o "$WORK/neg-key.json" -w '%{http_code}' -X POST "$BASE/v1/runner-keys" -H 'content-type: application/json' -d '{"key_id":"k","public_key_pem":"x"}')
+if [[ "$NEG_KEY" == "403" && "$(jfield '.error.code' < "$WORK/neg-key.json")" == "service_token_required" ]]; then
+  ok "runner-keys registration without x-service-token -> HTTP 403 service_token_required"
+else
+  bad "runner-keys without token: expected 403 service_token_required, got HTTP $NEG_KEY"
+fi
+NEG_CLAIM=$(curl -s -o "$WORK/neg-claim.json" -w '%{http_code}' -X POST "$BASE/v1/jobs-claim/run" -H 'content-type: application/json' -d '{"owner":"svc-neg","limit":1}')
+if [[ "$NEG_CLAIM" == "403" && "$(jfield '.error.code' < "$WORK/neg-claim.json")" == "service_token_required" ]]; then
+  ok "jobs-claim without x-service-token -> HTTP 403 service_token_required"
+else
+  bad "claim without token: expected 403 service_token_required, got HTTP $NEG_CLAIM"
+fi
+NEG_REC=$(curl -s -o "$WORK/neg-rec.json" -w '%{http_code}' -X POST "$BASE/v1/recover/leases" -H 'content-type: application/json')
+if [[ "$NEG_REC" == "403" && "$(jfield '.error.code' < "$WORK/neg-rec.json")" == "service_token_required" ]]; then
+  ok "recover/leases without x-service-token -> HTTP 403 service_token_required"
+else
+  bad "recover without token: expected 403 service_token_required, got HTTP $NEG_REC"
+fi
 
 say "setup: Ed25519 runner key (signed manifests are the default, RUN-01)"
 cat > "$WORK/gen-key.mjs" <<'EOF'

@@ -163,7 +163,11 @@ RUNNER_PID=""
 cleanup() { kill "$RUNNER_PID" "$KERNEL_PID" 2>/dev/null || true; rm -rf "$WORK"; }
 trap cleanup EXIT
 BASE="http://127.0.0.1:$PORT"
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): bundle clean-room kernels run with the fixed
+# eval service token; the helper attaches x-service-token so the internal
+# approve route works (runners inherit the env var for their own calls).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 # ---------------------------------------------------------------------------
 # Bundle-only clean-room isolation: snapshot the bundle into a fresh empty

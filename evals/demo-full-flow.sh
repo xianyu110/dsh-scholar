@@ -14,7 +14,11 @@ PASS=0; FAIL=0
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; PASS=$((PASS+1)); }
 bad() { printf '\033[1;31m  ✗ %s\033[0m\n' "$*"; FAIL=$((FAIL+1)); }
 say() { printf '\033[1;34m\n== %s ==\033[0m\n' "$*"; }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): the kernel runs with the fixed eval service token;
+# internal calls (approve/verified/accept) carry x-service-token via the helper
+# (runners inherit the env var and authenticate their own internal calls).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 # ── 0. 环境:连接测试实例 kernel(web sidecar 已起 17412),另起独立 runner ──
 say "0. 环境准备"
@@ -162,11 +166,11 @@ let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{
   const a=JSON.parse(d);
   const body={source_type:'analysis',run_ids:['formal:demo:11','formal:demo:23','formal:demo:47'],artifact_refs:[a.artifact],analysis_method:'bootstrap_95_mean_difference',result:{primary_metric:'macro_f1',value:a.mean,baseline_value:0.6,effect_size:a.effect,ci_low:a.ci[0],ci_high:a.ci[1],n_seeds:3}};
   try {
-    const r=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/verified',{method:'POST',headers:{'content-type':'application/json','x-service-principal':'analysis-worker'},body:JSON.stringify(body)});
+    const r=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/verified',{method:'POST',headers:{'content-type':'application/json','x-service-principal':'analysis-worker','x-service-token':process.env.DSH_SCHOLAR_SERVICE_TOKEN},body:JSON.stringify(body)});
     const j=await r.json();
     if(!j.evidence_id){console.log('');return;}
     // §6: Verifier accept transition (verified -> accepted) before Claim support.
-    const a2=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/'+j.evidence_id+'/accept',{method:'POST',headers:{'content-type':'application/json','x-service-principal':'verifier'},body:JSON.stringify({request_id:'demo-accept-1'})});
+    const a2=await fetch('http://127.0.0.1:'+process.argv[1]+'/v1/projects/'+process.argv[2]+'/evidence/'+j.evidence_id+'/accept',{method:'POST',headers:{'content-type':'application/json','x-service-principal':'verifier','x-service-token':process.env.DSH_SCHOLAR_SERVICE_TOKEN},body:JSON.stringify({request_id:'demo-accept-1'})});
     const aj=await a2.json();
     console.log(aj.evidence_id||'');
   } catch(e) { console.log(''); }

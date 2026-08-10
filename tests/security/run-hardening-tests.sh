@@ -19,7 +19,13 @@ PASS=0
 FAIL=0
 ok() { printf '  ok: %s\n' "$*"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL+1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): every kernel below is configured with the fixed
+# eval service token (env DSH_SCHOLAR_SERVICE_TOKEN; runners inherit it and
+# authenticate their claim/runner-keys/recover calls automatically). The
+# curl helper attaches x-service-token so internal routes (approve) work;
+# negative tests below use RAW curl without the header on purpose.
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KERNEL_PID=$!
@@ -27,6 +33,33 @@ for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null
 nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner harden --poll-ms 150 > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
 sleep 0.5
+
+echo "== service-token auth matrix (claim route on a token-configured kernel) =="
+NEG_NO=$(curl -s -o "$WORK/neg-no.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/jobs-claim/run" -H 'content-type: application/json' -d '{"owner":"svc-neg","limit":1}')
+NEG_ERR=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).error?.code??'')}catch(e){console.log('')}})" < "$WORK/neg-no.json")
+NEG_BEARER=$(curl -s -o "$WORK/neg-bearer.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/jobs-claim/run" -H 'content-type: application/json' -H "Authorization: Bearer $DSH_SCHOLAR_SERVICE_TOKEN" -d '{"owner":"svc-neg","limit":1}')
+NEG_WRONG=$(curl -s -o "$WORK/neg-wrong.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/jobs-claim/run" -H 'content-type: application/json' -H 'x-service-token: wrong-service-token' -d '{"owner":"svc-neg","limit":1}')
+NEG_OK=$(curl -s -o "$WORK/neg-ok.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/jobs-claim/run" -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -d '{"owner":"svc-neg","limit":1}')
+if [[ "$NEG_NO" == "403" && "$NEG_ERR" == "service_token_required" ]]; then
+  ok "claim without x-service-token -> HTTP 403 service_token_required"
+else
+  bad "claim without token: expected 403 service_token_required, got HTTP $NEG_NO (error=$NEG_ERR)"
+fi
+if [[ "$NEG_BEARER" == "403" ]]; then
+  ok "claim with the token in Authorization (browser bearer) -> HTTP 403 (only x-service-token counts)"
+else
+  bad "claim with bearer token: expected 403, got HTTP $NEG_BEARER"
+fi
+if [[ "$NEG_WRONG" == "403" ]]; then
+  ok "claim with a wrong x-service-token -> HTTP 403"
+else
+  bad "claim with wrong token: expected 403, got HTTP $NEG_WRONG"
+fi
+if [[ "$NEG_OK" == "200" ]]; then
+  ok "claim with the correct x-service-token -> HTTP 200"
+else
+  bad "claim with correct token: expected 200, got HTTP $NEG_OK"
+fi
 
 BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"machine-learning"}'
 PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"local-docker-cpu\",\"network_policy\":\"none\",\"artifact_store\":\"local-cas\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")

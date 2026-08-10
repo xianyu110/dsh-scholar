@@ -45,6 +45,11 @@ cleanup() {
 trap cleanup EXIT
 
 PORT=$((20000 + RANDOM % 20000))
+# §4 P0 (API-01/EVID-01): the kernel is configured with the fixed eval
+# service token (runners inherit the env and authenticate their own internal
+# calls: claim / runner-keys / recover).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+
 node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --host 127.0.0.1 --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KPID=$!
 for _ in $(seq 1 40); do

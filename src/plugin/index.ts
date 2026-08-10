@@ -105,6 +105,10 @@ export function apply(ctx: Context, config: ResearchPluginConfig = {}): void {
   const client = new ResearchClient({
     endpoint: sidecar.endpoint,
     token: config.kernel?.token,
+    // §4 P0 (API-01/EVID-01): the plugin's client authenticates to the
+    // kernel's INTERNAL routes with the same service identity the sidecar
+    // handed the kernel (0600 <dataDir>/service-token).
+    serviceToken: sidecar.serviceToken,
   })
   const cacheDir = config.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
   const cache = new DiskCache(cacheDir)

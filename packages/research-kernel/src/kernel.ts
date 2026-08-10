@@ -61,6 +61,16 @@ export interface KernelOptions {
   instanceId?: string
   /** §12.7: reject unsigned run manifests at job completion (default: compatible, accept). */
   requireSignedManifest?: boolean
+  /**
+   * §4 P0 (hardening API-01/EVID-01): service identity token for INTERNAL
+   * routes (jobs-claim, runner-keys, recover/leases, evidence verified/
+   * accept, contracts approve). When configured, the HTTP server demands
+   * `x-service-token` on those routes (browser bearer credentials and
+   * self-reported x-service-principal headers are NOT accepted). Supplied by
+   * the sidecars via DSH_SCHOLAR_SERVICE_TOKEN; a bare kernel without it
+   * stays open (dev compatibility).
+   */
+  serviceToken?: string
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -307,12 +317,15 @@ export class ResearchKernel {
   readonly tex: import('./tex-workspace.js').TexWorkspaceStore
   /** §12.7: when true, unsigned run manifests are rejected at completion. */
   requireSignedManifest: boolean
+  /** §4 P0 (API-01/EVID-01): service identity for internal HTTP routes. */
+  readonly serviceToken: string | undefined
 
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
+    this.serviceToken = options.serviceToken
     // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
     // registers an ephemeral Ed25519 key and signs every completion, so the
     // default only affects callers that never sign. Unit tests that exercise

@@ -17,8 +17,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve } from 'node:path'
-import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { randomBytes } from 'node:crypto'
 
 export interface UiKernelSidecarOptions {
   host?: string
@@ -58,6 +59,7 @@ export interface EndpointRecord {
 const ENDPOINT_PROTOCOL = 'http'
 const ENDPOINT_SCHEMA = 'v1'
 const DB_FILE_NAME = 'kernel.db'
+const SERVICE_TOKEN_FILE = 'service-token'
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 function sleep(ms: number): Promise<void> {
@@ -70,6 +72,8 @@ export class UiKernelSidecar {
   private childPid: number | null = null
   /** Actual bound port once known (always set after a successful spawn). */
   private resolvedPort: number | null = null
+  /** Cached value of <dataDir>/service-token (lazy, see ensureServiceToken). */
+  private serviceTokenValue: string | undefined
   private readonly require = createRequire(import.meta.url)
   readonly host: string
   /** Configured port; 0 means "ephemeral — resolve from runtime/endpoint.json". */
@@ -82,6 +86,56 @@ export class UiKernelSidecar {
     this.port = options.port ?? 7412
     this.dataDir = resolve(options.dataDir ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh-scholar-standalone'), 'research-ui-standalone'))
     this.log = options.log ?? (() => undefined)
+  }
+
+  /**
+   * §4 P0 (API-01/EVID-01): the kernel's INTERNAL-route service identity.
+   * The 0600 `<dataDir>/service-token` file is created on first use (random
+   * 32 hex) and reused afterwards, so every process of this instance —
+   * kernel, runner, BFF proxy — authenticates with the SAME token. The
+   * token is only ever passed via env, never argv.
+   */
+  get serviceToken(): string {
+    return this.ensureServiceToken()
+  }
+
+  private ensureServiceToken(): string {
+    if (this.serviceTokenValue !== undefined) return this.serviceTokenValue
+    const file = join(this.dataDir, SERVICE_TOKEN_FILE)
+    let existing = false
+    try {
+      const stat = lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error(`service token path must be a regular file: ${file}`)
+      }
+      existing = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let token = ''
+    if (existing) {
+      token = readFileSync(file, 'utf8').trim()
+      chmodSync(file, 0o600)
+    }
+    if (token === '') {
+      mkdirSync(this.dataDir, { recursive: true })
+      token = randomBytes(16).toString('hex')
+      try {
+        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
+      } catch {
+        // Lost a race with a concurrent sidecar on the same dataDir — the
+        // existing file is authoritative (both spawn the same kernel token).
+        token = readFileSync(file, 'utf8').trim()
+      }
+      chmodSync(file, 0o600)
+    }
+    if (token === '') {
+      // Fail-closed: an empty token would lock every internal route behind
+      // an unusable credential.
+      throw new Error(`service token file must not be empty: ${file}`)
+    }
+    this.serviceTokenValue = token
+    return token
   }
 
   /**
@@ -285,7 +339,15 @@ export class UiKernelSidecar {
       '--endpoint-file', this.endpointFilePath(),
     ]
     this.log(`[research-ui] spawning research kernel: node ${args.join(' ')}`)
-    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity
+    // travels via env only (0600 file, never argv / process listings).
+    const child = spawn(process.execPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        DSH_SCHOLAR_SERVICE_TOKEN: this.serviceToken,
+      },
+    })
     this.child = child
     this.childPid = child.pid ?? null
     child.stdout?.on('data', (chunk: Buffer) => this.log(`[research-kernel] ${chunk.toString().trimEnd()}`))

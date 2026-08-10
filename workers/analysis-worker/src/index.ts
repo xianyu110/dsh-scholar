@@ -6,12 +6,16 @@
  * file parsing, and a deterministic paired mean-difference analysis with a
  * seeded percentile bootstrap 95% CI.
  *
- * Design constraints honored here:
+ * Design constraints honored here (reconstruction-contracts.md §12 is the
+ * authoritative formula source):
  *  - One analysis = one contract × one metric (enforced by the API shape:
  *    an AnalysisPlan carries a single contract_id and a single MetricSpec).
- *  - Deterministic: the bootstrap RNG is a mulberry32 stream seeded from the
- *    plan identity, so repeated runs of the same analysis produce identical
- *    results on the same platform.
+ *  - Deterministic: the bootstrap RNG is a mulberry32 stream seeded from
+ *    FNV-1a 32-bit over the UTF-8 canonical JSON of the plan + ordered run
+ *    IDs + metric values, so repeated runs of the same analysis produce
+ *    identical results on the same platform.
+ *  - Production-fixed: bootstrap resamples are fixed at 10,000; numeric
+ *    result values keep 12 significant decimals (round-half-to-even).
  *  - Self-contained: this package intentionally does NOT depend on
  *    @dsh-scholar/research-schemas (kernel-side schemas are being refactored
  *    by the main agent); all schema shapes are declared and validated here.
@@ -99,6 +103,7 @@ export interface PairedAnalysisResult {
   ci_low: number
   ci_high: number
   n_pairs: number
+  raw_p_value: number
   adjusted_p_value: number
   direction_ok: boolean
 }
@@ -142,14 +147,129 @@ function mean(values: number[]): number {
   return sum / values.length
 }
 
-/** FNV-1a 32-bit string hash — stable across processes and platforms. */
-function fnv1a32(input: string): number {
+/**
+ * Canonical JSON (reconstruction-contracts.md §2): UTF-8 text, object keys
+ * recursively sorted lexicographically, arrays keep order, no extra
+ * whitespace, finite JSON numbers only, -0 serialized as 0, undefined
+ * properties omitted. Signature/hash/RNG seeds all use this same encoding.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null) return 'null'
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail('canonical JSON: non-finite number')
+    return Object.is(value, -0) ? '0' : String(value)
+  }
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const keys = Object.keys(record)
+      .filter((k) => record[k] !== undefined)
+      .sort()
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(record[k])}`).join(',')}}`
+  }
+  fail('canonical JSON: unsupported value type')
+}
+
+/** FNV-1a 32-bit hash over raw bytes — stable across processes and platforms. */
+function fnv1a32Bytes(bytes: Uint8Array): number {
   let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i] as number
     h = Math.imul(h, 0x01000193)
   }
   return h >>> 0
+}
+
+/**
+ * Exact decimal expansion of a finite IEEE-754 double:
+ * value = (±1) × digits × 10^exp10, digits a non-empty digit string with no
+ * leading zeros (trailing zeros folded into exp10). Every double has a
+ * terminating decimal expansion, so this is exact.
+ */
+function exactDecimal(value: number): { negative: boolean; digits: string; exp10: number } {
+  if (!Number.isFinite(value)) fail('exactDecimal: non-finite value')
+  if (value === 0) return { negative: Object.is(value, -0), digits: '0', exp10: 0 }
+  const view = new DataView(new ArrayBuffer(8))
+  view.setFloat64(0, value)
+  const bits = view.getBigUint64(0)
+  const negative = (bits >> 63n) === 1n
+  const expBits = Number((bits >> 52n) & 0x7ffn)
+  const fraction = bits & 0xfffffffffffffn
+  let mantissa: bigint
+  let exp2: number
+  if (expBits === 0) {
+    // subnormal: value = fraction × 2^-1074
+    mantissa = fraction
+    exp2 = -1074
+  } else {
+    // value = (1.fraction) × 2^(expBits - 1023) = mantissa × 2^(expBits - 1075)
+    mantissa = fraction | 0x10000000000000n
+    exp2 = expBits - 1075
+  }
+  let digits: string
+  let exp10: number
+  if (exp2 >= 0) {
+    digits = (mantissa << BigInt(exp2)).toString()
+    exp10 = 0
+  } else {
+    // value = mantissa × 2^exp2 = mantissa × 5^(-exp2) × 10^exp2 (exact integer digits)
+    digits = (mantissa * 5n ** BigInt(-exp2)).toString()
+    exp10 = exp2
+  }
+  while (digits.length > 1 && digits.endsWith('0')) {
+    digits = digits.slice(0, -1)
+    exp10 += 1
+  }
+  return { negative, digits, exp10 }
+}
+
+/** Rounds an exact digit string to `significant` digits, round-half-to-even. */
+function roundDigitsHalfEven(digits: string, significant: number): string {
+  if (digits.length <= significant) return digits
+  const keep = digits.slice(0, significant)
+  const rest = digits.slice(significant)
+  let roundUp = false
+  const firstRest = rest.charCodeAt(0) - 48
+  if (firstRest > 5) roundUp = true
+  else if (firstRest === 5) {
+    const anyNonZero = /[1-9]/.test(rest.slice(1))
+    if (anyNonZero) roundUp = true
+    else roundUp = ((keep.charCodeAt(keep.length - 1) - 48) % 2) === 1 // exact tie → even
+  }
+  if (!roundUp) return keep
+  const out: string[] = []
+  let carry = 1
+  for (let i = keep.length - 1; i >= 0; i--) {
+    const d = (keep.charCodeAt(i) - 48) + carry
+    if (d === 10) {
+      out.unshift('0')
+      carry = 1
+    } else {
+      out.unshift(String(d))
+      carry = 0
+    }
+  }
+  if (carry === 1) out.unshift('1')
+  return out.join('')
+}
+
+/**
+ * §12 result-number rule: every numeric value of the result JSON is kept at
+ * 12 significant decimal digits before serialization, round-half-to-even,
+ * and -0 is serialized as 0.
+ */
+function round12(value: number): number {
+  if (value === 0) return 0
+  const { negative, digits, exp10 } = exactDecimal(value)
+  const rounded = roundDigitsHalfEven(digits, 12)
+  // digits × 10^exp10 == rounded × 10^(exp10 + digits.length − rounded.length)
+  const exponent = exp10 + digits.length - rounded.length
+  const num = Number(`${negative ? '-' : ''}${rounded}e${exponent}`)
+  return num === 0 ? 0 : num
 }
 
 /** mulberry32 PRNG — deterministic given the same 32-bit seed. */
@@ -163,36 +283,32 @@ function mulberry32(seed: number): () => number {
   }
 }
 
-/** Linear-interpolation percentile (numpy-default style) of sorted data. */
-function percentile(sortedAsc: number[], q: number): number {
-  const n = sortedAsc.length
-  if (n === 0) fail('percentile of empty sample')
-  if (n === 1) return sortedAsc[0] as number
-  const rank = (q / 100) * (n - 1)
-  const lo = Math.floor(rank)
-  const hi = Math.ceil(rank)
-  const vLo = sortedAsc[lo] as number
-  if (lo === hi) return vLo
-  const vHi = sortedAsc[hi] as number
-  return vLo + (vHi - vLo) * (rank - lo)
-}
-
 /**
- * Holm step-down multiple-testing adjustment (§13.3 `multiple_testing: holm`,
- * §13.6). For a single comparison (this engine analyzes one contract × one
- * metric at a time) it is the identity — kept for API fidelity so callers can
- * adjust across plans exactly as the design prescribes.
+ * Holm step-down multiple-testing adjustment (reconstruction-contracts.md
+ * §12: `multiple_testing: holm`; ties ordered by metric name ascending,
+ * adjusted p monotone step-down, capped at 1). For a single comparison this
+ * engine analyzes one contract × one metric at a time, so it is the identity
+ * — kept for API fidelity so callers can adjust across plans exactly as the
+ * spec prescribes. `names` (one per p-value, e.g. metric names) breaks ties
+ * by ascending name, per §12.
  */
-export function holmAdjust(pValues: number[]): number[] {
+export function holmAdjust(pValues: number[], names?: string[]): number[] {
   if (pValues.length === 0) fail('holmAdjust: empty p-value list')
+  if (names !== undefined && names.length !== pValues.length) {
+    fail('holmAdjust: names length must equal p-values length')
+  }
   const m = pValues.length
-  const indexed = pValues.map((p, i) => ({ p, i })).sort((a, b) => a.p - b.p)
+  const indexed = pValues
+    .map((p, i) => ({ p, name: names?.[i] ?? '', i }))
+    .sort((a, b) => a.p - b.p || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   const adjusted = new Array<number>(m)
-  let running = 1
+  // Classic Holm step-down: process from the smallest p; the adjusted value
+  // is the running maximum of the Bonferroni steps (monotone, capped at 1).
+  let running = 0
   for (let k = 0; k < m; k++) {
     const entry = indexed[k] as { p: number; i: number }
     const step = Math.min(1, (m - k) * entry.p)
-    running = Math.min(running, step)
+    running = Math.max(running, step)
     adjusted[entry.i] = running
   }
   return adjusted
@@ -263,7 +379,15 @@ export function validateAnalysisPlan(value: unknown): AnalysisPlan {
   if (m.interval !== 'bootstrap_95') {
     fail(`analysis_plan.method.interval must be 'bootstrap_95', got ${JSON.stringify(m.interval)}`)
   }
-  if (!isPositiveInteger(m.resamples)) fail('analysis_plan.method.resamples must be a positive integer')
+  // §12: bootstrap resamples are DEFAULT and PRODUCTION-FIXED at 10,000 — an
+  // explicit value must equal 10,000 (the canonical AnalysisPlan type is
+  // literal `resamples: 10000`; formal resamples cannot be arbitrarily
+  // rewritten, §22 analysis.*). Absent means 10,000.
+  if (m.resamples === undefined) {
+    // defaulted to 10,000 by computePairedAnalysis
+  } else if (!isPositiveInteger(m.resamples) || m.resamples !== 10000) {
+    fail(`analysis_plan.method.resamples must be 10000 (production-fixed, §12), got ${JSON.stringify(m.resamples)}`)
+  }
   if (value.multiple_testing !== 'holm') {
     fail(`analysis_plan.multiple_testing must be 'holm', got ${JSON.stringify(value.multiple_testing)}`)
   }
@@ -302,9 +426,13 @@ export function parseMetricsFile(content: string): ParsedMetricsFile {
     fail('metrics file metrics must be a non-empty array')
   }
   const metrics: Array<{ name: string; value: number }> = []
+  const seenNames = new Set<string>()
   for (const m of raw.metrics) {
     if (!isRecord(m)) fail('metrics file metric entries must be objects')
     if (!isNonEmptyString(m.name)) fail('metrics file metric name must be a non-empty string')
+    // §12: each metric name is unique in a MetricsFileV1.
+    if (seenNames.has(m.name)) fail(`metrics file has duplicate metric name "${String(m.name)}"`)
+    seenNames.add(m.name)
     if (!isFiniteNumber(m.value)) fail(`metrics file metric "${String(m.name)}" value must be a finite number`)
     if (m.unit !== undefined && typeof m.unit !== 'string') {
       fail(`metrics file metric "${String(m.name)}" unit must be a string`)
@@ -344,20 +472,33 @@ function indexRuns(runs: PerRunMetric[], label: string): Map<string, PerRunMetri
 }
 
 /**
- * Deterministic paired analysis of one contract × one metric (§13.6).
+ * Deterministic paired analysis of one contract × one metric
+ * (reconstruction-contracts.md §12 — the authoritative formulas).
  *
  * Pairs baseline and treatment runs by seed, keeping only seeds present on
  * BOTH sides. Throws if the number of paired runs is below `plan.minimum_n`.
- * Computes:
- *   - baseline_mean / treatment_mean over the paired runs;
- *   - paired_mean_difference (mean of per-seed treatment − baseline diffs);
- *   - effect_size — for the paired_mean_difference estimator this IS the mean
- *     paired difference (matches the §13.4 worked example: 0.812 − 0.781);
- *   - percentile bootstrap 95% CI over `plan.method.resamples` resamples,
- *     drawn with a fixed-seed mulberry32 stream (deterministic);
- *   - a two-sided bootstrap p-value, Holm-adjusted (identity for one test);
+ * Computes, exactly per §12:
+ *   - baseline_mean / treatment_mean over the paired runs (IEEE-754 double);
+ *   - paired_mean_difference: mean of per-seed (treatment − baseline) diffs;
+ *     lower_is_better only affects direction_ok, never the stored difference;
+ *   - effect_size = paired_mean_difference (future standardized effects need
+ *     a new schema version);
+ *   - bootstrap 95% CI: `resamples` (= 10,000, production-fixed) resamples of
+ *     the n_pairs differences with replacement, each replaced by its mean,
+ *     sorted; low index = floor(0.025*(B−1)), high index = ceil(0.975*(B−1));
+ *   - RNG: mulberry32 seeded with FNV-1a 32-bit over the UTF-8 bytes of the
+ *     canonical JSON (recursive key order, §2) of the plan + ordered
+ *     (seed-ascending) run IDs + metric values of both sides;
+ *   - two-sided bootstrap p: pLow=(1+count(boot<=0))/(B+1),
+ *     pHigh=(1+count(boot>=0))/(B+1), raw_p=min(1, 2*min(pLow,pHigh));
+ *     a zero paired difference forces direction_ok=false and raw p=1;
+ *   - adjusted_p_value: Holm step-down (identity for one metric; ties broken
+ *     by metric name);
  *   - direction_ok: effect in the direction the metric declares good
- *     (higher_is_better ⇒ effect > 0; lower_is_better ⇒ effect < 0).
+ *     (higher_is_better ⇒ difference > 0; lower_is_better ⇒ difference < 0;
+ *     zero ⇒ false);
+ *   - every numeric result value is kept at 12 significant decimal digits
+ *     (round-half-to-even) before serialization; -0 serializes as 0.
  */
 export function computePairedAnalysis(
   plan: AnalysisPlan,
@@ -368,7 +509,8 @@ export function computePairedAnalysis(
   const baseline = indexRuns(baselineRuns, 'baseline_runs')
   const treatment = indexRuns(treatmentRuns, 'treatment_runs')
 
-  // Only seeds present on both sides are paired (§13.6: matched-seed design).
+  // Only seeds present on both sides are paired (§12: matched-seed design);
+  // the pairing is canonicalized by seed ascending.
   const pairedSeeds = [...baseline.keys()].filter((seed) => treatment.has(seed)).sort()
 
   const nPairs = pairedSeeds.length
@@ -386,58 +528,86 @@ export function computePairedAnalysis(
     const t = treatment.get(seed) as PerRunMetric
     baselineValues.push(b.metric_value)
     treatmentValues.push(t.metric_value)
-    diffs.push(t.metric_value - b.metric_value)
+    diffs.push(t.metric_value - b.metric_value) // §12: treatment − baseline
   }
 
   const baselineMean = mean(baselineValues)
   const treatmentMean = mean(treatmentValues)
   const pairedMeanDifference = mean(diffs)
 
-  // Seeded percentile bootstrap 95% CI (§13.3 `bootstrap_95`). The seed is a
-  // pure function of the plan identity, so the same analysis is bit-for-bit
-  // reproducible.
-  const rngSeed = fnv1a32(
-    `${validatedPlan.contract_id}\u0000${validatedPlan.metric.name}\u0000` +
-      `${validatedPlan.baseline_run_set_id}\u0000${validatedPlan.treatment_run_set_id}`,
-  )
+  // §12 RNG seed: FNV-1a 32-bit over the UTF-8 canonical JSON (recursive key
+  // order, no extra whitespace — §2 "canonical JSON") of the plan plus the
+  // ordered (seed-ascending) run IDs and metric values of both sides. The
+  // same analysis is therefore bit-for-bit reproducible.
+  const orderedSide = (side: Map<string, PerRunMetric>, values: number[]): { run_ids: string[]; metric_values: number[] } => {
+    const runIds: string[] = []
+    for (const seed of pairedSeeds) {
+      runIds.push((side.get(seed) as PerRunMetric).run_id)
+    }
+    return { run_ids: runIds, metric_values: [...values] }
+  }
+  const seedDocument = {
+    plan: validatedPlan,
+    baseline: orderedSide(baseline, baselineValues),
+    treatment: orderedSide(treatment, treatmentValues),
+  }
+  const rngSeed = fnv1a32Bytes(new TextEncoder().encode(canonicalJson(seedDocument)))
   const rng = mulberry32(rngSeed)
-  const resamples = validatedPlan.method.resamples
-  const bootstrapMeans = new Array<number>(resamples)
-  let countAtLeastObserved = 0
-  for (let r = 0; r < resamples; r++) {
+
+  // §12: bootstrap resamples are default and production-fixed at 10,000.
+  const resamples = validatedPlan.method.resamples ?? 10000
+  const B = resamples
+  const bootstrapMeans = new Array<number>(B)
+  let countLeZero = 0
+  let countGeZero = 0
+  for (let r = 0; r < B; r++) {
     let sum = 0
     for (let i = 0; i < nPairs; i++) {
       sum += diffs[Math.floor(rng() * nPairs)] as number
     }
     const bootMean = sum / nPairs
     bootstrapMeans[r] = bootMean
-    if (Math.abs(bootMean) >= Math.abs(pairedMeanDifference)) countAtLeastObserved++
+    if (bootMean <= 0) countLeZero++
+    if (bootMean >= 0) countGeZero++
   }
   bootstrapMeans.sort((a, b) => a - b)
-  const ciLow = percentile(bootstrapMeans, 2.5)
-  const ciHigh = percentile(bootstrapMeans, 97.5)
 
-  // Two-sided bootstrap p-value (+1 smoothing), Holm-adjusted. With a single
-  // comparison Holm is the identity, but the adjustment is applied as §13.6
-  // requires so callers can rely on `adjusted_p_value` directly.
-  const rawP = (countAtLeastObserved + 1) / (resamples + 1)
-  const adjustedP = (holmAdjust([rawP]) as [number])[0] as number
+  // §12 95% percentile CI: index-based, not interpolated.
+  const ciLow = bootstrapMeans[Math.floor(0.025 * (B - 1))] as number
+  const ciHigh = bootstrapMeans[Math.ceil(0.975 * (B - 1))] as number
+
+  // §12 two-sided bootstrap p-value:
+  //   pLow  = (1 + count(boot <= 0)) / (B + 1)
+  //   pHigh = (1 + count(boot >= 0)) / (B + 1)
+  //   raw_p = min(1, 2 * min(pLow, pHigh)); zero difference ⇒ raw p = 1.
+  let rawP: number
+  if (pairedMeanDifference === 0) {
+    rawP = 1
+  } else {
+    const pLow = (1 + countLeZero) / (B + 1)
+    const pHigh = (1 + countGeZero) / (B + 1)
+    rawP = Math.min(1, 2 * Math.min(pLow, pHigh))
+  }
+  const adjustedP = (holmAdjust([rawP], [validatedPlan.metric.name]) as [number])[0] as number
 
   const direction = validatedPlan.metric.direction
   const directionOk =
     direction === 'higher_is_better' ? pairedMeanDifference > 0 : pairedMeanDifference < 0
 
+  // §12: key order strictly follows the PairedAnalysisResult declaration;
+  // numeric values keep 12 significant decimals (round-half-to-even), -0 → 0.
   return {
     metric: validatedPlan.metric.name,
     direction,
-    baseline_mean: baselineMean,
-    treatment_mean: treatmentMean,
-    paired_mean_difference: pairedMeanDifference,
-    effect_size: pairedMeanDifference,
-    ci_low: ciLow,
-    ci_high: ciHigh,
+    baseline_mean: round12(baselineMean),
+    treatment_mean: round12(treatmentMean),
+    paired_mean_difference: round12(pairedMeanDifference),
+    effect_size: round12(pairedMeanDifference),
+    ci_low: round12(ciLow),
+    ci_high: round12(ciHigh),
     n_pairs: nPairs,
-    adjusted_p_value: adjustedP,
+    raw_p_value: round12(rawP),
+    adjusted_p_value: round12(adjustedP),
     direction_ok: directionOk,
   }
 }

@@ -35,7 +35,7 @@ function makePlan(overrides: Partial<AnalysisPlan> = {}): AnalysisPlan {
     paired_by: 'seed',
     baseline_run_set_id: 'runset_baseline_det',
     treatment_run_set_id: 'runset_treatment_det',
-    method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 1000 },
+    method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 10000 },
     multiple_testing: 'holm',
     minimum_n: 1,
     ...overrides,
@@ -66,7 +66,7 @@ const treatmentEight = () => Array.from({ length: 8 }, (_, i) => run(`t${i + 2}`
 
 const cases: DeterminismCase[] = [
   {
-    label: 'golden vector case: m1 higher_is_better, seeds 11/23/47, resamples 1000, minimum_n 1',
+    label: 'golden vector case: m1 higher_is_better, seeds 11/23/47, resamples 10000, minimum_n 1',
     plan: golden.input.plan,
     baseline: golden.input.baseline_runs,
     treatment: golden.input.treatment_runs,
@@ -78,28 +78,28 @@ const cases: DeterminismCase[] = [
     treatment: golden.additional_cases![0]!.input.treatment_runs,
   },
   {
-    label: 'different seeds (1..5), macro_f1 higher_is_better, resamples 5000, minimum_n 5',
-    plan: makePlan({ analysis_plan_id: 'det_plan_seeds15', contract_id: 'expc_det_seeds15', method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 5000 }, minimum_n: 5 }),
+    label: 'different seeds (1..5), macro_f1 higher_is_better, resamples 10000, minimum_n 5',
+    plan: makePlan({ analysis_plan_id: 'det_plan_seeds15', contract_id: 'expc_det_seeds15', method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 10000 }, minimum_n: 5 }),
     baseline: baselineFive(),
     treatment: treatmentFive(),
   },
   {
-    label: 'different metric name: accuracy higher_is_better, 2 pairs seeds 3/7, resamples 200, minimum_n 2',
+    label: 'different metric name: accuracy higher_is_better, 2 pairs seeds 3/7, resamples 10000, minimum_n 2',
     plan: makePlan({
       contract_id: 'expc_det_acc',
       metric: { name: 'accuracy', direction: 'higher_is_better', aggregation: 'mean' },
-      method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 200 },
+      method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 10000 },
       minimum_n: 2,
     }),
     baseline: [run('b3', 3, 0.61), run('b7', 7, 0.64)],
     treatment: [run('t3', 3, 0.72), run('t7', 7, 0.69)],
   },
   {
-    label: 'different n: 8 pairs seeds 2..9, resamples 100, minimum_n 8',
+    label: 'different n: 8 pairs seeds 2..9, resamples 10000, minimum_n 8',
     plan: makePlan({
       contract_id: 'expc_det_n8',
       metric: { name: 'recall', direction: 'higher_is_better', aggregation: 'mean' },
-      method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 100 },
+      method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 10000 },
       minimum_n: 8,
     }),
     baseline: baselineEight(),
@@ -116,14 +116,15 @@ const cases: DeterminismCase[] = [
     treatment: golden.input.treatment_runs,
   },
   {
-    label: 'large resamples: 10000 draws over 3 pairs, minimum_n 3',
+    label: '3 pairs seeds 1..3 with diffs straddling zero (p-value tail counts vary), resamples 10000',
     plan: makePlan({
-      contract_id: 'expc_det_10k',
+      contract_id: 'expc_det_straddle',
+      metric: { name: 'macro_f1', direction: 'higher_is_better', aggregation: 'mean' },
       method: { estimator: 'paired_mean_difference', interval: 'bootstrap_95', resamples: 10000 },
       minimum_n: 3,
     }),
-    baseline: [run('b1', 1, 0.5), run('b2', 2, 0.6), run('b3', 3, 0.7)],
-    treatment: [run('t1', 1, 0.55), run('t2', 2, 0.68), run('t3', 3, 0.71)],
+    baseline: [run('b1', 1, 0.5), run('b2', 2, 0.5), run('b3', 3, 0.5)],
+    treatment: [run('t1', 1, 1.0), run('t2', 2, 0.2), run('t3', 3, 0.6)],
   },
 ]
 
@@ -173,6 +174,7 @@ describe('computePairedAnalysis — determinism matrix (§6)', () => {
         'ci_low',
         'ci_high',
         'n_pairs',
+        'raw_p_value',
         'adjusted_p_value',
         'direction_ok',
       ])

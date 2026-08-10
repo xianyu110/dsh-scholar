@@ -31,6 +31,10 @@ export class KernelApiError extends Error {
 export interface KernelClientOptions {
   endpoint: string
   token?: string
+  /** §4 P0 (API-01/EVID-01): internal-route service identity — sent as
+   * `x-service-token` on every request; the kernel only enforces it on its
+   * internal routes (claim/runner-keys/recover/verified/accept/approve). */
+  serviceToken?: string
   /** Timeout for each request, ms. */
   timeoutMs?: number
 }
@@ -38,11 +42,13 @@ export interface KernelClientOptions {
 export class ResearchClient {
   readonly endpoint: string
   private readonly token: string | undefined
+  private readonly serviceToken: string | undefined
   private readonly timeoutMs: number
 
   constructor(options: KernelClientOptions) {
     this.endpoint = options.endpoint.replace(/\/+$/, '')
     this.token = options.token
+    this.serviceToken = options.serviceToken
     this.timeoutMs = options.timeoutMs ?? 15000
   }
 
@@ -56,6 +62,7 @@ export class ResearchClient {
         headers: {
           'content-type': 'application/json',
           ...this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {},
+          ...this.serviceToken !== undefined ? { 'x-service-token': this.serviceToken } : {},
           ...headers,
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -300,6 +307,38 @@ export class ResearchClient {
 
   ingestEvidence(input: Record<string, unknown> & { provenance_status?: 'draft_unverified' | 'legacy_unverified' | 'verified' }): Promise<EvidenceItem> {
     return this.request('POST', `/v1/projects/${String(input.project_id)}/evidence`, input)
+  }
+
+  /**
+   * §4 P0 (EVID-01): internal Analysis-Worker path — ingest evidence with
+   * provenance 'verified'. Only reachable with the service token
+   * (x-service-token) plus x-service-principal: analysis-worker; the public
+   * route rejects 'verified' provenance (422).
+   */
+  ingestVerifiedEvidence(input: Record<string, unknown>): Promise<EvidenceItem> {
+    return this.request('POST', `/v1/projects/${String(input.project_id)}/evidence/verified`, input, {
+      'x-service-principal': 'analysis-worker',
+    })
+  }
+
+  /**
+   * §4 P0 (EVID-01): internal Verifier/Auditor path — transition verified →
+   * accepted after full revalidation. Requires the service token plus
+   * x-service-principal: verifier|auditor (defaults to verifier).
+   */
+  acceptEvidence(projectId: string, evidenceId: string, input: { request_id?: string; service_principal?: 'verifier' | 'auditor' } = {}): Promise<EvidenceItem> {
+    const { service_principal: principal, ...body } = input
+    return this.request('POST', `/v1/projects/${projectId}/evidence/${evidenceId}/accept`, body, {
+      'x-service-principal': principal ?? 'verifier',
+    })
+  }
+
+  /**
+   * §4 P0 (API-01): internal orchestrator path — freeze a contract by the
+   * simulate-Human-Gate-Decision approve route. Requires the service token.
+   */
+  approveContract(projectId: string, contractId: string, actor: string): Promise<ExperimentContract> {
+    return this.request('POST', `/v1/projects/${projectId}/contracts/${contractId}/approve`, { actor })
   }
 
   verifyClaim(input: { claim_id: string; evidence_ids: string[]; analysis_artifact?: string; reason?: string }): Promise<Claim> {

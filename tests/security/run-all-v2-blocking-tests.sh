@@ -15,6 +15,10 @@
 #   run-release-bundle-tests.sh release-bundle self-containment + clean-room rerun
 #   run-analysis-consistency-tests.sh analysis repeat byte-determinism + artifact/
 #                               chart/manuscript number consistency (§6, real docker runs)
+#   run-analysis-spec-tests.sh  §12 formula conformance: estimator identity,
+#                               direction_ok semantics, canonical-RNG-rule CI
+#                               (independent mirror), + manuscript excludes
+#                               draft evidence / accepted chain claims_used
 #   run-gate-tests.sh           agent-cannot-decide-gate (kernel-level part)
 #                               + §2 gate-state-cannot-transition / five gate
 #                               types / budget-gate-resume / concurrent-
@@ -49,6 +53,7 @@ SCRIPTS=(
   run-hardening-tests.sh
   run-release-bundle-tests.sh
   run-analysis-consistency-tests.sh
+  run-analysis-spec-tests.sh
   run-gate-tests.sh
   run-terminal-tests.sh
   run-sse-tests.sh

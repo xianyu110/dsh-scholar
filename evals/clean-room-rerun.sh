@@ -15,7 +15,11 @@ PASS=0
 FAIL=0
 ok() { printf '  ok: %s\n' "$*"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL+1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): the kernel runs with the fixed eval service token;
+# internal calls (approve/verified/accept) carry x-service-token via the helper
+# (runners inherit the env var and authenticate their own internal calls).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 

@@ -26,6 +26,9 @@ const { values } = parseArgs({
   options: {
     kernel: { type: 'string', default: 'http://127.0.0.1:7412' },
     token: { type: 'string' },
+    // §4 P0 (API-01): internal-route service identity. Sidecar/deployment
+    // environments export DSH_SCHOLAR_SERVICE_TOKEN; the flag overrides it.
+    'service-token': { type: 'string' },
     mode: { type: 'string', default: 'subprocess' },
     'poll-ms': { type: 'string', default: '2000' },
     'timeout-ms': { type: 'string', default: '60000' },
@@ -44,8 +47,9 @@ const heartbeatMs = Number(values['heartbeat-ms'] ?? 15000)
 const cancelPollMs = Number(values['cancel-poll-ms'] ?? 5000)
 const keyFile = values['key-file']
 const owner = values.owner ?? `runner-${randomUUID().slice(0, 8)}`
+const serviceToken = values['service-token'] ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
 
-const client = new ResearchClient({ endpoint, token: values.token })
+const client = new ResearchClient({ endpoint, token: values.token, serviceToken })
 
 /**
  * Load the Ed25519 signing key from --key-file, or generate an ephemeral one

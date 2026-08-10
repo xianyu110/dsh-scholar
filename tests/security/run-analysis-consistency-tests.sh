@@ -59,7 +59,11 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+# §4 P0 (API-01/EVID-01): the kernel runs with the fixed eval service token;
+# positive internal calls carry x-service-token via the helper (runners inherit
+# the env var and authenticate their claim/runner-keys/recover calls themselves).
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 
@@ -297,7 +301,7 @@ RUN_IDS_JSON=$(WORK="$WORK" node --input-type=module -e '
   const keys=["ac-formal-1","ac-formal-2","ac-formal-3"]
   console.log(JSON.stringify(keys.map(k=>jobs.find(j=>j.idempotency_key===k)?.run_manifest?.run_id).filter(Boolean)))')
 EV_BODY=$(PROJ="$PROJ" MEAN="$MEAN" BASE_V="$BASE_V" EFF="$EFF" CI_LO="$CI_LO" CI_HI="$CI_HI" ART="$ART1" RUN_IDS="$RUN_IDS_JSON" node -e 'process.stdout.write(JSON.stringify({project_id:process.env.PROJ,source_type:"analysis",run_ids:JSON.parse(process.env.RUN_IDS),artifact_refs:[process.env.ART],analysis_method:"percentile-bootstrap-95",result:{primary_metric:"m1",value:Number(process.env.MEAN),baseline_value:Number(process.env.BASE_V),effect_size:Number(process.env.EFF),ci_low:Number(process.env.CI_LO),ci_high:Number(process.env.CI_HI),n_seeds:3}}))')
-EV=$(curl -sf -H 'content-type: application/json' -H 'x-service-principal: analysis-worker' -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d "$EV_BODY")
+EV=$(curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -H 'x-service-principal: analysis-worker' -X POST "$BASE/v1/projects/$PROJ/evidence/verified" -d "$EV_BODY")
 if [[ "$(printf '%s' "$EV" | jfield '.evidence_id')" == evidence_* ]]; then
   ok "evidence ingested via the Analysis-Worker verified route with the analysis artifact numbers (artifact_refs=[$ART1])"
 else

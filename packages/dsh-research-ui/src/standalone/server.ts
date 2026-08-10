@@ -509,6 +509,12 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     throw error
   }
   const endpoint = sidecar.endpoint
+  // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity.
+  // The BFF is a service process holding the 0600 dataDir token; it attaches
+  // x-service-token to upstream kernel calls so internal routes (claim,
+  // runner-keys, recover, verified/accept, approve) keep working through the
+  // proxy while the browser never sees or supplies the credential.
+  const serviceToken = sidecar.serviceToken
 
   // The client bundle ships from this package's lib/client.js.
   const bundlePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
@@ -915,6 +921,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // itself, and on /v2 the identity headers below are overwritten with
         // the server-derived principal/role (never taken from the client).
         const proxyHeaders: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' }
+        // §4 P0 (API-01/EVID-01): internal routes demand the service token.
+        // The BFF injects its OWN credential (server-derived, 0600 file) and
+        // never forwards a client-supplied x-service-token; the kernel
+        // ignores the header on non-internal routes.
+        proxyHeaders['x-service-token'] = serviceToken
         for (const name of ['idempotency-key', 'x-request-id']) {
           const value = req.headers[name]
           if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
