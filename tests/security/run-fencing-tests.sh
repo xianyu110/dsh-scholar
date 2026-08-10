@@ -7,15 +7,20 @@
 #   heartbeat-current-credentials-ok       heartbeat with current gen+token -> 200
 #   terminal-frame-stale-generation-409    frame with generation < current -> 409 lease_stale
 #   terminal-frame-current-generation-ok   frame with current generation -> 200
+#   terminal-frame-wrong-owner-409         frame with wrong x-lease-owner -> 409 lease_stale
+#   terminal-frame-wrong-token-409         frame with wrong x-lease-token -> 409 lease_stale
 #   complete-missing-fencing-rejected      complete w/o generation/token -> 409 lease_stale
 #   complete-future-generation-rejected    complete with generation 2 (> current 1) -> 409 lease_stale
 #   complete-current-fencing-ok            complete with current gen+token -> 200, job succeeded
+#   complete-manifest-required-422         succeeded w/o run_manifest (analysis kind) -> 422
 #   artifact-finalize-route-absent         no artifact finalize route exists (404) — noted
 #
 # P0 (acceptance-tests.md §4): heartbeat/Terminal frame/complete MUST carry
 # the current owner/generation/token; missing fields, old generation, future
 # generation and wrong tokens are all 409 lease_stale — no owner-only
-# compatibility pass.
+# compatibility pass. Terminal frames additionally authenticate the lease
+# owner/token (x-lease-owner/x-lease-token) whenever provided — the runner
+# gateway always sends them.
 #
 # Actual kernel behavior probed against lib/bin/kernel.js:
 #  - heartbeatJob/completeJob reject missing OR mismatched generation/token
@@ -81,10 +86,11 @@ J=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"fence-1",
 CLAIM=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-fence","lease_ttl_seconds":60,"limit":8}')
 G=$(printf '%s' "$CLAIM" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J');console.log(row?row.lease_generation:'')})")
 T=$(printf '%s' "$CLAIM" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J');console.log(row?row.lease_token:'')})")
-if [[ "$G" == "1" && -n "$T" ]]; then
-  ok "claim returned lease_generation=$G + lease_token for $J"
+RID=$(printf '%s' "$CLAIM" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J');console.log(row?row.run_id:'')})")
+if [[ "$G" == "1" && -n "$T" && "$RID" == run_* ]]; then
+  ok "claim returned lease_generation=$G + lease_token + durable run_id=$RID for $J (RUN-01 P0)"
 else
-  bad "claim must return lease_generation=1 and a lease_token (got gen=$G token=$T)"
+  bad "claim must return lease_generation=1, a lease_token and the durable run_id (got gen=$G token=$T run_id=$RID)"
   exit 1
 fi
 
@@ -117,29 +123,46 @@ else
   bad "heartbeat current credentials: expected 200, got HTTP $CODE"
 fi
 
-say "Test: Terminal frame fencing (stale generation / current generation / missing field)"
+say "Test: Terminal frame fencing (stale generation / current generation / missing field / owner+token)"
+# P0 (TERM-01): a leased job's terminal frames MUST carry the lease owner and
+# token (x-lease-owner/x-lease-token headers) IN ADDITION to the generation —
+# missing, wrong-owner and wrong-token frames are all 409 lease_stale.
 # Route existence verified by curl: POST /v1/jobs/{id}/terminal-frames is
 # implemented (422 validation_error on an empty frames body proves the route).
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -d '{"run_id":"run_fence_1","frames":[{"seq":1,"frame_kind":"chunk","channel":"stdout","text":"x","lease_generation":0}]}')
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: runner-fence" -H "x-lease-token: $T" -d '{"run_id":"run_fence_1","frames":[{"seq":1,"frame_kind":"chunk","channel":"stdout","text":"x","lease_generation":0}]}')
 ERR=$(jfield '.error.code' < "$WORK/resp.json")
 if [[ "$CODE" == "409" && "$ERR" == "lease_stale" ]]; then
   ok "terminal frame with generation 0 (stale vs current $G) -> HTTP 409 lease_stale"
 else
   bad "terminal frame stale generation: expected 409 lease_stale, got HTTP $CODE (error=$ERR)"
 fi
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -d "{\"run_id\":\"run_fence_1\",\"frames\":[{\"seq\":2,\"frame_kind\":\"chunk\",\"channel\":\"stdout\",\"text\":\"y\",\"lease_generation\":$G}]}")
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: runner-fence" -H "x-lease-token: $T" -d "{\"run_id\":\"run_fence_1\",\"frames\":[{\"seq\":2,\"frame_kind\":\"chunk\",\"channel\":\"stdout\",\"text\":\"y\",\"lease_generation\":$G}]}")
 APPENDED=$(jfield '.appended' < "$WORK/resp.json")
 if [[ "$CODE" == "200" && "$APPENDED" == "1" ]]; then
-  ok "terminal frame with current generation -> HTTP 200, appended=$APPENDED"
+  ok "terminal frame with current generation + owner/token -> HTTP 200, appended=$APPENDED"
 else
   bad "terminal frame current generation: expected 200 appended=1, got HTTP $CODE appended=$APPENDED"
 fi
-CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -d '{"run_id":"run_fence_1","frames":[{"seq":3,"frame_kind":"chunk","channel":"stdout","text":"z"}]}')
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: runner-fence" -H "x-lease-token: $T" -d '{"run_id":"run_fence_1","frames":[{"seq":3,"frame_kind":"chunk","channel":"stdout","text":"z"}]}')
 ERR=$(jfield '.error.code' < "$WORK/resp.json")
 if [[ "$CODE" == "409" && "$ERR" == "lease_stale" ]]; then
   ok "terminal frame WITHOUT lease_generation -> HTTP 409 lease_stale (fail-closed, P0)"
 else
   bad "terminal frame missing generation: expected 409 lease_stale, got HTTP $CODE (error=$ERR)"
+fi
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: intruder" -H "x-lease-token: $T" -d "{\"run_id\":\"run_fence_1\",\"frames\":[{\"seq\":5,\"frame_kind\":\"chunk\",\"channel\":\"stdout\",\"text\":\"v\",\"lease_generation\":$G}]}")
+ERR=$(jfield '.error.code' < "$WORK/resp.json")
+if [[ "$CODE" == "409" && "$ERR" == "lease_stale" ]]; then
+  ok "terminal frame with WRONG x-lease-owner -> HTTP 409 lease_stale"
+else
+  bad "terminal frame wrong owner: expected 409 lease_stale, got HTTP $CODE (error=$ERR)"
+fi
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: runner-fence" -H "x-lease-token: wrong-token" -d "{\"run_id\":\"run_fence_1\",\"frames\":[{\"seq\":6,\"frame_kind\":\"chunk\",\"channel\":\"stdout\",\"text\":\"u\",\"lease_generation\":$G}]}")
+ERR=$(jfield '.error.code' < "$WORK/resp.json")
+if [[ "$CODE" == "409" && "$ERR" == "lease_stale" ]]; then
+  ok "terminal frame with WRONG x-lease-token -> HTTP 409 lease_stale"
+else
+  bad "terminal frame wrong token: expected 409 lease_stale, got HTTP $CODE (error=$ERR)"
 fi
 
 say "Test: complete fencing (missing / future generation / current)"
@@ -163,6 +186,24 @@ if [[ "$CODE" == "200" && "$STATUS" == "succeeded" ]]; then
   ok "complete with current generation/token -> HTTP 200, job '$STATUS'"
 else
   bad "complete current credentials: expected 200 succeeded, got HTTP $CODE status=$STATUS"
+fi
+
+say "Test: succeeded completion REQUIRES a run manifest (non-fixture kinds, RUN-01)"
+# kind 'analysis' is not an echo/smoke fixture: a succeeded completion without
+# a RunManifest is rejected 422 run_manifest_required (echo fixtures stay
+# exempt — they execute nothing in-process, §3.2 invariant 1).
+J2=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"fence-manifest","kind":"analysis","payload":{"metric":"m"}}' | jfield '.job_id')
+[[ -n "$J2" ]] || { echo "failed to submit analysis job"; exit 1; }
+CLAIM2=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-fence","lease_ttl_seconds":60,"limit":8}')
+G2=$(printf '%s' "$CLAIM2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J2');console.log(row?row.lease_generation:'')})")
+T2=$(printf '%s' "$CLAIM2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J2');console.log(row?row.lease_token:'')})")
+CODE=$(curl -s -o "$WORK/resp.json" -w '%{http_code}' -X POST "$BASE/v1/jobs/$J2/status" -H 'content-type: application/json' -d "{\"owner\":\"runner-fence\",\"status\":\"succeeded\",\"lease_generation\":$G2,\"lease_token\":\"$T2\"}")
+ERR=$(jfield '.error.code' < "$WORK/resp.json")
+S2=$(api "$BASE/v1/jobs/$J2" | jfield '.status')
+if [[ "$CODE" == "422" && "$ERR" == "run_manifest_required" && "$S2" == "running" ]]; then
+  ok "succeeded without run_manifest -> HTTP 422 run_manifest_required; job still '$S2'"
+else
+  bad "succeeded w/o manifest: expected 422 run_manifest_required, got HTTP $CODE (error=$ERR) status=$S2"
 fi
 
 say "Artifact finalize route probe"

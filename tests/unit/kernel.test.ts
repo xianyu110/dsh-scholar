@@ -8,10 +8,10 @@ import { describe, expect, it } from 'vitest'
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { fixtureCorpus, fixtureIdea } from '@dsh-scholar/research-schemas'
-import { materializeCodeSnapshot, unpackCodeSnapshot } from '@dsh-scholar/runner-gateway'
+import { materializeCodeSnapshot, unpackCodeSnapshot, buildLatexRunScript, resolveMetricsFileWithin } from '@dsh-scholar/runner-gateway'
 
 /** P0 (acceptance-tests.md §4): the exact digests pinned by configs/runner-profiles/images.lock.json. */
 const NODE_IMAGE_DIGEST = 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32'
@@ -1518,12 +1518,17 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'r1', kind: 'echo', payload: { message: 'x' } })
     const [claimed] = kernel.claimJobs('runner-1', 60, 8)
     expect(claimed).toBeDefined()
+    // RUN-01 (P0): claimJobs MUST return the durable runs.run_id written for
+    // this attempt — the runner uses it for manifest/terminal/evidence.
+    expect(claimed!.run_id).toMatch(/^run_[0-9a-f]{12}$/)
+    expect(kernel.getJob(job.job_id).run_id).toBe(claimed!.run_id)
     let runs = kernel.listRuns(project.project_id)
     expect(runs.length).toBe(1)
     expect(runs[0]!.job_id).toBe(job.job_id)
     expect(runs[0]!.attempt_no).toBe(1)
     expect(runs[0]!.signature_status).toBe('pending')
     expect(runs[0]!.finished_at).toBeNull()
+    expect(runs[0]!.run_id).toBe(claimed!.run_id)
     kernel.completeJob({
       job_id: job.job_id, owner: 'runner-1', status: 'succeeded',
       lease_generation: claimed!.lease_generation!, lease_token: claimed!.lease_token!,
@@ -1954,5 +1959,256 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
     expect(() => kernel.computeAnalysis(project.project_id, contract.contract_id, 'm', { minimum_n: 1 }))
       .toThrowError(/cannot be lowered by the caller/)
     kernel.close()
+  })
+})
+
+describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () => {
+  it('succeeded completion without a run manifest is rejected 422 run_manifest_required (non-fixture kinds)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-manifest', workspace: '/w', brief: makeBrief() })
+    // kind 'analysis' is NOT an echo/smoke fixture — a succeeded completion
+    // without a RunManifest is a protocol violation.
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'p0-an1', kind: 'analysis' })
+    kernel.claimJobs('runner-p0', 60, 8)
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-p0', ...fenceArgs(kernel, job.job_id), status: 'succeeded' }),
+      422, 'run_manifest_required',
+    )
+    // Job must still be running — the failed completion changed nothing.
+    expect(kernel.getJob(job.job_id).status).toBe('running')
+    // With a minimal manifest (unsigned OK: freshKernel opts out of signing)
+    // the completion succeeds and finalizes the runs row.
+    const done = kernel.completeJob({
+      job_id: job.job_id, owner: 'runner-p0', ...fenceArgs(kernel, job.job_id), status: 'succeeded',
+      run_manifest: { run_id: 'run_p0_1', job_id: job.job_id, exit_code: 0 },
+    })
+    expect(done.status).toBe('succeeded')
+    expect(kernel.listRuns(project.project_id)[0]!.finished_at).not.toBeNull()
+    kernel.close()
+  })
+
+  it('echo fixture kinds keep completing without a manifest (in-process, §3.2 invariant 1)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-echo', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'p0-e1', kind: 'echo' })
+    kernel.claimJobs('runner-p0', 60, 8)
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-p0', ...fenceArgs(kernel, job.job_id), status: 'succeeded' })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
+  it('terminal frames with a wrong lease owner or token are rejected 409 lease_stale', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-term', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'p0-t1', kind: 'echo' })
+    kernel.claimJobs('runner-p0', 60, 8)
+    const frame = { seq: 1, frame_kind: 'chunk' as const, channel: 'stdout' as const, text: 'x', lease_generation: 1 }
+    // Wrong owner + correct generation -> 409 lease_stale.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_t', frames: [frame], owner: 'intruder', lease_token: 'wrong' }),
+      409, 'lease_stale',
+    )
+    // Correct owner + wrong token -> 409 lease_stale.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_t', frames: [frame], owner: 'runner-p0', lease_token: 'wrong-token' }),
+      409, 'lease_stale',
+    )
+    // Partial credentials -> 409 lease_stale.
+    expectKernelError(
+      () => kernel.appendTerminalFrames({ jobId: job.job_id, runId: 'run_t', frames: [frame], owner: 'runner-p0' }),
+      409, 'lease_stale',
+    )
+    // Correct owner + token + generation -> accepted.
+    const job2 = kernel.getJob(job.job_id)
+    const ok = kernel.appendTerminalFrames({
+      jobId: job.job_id, runId: 'run_t', frames: [{ ...frame, lease_generation: job2.lease_generation! }],
+      owner: 'runner-p0', lease_token: job2.lease_token,
+    })
+    expect(ok.appended).toBe(1)
+    kernel.close()
+  })
+
+  it('formal analysis rejects duplicate treatment seeds 422 duplicate_seed (no silent overwrite)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-stat', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const contract = approvedContract(kernel, project.project_id)
+    const run = (key: string, kind: 'baseline' | 'formal', seed: number, value: number): void => {
+      const job = kernel.submitJob({
+        project_id: project.project_id, idempotency_key: key, kind, contract_id: contract, payload: { seed },
+        code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST,
+      })
+      kernel.claimJobs('r1', 60, 8)
+      const art = kernel.registerArtifact({
+        project_id: project.project_id, kind: 'analysis',
+        content: JSON.stringify({ schema_version: 1, seed, metrics: [{ name: 'm', value, unit: '' }] }),
+      })
+      kernel.completeJob({
+        job_id: job.job_id, owner: 'r1', ...fenceArgs(kernel, job.job_id), status: 'succeeded',
+        run_manifest: { run_id: `run_${key}`, job_id: job.job_id, exit_code: 0, metrics_artifact: `sha256:${art.sha256}` },
+      })
+    }
+    run('b1', 'baseline', 1, 0.4)
+    run('f1', 'formal', 1, 0.6)
+    // SECOND formal run with the SAME seed 1 — the old code silently used the
+    // first; the paired design must reject the duplicate outright.
+    run('f2', 'formal', 1, 0.7)
+    expectKernelError(() => kernel.computeAnalysis(project.project_id, undefined, 'm'), 422, 'duplicate_seed')
+    kernel.close()
+  })
+
+  it('formal analysis rejects duplicate baseline seeds 422 duplicate_seed', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-stat-b', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const contract = approvedContract(kernel, project.project_id)
+    const run = (key: string, kind: 'baseline' | 'formal', seed: number, value: number): void => {
+      const job = kernel.submitJob({
+        project_id: project.project_id, idempotency_key: key, kind, contract_id: contract, payload: { seed },
+        code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST,
+      })
+      kernel.claimJobs('r1', 60, 8)
+      const art = kernel.registerArtifact({
+        project_id: project.project_id, kind: 'analysis',
+        content: JSON.stringify({ schema_version: 1, seed, metrics: [{ name: 'm', value, unit: '' }] }),
+      })
+      kernel.completeJob({
+        job_id: job.job_id, owner: 'r1', ...fenceArgs(kernel, job.job_id), status: 'succeeded',
+        run_manifest: { run_id: `run_${key}`, job_id: job.job_id, exit_code: 0, metrics_artifact: `sha256:${art.sha256}` },
+      })
+    }
+    run('b1', 'baseline', 1, 0.4)
+    run('b2', 'baseline', 1, 0.41) // duplicate baseline seed
+    run('f1', 'formal', 1, 0.6)
+    expectKernelError(() => kernel.computeAnalysis(project.project_id, undefined, 'm'), 422, 'duplicate_seed')
+    kernel.close()
+  })
+
+  it('contract gate approving a FOREIGN project contract is rejected 422 contract_foreign (GOV-02)', () => {
+    const kernel = freshKernel()
+    const projectA = kernel.createProject({ name: 'p0-gov-a', workspace: '/w', brief: makeBrief() })
+    const projectB = kernel.createProject({ name: 'p0-gov-b', workspace: '/w', brief: makeBrief() })
+    const foreign = kernel.registerContract({
+      project_id: projectB.project_id, idea_id: 'i',
+      data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'm' }, seeds: [1], analysis: {},
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 1, stop_on_data_leakage: true },
+    })
+    // A's contract gate payload references B's contract.
+    const gate = kernel.createGate({
+      project_id: projectA.project_id, type: 'contract', title: 'freeze foreign',
+      payload: { contract_id: foreign.contract_id },
+    })
+    expectKernelError(
+      () => kernel.decideGate({ gate_id: gate.gate_id, actor: 'pi', decision: 'approved', reason: 'ok' }),
+      422, 'contract_foreign',
+    )
+    // Nothing was partially written: the gate stays pending, the contract stays draft.
+    expect(kernel.getGate(gate.gate_id).status).toBe('pending')
+    expect(kernel.getContract(foreign.contract_id).status).toBe('draft')
+    // Same-project contracts still approve (the rejection was the gate's own
+    // ownership check, not a general approval problem).
+    const own = kernel.registerContract({
+      project_id: projectA.project_id, idea_id: 'i',
+      data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'm' }, seeds: [1], analysis: {},
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 1, stop_on_data_leakage: true },
+    })
+    kernel.approveContract(own.contract_id, 'dec_own', 'pi')
+    expect(kernel.getContract(own.contract_id).status).toBe('approved')
+    kernel.close()
+  })
+
+  it('latex-compile with an engine outside the fixed whitelist is rejected 422 engine_invalid (TEX-02)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-tex', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}hi\\end{document}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    // A malicious engine string must never reach the build script.
+    expectKernelError(
+      () => kernel.submitJob({
+        project_id: project.project_id, idempotency_key: 'p0-tex-bad',
+        kind: 'latex-compile',
+        command: ['rm -rf /; echo pwned', '-interaction=nonstopmode', 'paper.tex'],
+        payload: { tex_document_id: doc.document_id, tex_revision: snap.revision, tex_snapshot: snap.manifest, engine: 'rm -rf /; echo pwned' },
+      }),
+      422, 'engine_invalid',
+    )
+    // Whitelisted engines are accepted.
+    const job = kernel.submitJob({
+      project_id: project.project_id, idempotency_key: 'p0-tex-ok',
+      kind: 'latex-compile',
+      command: ['xelatex', '-interaction=nonstopmode', 'paper.tex'],
+      payload: { tex_document_id: doc.document_id, tex_revision: snap.revision, tex_snapshot: snap.manifest, engine: 'xelatex' },
+    })
+    expect(job.kind).toBe('latex-compile')
+    kernel.close()
+  })
+
+  it('latex-compile snapshot paths with shell metacharacters or traversal are rejected 422 tex_path_invalid (TEX-02)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'p0-tex-path', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}hi\\end{document}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    const payload = (rootFile: unknown, files: unknown[]): Record<string, unknown> => ({
+      tex_document_id: doc.document_id,
+      tex_revision: snap.revision,
+      tex_snapshot: { schema_version: 1, document_id: doc.document_id, revision: snap.revision, root_file: rootFile, files },
+    })
+    expectKernelError(
+      () => kernel.submitJob({
+        project_id: project.project_id, idempotency_key: 'p0-tex-p1', kind: 'latex-compile',
+        command: ['pdflatex', 'paper.tex'],
+        payload: payload('../../etc/passwd', [{ path: 'paper.tex', version: 1, content_hash: 'x' }]),
+      }),
+      422, 'tex_path_invalid',
+    )
+    expectKernelError(
+      () => kernel.submitJob({
+        project_id: project.project_id, idempotency_key: 'p0-tex-p2', kind: 'latex-compile',
+        command: ['pdflatex', 'paper.tex'],
+        payload: payload('paper.tex', [{ path: 'a;rm -rf /', version: 1, content_hash: 'x' }]),
+      }),
+      422, 'tex_path_invalid',
+    )
+    kernel.close()
+  })
+
+  it('runner buildLatexRunScript refuses engines outside the fixed whitelist (TEX-02, defense in depth)', () => {
+    // The kernel 422s at submit; the runner must ALSO refuse to splice a
+    // non-whitelisted engine into the container build script.
+    expect(() => buildLatexRunScript('paper.tex', 'rm -rf /; echo pwned')).toThrow(/engine whitelist/)
+    expect(() => buildLatexRunScript('paper.tex', 'pdflatex --shell-escape')).toThrow(/engine whitelist/)
+    // Whitelisted engines and safe paths generate a script.
+    const script = buildLatexRunScript('paper.tex', 'xelatex', ['paper.tex', 'sections/intro.tex'])
+    expect(script).toContain('xelatex -interaction=nonstopmode')
+    // Shell metacharacters in paths are refused too.
+    expect(() => buildLatexRunScript('a;rm -rf /', 'pdflatex')).toThrow(/shell metacharacters|unsafe path/)
+    expect(() => buildLatexRunScript('paper.tex', 'pdflatex', ['../../etc/passwd'])).toThrow(/unsafe path/)
+  })
+
+  it('runner metrics path must resolve inside the outputs dir — ../ escapes and symlinks are rejected (RUN-02)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-metrics-path-'))
+    const outputs = join(dir, 'outputs')
+    mkdirSync(outputs, { recursive: true })
+    writeFileSync(join(outputs, 'metrics.json'), '{"schema_version":1,"metrics":[{"name":"m","value":1}]}')
+    writeFileSync(join(dir, 'outside.json'), 'host file')
+    // Legitimate path resolves.
+    expect(resolveMetricsFileWithin(outputs, '/outputs/metrics.json')).toBe(resolve(outputs, 'metrics.json'))
+    expect(resolveMetricsFileWithin(outputs, 'metrics.json')).toBe(resolve(outputs, 'metrics.json'))
+    // Traversal escapes -> null.
+    expect(resolveMetricsFileWithin(outputs, '/outputs/../outside.json')).toBeNull()
+    expect(resolveMetricsFileWithin(outputs, '../outside.json')).toBeNull()
+    expect(resolveMetricsFileWithin(outputs, '/etc/passwd')).toBeNull()
+    // Symlink pointing outside -> null (realpath containment).
+    try {
+      symlinkSync(join(dir, 'outside.json'), join(outputs, 'evil.json'))
+      expect(resolveMetricsFileWithin(outputs, '/outputs/evil.json')).toBeNull()
+    } catch {
+      // Symlink creation may be unsupported on some platforms — skip.
+    }
+    rmSync(dir, { recursive: true, force: true })
   })
 })

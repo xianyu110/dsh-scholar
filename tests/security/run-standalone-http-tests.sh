@@ -12,6 +12,11 @@
 #           unchanged Corpus Snapshot/Outbox counts; token never in server
 #           log or kernel/server argv (0600 token-file handoff); stable
 #           error bodies without internal paths/env detail.
+#   hardening §4 P0 (GOV-01/API-01): token startup WITHOUT --principal is
+#           fail-closed — list/create/read/write all 401 'principal required'
+#           (only health/unlock/CSRF/static stay open); client-forged
+#           creator/actor/tenant/principal/session in write bodies is
+#           overwritten by the BFF with the session-derived principal.
 #
 # Usage: bash tests/security/run-standalone-http-tests.sh
 set -eu
@@ -48,7 +53,7 @@ KERNEL_PORT=$((WEB_PORT + 1))
 DATA="$WORK/data"
 TOKEN="accept-token-$(date +%s)"
 LOG="$WORK/server.log"
-node "$SERVER_BIN" --host 127.0.0.1 --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$DATA" --token "$TOKEN" > "$LOG" 2>&1 &
+node "$SERVER_BIN" --host 127.0.0.1 --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$DATA" --token "$TOKEN" --principal ops-1 > "$LOG" 2>&1 &
 SPID=$!
 
 ready=0
@@ -442,15 +447,15 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TO
 [ "$R" = "201" ] && ok "API-01: v2 idempotent replay via proxy -> 201" || fail "API-01: v2 replay -> $R"
 
 # ── SEC-UI-01: stable error codes (no connector URL / internal paths) ───────
-# Survey on a nonexistent project with NO principal: the connector may run,
-# but the corpus write fails -> 502 with a generic message; the proxy error
-# bodies must never echo internal details.
+# Survey on a nonexistent project WITH a principal: the BFF answers 404
+# fail-closed BEFORE the connector runs — the body never echoes internal
+# detail.
 BODY=$(curl -s -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
   -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $CSRF" -H "Origin: http://127.0.0.1:$WEB_PORT" \
   -H 'content-type: application/json' -d '{"project_id":"rsp_nonexistent","query":"temporal action localization"}' -m 90)
 case "$BODY" in
-  *'"ok":false'*'connector unavailable'*|*'"ok":false'*'corpus snapshot failed'*) ok "SEC: survey 502 body is generic" ;;
-  *) fail "SEC: survey 502 body -> $BODY" ;;
+  *'"ok":false'*'project not found or access denied'*) ok "SEC: survey 404 fail-closed body is generic" ;;
+  *) fail "SEC: survey fail-closed body -> $BODY" ;;
 esac
 BODY=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/projects/rsp_nonexistent")
 case "$BODY" in
@@ -666,7 +671,133 @@ if [ "$sprinc_ready" = 1 ]; then
   [ -f "$SESS_FILE" ] && [ "$(stat -c %a "$SESS_FILE")" = "600" ] && ok "GOV-01: session.json exists 0600" || fail "GOV-01: session.json missing/wrong mode"
   FILE_SESS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SESS_FILE','utf8')).session_id||'')" 2>/dev/null)
   [ -n "$FILE_SESS" ] && [ "$FILE_SESS" = "$SESS" ] && ok "GOV-01: forwarded session matches session.json (stable identity)" || fail "GOV-01: session mismatch file=$FILE_SESS forwarded=$SESS"
+
+  # ── API-01/GOV-01 (hardening §4 P0): client-forged identity is rewritten ──
+  # A gate decision whose body claims a foreign actor/principal/tenant/session
+  # must be recorded with the SESSION-derived principal: the BFF rewrites
+  # actor→sprinc-ops, principal→{principal_id:sprinc-ops,tenant_id:null,
+  # auth_method:dsh-session,session_id:<real>} and drops the forged top-level
+  # session_id (the kernel then binds the forwarded x-principal-session).
+  FG=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/gates" -d '{"type":"scope","title":"forged identity gate"}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id||''))")
+  [ -n "$FG" ] && ok "GOV-01: forgery gate created ($FG)" || fail "GOV-01: forgery gate create"
+  FDEC=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$SPRINC_WEB/v1/gates/$FG/decisions" \
+    -d '{"actor":"evil-actor","principal":{"principal_id":"evil","tenant_id":"evil-tenant","auth_method":"forged","session_id":"sess_forged"},"session_id":"sess_forged","decision":"approved"}')
+  CODE=$(printf '%s' "$FDEC" | tail -1)
+  [ "$CODE" = "200" ] && ok "GOV-01: forged-identity decision accepted (identity rewritten by BFF) -> 200" || fail "GOV-01: forged decision -> $CODE body=$(printf '%s' "$FDEC" | head -c 200)"
+  FROW=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/decisions" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);const r=a.find(x=>x.gate_id==='$FG');console.log(JSON.stringify(r||{}))})")
+  SESS_PAT="\"session_id\":\"$SESS\""
+  case "$FROW" in
+    *'"actor":"sprinc-ops"'*'"principal_id":"sprinc-ops"'*'"tenant_id":""'*'"auth_method":"dsh-session"'*"$SESS_PAT"*)
+      ok "GOV-01: forged actor/principal/tenant/session rewritten to session identity" ;;
+    *) fail "GOV-01: forged decision row -> $FROW" ;;
+  esac
+  case "$FROW" in
+    *'evil'*|*'sess_forged'*) fail "GOV-01: forged identity leaked into decision -> $FROW" ;;
+    *) ok "GOV-01: no forged identity in decision row" ;;
+  esac
+  # A project CREATE claiming a foreign creator/tenant: the BFF rewrites
+  # creator_principal_id to the session principal and drops creator_tenant_id,
+  # so the kernel seeds sprinc-ops (never the forged PI) as the pi member.
+  PF=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects" \
+    -d '{"name":"forged-create","workspace":"/w/forged","mode":"gate-only","creator_principal_id":"evil-pi","creator_tenant_id":"evil-tenant","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id||''))")
+  [ -n "$PF" ] && ok "GOV-01: forged-creator v1 create -> project $PF" || fail "GOV-01: forged-creator v1 create"
+  MEMS=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$SPRINC_WEB/v1/projects/$PF/members" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a.map(m=>m.principal_id+':'+m.role).join(','))})")
+  [ "$MEMS" = "sprinc-ops:pi" ] && ok "GOV-01: creator membership seeded from session (sprinc-ops:pi, not evil-pi)" || fail "GOV-01: forged creator membership -> '$MEMS'"
+  # v2 create with the same forged creator/tenant: 201, membership from session.
+  V2BODY=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' \
+    -H 'idempotency-key: v2-forge-1' \
+    "http://127.0.0.1:$SPRINC_WEB/v2/projects" \
+    -d '{"name":"v2-forged","workspace":"/w/v2forged","mode":"gate-only","creator_principal_id":"evil-pi","creator_tenant_id":"evil-tenant","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}')
+  case "$V2BODY" in
+    *'"principal_id":"sprinc-ops"'*'"role":"pi"'*) ok "GOV-01: v2 create membership from session (sprinc-ops:pi)" ;;
+    *) fail "GOV-01: v2 create membership -> $(printf '%s' "$V2BODY" | head -c 200)" ;;
+  esac
+  case "$V2BODY" in
+    *'evil'*) fail "GOV-01: v2 forged creator leaked -> $(printf '%s' "$V2BODY" | head -c 200)" ;;
+    *) ok "GOV-01: v2 create carries no forged identity" ;;
+  esac
   kill_test_servers
+fi
+
+# ── hardening §4 P0: default token startup WITHOUT --principal is ───────────
+# fail-closed — list/create/read/write (v1 AND v2) all answer 401
+# {ok:false,error:'principal required'}; only health, the unlock screen,
+# CSRF issuance and static assets stay open.
+echo "== hardening §4: missing principal fail-closed (default token startup) =="
+FC_WEB=$((WEB_PORT + 800))
+FC_KERNEL=$((WEB_PORT + 801))
+FC_DATA="$WORK/fc-data"
+node "$SERVER_BIN" --host 127.0.0.1 --port "$FC_WEB" --kernel-port "$FC_KERNEL" \
+  --data-dir "$FC_DATA" --token "$TOKEN" > "$WORK/fc.log" 2>&1 &
+FC_PID=$!
+fcready=0
+for _ in $(seq 1 60); do
+  if curl -sf -m 2 -X POST "http://127.0.0.1:$FC_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then fcready=1; break; fi
+  sleep 0.5
+done
+[ "$fcready" = 1 ] && ok "FC: default token startup without --principal serves the unlock screen" || fail "FC: default startup readiness (log: $(tail -3 "$WORK/fc.log" | tr '\n' ' '))"
+if [ "$fcready" = 1 ]; then
+  R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FC_WEB/")
+  [ "$R" = "200" ] && ok "FC: GET / bootstrap page (allowlisted) -> 200" || fail "FC: bootstrap -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FC_WEB/client.js")
+  [ "$R" = "200" ] && ok "FC: GET /client.js static bundle (allowlisted) -> 200" || fail "FC: client.js -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FC_WEB/favicon.ico")
+  [ "$R" = "204" ] && ok "FC: GET /favicon.ico static (allowlisted) -> 204" || fail "FC: favicon -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$FC_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}")
+  [ "$R" = "200" ] && ok "FC: POST /api/token-check (allowlisted) -> 200" || fail "FC: token-check -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/api/session/csrf")
+  [ "$R" = "200" ] && ok "FC: GET /api/session/csrf (allowlisted) -> 200" || fail "FC: csrf -> $R"
+  for HEALTH in /v1/health /v2/health; do
+    R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB$HEALTH")
+    [ "$R" = "200" ] && ok "FC: $HEALTH (allowlisted) -> 200" || fail "FC: $HEALTH -> $R"
+  done
+  # Everything else is 401 principal required — with a VALID bearer token,
+  # proving this is an AuthZ fail-closed, not an AuthN failure.
+  principal_required() {
+    local desc="$1" url="$2" method="$3" body="${4:-}"
+    local out R
+    out=$(curl -s -w '\n%{http_code}' -X "$method" -H "Authorization: Bearer $TOKEN" \
+      -H "Origin: http://127.0.0.1:$FC_WEB" -H 'content-type: application/json' \
+      ${body:+-d "$body"} "http://127.0.0.1:$FC_WEB$url")
+    R=$(printf '%s' "$out" | tail -1)
+    if [ "$R" = "401" ] && printf '%s' "$out" | grep -q '"principal required"'; then
+      ok "FC: $desc -> 401 principal required"
+    else
+      fail "FC: $desc -> $R $(printf '%s' "$out" | head -c 120)"
+    fi
+  }
+  principal_required "GET /v1/projects (list)" "/v1/projects" GET
+  principal_required "POST /v1/projects (create, forged creator)" "/v1/projects" POST '{"name":"x","workspace":"/w/x","mode":"gate-only","creator_principal_id":"evil-pi","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}'
+  principal_required "GET /v1/projects/rsp_x (read)" "/v1/projects/rsp_x" GET
+  principal_required "GET /v2/projects (list)" "/v2/projects" GET
+  principal_required "POST /v2/projects (create, forged creator)" "/v2/projects" POST '{"name":"x","workspace":"/w/x","mode":"gate-only","creator_principal_id":"evil-pi","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}'
+  principal_required "GET /v2/projects/rsp_x (read)" "/v2/projects/rsp_x" GET
+  principal_required "PUT /api/model (write)" "/api/model" PUT '{"model":"deepseek-v4-flash"}'
+  principal_required "POST /api/chat/survey (write)" "/api/chat/survey" POST '{"project_id":"x","query":"y"}'
+  # Without a principal no project data can be reached: the list must NOT
+  # return the full project set (the old fail-open leak).
+  LEAK=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/v1/projects")
+  case "$LEAK" in
+    *'project_id'*) fail "FC: project list leaked without principal -> $LEAK" ;;
+    *) ok "FC: no project data reachable without principal (list fail-closed)" ;;
+  esac
+  # No session is derived and no kernel contact happens on the 401 path.
+  [ ! -f "$FC_DATA/session.json" ] && ok "FC: no session derived without principal" || fail "FC: session.json unexpectedly present"
+  R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FC_WEB/v1/projects")
+  [ "$R" = "401" ] && ok "FC: /v1/projects without token -> 401" || fail "FC: no-token list -> $R"
+  kill "$FC_PID" 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    if ! ss -ltn 2>/dev/null | grep -qE ":$FC_WEB |:$FC_KERNEL "; then break; fi
+    sleep 0.5
+  done
+  ok "FC: fail-closed instance cleaned up"
 fi
 
 echo "== standalone http acceptance: $PASS passed, $FAIL failed =="

@@ -25,6 +25,29 @@ import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
  * 10,000 in production — the kernel never lowers them. */
 const ANALYSIS_RESAMPLES = 10_000
 
+/**
+ * §4 (RUN-02/TEX-02 P0): the TeX build engine is a FIXED enum — never a raw
+ * string spliced into a shell. The runner's build script validates the same
+ * whitelist before generating any command line.
+ */
+export const TEX_ENGINES: readonly string[] = ['pdflatex', 'lualatex', 'xelatex', 'bibtex', 'biber']
+
+/** §4 (TEX-02): shell metacharacters that must never appear in a TeX build
+ * path (mirrors the runner's materializeTexWorkspace rule). */
+const TEX_SHELL_META = /[;&|`$"'\\ \t\n]/
+
+/** §4 (TEX-02): a TeX build path must be root-relative (inside the frozen
+ * workspace), free of `..` segments and shell metacharacters — it is
+ * interpolated into the container build script. */
+function assertSafeTexBuildPath(path: string): void {
+  if (path === '' || path.startsWith('/') || path.split('/').some(part => part === '..')) {
+    throw new KernelError(422, 'tex_path_invalid', `tex build path must be root-relative without '..': ${path}`)
+  }
+  if (TEX_SHELL_META.test(path)) {
+    throw new KernelError(422, 'tex_path_invalid', `tex build path contains shell metacharacters: ${path}`)
+  }
+}
+
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexSnapshotManifest } from './tex-workspace.js'
 import { validateImageDigest, type SecureJobKind } from './images-lock.js'
 import { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
@@ -100,14 +123,22 @@ function gateFromRow(row: GateRow): Gate {
   }
 }
 
-function jobFromRow(row: JobRow): JobSpecBound {
+function jobFromRow(row: JobRow, db: DatabaseSync): JobSpecBound & { run_id: string | null } {
   const payload = jsonParse(row.payload, {} as Record<string, unknown>)
   // §12.6: the opaque lease token is persisted inside payload.__lease_token
   // (avoids a schema column); surface it as a first-class field and keep the
   // public payload clean.
   const leaseToken = typeof payload.__lease_token === 'string' ? payload.__lease_token : null
   if (leaseToken !== null) delete payload.__lease_token
+  // §3.1 / RUN-01 (P0): the durable per-attempt run identity — the runs row
+  // of the CURRENT attempt (`attempts`). Runners that only hold the job
+  // record (claim response / GET job) can use run_id for manifest, terminal
+  // frames and evidence without re-fetching; queued jobs (no attempt yet)
+  // yield null.
+  const runRow = db.prepare('SELECT run_id FROM runs WHERE job_id = ? AND attempt_no = ?')
+    .get(row.job_id, row.attempts) as { run_id?: string } | undefined
   return {
+    run_id: runRow?.run_id ?? null,
     job_id: row.job_id,
     project_id: row.project_id,
     contract_id: row.contract_id,
@@ -778,8 +809,22 @@ export class ResearchKernel {
           // GOV-02: freeze the target contract ATOMICALLY with the decision
           // (design §6.6: contracts become immutable on Contract Gate
           // approval) — inside the same transaction as the decision row.
+          // P0 (GOV-02/RUN-01a): the gate payload must reference a contract
+          // of the GATE's OWN project — a cross-project Contract is rejected
+          // 422 `contract_foreign` (the approval still updates by contract_id,
+          // but only after the ownership check inside the same transaction).
           const contractId = typeof gate.payload.contract_id === 'string' ? gate.payload.contract_id : undefined
           if (contractId !== undefined) {
+            let contract: ExperimentContract | undefined
+            try {
+              contract = this.getContract(contractId)
+            } catch {
+              throw new KernelError(422, 'contract_unknown', `contract ${contractId} referenced by contract gate ${gate.gate_id} not found`)
+            }
+            if (contract.project_id !== gate.project_id) {
+              throw new KernelError(422, 'contract_foreign',
+                `contract ${contractId} belongs to project ${contract.project_id}, not gate project ${gate.project_id} (cross-project Contract freeze is rejected)`)
+            }
             this.approveContract(contractId, decision.decision_id, input.actor)
           }
           if (project.status === mapping.from) {
@@ -1427,7 +1472,7 @@ export class ResearchKernel {
     // yields two independent jobs.
     const existing = this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?')
       .get(input.project_id, input.idempotency_key) as JobRow | undefined
-    if (existing !== undefined) return jobFromRow(existing)
+    if (existing !== undefined) return jobFromRow(existing, this.db)
     // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
     // isolated-subprocess is rejected at submission time (kernel layer).
     const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
@@ -1441,6 +1486,30 @@ export class ResearchKernel {
       const rev = typeof input.payload?.tex_revision === 'number' ? input.payload.tex_revision : undefined
       if (docId === '' || rev === undefined) {
         throw new KernelError(422, 'tex_snapshot_required', 'latex-compile jobs require payload.tex_document_id + payload.tex_revision')
+      }
+      // P0 (RUN-02/TEX-02): the build engine is a fixed enum — an arbitrary
+      // string (payload.engine or command[0]) is rejected 422 `engine_invalid`
+      // before it can be spliced into the container build script.
+      const engine = typeof input.payload?.engine === 'string' && input.payload.engine !== ''
+        ? input.payload.engine
+        : (Array.isArray(input.command) && input.command.length > 0 ? String(input.command[0]) : 'pdflatex')
+      if (!TEX_ENGINES.includes(engine)) {
+        throw new KernelError(422, 'engine_invalid',
+          `latex-compile engine '${engine}' is not in the fixed engine whitelist (${TEX_ENGINES.join('/')})`)
+      }
+      // P0 (TEX-02): every path of the frozen snapshot must be root-relative
+      // and free of shell metacharacters (they are interpolated into the
+      // build script by the runner; the kernel rejects them at submit).
+      const snapshot = input.payload?.tex_snapshot
+      if (typeof snapshot === 'object' && snapshot !== null) {
+        const snap = snapshot as { root_file?: unknown; files?: unknown }
+        if (typeof snap.root_file === 'string') assertSafeTexBuildPath(snap.root_file)
+        if (Array.isArray(snap.files)) {
+          for (const f of snap.files) {
+            const path = (f as { path?: unknown } | null)?.path
+            if (typeof path === 'string') assertSafeTexBuildPath(path)
+          }
+        }
       }
       this.texSnapshot(docId, rev)
     }
@@ -1591,17 +1660,17 @@ export class ResearchKernel {
     return job
   }
 
-  getJob(jobId: string): JobRecord {
+  getJob(jobId: string): JobSpecBound & { run_id: string | null } {
     const row = this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(jobId) as JobRow | undefined
     if (row === undefined) throw new KernelError(404, 'job_not_found', `job ${jobId} not found`)
-    return jobFromRow(row)
+    return jobFromRow(row, this.db)
   }
 
-  listJobs(projectId: string, status?: JobStatus): JobRecord[] {
+  listJobs(projectId: string, status?: JobStatus): Array<JobSpecBound & { run_id: string | null }> {
     const rows = status === undefined
       ? this.db.prepare('SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as JobRow[]
       : this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND status = ? ORDER BY created_at').all(projectId, status) as unknown as JobRow[]
-    return rows.map(jobFromRow)
+    return rows.map(row => jobFromRow(row, this.db))
   }
 
   /** §3.1 / RUN-01: durable per-attempt run rows of a project (claim-time
@@ -1623,13 +1692,16 @@ export class ResearchKernel {
   /** Claim queued/retryable jobs for an owner with a lease TTL (design §9.3, §12.6).
    * Every claim bumps `lease_generation` and issues a fresh opaque
    * `lease_token`; runners must echo both on heartbeat/complete, and stale
-   * generations are fenced out (an old runner can never finish the job). */
-  claimJobs(owner: string, leaseTtlSeconds = 300, limit = 8): JobRecord[] {
+   * generations are fenced out (an old runner can never finish the job).
+   * RUN-01 (P0): each claimed job carries the durable `run_id` of the runs
+   * row written for THIS attempt — the runner must use it for manifest,
+   * terminal frames and evidence instead of minting its own run identity. */
+  claimJobs(owner: string, leaseTtlSeconds = 300, limit = 8): Array<JobSpecBound & { run_id: string | null }> {
     const now = nowIso()
     const rows = this.db.prepare(
       `SELECT * FROM jobs WHERE status = 'queued' OR (status = 'retryable' AND attempts < max_attempts) ORDER BY created_at LIMIT ?`,
     ).all(limit) as unknown as JobRow[]
-    const claimed: JobRecord[] = []
+    const claimed: Array<JobSpecBound & { run_id: string | null }> = []
     const update = this.db.prepare(
       `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, lease_generation = COALESCE(lease_generation, 0) + 1, payload = ?, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
     )
@@ -1640,19 +1712,22 @@ export class ResearchKernel {
       payload.__lease_token = leaseToken
       const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
       if (Number(result.changes) === 1) {
-        const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow)
+        const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow, this.db)
         // §3.1 / RUN-01 (Run attempt): every claim records a runs row — the
         // durable per-attempt identity (attempt_no = attempts after claim).
         // run_id is run_<12 hex>; snapshot_sha256 is the CAS sha256 resolved
         // from the job's code_snapshot_id ('' → NULL when the job has none).
+        // P0: the run_id is generated HERE and returned on the claimed job so
+        // the runner never mints a parallel run identity.
+        const runId = `run_${randomUUID().replaceAll('-', '').slice(0, 12)}`
         this.db.prepare(
           `INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, signature_status, started_at)
            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
         ).run(
-          `run_${randomUUID().replaceAll('-', '').slice(0, 12)}`, claimedJob.project_id, claimedJob.job_id, claimedJob.attempts,
+          runId, claimedJob.project_id, claimedJob.job_id, claimedJob.attempts,
           claimedJob.contract_id, this.resolveSnapshotSha256(claimedJob.code_snapshot_id), now,
         )
-        claimed.push(claimedJob)
+        claimed.push({ ...claimedJob, run_id: runId })
       }
     }
     return claimed
@@ -1755,6 +1830,16 @@ export class ResearchKernel {
       throw new KernelError(409, 'lease_stale',
         `job ${input.job_id} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${input.lease_generation ?? 'n/a'} token ${input.lease_token ?? 'n/a'}`)
     }
+    // RUN-01 (P0): a SUCCEEDED completion MUST carry a RunManifest — a real
+    // run that finished without one is a protocol violation, not a success
+    // (422 run_manifest_required). echo/smoke are the in-process FIXTURE
+    // kinds (echo executes nothing, §3.2 invariant 1; smoke is a trusted
+    // fixture) — every kind that actually executes work (baseline/pilot/
+    // formal/reproduce/analysis/latex-compile) is enforced.
+    if (input.status === 'succeeded' && input.run_manifest === undefined && job.kind !== 'echo' && job.kind !== 'smoke') {
+      throw new KernelError(422, 'run_manifest_required',
+        `job ${input.job_id} (${job.kind}) succeeded without a run manifest — succeeded completions must carry run_manifest (RUN-01)`)
+    }
     if (input.run_manifest !== undefined) {
       this.verifyRunManifest(input.run_manifest, job)
     }
@@ -1776,27 +1861,34 @@ export class ResearchKernel {
       }
     }
     const now = nowIso()
-    this.db.prepare(
-      'UPDATE jobs SET status = ?, failure_class = ?, run_manifest = ?, error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE job_id = ?',
-    ).run(input.status, input.failure_class ?? null, input.run_manifest !== undefined ? JSON.stringify(input.run_manifest) : null, input.error ?? '', now, input.job_id)
-    // §3.1 / RUN-01 (Run attempt): finalize the attempt's runs row (the one
-    // recorded at claim time for this attempt_no). Manifest + signature
-    // status come from the completed run; a manifest without a non-empty
-    // `signature` (or no manifest at all) records 'unsigned'.
-    const manifestRow = input.run_manifest !== undefined ? input.run_manifest : undefined
-    const signed = typeof (manifestRow as Record<string, unknown> | undefined)?.signature === 'string'
-      && (manifestRow as Record<string, unknown>).signature !== ''
-    const signatureStatus = manifestRow !== undefined && signed ? 'signed' : 'unsigned'
-    this.db.prepare(
-      'UPDATE runs SET manifest_json = ?, signature_status = ?, finished_at = ? WHERE job_id = ? AND attempt_no = ?',
-    ).run(
-      manifestRow !== undefined ? JSON.stringify(manifestRow) : null,
-      signatureStatus, now, input.job_id, job.attempts,
-    )
-    const jobRecord = this.getJob(input.job_id)
-    this.emit(job.project_id, 'job.updated', {
-      job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,
+    // RUN-01 (P0): the jobs UPDATE and the runs-row finalization MUST be one
+    // transaction — a crash between the two would leave a finalized job with
+    // a pending run (or vice versa). Manifest verification above stays OUTSIDE
+    // the transaction (read-only; no partial-write risk).
+    withTransaction(this.db, () => {
+      this.db.prepare(
+        'UPDATE jobs SET status = ?, failure_class = ?, run_manifest = ?, error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE job_id = ?',
+      ).run(input.status, input.failure_class ?? null, input.run_manifest !== undefined ? JSON.stringify(input.run_manifest) : null, input.error ?? '', now, input.job_id)
+      // §3.1 / RUN-01 (Run attempt): finalize the attempt's runs row (the one
+      // recorded at claim time for this attempt_no). Manifest + signature
+      // status come from the completed run; a manifest without a non-empty
+      // `signature` (or no manifest at all) records 'unsigned'.
+      const manifestRow = input.run_manifest !== undefined ? input.run_manifest : undefined
+      const signed = typeof (manifestRow as Record<string, unknown> | undefined)?.signature === 'string'
+        && (manifestRow as Record<string, unknown>).signature !== ''
+      const signatureStatus = manifestRow !== undefined && signed ? 'signed' : 'unsigned'
+      this.db.prepare(
+        'UPDATE runs SET manifest_json = ?, signature_status = ?, finished_at = ? WHERE job_id = ? AND attempt_no = ?',
+      ).run(
+        manifestRow !== undefined ? JSON.stringify(manifestRow) : null,
+        signatureStatus, now, input.job_id, job.attempts,
+      )
+      const jobRecord = this.getJob(input.job_id)
+      this.emit(job.project_id, 'job.updated', {
+        job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,
+      })
     })
+    const jobRecord = this.getJob(input.job_id)
     // §12 (TEX-02): a latex-compile completion finalizes its tex_builds row
     // (status/diagnostics/PDF/log from the runner manifest).
     if (job.kind === 'latex-compile' && input.run_manifest !== undefined) {
@@ -1951,9 +2043,13 @@ export class ResearchKernel {
    * exist; frames from a stale lease generation are rejected (fencing); seq
    * must be monotonic within the run (duplicate/older seq is an idempotent
    * skip); chunk frames must carry channel/stream_seq/text/byte_offset/
-   * byte_length. Retention: when total_bytes exceeds maxLogBytes, the OLDEST
-   * chunk frames are evicted, dropped_bytes accumulate and truncated is set;
-   * gap/exit frames are never evicted.
+   * byte_length. P0 (acceptance-tests.md §4): when the caller supplies the
+   * lease owner/token, each frame is fenced against BOTH — a wrong owner or
+   * token is 409 `lease_stale` (the HTTP route requires both for leased
+   * jobs, so every frame that arrives over the wire is owner/token checked).
+   * Retention: when total_bytes exceeds maxLogBytes, the OLDEST chunk frames
+   * are evicted, dropped_bytes accumulate and truncated is set; gap/exit
+   * frames are never evicted.
    */
   appendTerminalFrames(input: {
     jobId: string
@@ -1969,11 +2065,32 @@ export class ResearchKernel {
       payload_json?: string
       lease_generation?: number
     }>
+    /** §4 P0 (TERM-01): lease owner/token fencing — exact match when provided. */
+    owner?: string | null
+    lease_token?: string | null
     maxLogBytes?: number
   }): { appended: number; last_seq: number; truncated: boolean; total_bytes: number; dropped_bytes: number } {
     const job = this.getJob(input.jobId)
     if (input.frames.length === 0) {
       throw new KernelError(422, 'empty_frames', 'at least one frame is required')
+    }
+    // P0 (acceptance-tests.md §4): Terminal frames must authenticate the
+    // CLAIM — when the caller provides owner/token (the runner gateway and
+    // the HTTP route always do), both must exactly match the job's lease or
+    // the batch is rejected 409 lease_stale (an old or foreign runner can
+    // never write frames into a live run). Partial credentials (one side
+    // provided, the other null/undefined) are stale too.
+    const ownerProvided = input.owner !== undefined && input.owner !== null
+    const tokenProvided = input.lease_token !== undefined && input.lease_token !== null
+    if (ownerProvided || tokenProvided) {
+      if (!ownerProvided || !tokenProvided) {
+        throw new KernelError(409, 'lease_stale',
+          `job ${input.jobId} terminal frames must carry BOTH lease owner and token (got owner=${String(input.owner)} token=${String(input.lease_token)})`)
+      }
+      if (input.owner !== job.lease_owner || input.lease_token !== job.lease_token) {
+        throw new KernelError(409, 'lease_stale',
+          `job ${input.jobId} terminal frames lease mismatch: expected owner ${job.lease_owner ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got owner ${input.owner} token ${input.lease_token}`)
+      }
     }
     const maxBytes = input.maxLogBytes ?? ResearchKernel.TERMINAL_DEFAULT_MAX_BYTES
     let appended = 0
@@ -2598,6 +2715,24 @@ export class ResearchKernel {
       if (v.kind === 'baseline') baselineRuns.push({ seed: v.seed, value: v.value })
       else treatmentRuns.push({ seed: v.seed, value: v.value })
     }
+    // STAT-01 (P0): a seed that appears in MULTIPLE runs of the same group
+    // (baseline or treatment) makes the matched-seed design ambiguous — the
+    // old behavior silently overwrote/`find`-firsted it. Formal analyses now
+    // reject duplicate seeds outright (422 duplicate_seed): each baseline and
+    // each treatment seed must be unique across the collected runs.
+    const assertUniqueSeeds = (group: string, runs: Array<{ seed?: number }>): void => {
+      const seen = new Set<number>()
+      for (const r of runs) {
+        if (r.seed === undefined) continue
+        if (seen.has(r.seed)) {
+          throw new KernelError(422, 'duplicate_seed',
+            `${group} seed ${r.seed} appears in multiple runs — duplicate seeds are rejected in formal analysis (STAT-01); re-run with unique seeds`)
+        }
+        seen.add(r.seed)
+      }
+    }
+    assertUniqueSeeds('baseline', baselineRuns)
+    assertUniqueSeeds('treatment', treatmentRuns)
     const baselineBySeed = new Map<number, number>()
     for (const b of baselineRuns) {
       if (b.seed !== undefined) baselineBySeed.set(b.seed, b.value)

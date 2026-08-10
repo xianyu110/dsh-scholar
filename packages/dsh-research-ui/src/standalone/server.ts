@@ -137,6 +137,62 @@ function tokenMatches(provided: string | undefined, expected: string): boolean {
   return constantTimeEqual(provided, expected)
 }
 
+/**
+ * API-01/GOV-01 (hardening §4 P0): JSON write bodies are normalized so the
+ * kernel only ever records the SESSION-derived operator principal. Identity
+ * fields the client supplies are overwritten with the BFF-resolved identity
+ * or removed — a client can never claim another creator, actor, tenant or
+ * session. `principal_id` is deliberately NOT in the set: project member
+ * routes legitimately add OTHER principals (e.g. POST /v1/projects/{id}/members).
+ * Applied to POST/PATCH/PUT bodies only; non-JSON bodies pass through untouched.
+ */
+function normalizeIdentityBody(raw: string, principalId: string, sessionId: string, seedCreator: boolean): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return raw
+  const body = parsed as Record<string, unknown>
+  let changed = false
+  if ('creator_principal_id' in body) {
+    body.creator_principal_id = principalId
+    changed = true
+  }
+  if ('creator_tenant_id' in body) {
+    // The tenant comes from the session only (operatorSession tenant_id is
+    // null) — a client-forged tenant is dropped, never forwarded.
+    delete body.creator_tenant_id
+    changed = true
+  }
+  if ('actor' in body) {
+    body.actor = principalId
+    changed = true
+  }
+  if ('principal' in body) {
+    // Full session-derived principal; the client's claimed tenant_id,
+    // auth_method and session_id are never forwarded. tenant_id is '' on
+    // the wire (kernel decisionSchema requires a string; operatorSession
+    // keeps tenant_id null — an empty tenant is the session truth).
+    body.principal = { principal_id: principalId, tenant_id: '', auth_method: 'dsh-session', session_id: sessionId }
+    changed = true
+  }
+  if ('session_id' in body) {
+    // A forged session is dropped; the kernel binds the BFF-forwarded
+    // x-principal-session instead (server.ts GOV-01 resolver).
+    delete body.session_id
+    changed = true
+  }
+  if (seedCreator && !('creator_principal_id' in body)) {
+    // Project create: the BFF seeds the creator PI membership from the
+    // authenticated session even when the client omits the field.
+    body.creator_principal_id = principalId
+    changed = true
+  }
+  return changed ? JSON.stringify(body) : raw
+}
+
 function secureExistingTokenFile(tokenFile: string): void {
   const stat = lstatSync(tokenFile)
   if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -604,6 +660,22 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
+      // API-01/GOV-01 (hardening §4 P0): in token mode the loopback operator
+      // identity (--principal) is REQUIRED. A token without a principal is a
+      // misconfiguration, not an anonymous mode: every surface except the
+      // unlock screen, CSRF issuance, static assets and health answers
+      // 401 {ok:false,error:'principal required'} — fail-closed, before any
+      // kernel contact. --no-token keeps its loopback-dev behavior.
+      if (
+        options.token !== null &&
+        options.principal === null &&
+        url.pathname !== '/v1/health' &&
+        url.pathname !== '/v2/health'
+      ) {
+        sendJson(res, 401, { ok: false, error: 'principal required' })
+        return
+      }
+
       // Model preference: the research agent's model seat. The standalone
       // persists the choice under the data dir (`model.json`, 0600) and
       // exposes it to the DSH-side plugin via the same file, so a selection
@@ -829,6 +901,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           }
           body = read.body
         }
+        // API-01/GOV-01 (hardening §4 P0): the authenticated operator session
+        // is derived ONCE per request — it both normalizes identity fields in
+        // write bodies and supplies x-principal-session for the kernel.
+        const opSession = options.principal !== null ? operatorSession(options.dataDir, options.principal) : null
+        if (opSession !== null && body !== undefined && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
+          const seedCreator = url.pathname === '/v1/projects' || url.pathname === '/v2/projects'
+          body = normalizeIdentityBody(body, opSession.principal_id, opSession.session_id, seedCreator)
+        }
         // api-contracts.md §1: mutation/creation headers pass through
         // (Idempotency-Key, X-Request-Id). Client-supplied identity is never
         // trusted on any surface: on /v1 the standalone enforces membership
@@ -860,8 +940,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // 0600, stable across restarts — "Session link 在重启后恢复"). Every
         // forwarded request carries x-principal-session so kernel decisions
         // record the session_id (durable principal, acceptance-tests.md §2).
-        if (options.principal !== null) {
-          proxyHeaders['x-principal-session'] = operatorSession(options.dataDir, options.principal).session_id
+        if (opSession !== null) {
+          proxyHeaders['x-principal-session'] = opSession.session_id
         }
         const upstream = await fetch(`${endpoint}${url.pathname}${url.search}`, {
           method,

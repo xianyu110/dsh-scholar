@@ -78,10 +78,11 @@ J=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"term-1","
 [[ -n "$J" ]] || { echo "failed to submit echo job"; exit 1; }
 CLAIM=$(api -X POST "$BASE/v1/jobs-claim/run" -d '{"owner":"runner-term","lease_ttl_seconds":60,"limit":8}')
 G=$(printf '%s' "$CLAIM" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J');console.log(row?row.lease_generation:'')})")
-if [[ "$G" == "1" ]]; then
-  ok "claim returned lease_generation=$G for $J (frames must carry it, P0 fencing)"
+T=$(printf '%s' "$CLAIM" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);const row=j.find(x=>x.job_id==='$J');console.log(row?row.lease_token:'')})")
+if [[ "$G" == "1" && -n "$T" ]]; then
+  ok "claim returned lease_generation=$G + lease_token for $J (frames must carry both, P0 fencing)"
 else
-  bad "claim must return lease_generation=1 (got '$G')"
+  bad "claim must return lease_generation=1 and a lease_token (got gen='$G' token='$T')"
   exit 1
 fi
 # frame <seq> <kind> [payload-json-object] -> frame JSON (payload_json is a STRING)
@@ -94,15 +95,17 @@ chunk() {
   printf '{"seq":%s,"stream_seq":%s,"channel":"stdout","text":"%s","byte_offset":0,"byte_length":%s,"frame_kind":"chunk","lease_generation":%s}' "$seq" "$seq" "$text" "${#text}" "$G"
 }
 # append <run> <maxlog> <frames...> -> response body
+# P0 (TERM-01): every append carries the claim's lease owner + token via
+# x-lease-owner/x-lease-token headers — leased jobs reject frames without them.
 append() {
   local run="$1" maxlog="$2"
   shift 2
   local frames=""
   for f in "$@"; do [[ -n "$frames" ]] && frames="$frames,"; frames="$frames$f"; done
   if [[ -n "$maxlog" ]]; then
-    curl -s -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -d "{\"run_id\":\"$run\",\"max_log_bytes\":$maxlog,\"frames\":[$frames]}"
+    curl -s -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: runner-term" -H "x-lease-token: $T" -d "{\"run_id\":\"$run\",\"max_log_bytes\":$maxlog,\"frames\":[$frames]}"
   else
-    curl -s -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -d "{\"run_id\":\"$run\",\"frames\":[$frames]}"
+    curl -s -X POST "$BASE/v1/jobs/$J/terminal-frames" -H 'content-type: application/json' -H "x-lease-owner: runner-term" -H "x-lease-token: $T" -d "{\"run_id\":\"$run\",\"frames\":[$frames]}"
   fi
 }
 

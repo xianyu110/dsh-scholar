@@ -75,7 +75,9 @@ for s in "${SCRIPTS[@]}"; do
   SKIPPED=0
   if grep -qE "SKIP|skip" "$LOG"; then SKIPPED=1; fi
   ZERO=0
-  if grep -qE "0 passed" "$LOG"; then ZERO=1; fi
+  # "180 passed" must NOT count as "0 passed" — require the count to be a
+  # standalone zero (not preceded by another digit).
+  if grep -qE "(^|[^0-9])0 passed" "$LOG"; then ZERO=1; fi
   if [[ "$RC" -eq 0 && ( "$SKIPPED" -eq 1 || "$ZERO" -eq 1 ) && ( -n "${CI:-}" || "$ALLOW_SKIP" -eq 0 ) ]]; then
     FAILED+=("$s")
     echo "FAIL  $s  (exit 0 but SKIP/zero-assertion detected; CI=true requires fail-closed)"

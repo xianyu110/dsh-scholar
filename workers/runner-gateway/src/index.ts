@@ -13,7 +13,7 @@
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -22,6 +22,87 @@ import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { JobRecord } from '@dsh-scholar/research-schemas'
 
 const execFileAsync = promisify(execFile)
+
+/** §4 P0 (RUN-01): a claimed job carries the durable per-attempt run_id that
+ * the kernel wrote into its `runs` ledger at claim time. */
+export type ClaimedJobRecord = JobRecord & { run_id?: string | null }
+
+/**
+ * §4 P0 (TERM-01): upload terminal frames WITH the lease owner/token — the
+ * kernel exact-matches them against the job's current lease (a wrong owner or
+ * token is 409 lease_stale), so the gateway must always attach both. The
+ * ResearchClient's typed method does not carry headers, so this reuses the
+ * client's request pipeline (same endpoint/bearer handling) with the lease
+ * headers attached.
+ */
+type ResearchRequestFn = <T>(method: string, path: string, body?: unknown, headers?: Record<string, string>) => Promise<T>
+
+export function appendTerminalFramesWithLease(
+  client: ResearchClient,
+  jobId: string,
+  runId: string,
+  frames: Array<{
+    seq: number
+    stream_seq?: number | null
+    channel?: 'stdout' | 'stderr' | null
+    text?: string | null
+    byte_offset?: number | null
+    byte_length?: number | null
+    frame_kind: 'chunk' | 'gap' | 'exit'
+    lease_generation?: number
+    payload_json?: string
+  }>,
+  owner: string,
+  token: string | null,
+): Promise<{ appended: number; last_seq: number }> {
+  const request = (client as unknown as { request: ResearchRequestFn }).request
+  return request('POST', `/v1/jobs/${jobId}/terminal-frames`, { run_id: runId, frames }, {
+    'x-lease-owner': owner,
+    'x-lease-token': token ?? '',
+  })
+}
+
+/**
+ * §4 P0 (RUN-02/TEX-02): the TeX build engine is a FIXED enum — a raw string
+ * is never spliced into the build script. Mirrors the kernel whitelist.
+ */
+const TEX_ENGINES: readonly string[] = ['pdflatex', 'lualatex', 'xelatex', 'bibtex', 'biber']
+
+/** §4 (TEX-02): shell metacharacters banned from TeX build paths. */
+const TEX_SHELL_META = /[;&|`$"'\\ \t\n]/
+
+/** §4 (TEX-02): a TeX build path must be root-relative (inside the frozen
+ * workspace), free of `..` segments and shell metacharacters. */
+function assertSafeTexPath(path: string): void {
+  if (path === '' || path.startsWith('/') || path.split('/').some(part => part === '..')) {
+    throw new Error(`tex snapshot contains an unsafe path: ${path}`)
+  }
+  if (TEX_SHELL_META.test(path)) {
+    throw new Error(`tex snapshot path contains shell metacharacters: ${path}`)
+  }
+}
+
+/**
+ * §4 P0 (RUN-02): resolve the output-contract metrics path to a readable file
+ * STRICTLY inside the outputs directory. `../` escapes, absolute paths and
+ * symlinks pointing outside outputs return null — a malicious job must never
+ * read host files through the metrics path. The caller treats null as a
+ * failed output-contract validation.
+ */
+export function resolveMetricsFileWithin(outputsDir: string, metricsPath: string): string | null {
+  const rel = metricsPath.replace(/^\/outputs\/?/, '')
+  const absOutputs = resolve(outputsDir)
+  const target = resolve(absOutputs, rel)
+  if (!target.startsWith(`${absOutputs}${sep}`)) return null
+  try {
+    // realpath re-check: a container-created symlink may resolve outside.
+    const real = realpathSync(target)
+    if (!real.startsWith(`${realpathSync(absOutputs)}${sep}`)) return null
+    return real
+  } catch {
+    return null // missing/unreadable file
+  }
+}
 
 export type RunnerMode = 'subprocess' | 'docker'
 
@@ -239,8 +320,16 @@ export function parseLatexDiagnostics(logText: string): LatexDiagnostic[] {
  * manifest list — never the /work tree, whose /outputs sub-mount would make
  * cp recurse into its own destination) to the writable /outputs/work, then
  * pdflatex (3 passes) + bibtex there. /work is mounted read-only, so
- * compiling in-place would fail on the first .aux write. */
+ * compiling in-place would fail on the first .aux write.
+ * §4 P0 (RUN-02/TEX-02): `engine` is a FIXED enum and every path is
+ * root-relative without shell metacharacters — anything else throws and the
+ * job fails before any command line is generated. */
 export function buildLatexRunScript(rootFile: string, engine = 'pdflatex', files: string[] = [rootFile]): string {
+  if (!TEX_ENGINES.includes(engine)) {
+    throw new Error(`latex engine '${engine}' is not in the fixed engine whitelist (${TEX_ENGINES.join('/')})`)
+  }
+  assertSafeTexPath(rootFile)
+  for (const f of files) assertSafeTexPath(f)
   const base = rootFile.replace(/\.tex$/i, '')
   const copyLines = files
     .filter(f => f !== 'outputs' && !f.startsWith('outputs/'))
@@ -615,10 +704,12 @@ async function runDocker(
 export async function executeJob(job: JobRecord, options: RunnerOptions): Promise<{ job: JobRecord; run: RunOutcome }> {
   const { client, owner, mode = 'subprocess', timeoutMs = 60000, maxLogBytes = 4 * 1024 * 1024, signal, signingKey } = options
   // §6 terminal frames: the run identity is fixed BEFORE execution so live
-  // chunks can be uploaded while the process is still running. The manifest
-  // and metrics validation use the same run_id (run_…), so frames MUST use
-  // it too; the SSE endpoint resolves the job's current run_id server-side.
-  const runId = `run_${randomUUID().slice(0, 12)}`
+  // chunks can be uploaded while the process is still running. RUN-01 (P0):
+  // the run identity is the KERNEL'S durable runs row — claimJobs returns
+  // `run_id` (run_<12 hex>, one per attempt) and the manifest, metrics
+  // provenance and terminal frames must ALL use it; the runner never mints a
+  // parallel run id. (Fallback keeps legacy callers working.)
+  const runId = (job as ClaimedJobRecord).run_id ?? `run_${randomUUID().slice(0, 12)}`
   const leaseGeneration = options.leaseGeneration ?? undefined
   const pendingFrames: Array<{
     seq: number; stream_seq?: number | null; channel?: 'stdout' | 'stderr' | null
@@ -631,7 +722,9 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   const flushFrames = (): void => {
     if (pendingFrames.length === 0) return
     const batch = pendingFrames.splice(0, pendingFrames.length)
-    void client.appendTerminalFrames(job.job_id, runId, batch).catch(() => undefined)
+    // §4 P0 (TERM-01): frames carry the lease owner + token — the kernel
+    // rejects leased-job frames without them (409 lease_stale).
+    void appendTerminalFramesWithLease(client, job.job_id, runId, batch, owner, job.lease_token).catch(() => undefined)
   }
   const onChunk = (channel: 'stdout' | 'stderr', text: string, byteOffset: number, byteLength: number): void => {
     frameSeq += 1
@@ -920,15 +1013,22 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       ? (outputContract as Record<string, unknown>).metrics
       : undefined
     if (typeof metricsPath === 'string' && metricsPath !== '') {
-      const rel = metricsPath.replace(/^\/outputs\/?/, '')
-      try {
-        const fileContent = readFileSync(join(outputsDir, rel), 'utf8')
-        metricsFromFile = parseMetricsFile(fileContent)
-        if (metricsFromFile === null) {
-          metricsFileError = `metrics file ${metricsPath} is missing or not a MetricsFileV1 (schema_version=1 + non-empty metrics)`
+      // §4 P0 (RUN-02): the metrics path must resolve STRICTLY INSIDE the
+      // outputs directory — `../` escapes, absolute paths and symlink escapes
+      // are rejected (never read host files through the metrics path).
+      const real = resolveMetricsFileWithin(outputsDir, metricsPath)
+      if (real === null) {
+        metricsFileError = `metrics path ${metricsPath} escapes the outputs directory or is unreadable (path traversal rejected)`
+      } else {
+        try {
+          const fileContent = readFileSync(real, 'utf8')
+          metricsFromFile = parseMetricsFile(fileContent)
+          if (metricsFromFile === null) {
+            metricsFileError = `metrics file ${metricsPath} is missing or not a MetricsFileV1 (schema_version=1 + non-empty metrics)`
+          }
+        } catch {
+          metricsFileError = `metrics file ${metricsPath} not found after execution (output contract violated)`
         }
-      } catch {
-        metricsFileError = `metrics file ${metricsPath} not found after execution (output contract violated)`
       }
     } else if (SECURE_METRICS_KINDS.includes(job.kind)) {
       metricsFileError = 'secure job must declare output_contract.metrics (MetricsFileV1 path)'

@@ -7,7 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { ResearchKernel, KernelError } from './kernel.js'
+import { ResearchKernel, KernelError, TEX_ENGINES } from './kernel.js'
 import { TexError } from './tex-workspace.js'
 
 export interface KernelServerOptions {
@@ -36,6 +36,10 @@ const terminalFramesSchema = z.object({
     lease_generation: z.number().int().nonnegative().optional(),
   })).min(1).max(256),
   max_log_bytes: z.number().int().positive().optional(),
+  // §4 P0 (TERM-01): lease owner/token MAY travel in the body as a fallback;
+  // the x-lease-owner/x-lease-token headers take precedence (runner client).
+  owner: z.string().optional(),
+  lease_token: z.string().nullable().optional(),
 }).strict()
 
 const createProjectSchema = z.object({
@@ -764,6 +768,18 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           if (id !== undefined && sub === 'terminal-frames' && method === 'POST') {
             const input = terminalFramesSchema.parse(body)
+            // §4 P0 (TERM-01): lease owner/token travel via the
+            // x-lease-owner/x-lease-token headers (runner client) or the body
+            // fallback; the kernel exact-matches them against the job's
+            // current lease when provided — a wrong owner/token is 409
+            // lease_stale. The runner gateway ALWAYS sends both, so every
+            // frame it produces is owner/token-fenced.
+            const owner = typeof req.headers['x-lease-owner'] === 'string' && req.headers['x-lease-owner'] !== ''
+              ? req.headers['x-lease-owner']
+              : input.owner
+            const leaseToken = typeof req.headers['x-lease-token'] === 'string' && req.headers['x-lease-token'] !== ''
+              ? req.headers['x-lease-token']
+              : input.lease_token ?? undefined
             ok(res, kernel.appendTerminalFrames({
               jobId: id,
               runId: input.run_id,
@@ -778,6 +794,8 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
                 payload_json: f.payload_json,
                 lease_generation: f.lease_generation,
               })),
+              owner,
+              lease_token: leaseToken,
               maxLogBytes: input.max_log_bytes,
             }))
             return
@@ -867,19 +885,30 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               idempotency_key: z.string().optional(),
               image_digest: z.string().optional(),
             }).parse(body)
+            // §4 P0 (RUN-02/TEX-02): the build engine is a fixed enum —
+            // reject anything outside the whitelist before it can be spliced
+            // into the container build script (422 engine_invalid).
+            const engine = input.engine ?? 'pdflatex'
+            if (!TEX_ENGINES.includes(engine)) {
+              throw new KernelError(422, 'engine_invalid',
+                `latex-compile engine '${engine}' is not in the fixed engine whitelist (${TEX_ENGINES.join('/')})`)
+            }
             // Freeze the workspace manifest, then submit the latex-compile job.
             const snap = kernel.texSnapshot(id, input.expected_document_revision)
             const tree = kernel.texTree(id)
             const rootFile = input.root_file ?? tree.document.root_file
             const job = kernel.submitJob({
               project_id: tree.document.project_id,
-              idempotency_key: input.idempotency_key ?? `latex:${id}:${snap.revision}:${input.engine ?? 'pdflatex'}`,
+              idempotency_key: input.idempotency_key ?? `latex:${id}:${snap.revision}:${engine}`,
               kind: 'latex-compile',
-              command: [input.engine ?? 'pdflatex', '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-no-shell-escape', rootFile],
+              command: [engine, '-interaction=nonstopmode', '-halt-on-error', '-file-line-error', '-recorder', '-no-shell-escape', rootFile],
               payload: {
                 tex_document_id: id,
                 tex_revision: snap.revision,
                 tex_snapshot: snap.manifest,
+                // The runner builds with payload.engine — it MUST see the
+                // validated engine so command[0] and the actual build agree.
+                engine,
                 image_digest: input.image_digest ?? '',
               },
             })
