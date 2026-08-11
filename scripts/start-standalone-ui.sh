@@ -37,9 +37,12 @@ while [ "$#" -gt 0 ]; do
     --token) TOKEN_VALUE=$2; shift 2 ;;
     --token=*) TOKEN_VALUE=${1#*=}; shift ;;
     --no-token) PASSTHROUGH+=(--no-token); shift ;;
+    --principal) PASSTHROUGH+=(--principal "$2"); shift 2 ;;
+    --principal=*) PASSTHROUGH+=(--principal "${1#*=}"); shift ;;
     *) PASSTHROUGH+=("$1"); shift ;;
   esac
 done
+
 
 case "$WEB_HOST" in
   0.0.0.0) PROBE_HOST=127.0.0.1 ;;
@@ -66,6 +69,12 @@ if [ -n "$TOKEN_VALUE" ]; then
   mv -f "$TMP_TOKEN" "$SERVER_DATA_DIR/standalone-token"
 fi
 echo "starting standalone DSH Scholar: $WEB_URL (kernel :$KERNEL_PORT, data: $SERVER_DATA_DIR)"
+# GOV-01: token mode requires the loopback operator principal (default ops-1,
+# override DSH_SCHOLAR_STANDALONE_PRINCIPAL); --no-token keeps loopback-dev
+# behavior without a principal.
+if ! [[ " ${PASSTHROUGH[*]} " == *" --no-token "* ]] && ! [[ " ${PASSTHROUGH[*]} " == *" --principal "* ]]; then
+  PASSTHROUGH+=(--principal "${DSH_SCHOLAR_STANDALONE_PRINCIPAL:-ops-1}")
+fi
 DSH_HOME="$DATA_DIR" setsid nohup node "$BIN" \
   --host "$WEB_HOST" --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$SERVER_DATA_DIR" \
   "${PASSTHROUGH[@]}" \
