@@ -29,6 +29,8 @@ export function chromeTabGroups(): ChromeTabGroup[] {
         { key: 'gates', label: t('shell', 'shell.tab.gates'), description: t('shell', 'shell.tab.gates.desc') },
         { key: 'runs', label: t('shell', 'shell.tab.runs'), description: t('shell', 'shell.tab.runs.desc') },
         { key: 'terminal', label: t('shell', 'shell.tab.terminal'), description: t('shell', 'shell.tab.terminal.desc') },
+        // PTY-01 (hardening §5): Interactive Terminal (real pty session).
+        { key: 'pty', label: t('shell', 'shell.tab.pty'), description: t('shell', 'shell.tab.pty.desc') },
       ],
     },
     {
@@ -40,6 +42,8 @@ export function chromeTabGroups(): ChromeTabGroup[] {
         // TRAJ-01/SUBAGENT-01 (hardening §5): Trajectory / Topology tabs.
         { key: 'trajectory', label: t('shell', 'shell.tab.trajectory'), description: t('shell', 'shell.tab.trajectory.desc') },
         { key: 'topology', label: t('shell', 'shell.tab.topology'), description: t('shell', 'shell.tab.topology.desc') },
+        // WORK-01 (hardening §5): generic VS Code-style Workspace tree/tabs.
+        { key: 'workspace', label: t('shell', 'shell.tab.workspace'), description: t('shell', 'shell.tab.workspace.desc') },
       ],
     },
     {

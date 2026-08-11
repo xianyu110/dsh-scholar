@@ -31,6 +31,8 @@ import { renderBudget } from './panels/budget'
 import { renderManuscript } from './panels/manuscript'
 import { renderTrajectory } from './panels/trajectory'
 import { renderTopology } from './panels/topology'
+import { renderWorkspace, stopWorkspaceWatch } from './panels/workspace'
+import { renderPty, ptyPanelDetachAll } from './panels/pty'
 import { openSettingsModal } from './modals/settings'
 import { openCommandsModal, openShortcutsModal } from './modals/commands'
 import { openNotificationsModal, openSessionSearchModal, openProjectSwitcherModal } from './modals/search'
@@ -981,6 +983,12 @@ export function apply(): void {
     // dsh-web terminal hygiene: leaving the Terminal tab closes the stream
     // (state stays for the return; a new visit reconnects from lastSeq).
     if (state.activeTab !== 'terminal' && state.terminalStatus !== 'idle') terminalDisconnect()
+    // WORK-01: leaving the Workspace tab stops its listSince watch poll
+    // (the panel state survives; the next visit restarts the poll).
+    if (state.activeTab !== 'workspace') stopWorkspaceWatch()
+    // PTY-01: leaving the PTY tab detaches the session wire (the process
+    // keeps running server-side; the next visit reconnects via after_seq).
+    if (state.activeTab !== 'pty') ptyPanelDetachAll()
     body.replaceChildren()
 
     const title = el('div', 'project-title')
@@ -1018,6 +1026,8 @@ export function apply(): void {
       case 'manuscript': renderManuscript(body, projection, target); break
       case 'trajectory': await renderTrajectory(body, target); break
       case 'topology': await renderTopology(body, target); break
+      case 'workspace': await renderWorkspace(body, target); break
+      case 'pty': renderPty(body, projection, target); break
     }
     const stamp = el('div', 'stamp', `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${state.lastError !== undefined ? ` · ⚠ ${state.lastError}` : ''}`)
     body.appendChild(stamp)

@@ -21,6 +21,10 @@ export const ALL_TAB_KEYS = [
   'chat', 'phase', 'gates', 'runs', 'artifacts', 'evidence', 'budget', 'manuscript', 'terminal',
   // TRAJ-01/SUBAGENT-01 (hardening §5): Trajectory / Topology tabs.
   'trajectory', 'topology',
+  // WORK-01 (hardening §5): generic VS Code-style Workspace tree/tabs.
+  'workspace',
+  // PTY-01 (hardening §5): Interactive Terminal (real pty session).
+  'pty',
 ] as const
 export type TabKey = (typeof ALL_TAB_KEYS)[number]
 
@@ -31,8 +35,8 @@ export function isTabKey(key: string): key is TabKey {
 /** Four primary tabs (概览 / 运行 / 证据 / 文稿). */
 export const PRIMARY_TAB_KEYS: readonly TabKey[] = ['phase', 'runs', 'evidence', 'manuscript']
 
-/** Tabs collapsed behind the More menu (Gate、预算、产物、终端、对话、轨迹、拓扑). */
-export const MORE_TAB_KEYS: readonly TabKey[] = ['chat', 'gates', 'artifacts', 'budget', 'terminal', 'trajectory', 'topology']
+/** Tabs collapsed behind the More menu (Gate、预算、产物、终端、对话、轨迹、拓扑、工作区、PTY). */
+export const MORE_TAB_KEYS: readonly TabKey[] = ['chat', 'gates', 'artifacts', 'budget', 'terminal', 'trajectory', 'topology', 'workspace', 'pty']
 
 /** More menu modal entry (Settings). */
 export const MORE_MODAL_KEYS = ['settings'] as const

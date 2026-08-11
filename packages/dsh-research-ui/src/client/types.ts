@@ -281,6 +281,72 @@ export interface ChatSession { id: string; name: string; messages: ChatMessage[]
 
 export interface NotifEntry { text: string; time: string; ts?: number; count?: number }
 
+/* ── WORK-01 workspace wire shapes (research-schemas/workspace.ts contract,
+ *  api-contracts.md §17 — mirrored structurally so the browser bundle stays
+ *  dependency-light, same pattern as Trajectory/Topology). ── */
+
+export interface WorkspaceInfoLite {
+  workspace_id: string
+  project_id: string
+  kind: string
+  name: string
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+/** One node of the workspace file tree (dirs are projected from path
+ *  prefixes — only `file` nodes are stored server-side). `content` is
+ *  present only for text reads; binary nodes carry blob_sha256 and are
+ *  read-only for text writes (replaced via the binary upload path). */
+export interface WorkspaceNodeLite {
+  path: string
+  kind: 'file' | 'dir'
+  binary: boolean
+  media: string
+  size: number
+  version: number
+  etag: string
+  hash: string
+  content: string | null
+  blob_sha256: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** GET /v1/projects/{id}/workspaces/{wsid}/tree projection. */
+export interface WorkspaceTreePayload {
+  info: WorkspaceInfoLite
+  nodes: WorkspaceNodeLite[]
+}
+
+/** One durable mutation op (workspace_ops ledger / history projection). */
+export interface WorkspaceOpLite {
+  seq: number
+  op: string
+  path: string
+  from_path: string | null
+  version: number | null
+  sha256: string | null
+  at: string
+}
+
+/** One workspace revision (history projection, newest first). */
+export interface WorkspaceRevisionLite {
+  workspace_id: string
+  revision: number
+  at: string
+  ops: WorkspaceOpLite[]
+}
+
+/** GET /v1/projects/{id}/workspaces/{wsid}/nodes?after_revision=N watch
+ *  feed: changed nodes + deleted-path tombstones. */
+export interface WorkspaceListSincePayload {
+  info: WorkspaceInfoLite
+  nodes: WorkspaceNodeLite[]
+  deleted: string[]
+}
+
 export interface ManuscriptFile { path: string; version: number; content_hash: string; content?: string }
 
 export interface ManuscriptBuild {

@@ -401,6 +401,12 @@ export const zh = {
   'shell.tab.trajectory.desc': 'Research/Session 双泳道,展示脱敏后的权威研究轨迹与观察事件。',
   'shell.tab.topology': '拓扑',
   'shell.tab.topology.desc': '子代理直系树、状态、只读历史与 one-shot 只读 follow-up。',
+  // WORK-01 (hardening §5): Workspace tree/tabs panel (More).
+  'shell.tab.workspace': '工作区',
+  'shell.tab.workspace.desc': '通用代码/草稿文件树、多标签编辑、二进制上传下载、历史回退与路径搜索。',
+  // PTY-01 (hardening §5): Interactive Terminal panel (More).
+  'shell.tab.pty': 'PTY 终端',
+  'shell.tab.pty.desc': '可操作的交互终端:输入、resize、信号与 detach/reconnect。',
   'shell.dialog.ariaFallback': '对话框',
   'shell.sidebar.sortRecent': '最近',
   'shell.sidebar.sortByName': '按名称排序(点击按最近)',
@@ -889,6 +895,12 @@ export const en: Record<ShellKey, string> = {
   'shell.tab.trajectory.desc': 'Research and Session lanes of the redacted authoritative trajectory plus observational events.',
   'shell.tab.topology': 'Topology',
   'shell.tab.topology.desc': 'Subagent direct-children tree, states, read-only history and one-shot read-only follow-up.',
+  // WORK-01 (hardening §5): Workspace tree/tabs panel (More).
+  'shell.tab.workspace': 'Workspace',
+  'shell.tab.workspace.desc': 'Generic code/scratch file tree, multi-tab editing, binary upload/download, history rollback and path search.',
+  // PTY-01 (hardening §5): Interactive Terminal panel (More).
+  'shell.tab.pty': 'PTY Terminal',
+  'shell.tab.pty.desc': 'Operable interactive terminal: input, resize, signals and detach/reconnect.',
   'shell.dialog.ariaFallback': 'dialog',
   'shell.sidebar.sortRecent': 'Recent',
   'shell.sidebar.sortByName': 'sort by name (click for recent)',
