@@ -1,4 +1,6 @@
-# DSH Scholar 最终差距审计报告
+# DSH Scholar 历史最终差距审计报告（已过期）
+
+> **状态警告（2026-08-11）**：本文是 `0ea536e` 附近工作树的历史快照，不是当前实现的完成证明。`main@fda346b` 的复审已确认普通 Kernel Bearer 缺失、global-id/PTY AuthZ 绕过、任意 host 路径快照、Manuscript rerender 覆写、远端宿主 subprocess、前端关键工作台缺失以及当前测试失败。因此本文 §7“无未覆盖缺口”和 §9“代码侧无可实现差距”的结论已经失效。当前状态与强制关闭条件以 [hardening-v0.2-status.md §5](./hardening-v0.2-status.md#5-2026-08-11-当前代码审阅阻断项) 为准。
 
 - 审计日期:2026-08
 - 审计基线:工作树 HEAD `0ea536e` + 本轮改动(未提交,由主代理统一提交)

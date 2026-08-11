@@ -153,6 +153,8 @@ build 先 schemas/cas，再 kernel/client/connectors/evidence/manuscript，后 w
 
 `test:security`、`test:docker`、`test:ui` 和 `test:all` 的聚合器必须区分 PASS/FAIL/SKIP。`CI=true` 时任何 SKIP、缺失依赖、断言数为 0 或子脚本未执行都必须使聚合器非零退出；只有本地非 CI 环境可以显式 `--allow-skip`，且结果不得计入 PASS 或 hardening 验收证据。
 
+开发机不具备真实浏览器、DSH、Docker/TeX、远端主机/mTLS 或 GPU 时，不要求先搭建这些 CI 才能实现代码。生成器应先产出完整生产路径、可运行的本地验证和 `manual-acceptance.md` 对应场景，把真实环境结果标成 `NOT_RUN_MANUAL_PENDING`；待人工验收后再升级 hardening 状态。已经存在并实际运行的 CI 仍保持上述 fail-closed 语义。
+
 ## 6. 生成顺序
 
 1. 建立 schemas 与错误 code；
@@ -168,9 +170,9 @@ build 先 schemas/cas，再 kernel/client/connectors/evidence/manuscript，后 w
 11. 实现不含浏览器面的 DSH Agent adapter、safe Session source 和 Skills；
 12. 实现 Trajectory/Subagent projection 与 standalone BFF/UI/i18n；
 13. 验证包 manifest 和路由不存在任何 DSH embedded UI 面；
-14. 跑 security、recovery、remote/Docker/PTY、upload/onboarding、trajectory、TeX、Golden、clean-room。
+14. 生成 security、recovery、remote/Docker/PTY、upload/onboarding、trajectory、TeX、Golden、clean-room 的自动化脚本或人工验收步骤；开发环境能运行的立即执行，真实环境不可用的登记 `NOT_RUN_MANUAL_PENDING`，后续交给人工执行。
 
-每步先写对应接口验收，再实现。旧浅模块的测试在新深接口测试覆盖后删除，避免同时维护两套行为。
+每步先写对应接口验收，再实现。第 1–13 步和第 14 步的“场景/脚本生成”属于代码实现阶段；第 14 步的真实环境执行属于后续人工验收阶段，不阻塞继续开发。旧浅模块的测试在新深接口测试覆盖后删除，避免同时维护两套行为。
 
 ## 7. 开发协作与 subagent
 

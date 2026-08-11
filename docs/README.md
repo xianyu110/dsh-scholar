@@ -1,7 +1,7 @@
 # DSH Scholar 重建规范
 
-> 规范版本：2.3
-> 更新日期：2026-08-10
+> 规范版本：2.4
+> 更新日期：2026-08-11
 > 目标成熟度：Security Alpha，默认 gate-only
 > 用途：仅依赖本目录 Markdown，即可重新实现、测试和部署 DSH Scholar。
 
@@ -43,9 +43,10 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 | 12 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
 | 13 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
 | 14 | acceptance-tests.md | 如何证明生成结果符合规范 |
-| 15 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
-| 16 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
-| 17 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
+| 15 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
+| 16 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
+| 17 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
+| 18 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
 
 ## 4. 生成约束
 
@@ -90,11 +91,20 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 
 ## 4.2 Review 基线与执行约束
 
-`hardening-v0.2-status.md` 是当前实现账本，状态只允许：未实现、部分、已实现未验收、已验收、已关闭。“已验收”必须绑定当前 commit SHA、CI run/job 和 `acceptance-tests.md` 场景或机器可读报告；历史计数、旧日期日志、手工浏览器截图和本地显式 skip 只能作背景。
+`hardening-v0.2-status.md` 是当前实现账本，状态只允许：未实现、部分、已实现未验收、已验收、已关闭。“已验收”必须绑定当前 commit SHA、`acceptance-tests.md` 场景以及 CI 机器报告或 `manual-acceptance.md` 规定的人工验收记录；历史计数、旧日期日志、无场景/环境/结论的零散截图和本地显式 skip 只能作背景。
 
-后续工作必须按 hardening 的硬顺序推进：Governance → Formal execution → Evidence/Release → Terminal/TeX/i18n → DSH/package → CI/docs → Final validation。前一批 P0 未验收时，不得宣称后一批完成、不得提升成熟度、不得发布。README、USAGE、hardening、acceptance、repository blueprint 或源码对当前能力有矛盾时，自动采用较低状态并阻断合并。
+后续工作按 hardening 的风险顺序推进：Governance → Formal execution → Evidence/Release → Terminal/TeX/i18n → DSH/package → verification/docs → Final validation。P0 的**代码缺口**优先修复；P0 已完成代码但因真实环境缺失而处于“已实现未验收”时，不阻塞后续代码实现、提交或合并，但继续阻止成熟度升级、发布和真实研究使用。README、USAGE、hardening、acceptance、repository blueprint 或源码对当前能力有矛盾时，自动采用较低状态。
 
-所有 CI 阻断 job 必须零 SKIP、实际断言数大于 0；缺 Docker、TeX、DSH fixture、git base 或其他能力必须非零失败，不能以 `SKIP exit 0` 或聚合器 PASS 代替验收。
+真实 Docker、远端主机、mTLS、浏览器、DSH host、GPU、TeX 完整镜像或 clean-room 环境在开发期间不可用时，允许暂不建立/运行真实环境 CI；它们必须登记为“待人工验收”，不能伪造 PASS。已经运行的 CI 阻断 job 仍必须零 SKIP、实际断言数大于 0，不能以 `SKIP exit 0` 或聚合器 PASS 代替验收。
+
+## 4.3 代码优先、人工后验的两阶段开发规则
+
+开发默认分成两个互不混淆的阶段：
+
+1. **代码实现阶段**：先完成真实生产路径，不以 fake UI、只写接口、`NotImplemented` 或测试专用捷径代替实现；同步类型、Schema、迁移、错误码、i18n、文档、单元/模块契约测试和人工验收步骤。当前机器能运行的 build/typecheck/unit/static checks 必须运行；不可用的真实环境检查登记到 `manual-acceptance.md`。满足这些条件后可标记“已实现未验收”，并继续后续开发、提交和合并；
+2. **人工验收阶段**：由人工在真实浏览器、DSH、Docker/TeX、远端机器/mTLS 或其他目标环境按场景执行。记录必须包含 commit、日期、环境、操作者、步骤、期望/实际结果和日志/截图/Artifact 引用；全部阻断场景通过后才可标“已验收”。
+
+人工验收发现的问题仍属于正式需求/修复建议：必须先写回负责规范、`acceptance-tests.md` 和 hardening，再修改代码。CI 可以在环境具备后补建，用于重复验证，但不是代码实现阶段的前置条件。
 
 ## 5. 核心不可绕过规则
 
@@ -128,6 +138,6 @@ pnpm test:security
 pnpm test:all
 ~~~
 
-完成记录必须附当前 commit、每个 CI job、skip_count=0、Golden/recovery/clean-room 报告。缺少任一证据时只能标“已实现未验收”。
+最终重建完成记录必须附当前 commit，以及覆盖全部阻断场景的 CI 报告或结构化人工验收记录；凡已运行 CI 必须 skip_count=0，并保留 Golden/recovery/clean-room 报告。缺少任一最终证据时只能标“已实现未验收”。
 
 对外仍应标记 Security Alpha，直到真实外部项目、多人身份、长期运行和 clean-room 复现得到持续验证。

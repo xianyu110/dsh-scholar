@@ -1,6 +1,6 @@
 # 当前实现与目标规范差距
 
-> 信息性文档，校准于 2026-08-10，最新审阅基线 `main@cf6a8a8`。本文件描述当前仓库，不覆盖规范性文档。状态必须由源码、当前提交的自动化验收和 CI 证据共同决定；历史测试计数、旧 README、手工截图和未绑定提交的日志不能继承为当前证据。
+> 信息性文档，校准于 2026-08-11，最新审阅基线 `main@fda346b`。本文件描述当前仓库，不覆盖规范性文档。状态必须由源码、当前提交的本地验证，以及后续 CI 或结构化人工验收证据共同决定；历史测试计数、旧 README、零散截图和未绑定提交的日志不能继承为当前证据。
 
 ## 1. 状态定义与证据规则
 
@@ -11,10 +11,10 @@
 | 未实现 | 没有可运行实现，或只有文档/占位代码 |
 | 部分 | 已有骨架或局部能力，但存在规范缺口、已知阻断缺陷或关键验收缺失 |
 | 已实现未验收 | 代码表面完整，但当前提交尚无全部阻断验收证据 |
-| 已验收 | 当前 commit 的全部对应 acceptance 场景在目标 CI 环境通过，且零 SKIP |
+| 已验收 | 当前 commit 的全部对应 acceptance 场景在目标环境通过；证据可来自零 SKIP CI，或结构化人工验收记录 |
 | 已关闭 | 经明确决策不再实施；必须记录责任人、日期、边界和重新开启条件 |
 
-“已实现”不等于“已验收”。标记“已验收”时必须同时记录：commit SHA、CI run/job、acceptance 场景或机器可读报告。CI 中出现 SKIP、未执行断言、缺少 Docker/TeX/DSH fixture、缺失 git base ref 或 `continue-on-error`，均不得计入 PASS。状态矩阵与“具体不一致”、USAGE、README 或源码冲突时，自动取较低状态并阻断完成声明。
+“已实现”不等于“已验收”。开发期可先完成代码，将真实环境场景标记 `NOT_RUN_MANUAL_PENDING` 并继续后续实现；这类项最多进入“已实现未验收”。标记“已验收”时必须同时记录 commit SHA、acceptance 场景，以及 CI run/job 或符合 `manual-acceptance.md` 的人工记录。CI 中出现 SKIP、人工记录缺少环境/步骤/实际结果、缺少 Docker/TeX/DSH fixture、缺失 git base ref 或 `continue-on-error`，均不得计入 PASS。状态矩阵与“具体不一致”、USAGE、README 或源码冲突时，自动取较低状态并阻断完成声明。
 
 ## 2. 当前可复用基础
 
@@ -178,3 +178,37 @@
 | FLEET-01 | 生产 runner 二进制接线 fleet 服务（remote-runner-wire.md §2/§8 → §9 生产接线，审计报告 §4 #10） | 已实现未验收 | runner 二进制新增两个互斥角色（fleet-cli.ts + bin/runner.ts，Config Registry runner-profile scope 新增 5 键：runner.fleet_server_port/fleet_url/agent_id/fleet_target_id/fleet_public_key，configs/generated 已重新生成）：`--fleet-server <port>` 启动 RemoteFleetServer（attachRemoteFleetRoutes 挂真实 HTTP 路由、x-service-token 鉴权、注册表复用 InMemoryAgentRegistry、kernel client 复用本地 runner 同一 ResearchClient 路径、plan 签名密钥 = --key-file、公钥打印供 agent 验签、`--fleet-server 0` 临时端口）；`--agent <fleet-url>` 启动 RemoteRunnerAgentImpl 客户端循环（register 带重试 → runPollLoop：heartbeat → flush spool → claim → 执行 → frames/artifacts/complete；离线有界 spool 复用 AgentOutboundSpool；--fleet-public-key 验签缺省 fail closed；--key-file 签名 manifest；显式 --kernel 时尽力注册 manifest 公钥到 kernel，非致命）。互斥校验 fail fast：--fleet-server 与 --agent 同给、任一 fleet 角色与 --mode 同给均拒绝（--mode 仅本地模式有意义）；本地 --kernel 模式行为完全不变。**接线时修复**：kernel-client.ts appendTerminalFramesWithLease 未绑定调用 client.request（this=undefined → timeoutMs TypeError）——本地 runner 的 .catch() 掩盖为帧静默丢失、fleet 转发 frames 报 502 kernel_unreachable；改 request.call(client,…) 绑定，真实 kernel e2e 全链通过。证据：tests/unit/fleet-bin.test.ts 11/11（真实 node:http listener + HttpRemoteFleetTransport：角色判定与互斥、registry 键解析/校验、固定端口绑定 + 403、全链 runFleetAgentMain 完成 Job、离线 spool HTTP 层恢复、无匹配 target 留 pending + 匹配 agent 接单、未注册 404、appendTerminalFramesWithLease 绑定回归）、remote-wire.test.ts 15/15 不破坏、根 pnpm test 全绿、research-schemas/runner-gateway build 全绿、verify-docs 18/18、真实 kernel+fleet server+agent 三进程 e2e（echo job queued→succeeded，agent 公钥注册成功）。剩余（如实记录）：真实 mTLS 证书链（CA/第二主机）验收、跨主机网络分区故障注入、真实远端 sandbox 隔离验收（🌐，commit 9ff6d61）。 |
 | 审计结论 | 审计轮剩余两大项 OBS-01（/internal/metrics）与 STORE-05（terminal_frames 完整性）已于后续实现轮关闭（见上两行）；审计报告 §4 #10 的 runner 二进制 fleet 接线由 FLEET-01 行关闭（见上两行），无"可实现但未实现"差距 | — | 聚合器 SCRIPTS 20 项与实际脚本一致（两项有意排除已注释）；acceptance-tests.md 场景抽样 40+ 条均有对应测试；CLI 参数（kernel/runner/orchestrator/standalone）与 parseCli 一致（orchestrator 本轮补齐；runner 本轮新增 fleet 角色）；关键路径无遗留 TODO/FIXME/501（PTY 无 adapter 501、RemoteRunnerAgentNotImplementedError 均为设计）。环境受限清单（真实浏览器 Playwright、真实 mTLS/远端主机、真实 Docker/TeX/GPU/AV 深度扫描、DSH host 全链验收）见审计报告。 |
 | 收尾状态 | 代码侧全部实现（2026-08） | — | 审计报告已归档至 docs/final-audit-report.md。全部 §4 P0/P1 服务端/逻辑层项、审计 §4 的 11 项剩余大项（OBS-01/STORAGE-07/TEX-SAVE/STORE-06/STORE-05/MIG-V1/STORE-08 冻结规则/PROF-01/SHAPE-01/FLEET-01/UI-NAV2）均已实现并验收（单元测试 713/713、聚合器 19/19、ci-gate 4/4 零 SKIP、golden-path-v2 29/29 真实 Docker 全链）。剩余项全部为环境受限验收（浏览器 Playwright、真实 DSH host、真实 mTLS/远端主机、GPU、AV 深度扫描、双进程 orchestrator 并发、真实 registry 发布），代码侧无可实现差距；产品保持 Security Alpha/"已实现未验收"，不越级宣称。8443/18610 持续在线。 |
+
+## 5. 2026-08-11 当前代码审阅阻断项
+
+审阅范围：`cf6a8a8...fda346b`，`main` 与 `origin/main` 一致。本节覆盖 §3、§4 和历史“收尾状态”的完成声明；同一能力出现冲突时一律采用本节较低状态。当前结论是：**产品仍为 Security Alpha，不可发布，代码侧仍有可实现的 P0/P1 差距**。
+
+当前提交的可重复验证结果：
+
+- `node scripts/verify-docs.mjs`：18/18 通过，但该检查只验证结构、片段与静态删除面；
+- `./node_modules/.bin/vitest run`：43 个测试文件通过、2 个 suite 失败；703 个测试通过、1 个失败、9 个因 `pnpm` 不在 PATH 而跳过；失败项为 workspace 子目录权限在 `umask 0077` 下实际 0700、契约要求 0750；packaging suite 因 `spawnSync pnpm ENOENT` 未执行；
+- `bash tests/security/run-selfmod-tests.sh`：17/18；生产隔离、显式 dev overlay 和真实 DSH dump-config composition 通过，tarball 负向断言因 `pnpm pack` 未产出 tarball 失败；因此 SELFMOD-01 只能记“已实现未验收”；
+- 文档中的 713/713、19/19、4/4、29/29 是历史证据，不能替代上述 `main@fda346b` 当前结果。
+
+| 优先级 | 影响 ID / 当前状态 | 当前阻断 | 强制关闭条件 |
+|---|---|---|---|
+| P0 | API-01、SIDE-01：部分 | standalone sidecar 只向 Kernel 注入 `DSH_SCHOLAR_SERVICE_TOKEN`，未设置 `DSH_SCHOLAR_KERNEL_TOKEN`；Kernel 在普通 token 未配置时跳过整个 Bearer 检查。任何能访问 loopback Kernel 端口的本地进程可直接调用普通 v1/v2 API。 | sidecar 每次启动生成独立普通 Kernel token，通过 0600 文件/env 传递；BFF/Runner/Orchestrator 全部带 token；除 health 外缺失/错误 token 一律 401；直接访问 sidecar 端口的读写负向测试必须通过。 |
+| P0 | API-01、PTY-01：部分 | BFF 只为 project/job/child（以及 Gate Decision）解析项目。Artifact、Document/TeX、PTY session、全局 events 等 global-id 路由在 `memberProjectId=null` 时直接转发；PTY GET/frames 无 owner 检查，control 仅在可选 header 存在时检查，BFF 又只在 open 时注入该 header。知道 ID 即可跨项目读取或控制。 | 为每类 global-id 建统一 authoritative resource→project resolver；转发前执行 membership/role/revocation；Kernel 对 PTY read/control/frames 强制 principal+owner+lease，不接受“header 缺失即放行”；补跨项目、撤权、猜 ID 和 direct-Kernel 负向测试。 |
+| P0 | TEX-01、TEX-03：未实现/有数据破坏风险 | Manuscript 页每次 render 都 POST `manuscript-drafts`；服务端每次调用都重新生成并写入 `paper.tex`/`main.bib`。保存后的 rerender 会覆盖用户刚保存的内容。同时 UI 保存成功后从未调用已经存在的 `preview-builds` hook，因而没有实时预览链。 | “打开/ensure 文稿”必须只读或只在首次创建时生成；显式 regenerate 需确认并保留版本；保存+rerender 不改变字节/revision；保存成功触发 debounce preview，UI 展示 pending/running/failed/stale/PDF，并有数据不丢失与实时预览浏览器验收。 |
+| P0 | SNAPSHOT-01、API-01：未实现 | `POST /projects/{id}/code-snapshots` 接受调用者提供的 host `path`，`snapshotCodeArchive` 对 `resolve(path)` 后的任意目录递归读取并写入 CAS；只做根内 symlink 检查，没有把根限制到已批准 workspace。 | API 只接受 workspace_id + root-relative path；服务端从批准的项目 workspace 解析实际根；拒绝绝对路径、`..`、home/repo 外目录和 symlink 逃逸；补 secret 文件不可快照的负向测试。 |
+| P1 | RUN-REMOTE-01、RUN-01a：部分 | Remote Agent 默认在远端宿主用缩减 env 的 subprocess 执行，而不是受限 Docker/容器；Fleet HTTP service token 是可选项，真实 mTLS 身份仍未接线。当前实现不满足“安全 Job 必须容器化”和生产远端机器接入边界。 | secure kinds 只能进入 digest-pinned restricted container；subprocess 仅保留显式 trusted fixture；远端 wire 强制 mTLS/不可伪造 agent identity、证书轮换/吊销与断线重连；真实两主机故障注入验收。 |
+| P1 | RUN-REMOTE-01、RUN-01b、ART-01：部分 | Remote complete 的 manifest 把 `container_digest`/`data_hash` 写为空且缺少 metrics/seed/snapshot facts，Kernel 只验证“存在时匹配”；complete 顶层没有 run_id 绑定。Fleet CAS 又把 Kernel Artifact 当 UTF-8 text 读取再编码，二进制内容会损坏，且 client 未带 Kernel Bearer。 | remote 与 local 复用唯一 manifest builder；required facts 缺失即 422；job/run/lease/manifest run_id 全链一致；Artifact 全程 bytes streaming + Bearer + project binding；二进制 round-trip、stale attempt 和字段缺失负向测试。 |
+| P1 | GOV-01、ONBOARD-01：部分 | BFF role 写入正则未覆盖 intake adopt、project archive/unarchive；researcher 角色可越过 PI-only 决策。membership Promise 永久缓存，成员被撤销后旧进程仍继续授权。 | capability policy 使用显式 route table，Kernel/BFF 双层校验 PI-only；membership 缓存有 revision/TTL/主动失效，撤权立即生效；补 researcher/operator adopt/archive 和 revocation 负向测试。 |
+| P1 | ONBOARD-01、UPLOAD-01、GUIDE-01：部分 | Start 的“上传/接入”只显示 toast；已有项目时自动选择 `projects[0]`，Start/Resume/Init 分支不会出现。浏览器没有 Grill Me、阶段接入、文件上传/恢复上传和接入后的 NextAction 引导。 | 首次进入显式 Init/Resume 选择；导入卡接真实 intake begin→stage/upload→scan→grill→proposal→PI adopt；支持阶段选择、分块恢复和冲突处理；每一步都投影结构化 NextAction。 |
+| P1 | WORK-01、PTY-01、TRAJ-01、SUBAGENT-01：部分 | Kernel 已有 workspace、真实本机 PTY、trajectory/topology 路由，但 UI 导航只有 chat/phase/gates/runs/artifacts/evidence/budget/manuscript/terminal；Terminal 仍是 Job SSE 只读日志，没有 stdin/resize/signal；没有 VS Code 式文件树/多标签编辑，也没有 trajectory 与可进入 subagent 的拓扑。 | 增加可操作 PTY TUI、workspace tree/tabs/search/watch/upload/move/history/problems、trajectory 双 lane、subagent DAG/状态/进入/follow-up；本机与远端 PTY 共用鉴权 wire；桌面/窄屏、断线、撤权、冲突与 a11y 浏览器验收。 |
+| P1 | CONFIG-01、UI-02、UI-03：部分 | Settings 的 runner/workspace/terminal/tex/agent 均为 placeholder；Schema/effective config 还未形成可编辑、校验、SecretRef、scope override 和生效/重启反馈。尚未存在的 Init/Workspace/Trajectory/Topology 页面也没有对应 zh/en namespace。 | Settings 由 config schema/effective 动态生成并覆盖所有配置项；SecretRef 不回显；展示来源、scope、校验、config pin、热生效/需重启；所有新增页面在同一提交补 zh/en key、切换与缺 key 负向测试。 |
+| P1 | WORK-01、CI-01：部分 | workspace 权限测试在当前 `umask 0077` 下失败：workspace root 被显式 chmod 0750，但新建的嵌套目录只依赖 `mkdir(mode=0750)`，实际成为 0700。CI 同时排除 `tests/unit/security.test.ts`，根 `pnpm test` 又依赖未声明/未探测的 pnpm PATH，形成“历史全绿、当前不可复现”。 | 对完整目录链显式校准并验证权限或把规范改成最小权限范围；CI 不排除安全单测；package manager 版本与调用入口固定；所有阻断 job 零 SKIP、当前 commit 证据可复现。 |
+| P2 | STORE-01、WORK-01：部分 | workspace 的磁盘写/move/delete 与 SQLite 元数据更新不是同一恢复协议；崩溃窗口可留下“磁盘新字节+旧 row”或“row 指向缺失字节”。Remote Fleet/Agent 的 registry、assignment 与部分 spool 状态也主要在内存。 | 引入 journal/outbox/recovery scan 或可证明的原子提交协议；启动时修复/隔离不一致；对每个 fs/DB 边界注入崩溃并验证幂等恢复。 |
+
+SELFMOD-01 的当前边界保持不变：Cordis self-referential 工具已经以 `configs/research-dev-selfmod.cordis.yml` + `scripts/start-selfmod-dev.sh` 的显式开发 overlay 接入，生产 profile/patch 不包含 tool-cordis；在 tarball 隔离、mount/unmount 清理、审计记录全部通过前不得升级为“已验收”，也不得默认启用。
+
+## 6. 2026-08-11 开发验证方式决策
+
+当前阶段采用“代码优先、人工后验”：真实浏览器、DSH host、远端机器/mTLS、Docker/TeX/GPU、网络分区、长期 recovery 和 clean-room 环境暂不作为代码实现、提交或合并的前置条件。每个 §5 阻断项先完成生产代码、Schema/迁移/i18n、可运行的本地 build/typecheck/unit/contract/static checks，并把真实环境步骤写入 `acceptance-tests.md` 与 `manual-acceptance.md`；完成后标“已实现未验收”，继续下一项。
+
+以下边界不因延后真实环境验收而放宽：不得保留假按钮、宿主正式执行、可选生产鉴权、跨项目放行、伪造 Evidence/Manifest、测试专用生产分支或文档虚假完成声明；本地可复现的失败（例如 §5 workspace 权限失败）仍属于代码缺陷，不能归入“环境待人工”。真实环境人工测试通过并留下结构化记录后，才允许把相应项升级为“已验收”；人工发现的每个新问题仍先内化到 Markdown 再修复。

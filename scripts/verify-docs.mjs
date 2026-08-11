@@ -19,6 +19,7 @@ const requiredDocs = [
   'docs/security-baseline.md',
   'docs/repository-blueprint.md',
   'docs/acceptance-tests.md',
+  'docs/manual-acceptance.md',
   'docs/test-instance-plan.md',
   'docs/USAGE_GUIDE.md',
   'docs/hardening-v0.2-status.md',
@@ -53,6 +54,7 @@ const requiredFragments = new Map([
   ['docs/gui-plugin-plan.md', ['实时终端', 'i18n 硬约束']],
   ['docs/security-baseline.md', ['Cordis self-referential', 'Terminal 安全']],
   ['docs/acceptance-tests.md', ['docs-contract-sync', 'TeX Workbench', '根包无 `dshClient`']],
+  ['docs/manual-acceptance.md', ['代码优先、人工后验', 'NOT_RUN_MANUAL_PENDING', '人工验收记录模板']],
   ['docs/hardening-v0.2-status.md', ['TERM-01', 'PTY-01', 'ONBOARD-01', 'TRAJ-01', 'TEX-01', 'UI-02']],
   ['configs/research-dev-selfmod.cordis.yml', ['@deepseek-ai/dsh-tool-cordis']],
 ])

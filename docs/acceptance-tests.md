@@ -1,6 +1,6 @@
 # 验收与测试规范
 
-> 规范性文档。任何新增需求或修复建议必须在这里增加可自动化的验收场景。
+> 规范性文档。任何新增需求或修复建议必须在这里增加可自动化或可重复人工执行的验收场景。
 
 ## 1. 测试层级
 
@@ -14,6 +14,13 @@
 | UI | 两种 locale、keyboard、a11y、responsive | 用户可完成核心任务 |
 | Scientific | RunSet、Evidence、Claim、引用、负结果 | 防止科研语义漂移 |
 | Reproduction | Bundle、clean-room、PDF | 从空环境复现 |
+
+## 1.1 两阶段验收策略
+
+- **代码实现阶段**不要求开发机连接真实远端、mTLS CA、完整 DSH host、GPU、浏览器矩阵或生产 Docker/TeX 环境；实现者必须完成生产代码路径、build/typecheck、能运行的 unit/module/static checks，并为不可用环境写出确定的人工步骤、期望结果、失败判据和取证项；
+- 环境不可用只能产生 `NOT_RUN_MANUAL_PENDING`，不能产生 PASS；它不阻塞后续代码实现、提交或合并，但状态最多为“已实现未验收”，并持续阻止发布；
+- **人工验收阶段**按 `manual-acceptance.md` 执行。一次有效记录至少绑定 commit SHA、目标环境、操作者、时间、场景 ID、实际结果和证据位置；失败项回到 hardening 的“部分/未实现”，并先内化修复建议再改代码；
+- CI 是可选的重复执行载体，不是开发实现的前置条件。环境具备后若运行 CI，仍适用零 SKIP、断言数大于 0 和 fail-closed 规则；人工验收不能把未执行场景批量勾选为通过。
 
 ## 2. Project 与 Gate
 
@@ -403,14 +410,14 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 | trajectory-subagents | 是 |
 | config-schema-parity | 是 |
 
-所有“必跑”Job 在 `CI=true`/GitHub Actions 中必须满足 `skip_count=0`、实际断言数大于 0、`continue-on-error=false`。缺 Docker、pdflatex、镜像、DSH fixture、git base 或其他能力时必须非零退出，不能输出 `SKIP` 后 exit 0，也不能被聚合器计入 PASS。本地非 CI 环境可以显式 allow-skip，但结果只能记为“未运行”，不得更新 hardening 状态。
+本矩阵是**最终发布验收覆盖矩阵**，不是开发阶段必须立即搭建的真实环境 CI。所有实际运行的“必跑”Job 在 `CI=true`/GitHub Actions 中必须满足 `skip_count=0`、实际断言数大于 0、`continue-on-error=false`。暂时没有真实环境时，把对应 Job 映射到 `manual-acceptance.md` 的待人工场景；缺 Docker、pdflatex、镜像、DSH fixture、git base 或其他能力不能输出 `SKIP` 后 exit 0 或被聚合器计入 PASS。本地非 CI 环境可以显式 allow-skip，但结果只能记为“未运行”。
 
 ## 14. 文档治理与 subagent 流程验收
 
 - docs-contract-sync 校验 Markdown 链接、标题、fence、规范索引和目标/现状标签；
 - `verify-docs --diff-check <base>` 必须先解析并验证精确 base SHA；base 缺失、歧义、浅克隆不可达或任意 git error 以 `base_ref_unavailable` 非零退出，禁止将 changed files 当空集；
 - diff scope 必须覆盖 `src/`、`packages/`、`workers/`、`apps/`、`configs/`、`migrations/`、`tests/`、`evals/` 和 manifest；行为变更至少同时触达负责规范、本文和 hardening，或带 reviewer 批准的 no-contract-change 记录；
-- hardening 状态只允许未实现、部分、已实现未验收、已验收、已关闭；“已验收”必须绑定当前 commit、CI job 和 acceptance 报告，历史计数不能升级状态；
+- hardening 状态只允许未实现、部分、已实现未验收、已验收、已关闭；“已验收”必须绑定当前 commit、acceptance 场景以及 CI 报告或结构化人工验收记录，历史计数不能升级状态；
 - README、USAGE、hardening 和源码对当前能力有矛盾时，docs-contract-sync 必须失败，且默认采用较低完成状态；
 - 修改 src/packages/workers/apps/configs 中的接口、Schema、UI 或行为时，变更集必须同时触达负责的规范、acceptance-tests.md 和 hardening-v0.2-status.md；允许通过 PR label 明确 no-contract-change，但需要 reviewer 理由；
 - 新增 UI chrome 时静态检查要求 zh/en key，而不是硬编码文本；
@@ -419,7 +426,7 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 - 合并记录包含主代理对基础文档、修改代码、方案取舍和最终验收的确认；
 - 流程验收不要求为了单文件小改强行派代理，但若存在两个以上独立重任务而未并行，需在记录中说明原因。
 
-缺少 Docker、TeX、DSH fixture 或其他能力的本地环境可以明确标记“未运行”，但不得计入 PASS。CI 不允许 skip 成功。历史 README 中的测试计数仅作记录，不能代替当前提交和精确 CI job 的结果。
+缺少 Docker、TeX、DSH fixture 或其他能力的开发环境可以明确标记 `NOT_RUN_MANUAL_PENDING`，先完成代码并继续开发；它不得计入 PASS 或“已验收”。真实环境后续由人工按结构化场景补验，或在条件成熟后补 CI。历史 README 中的测试计数仅作记录，不能代替当前提交的人工/机器验收结果。
 
 ## 15. 最终差距审计轮新增场景（2026-08）
 
@@ -481,3 +488,26 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 - tex-file-saved-delete-move-quiet：delete/move 按设计不发事件（只有 save 发出 tex.file.saved）——tests/unit/tex-event.test.ts；
 - tex-file-saved-trajectory-lane：tex.file.saved 投影为 research lane 条目（redacted summary，raw payload 不出投影）——tests/unit/tex-event.test.ts；
 - tex-cross-connection-ordering（storage-migrations.md §7 取舍）：tex store 是独立 WAL 连接，tex 写先提交、outbox 后写；kernel 连接损坏时保存仍成功（outbox 追加失败只记录 error 不阻塞保存——写已提交、客户端已见成功，失败只会导致 409 重试）——tests/unit/tex-event.test.ts。
+
+## 21. 2026-08-11 当前复审强制回归场景
+
+本节来自 `main@fda346b` 代码复审。以下场景全部是发布阻断验收；在源码修复、当前提交自动化报告和目标环境证据同时存在前，hardening §5 对应项不得升级状态。
+
+- sidecar-kernel-bearer-required：standalone/plugin sidecar 每次启动生成并注入普通 Kernel Bearer；除 health 外，直接访问 sidecar Kernel 的 GET/POST/stream 在缺失、错误、旧 token 时均 401；token 不出 argv/log/client bundle，endpoint/token 文件 0600；BFF、Runner、Orchestrator 使用正确 token；
+- global-id-project-authz：Artifact、Document/TeX、PTY session、event、child 等 global-id 路由先由服务端解析 owning project，再做 membership/role；跨项目或撤权后 read/write/stream/control 一律 404/403，无 ID 枚举；BFF 和 direct Kernel 两层都有负向测试；
+- pty-owner-fencing-all-operations：PTY GET/control/frames/attach/detach/close 都要求 authenticated principal、owner、current lease/generation；header 缺失不是兼容放行；他人 session ID、旧 generation、撤权和重连抢占均失败且不泄漏 frames；
+- code-snapshot-approved-workspace-only：code snapshot wire 只接受 workspace_id + root-relative path；绝对路径、`..`、用户 home、仓库外目录、symlink 逃逸全部 422，且 CAS/Artifact/manifest 零写；批准 workspace 内文件逐字节归档；
+- manuscript-open-never-regenerates：首次 ensure 可生成模板；之后页面 render、locale 切换、poll、save 后 rerender、tab 往返不得改写 `paper.tex`/`main.bib` 或推进 revision；regenerate 是独立显式操作，有确认、版本历史和冲突保护；
+- tex-save-live-preview：成功保存调用一次 debounce preview hook；快速连续保存合并；queued/running/failed/superseded/stale/PDF/diagnostics 在同页实时更新；权威 Compile 与 preview 清楚分离；保存 409 不触发 preview/compile；
+- remote-secure-container-only：baseline/pilot/formal/reproduce/latex-compile 在远端只能使用 digest-pinned restricted container；宿主 subprocess 对 secure kinds fail-closed；trusted fixture 是唯一显式例外，并验证宿主 marker 未执行；
+- remote-identity-fencing-manifest：Fleet route 强制 mTLS service identity，证书吊销即时生效；assignment/job/run/owner/generation/token/manifest.run_id 全链绑定；container_digest/data_hash/code snapshot/seed/metrics/output contract 缺一即拒绝；stale complete 不改变终态；
+- remote-cas-binary-auth：Fleet CAS 使用 authenticated byte stream，不经过 `text()`/UTF-8 round-trip；随机二进制、PDF、压缩包和 NUL bytes 往返 hash/size 完全一致；caller 声明 project_id 不能越过 claim 所属项目；
+- membership-revocation-no-stale-cache：成员/角色变更后下一次请求立即采用新 revision；旧 Promise/cache 不继续授权；researcher/operator 对 PI-only intake adopt、archive/unarchive、Gate Decision 全部 403；
+- init-resume-intake-grill：有无历史项目都先显示可选择的 Init/Resume；可从 research brief、survey、idea、contract、experiment、evidence、manuscript 任一阶段接入；上传/恢复上传、scan、Grill Me、proposal、PI adopt 全链可运行；取消/重连不丢进度；
+- workspace-browser-workbench：真实磁盘 workspace 提供文件树、tabs、文本编辑、binary preview、search/watch、upload、create/move/delete/history/problems；version/etag 冲突可比较/重载/另存；桌面/窄屏与键盘/a11y 通过；
+- interactive-terminal-browser：浏览器 PTY 支持 stdin、resize、INT/TERM/KILL、detach/reconnect、after_seq/gap、完整日志下载；本机 Docker 与 RemoteRunner 共用同一 UI/权限语义；PTY 输出不能成为 Metrics/Manifest/Evidence；
+- trajectory-topology-browser：Research/Session 双 lane 增量投影；subagent DAG 显示 parent/child、状态、深度、运行时间、阻断与产物；稳定地址可进入 child、查看详情和发 follow-up；跨项目 child ID 与撤权负向通过；
+- settings-schema-complete-i18n：runner/workspace/terminal/tex/agent/remote/security 等所有配置由 schema/effective 生成，支持 scope/source/validation/SecretRef/config pin/重启提示；新增 Init/Workspace/Trajectory/Topology/Settings 文案 zh/en 齐全，运行时切换即时更新，无 module-load 时冻结译文；
+- workspace-permission-under-umask：在 umask 0000/0022/0077 下创建 workspace 及多级子目录，结果满足规范声明的完整 0750 chain（或经安全评审把契约改成“不得宽于 0750”并同步全部文档/测试）；文件为 0640 或更严格，原子 tmp 不残留；
+- ci-current-evidence-no-exclusion：CI 安装并固定 package manager，运行完整 unit（不得排除 `security.test.ts`）、UI typecheck/build、packaging、security aggregator 与 docs diff-check；必跑项零 SKIP；报告绑定当前 SHA，历史计数不能复用；
+- selfmod-production-and-tarball-negative：显式 dev overlay 可 inspect→mount harmless probe→调用→unmount，失败/HMR/shutdown 清理并审计；production profile、patch、dump-config、clean tarball/consumer install 均不存在 tool-cordis 与 cordis_*；无 pnpm/DSH fixture 时该场景失败或记未运行，不得 PASS。
