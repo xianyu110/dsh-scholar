@@ -34,6 +34,8 @@
 
 ## 3. 校准后的目标差距矩阵
 
+> 权威校准：同一 ID 在 §3 与第 5 节（2026-08-11 审阅阻断项）冲突时，一律采用第 5 节状态。2026-08-11 修复轮（commit 4b92ed8/d63abca/aa6d3e0/431085f）已把下列 ID 的服务端/逻辑层全部闭环为“已实现未验收”：API-01、SIDE-01、PTY-01、TEX-01、TEX-02、TEX-03、SNAPSHOT-01、RUN-REMOTE-01、RUN-01a、RUN-01b、ART-01、GOV-01、ONBOARD-01、UPLOAD-01、GUIDE-01、WORK-01、TRAJ-01、SUBAGENT-01、CONFIG-01、UI-02、UI-03、STORE-01、CI-01；剩余真实环境/浏览器验收统一记 NOT_RUN_MANUAL_PENDING（见 §6 决策与 manual-acceptance.md），状态上限“已实现未验收”，不越级宣称。§3 各行保留历史证据文本，与第 5 节冲突处以第 5 节为准。
+
 | ID | 目标 | 当前状态 | 当前阻断与关闭条件 |
 |---|---|---|---|
 | GOV-01 | 认证 Human Principal durable | 已实现未验收 | HTTP gate decision 路由 fail-closed(principal 必填,裸 actor→422);**本地 Principal resolver 已实现**:standalone BFF 从 bearer 凭据派生 DURABLE 会话身份(session.json,0600,确定性 sha256,重启稳定),所有转发请求带 x-principal-session,kernel decision 路由绑定该 session_id→决策重读完整保留 principal/tenant/auth_method/session;gate 决策经 BFF 正确解析 gate 所属项目做成员/角色检查(修复 gate id 被误当 project id 的 404 bug)。证据:tests/security/run-standalone-http-tests.sh 152/152(GOV-01 组:决策 200、session_id 持久化、session.json 0600、转发与文件一致)、run-gate-tests.sh 15/15;外部 IdP 可替换本 resolver,接入后即达已验收§4 P0 阻断项已关闭(commit f94fac5):BFF principal fail-closed(缺 principal 除 health/静态外 401)、客户端身份字段覆盖为会话身份、伪造身份负向测试(run-standalone-http-tests.sh 180/180 含 FC/forged 组)；**§5 P1（2026-08-11）已闭环**：PI-only capability route table（intake adopt、project archive/unarchive 加入 governance write）+ BFF/Kernel 双层校验 + membership 实时撤权，详见 §5 表 GOV-01/ONBOARD-01 行 |
