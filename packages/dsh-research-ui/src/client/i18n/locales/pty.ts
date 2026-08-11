@@ -46,6 +46,12 @@ export const zh = {
   'pty.status.leaseExpired': '已过期',
   'pty.status.bytes': '{bytes} 字节',
   'pty.status.aria': '会话状态',
+  // frames consumption (SSE stream vs poll fallback)
+  'pty.stream.connecting': 'SSE 连接中…',
+  'pty.stream.live': 'SSE 实时',
+  'pty.stream.reconnecting': 'SSE 重连中…',
+  'pty.stream.disconnected': 'SSE 已断开',
+  'pty.stream.poll': '轮询回退',
   // close-reason notices (server PtyCloseReason)
   'pty.notice.idleTtl': '会话因空闲超时关闭(TTL {ttl} 秒)。',
   'pty.notice.leaseExpired': '会话租约已过期 — 请重新打开终端。',
@@ -115,6 +121,12 @@ export const en: Record<PtyKey, string> = {
   'pty.status.leaseExpired': 'expired',
   'pty.status.bytes': '{bytes} byte(s)',
   'pty.status.aria': 'session status',
+  // frames consumption (SSE stream vs poll fallback)
+  'pty.stream.connecting': 'SSE connecting…',
+  'pty.stream.live': 'SSE live',
+  'pty.stream.reconnecting': 'SSE reconnecting…',
+  'pty.stream.disconnected': 'SSE disconnected',
+  'pty.stream.poll': 'polling fallback',
   'pty.notice.idleTtl': 'Session closed by idle TTL ({ttl}s).',
   'pty.notice.leaseExpired': 'Session lease expired — reopen the terminal.',
   'pty.notice.permissionRevoked': 'Permission revoked; the session was detached.',

@@ -32,8 +32,9 @@ import { ALL_TAB_KEYS, MORE_TAB_KEYS, parseDeepLink } from '../../packages/dsh-r
 import {
   PtyClientModel, ptyCloseReasonKey, ptyErrorKey, ptyStateKey, ptyStatusView, utf8ByteLength,
   type PtyControlFrame, type PtyFramesPageWire, type PtyOpenParams, type PtyResult,
-  type PtyScheduler, type PtySessionWire, type PtyTransport,
+  type PtyScheduler, type PtySessionWire, type PtyStreamTransport, type PtyTransport,
 } from '../../packages/dsh-research-ui/src/client/pty-session-model'
+import { MockSseFetch } from '../../packages/dsh-research-ui/src/client/sse-client'
 
 interface Missing { namespace: string; key: string; locale: string }
 
@@ -819,6 +820,227 @@ describe('PTY-01 error mapping (wire code → stable key) + i18n parity', () => 
       expect(view.errorText).toBe((locale === 'zh' ? ptyZh : ptyEn)['pty.error.lease'] ?? '')
       expect(missing).toEqual([])
     }
+  })
+})
+
+/* ──────────────────── SSE frames stream (client/sse-client.ts) ──────────────────── */
+
+/** One SSE frame as the frames/stream endpoint emits it. */
+function sse(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+}
+
+function streamUrl(sessionId: string, afterSeq: number): string {
+  return `/v1/pty/sessions/${encodeURIComponent(sessionId)}/frames/stream?after_seq=${afterSeq}`
+}
+
+/** Open a model wired to a mock SSE stream transport (the session id is
+ *  pinned BEFORE open so the mock fetch queue can be keyed by URL). */
+async function openStreamModel(
+  t: FakeTransport,
+  fetchMock: MockSseFetch,
+  over: Partial<ConstructorParameters<typeof PtyClientModel>[0]> = {},
+  sessionId = `pty_sse_${sessionCounter}`,
+): Promise<{ model: PtyClientModel; scheduler: FakeScheduler; transport: FakeTransport; fetchMock: MockSseFetch }> {
+  const env = makeModel(t, {
+    ...over,
+    stream: { fetch: fetchMock.fetchImpl.bind(fetchMock), maxReconnectAttempts: 3, ...(over.stream ?? {}) },
+  })
+  // Pin the session id BEFORE open (FakeTransport.open would otherwise mint
+  // a fresh id) so the mock fetch queue can be keyed by URL.
+  t.currentSession = fakeSession({ pty_session_id: sessionId })
+  t.openQueue = [{ ok: true, data: t.currentSession }]
+  const ok = await env.model.open(OPEN_PARAMS)
+  expect(ok).toBe(true)
+  await flush()
+  return { ...env, fetchMock }
+}
+
+describe('PTY-01 client SSE frames stream (frames/stream — client/sse-client.ts)', () => {
+  it('SSE frame/gap/exit events apply IDENTICALLY to the poll path (cursor/display/retention)', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    // pre-enqueue the FIRST stream (the connect during open consumes it)
+    const stream = fetchMock.enqueueStream(streamUrl(sessionId, 0))
+    const { model, fetchMock: fm } = await openStreamModel(t, fetchMock, {}, sessionId)
+    expect(model.framesMode).toBe('sse')
+    await flush()
+    expect(model.streamStatus).toBe('live')
+    stream.push(sse('frame', { server_seq: 1, type: 'output', payload: { text: 'hello\n', byte_length: 6, channel: 'stdout' } }))
+    stream.push(sse('frame', { server_seq: 2, type: 'output', payload: { text: 'world\n', byte_length: 6, channel: 'stderr' } }))
+    stream.push(sse('exit', { server_seq: 3, exit_code: 130, signal: 'SIGINT' }))
+    await flush()
+    expect(model.serverSeq).toBe(3)
+    expect(model.display.map(e => [e.kind, e.text])).toEqual([
+      ['output', 'hello\n'], ['output', 'world\n'], ['exit', undefined],
+    ])
+    expect(model.display[1]!.channel).toBe('stderr')
+    expect(model.exitCode).toBe(130)
+    expect(model.exitSignal).toBe('SIGINT')
+
+    // The POLL path over the same frames converges to the exact same state.
+    const t2 = new FakeTransport()
+    const { model: poll, scheduler: s2 } = await openModel(t2)
+    t2.framesQueue = [{ ok: true, data: framesPage({ frames: [
+      { pty_session_id: sessionId, server_seq: 1, type: 'output', payload: { text: 'hello\n', byte_length: 6, channel: 'stdout' }, created_at: 'x' },
+      { pty_session_id: sessionId, server_seq: 2, type: 'output', payload: { text: 'world\n', byte_length: 6, channel: 'stderr' }, created_at: 'x' },
+      { pty_session_id: sessionId, server_seq: 3, type: 'exit', payload: { exit_code: 130, signal: 'SIGINT' }, created_at: 'x' },
+    ] }) }]
+    s2.runOnce()
+    await flush()
+    expect(poll.serverSeq).toBe(model.serverSeq)
+    expect(poll.display.map(e => [e.kind, e.text])).toEqual(model.display.map(e => [e.kind, e.text]))
+    expect(poll.exitCode).toBe(model.exitCode)
+    expect(poll.exitSignal).toBe(model.exitSignal)
+    void fm
+  })
+
+  it('SSE gap event surfaces the same retention marker as the page gap', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    const stream = fetchMock.enqueueStream(streamUrl(sessionId, 0))
+    const { model, fetchMock: fm } = await openStreamModel(t, fetchMock, {}, sessionId)
+    await flush()
+    stream.push(sse('gap', { retained_from_seq: 10, dropped_bytes: 500, dropped_frames: 9 }))
+    stream.push(sse('frame', { server_seq: 10, type: 'output', payload: { text: 'after\n', byte_length: 6, channel: 'stdout' } }))
+    await flush()
+    expect(model.retainedFromSeq).toBe(10)
+    expect(model.droppedBytes).toBe(500)
+    expect(model.serverSeq).toBe(10)
+    expect(model.display.map(e => e.kind)).toEqual(['gap', 'output'])
+    expect(model.display[0]).toMatchObject({ gapFrom: 1, gapTo: 9, droppedFrames: 9 })
+    void fm
+  })
+
+  it('stream replay at/below serverSeq is skipped; reconnect resumes from the cursor', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    const stream = fetchMock.enqueueStream(streamUrl(sessionId, 0))
+    const { model, scheduler, fetchMock: fm } = await openStreamModel(t, fetchMock, {}, sessionId)
+    await flush()
+    stream.push(sse('frame', { server_seq: 1, type: 'output', payload: { text: 'a\n', byte_length: 2, channel: 'stdout' } }))
+    stream.push(sse('frame', { server_seq: 2, type: 'output', payload: { text: 'b\n', byte_length: 2, channel: 'stdout' } }))
+    await flush()
+    expect(model.serverSeq).toBe(2)
+    // server closes the stream → SseClient reconnects after the cursor
+    stream.end()
+    await flush()
+    expect(model.streamStatus).toBe('reconnecting')
+    const stream2 = fm.enqueueStream(streamUrl(sessionId, 2))
+    scheduler.runOnce()
+    await flush()
+    expect(model.streamStatus).toBe('live')
+    expect(fm.calls.at(-1)!.url).toBe(streamUrl(sessionId, 2))
+    // a replayed frame at/below the cursor is dropped; new ones apply
+    stream2.push(sse('frame', { server_seq: 2, type: 'output', payload: { text: 'dup\n', byte_length: 4, channel: 'stdout' } }))
+    stream2.push(sse('frame', { server_seq: 3, type: 'output', payload: { text: 'c\n', byte_length: 2, channel: 'stdout' } }))
+    await flush()
+    expect(model.display.map(e => e.text)).toEqual(['a\n', 'b\n', 'c\n'])
+  })
+
+  it('stream give-up (max reconnect attempts) falls back to the after_seq poll', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    // NO pre-enqueued stream: the first connect uses the mock default
+    // (never-ending stream) → live with no bytes → heartbeat trips.
+    const { model, scheduler, transport } = await openStreamModel(t, fetchMock, { stream: { maxReconnectAttempts: 2 } }, sessionId)
+    for (let i = 0; i < 4; i += 1) fetchMock.enqueueError(streamUrl(sessionId, 0), 500)
+    scheduler.runOnce() // heartbeat fires → reconnect #1 scheduled
+    await flush()
+    scheduler.runOnce() // reconnect #1 → fetch #2 → 500 → reconnect #2
+    await flush()
+    expect(model.streamStatus).toBe('reconnecting')
+    scheduler.runOnce() // reconnect #2 → fetch #3 → 500 → budget (2) exhausted
+    await flush() // the give-up continuation lands → POLL fallback
+    expect(model.framesMode).toBe('poll')
+    expect(model.streamStatus).toBe('idle')
+    // the poll resumes exactly where the stream stopped (after_seq cursor)
+    scheduler.runOnce()
+    await flush()
+    expect(transport.framesCalls.at(-1)!.afterSeq).toBe(0)
+    expect(model.framesMode).toBe('poll')
+    // status copy reflects the fallback
+    const view = ptyStatusView(model)
+    expect(view.streamText).toBe(ptyEn['pty.stream.poll'] ?? '')
+  })
+
+  it('stream 403 (lease_invalid) is fatal: error state, no poll restart', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    // the FIRST connect hits 403 → fatal lease failure (no reconnect loop)
+    fetchMock.enqueueError(streamUrl(sessionId, 0), 403)
+    const { model, scheduler } = await openStreamModel(t, fetchMock, {}, sessionId)
+    expect(model.state).toBe('error')
+    expect(model.lastError?.code).toBe('lease_invalid')
+    expect(ptyStatusView(model).errorText).toBe(ptyEn['pty.error.lease'] ?? '')
+    // nothing left scheduled (no poll, no further reconnects)
+    scheduler.runOnce()
+    await flush()
+    expect(scheduler.pending).toBe(0)
+    expect(t.framesCalls).toHaveLength(0)
+  })
+
+  it('detach closes the stream; reconnect reopens it from the cursor', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    const stream = fetchMock.enqueueStream(streamUrl(sessionId, 0))
+    const { model, scheduler, fetchMock: fm } = await openStreamModel(t, fetchMock, {}, sessionId)
+    await flush()
+    stream.push(sse('frame', { server_seq: 1, type: 'output', payload: { text: 'one\n', byte_length: 4, channel: 'stdout' } }))
+    await flush()
+    expect(model.serverSeq).toBe(1)
+    model.detach()
+    expect(model.state).toBe('detached')
+    expect(model.streamStatus).toBe('closed')
+    const callsBefore = fm.calls.length
+    scheduler.runOnce()
+    await flush()
+    expect(fm.calls.length).toBe(callsBefore) // no stream fetches while detached
+    model.reconnect()
+    expect(model.state).toBe('open')
+    const stream2 = fm.enqueueStream(streamUrl(sessionId, 1))
+    await flush()
+    expect(fm.calls.at(-1)!.url).toBe(streamUrl(sessionId, 1))
+    stream2.push(sse('frame', { server_seq: 2, type: 'output', payload: { text: 'two\n', byte_length: 4, channel: 'stdout' } }))
+    await flush()
+    expect(model.serverSeq).toBe(2)
+    expect(model.display.map(e => e.text)).toEqual(['one\n', 'two\n'])
+  })
+
+  it('stream status copy evaluates in BOTH locales with zero missing keys', async () => {
+    const t = new FakeTransport()
+    const fetchMock = new MockSseFetch()
+    const sessionId = `pty_sse_${sessionCounter}`
+    const stream = fetchMock.enqueueStream(streamUrl(sessionId, 0))
+    const { model, fetchMock: fm } = await openStreamModel(t, fetchMock, {}, sessionId)
+    await flush()
+    expect(model.streamStatus).toBe('live')
+    for (const locale of ['zh', 'en'] as const) {
+      setLocale(locale)
+      missing = []
+      const view = ptyStatusView(model)
+      expect(view.streamText).not.toBe('')
+      expect(view.streamText).toBe((locale === 'zh' ? ptyZh : ptyEn)['pty.stream.live'] ?? '')
+      expect(missing).toEqual([])
+    }
+    stream.push(sse('frame', { server_seq: 1, type: 'output', payload: { text: 'x\n', byte_length: 2, channel: 'stdout' } }))
+    await flush()
+    for (const status of ['connecting', 'live', 'reconnecting', 'disconnected', 'poll'] as const) {
+      for (const locale of ['zh', 'en'] as const) {
+        setLocale(locale)
+        missing = []
+        const text = (locale === 'zh' ? ptyZh : ptyEn)[`pty.stream.${status}`]
+        expect(text).toBeDefined()
+        expect(missing).toEqual([])
+      }
+    }
+    void fm
   })
 })
 

@@ -19,8 +19,8 @@
     "runner": "node lib/bin/runner.js"
   },
   "dependencies": {
-    "@dsh-scholar/research-client": "file:../../packages/research-client",
-    "@dsh-scholar/research-schemas": "file:../../packages/research-schemas"
+    "@dsh-scholar/research-client": "workspace:^",
+    "@dsh-scholar/research-schemas": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

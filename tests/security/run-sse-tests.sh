@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ART-01 SSE real-streaming acceptance (acceptance-tests.md §5/§11),
+# ART-01 SSE real-streaming acceptance (acceptance-tests.md §5/§11/§21),
 # probing lib/bin/kernel.js directly and through the standalone BFF proxy:
 #
 #   kernel-sse-real-body     GET /v1/jobs/{id}/terminal -> text/event-stream;
@@ -17,6 +17,24 @@
 #   bff-sse-no-token         no/wrong bearer token -> 401
 #   bff-sse-cross-project    BFF job-membership check answers 404 BEFORE any
 #                            SSE bytes are streamed
+#
+# §21 SSE real-time streams (api-contracts.md §22) — the three NEW stream
+# endpoints, kernel-direct AND through the BFF:
+#
+#   kernel-pty-stream-live   /v1/pty/sessions/{id}/frames/stream: real echoed
+#                            body, live tail, exit event ends the stream
+#   kernel-pty-stream-after-seq  after_seq resume (no dup), retention gap
+#                            event, 422/403/404/lease_invalid auth matrix
+#   kernel-watch-stream      /v1/projects/{id}/workspaces/{wid}/watch/stream:
+#                            change node + delete tombstone + revision
+#                            advance, after_revision resume, 422/404/cross-
+#                            project 404
+#   kernel-trajectory-stream /v1/projects/{id}/trajectory/stream: research/
+#                            session lane filter, live append, keyset
+#                            after_seq resume, redacted summary, 422/404
+#   bff-*-stream             the same three streams through the standalone
+#                            BFF proxy (bearer 401, non-member 404 BEFORE
+#                            any SSE bytes, x-principal-id injection)
 #
 # Fencing note: appendTerminalFrames requires frames to carry the claim's
 # lease_generation (P0), so every run below claims the job first and reuses
@@ -73,6 +91,40 @@ ctype() {
 sse_chunk_seqs() {
   [[ -f "$1" ]] || { echo ""; return; }
   node -e 'let d=require("fs").readFileSync(process.argv[1],"utf8");const out=[];for(const block of d.split("\n\n")){const e=block.split("\n").find(l=>l.startsWith("event: "));const data=block.split("\n").find(l=>l.startsWith("data: "));if(e&&e.slice(7)==="chunk"&&data){try{out.push(JSON.parse(data.slice(6)).seq)}catch{}}}console.log(out.join(","))' "$1"
+}
+
+# sse_events <bodyfile> [event-name] -> lines "event<TAB>data-json" in order
+# (filtered to one event name when given; comment frames are ignored)
+sse_events() {
+  node -e '
+    const fs = require("fs")
+    const body = fs.readFileSync(process.argv[1], "utf8")
+    const want = process.argv[2] ?? ""
+    const out = []
+    for (const block of body.split("\n\n")) {
+      const lines = block.split("\n")
+      const ev = lines.find(l => l.startsWith("event: "))
+      if (!ev) continue
+      const name = ev.slice(7)
+      if (want !== "" && name !== want) continue
+      const data = lines.find(l => l.startsWith("data: "))
+      out.push(name + "\t" + (data ? data.slice(6) : ""))
+    }
+    console.log(out.join("\n"))
+  ' "$1" "${2:-}"
+}
+
+# sse_seqs <bodyfile> <event-name> -> comma-joined `seq` fields, in order
+sse_seqs() {
+  [[ -f "$1" ]] || { echo ""; return; }
+  node -e 'let d=require("fs").readFileSync(process.argv[1],"utf8");const out=[];for(const block of d.split("\n\n")){const e=block.split("\n").find(l=>l.startsWith("event: "));const data=block.split("\n").find(l=>l.startsWith("data: "));if(e&&e.slice(7)===process.argv[2]&&data){try{out.push(JSON.parse(data.slice(6)).seq)}catch{}}}console.log(out.join(","))' "$1" "$2"
+}
+
+# sse_has_text <bodyfile> <event-name> <substring> -> true when any event of
+# that name carries a JSON `text` field containing the substring
+sse_has_text() {
+  [[ -f "$1" ]] || { echo "false"; return; }
+  node -e 'let d=require("fs").readFileSync(process.argv[1],"utf8");for(const block of d.split("\n\n")){const e=block.split("\n").find(l=>l.startsWith("event: "));const data=block.split("\n").find(l=>l.startsWith("data: "));if(e&&e.slice(7)===process.argv[2]&&data){try{const j=JSON.parse(data.slice(6));const text=j.text??j.payload?.text??"";if(String(text).includes(process.argv[3])){console.log("true");process.exit(0)}}catch{}}}console.log("false")' "$1" "$2" "$3"
 }
 
 cleanup() {
@@ -278,6 +330,237 @@ else
   bad "owning project_id: expected 200, got HTTP $CODE"
 fi
 
+# ── kernel-direct SSE real-time streams (acceptance-tests.md §21) ────────────
+# The three new stream endpoints (api-contracts.md §22) mirror the terminal
+# SSE pattern: text/event-stream, after_seq/after_revision replay, live tail,
+# named heartbeat, exit/close end for the pty stream. Data sources are the
+# SAME stores the polling endpoints read (pty frames / workspace listSince /
+# trajectory projection).
+PTYOWNER='pty-sse'
+PTYP=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse-pty\",\"workspace\":\"/w/pty\",\"creator_principal_id\":\"$PTYOWNER\",\"brief\":$BRIEF}" | jfield '.project_id')
+PTYWS=$(api -X POST "$BASE/v1/projects/$PTYP/workspaces" -d '{"kind":"scratch","name":"s"}' | jfield '.workspace_id')
+[[ -n "$PTYP" && -n "$PTYWS" ]] || { echo "failed to create pty-stream fixtures"; exit 1; }
+
+say "Test 8: kernel-pty-stream-live — pty frame stream: real body, live tail, exit end"
+PTY_OPEN=$(curl -s -X POST "$BASE/v1/pty/sessions" -H 'content-type: application/json' -H "x-principal-id: $PTYOWNER" \
+  -d "{\"project_id\":\"$PTYP\",\"workspace_id\":\"$PTYWS\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}")
+PTY_ID=$(printf '%s' "$PTY_OPEN" | jfield '.pty_session_id')
+PTY_LEASE=$(printf '%s' "$PTY_OPEN" | jfield '.lease_token')
+if [[ -n "$PTY_ID" && -n "$PTY_LEASE" ]]; then
+  ok "pty session opened via kernel ($PTY_ID)"
+else
+  bad "pty session open (got: $(printf '%s' "$PTY_OPEN" | head -c 160))"
+  exit 1
+fi
+(timeout 6 curl -sN --no-buffer -D "$WORK/hp1.txt" -o "$WORK/bp1.txt" \
+  "$BASE/v1/pty/sessions/$PTY_ID/frames/stream?after_seq=0" -H "x-principal-id: $PTYOWNER" > /dev/null 2>&1 || true) &
+PTY_SSE_PID=$!
+sleep 1.2
+CTL8=$(node -e 'const text="echo SSE_LIVE_1; echo SSE_LIVE_2; echo SSE_LIVE_3; exit\n"; console.log(JSON.stringify({client_seq:1,type:"bytes",payload:{text,byte_length:text.length}}))')
+CTL=$(curl -s -X POST "$BASE/v1/pty/sessions/$PTY_ID/control" -H 'content-type: application/json' -H "x-principal-id: $PTYOWNER" -H "x-pty-lease: $PTY_LEASE" -d "$CTL8")
+wait "$PTY_SSE_PID" 2>/dev/null || true
+CTP1=$(ctype "$WORK/hp1.txt")
+if [[ "$CTP1" == "text/event-stream" ]]; then
+  ok "pty stream content-type: $CTP1"
+else
+  bad "pty stream: expected text/event-stream, got '$CTP1'"
+fi
+if grep -qF 'event: subscribed' "$WORK/bp1.txt" && grep -qF "\"session_id\":\"$PTY_ID\"" "$WORK/bp1.txt"; then
+  ok "pty stream subscribed event carries the session_id"
+else
+  bad "pty stream missing subscribed event"
+fi
+PTY_SEQS=$(sse_seqs "$WORK/bp1.txt" frame)
+if [[ -n "$PTY_SEQS" ]] && printf '%s' "$PTY_SEQS" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=d.split(",").map(Number);console.log(s.every((v,i)=>i===0||v>s[i-1])?"asc":"no")})' | grep -q asc; then
+  ok "pty frame seqs strictly increasing: [$PTY_SEQS]"
+else
+  bad "pty frame seqs not strictly increasing: [$PTY_SEQS]"
+fi
+if sse_has_text "$WORK/bp1.txt" frame SSE_LIVE_1 && sse_has_text "$WORK/bp1.txt" frame SSE_LIVE_3; then
+  ok "live pty frames carry real echoed text (SSE_LIVE_1..SSE_LIVE_3)"
+else
+  bad "live pty frames missing echoed text"
+fi
+if grep -qF 'event: exit' "$WORK/bp1.txt"; then
+  ok "exit event ended the pty stream after the live frames"
+else
+  bad "pty stream missing exit event"
+fi
+
+say "Test 9: kernel-pty-stream-after-seq — resume without duplicates; gap on eviction; auth matrix"
+LAST_PTY=$(printf '%s' "$PTY_SEQS" | awk -F, '{print $NF}')
+sse_read "$WORK/bp2.txt" "$WORK/hp2.txt" 2 "$BASE/v1/pty/sessions/$PTY_ID/frames/stream?after_seq=$LAST_PTY" -H "x-principal-id: $PTYOWNER"
+PTY2_SEQS=$(sse_seqs "$WORK/bp2.txt" frame)
+if [[ -z "$PTY2_SEQS" ]]; then
+  ok "after_seq=$LAST_PTY -> no pty frame replayed"
+else
+  bad "after_seq=$LAST_PTY: expected no frames, got [$PTY2_SEQS]"
+fi
+EXIT_SEQ=$(sse_events "$WORK/bp1.txt" exit | head -1 | cut -f2 | jfield '.seq')
+if [[ -n "$EXIT_SEQ" ]]; then
+  sse_read "$WORK/bp3.txt" "$WORK/hp3.txt" 2 "$BASE/v1/pty/sessions/$PTY_ID/frames/stream?after_seq=$EXIT_SEQ" -H "x-principal-id: $PTYOWNER"
+  if grep -q 'event: frame' "$WORK/bp3.txt" || grep -q 'event: exit' "$WORK/bp3.txt"; then
+    bad "after exit seq $EXIT_SEQ: expected only subscribed, got more events"
+  else
+    ok "after_seq=$EXIT_SEQ (exit seq) -> stream replays nothing (exit is authoritative)"
+  fi
+else
+  bad "could not extract exit seq"
+fi
+# Gap: a reader starting at 0 on an evicted window must see the gap event.
+PTY_GAP=$(curl -s -X POST "$BASE/v1/pty/sessions" -H 'content-type: application/json' -H "x-principal-id: $PTYOWNER" \
+  -d "{\"project_id\":\"$PTYP\",\"workspace_id\":\"$PTYWS\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\",\"retention_bytes\":16}")
+PTY_GAP_ID=$(printf '%s' "$PTY_GAP" | jfield '.pty_session_id')
+PTY_GAP_LEASE=$(printf '%s' "$PTY_GAP" | jfield '.lease_token')
+if [[ -n "$PTY_GAP_ID" && -n "$PTY_GAP_LEASE" ]]; then
+  CTL9=$(node -e 'const text="echo GAP_AAAAAA; echo GAP_BBBBBB; echo GAP_CCCCCC; echo GAP_DDDDDD\n"; console.log(JSON.stringify({client_seq:1,type:"bytes",payload:{text,byte_length:text.length}}))')
+  curl -s -X POST "$BASE/v1/pty/sessions/$PTY_GAP_ID/control" -H 'content-type: application/json' -H "x-principal-id: $PTYOWNER" -H "x-pty-lease: $PTY_GAP_LEASE" \
+    -d "$CTL9" > /dev/null
+  sse_read "$WORK/bpg.txt" "$WORK/hpg.txt" 2 "$BASE/v1/pty/sessions/$PTY_GAP_ID/frames/stream?after_seq=0" -H "x-principal-id: $PTYOWNER"
+  GAPLINE=$(sse_events "$WORK/bpg.txt" gap | head -1)
+  if [[ -n "$GAPLINE" ]]; then
+    GF=$(printf '%s' "$GAPLINE" | cut -f2)
+    GF1=$(printf '%s' "$GF" | jfield '.gap_from_seq'); GDB=$(printf '%s' "$GF" | jfield '.dropped_bytes')
+    if [[ "$GF1" =~ ^[0-9]+$ && "$GF1" -ge 1 && "$GDB" =~ ^[0-9]+$ && "$GDB" -gt 0 ]]; then
+      ok "gap event on evicted window (gap_from_seq=$GF1, dropped_bytes=$GDB)"
+    else
+      bad "gap event fields unexpected: $GF"
+    fi
+  else
+    bad "expected gap event on evicted window"
+  fi
+else
+  bad "retention pty session open for gap test"
+fi
+# Auth matrix mirrors the polling frames route (422/403/404, wrong lease 403).
+R=$(curl -s -o "$WORK/bpn1.json" -w '%{http_code}' "$BASE/v1/pty/sessions/$PTY_ID/frames/stream?after_seq=0")
+[[ "$R" == "422" && "$(jfield '.error.code' < "$WORK/bpn1.json")" == "principal_required" ]] \
+  && ok "pty stream without principal -> 422 principal_required" || bad "no-principal pty stream expected 422, got HTTP $R"
+R=$(curl -s -o "$WORK/bpn2.json" -w '%{http_code}' -H 'x-principal-id: evil' "$BASE/v1/pty/sessions/$PTY_ID/frames/stream?after_seq=0")
+[[ "$R" == "403" && "$(jfield '.error.code' < "$WORK/bpn2.json")" == "pty_principal_mismatch" ]] \
+  && ok "pty stream as non-owner -> 403 pty_principal_mismatch" || bad "non-owner pty stream expected 403, got HTTP $R"
+R=$(curl -s -o "$WORK/bpn3.json" -w '%{http_code}' -H "x-principal-id: $PTYOWNER" "$BASE/v1/pty/sessions/pty_nope/frames/stream?after_seq=0")
+[[ "$R" == "404" && "$(jfield '.error.code' < "$WORK/bpn3.json")" == "pty_session_not_found" ]] \
+  && ok "unknown pty session stream -> 404 pty_session_not_found" || bad "unknown pty stream expected 404, got HTTP $R"
+R=$(curl -s -o "$WORK/bpn4.json" -w '%{http_code}' -H "x-principal-id: $PTYOWNER" -H 'x-pty-lease: lease_wrong' "$BASE/v1/pty/sessions/$PTY_ID/frames/stream?after_seq=0")
+[[ "$R" == "403" && "$(jfield '.error.code' < "$WORK/bpn4.json")" == "lease_invalid" ]] \
+  && ok "pty stream with wrong lease -> 403 lease_invalid" || bad "wrong-lease pty stream expected 403, got HTTP $R"
+
+say "Test 10: kernel-watch-stream — workspace change/delete events + revision advance; after_revision resume; auth"
+SWOWNER='sse-watch'
+SWP=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse-watch\",\"workspace\":\"/w\",\"creator_principal_id\":\"$SWOWNER\",\"brief\":$BRIEF}" | jfield '.project_id')
+SWID=$(api -X POST "$BASE/v1/projects/$SWP/workspaces" -d '{"kind":"code","name":"c"}' | jfield '.workspace_id')
+[[ -n "$SWP" && -n "$SWID" ]] || { echo "failed to create watch fixtures"; exit 1; }
+(timeout 5 curl -sN --no-buffer -D "$WORK/hw1.txt" -o "$WORK/bw1.txt" \
+  "$BASE/v1/projects/$SWP/workspaces/$SWID/watch/stream?after_revision=0" -H "x-principal-id: $SWOWNER" > /dev/null 2>&1 || true) &
+WATCH_PID=$!
+sleep 1.2
+curl -s -X POST "$BASE/v1/projects/$SWP/workspaces/$SWID/nodes" -H 'content-type: application/json' \
+  -d '{"path":"w1.txt","content":"one"}' > /dev/null
+curl -s -X POST "$BASE/v1/projects/$SWP/workspaces/$SWID/nodes" -H 'content-type: application/json' \
+  -d '{"path":"w2.txt","content":"two"}' > /dev/null
+curl -s -X DELETE "$BASE/v1/projects/$SWP/workspaces/$SWID/nodes?path=w1.txt" > /dev/null
+wait "$WATCH_PID" 2>/dev/null || true
+CTW=$(ctype "$WORK/hw1.txt")
+if [[ "$CTW" == "text/event-stream" ]]; then
+  ok "watch stream content-type: $CTW"
+else
+  bad "watch stream: expected text/event-stream, got '$CTW'"
+fi
+if grep -qF 'event: subscribed' "$WORK/bw1.txt" && grep -qF "\"workspace_id\":\"$SWID\"" "$WORK/bw1.txt" && grep -qF '"after_revision":0' "$WORK/bw1.txt"; then
+  ok "watch stream subscribed event carries workspace_id + after_revision"
+else
+  bad "watch stream missing subscribed event"
+fi
+CHANGE_PATHS=$(sse_events "$WORK/bw1.txt" change | cut -f2 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const out=[];for(const l of d.split("\n")){if(!l.trim())continue;try{out.push(JSON.parse(l).node.path)}catch{}}console.log(out.join(","))})')
+if printf '%s' "$CHANGE_PATHS" | grep -q 'w2.txt'; then
+  ok "change events carry the touched nodes [$CHANGE_PATHS] (w1.txt may appear in an intermediate poll — listSince projects current state per path)"
+else
+  bad "expected a change event for w2.txt, got [$CHANGE_PATHS]"
+fi
+DEL_PATH=$(sse_events "$WORK/bw1.txt" delete | head -1 | cut -f2 | jfield '.path')
+DEL_REV=$(sse_events "$WORK/bw1.txt" delete | head -1 | cut -f2 | jfield '.revision')
+SUB_REV=$(grep -o '"revision":[0-9]*' "$WORK/bw1.txt" | head -1 | cut -d: -f2)
+if [[ "$DEL_PATH" == "w1.txt" && -n "$DEL_REV" && -n "$SUB_REV" && "$DEL_REV" -gt "$SUB_REV" ]]; then
+  ok "delete tombstone (w1.txt) with revision advance $SUB_REV -> $DEL_REV"
+else
+  bad "delete tombstone/revision advance: path='$DEL_PATH' rev='$DEL_REV' sub='$SUB_REV'"
+fi
+WSREV=$(api "$BASE/v1/projects/$SWP/workspaces" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);const w=a.find(x=>x.workspace_id==='$SWID');console.log(w?w.revision:'')})")
+sse_read "$WORK/bw2.txt" "$WORK/hw2.txt" 2 "$BASE/v1/projects/$SWP/workspaces/$SWID/watch/stream?after_revision=$WSREV" -H "x-principal-id: $SWOWNER"
+if grep -q 'event: change' "$WORK/bw2.txt" || grep -q 'event: delete' "$WORK/bw2.txt"; then
+  bad "after_revision=$WSREV replayed old changes"
+else
+  ok "after_revision=$WSREV -> no change/delete replayed"
+fi
+R=$(curl -s -o "$WORK/bwn1.json" -w '%{http_code}' "$BASE/v1/projects/$SWP/workspaces/$SWID/watch/stream?after_revision=0")
+[[ "$R" == "422" && "$(jfield '.error.code' < "$WORK/bwn1.json")" == "principal_required" ]] \
+  && ok "watch stream without principal -> 422 principal_required" || bad "no-principal watch stream expected 422, got HTTP $R"
+R=$(curl -s -o "$WORK/bwn2.json" -w '%{http_code}' -H 'x-principal-id: evil' "$BASE/v1/projects/$SWP/workspaces/$SWID/watch/stream?after_revision=0")
+[[ "$R" == "404" && "$(jfield '.error.code' < "$WORK/bwn2.json")" == "project_not_found" ]] \
+  && ok "watch stream as non-member -> 404 project_not_found" || bad "non-member watch stream expected 404, got HTTP $R"
+SWP2=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse-watch-2\",\"workspace\":\"/w\",\"creator_principal_id\":\"$SWOWNER\",\"brief\":$BRIEF}" | jfield '.project_id')
+R=$(curl -s -o "$WORK/bwn3.json" -w '%{http_code}' -H "x-principal-id: $SWOWNER" "$BASE/v1/projects/$SWP2/workspaces/$SWID/watch/stream?after_revision=0")
+[[ "$R" == "404" && "$(jfield '.error.code' < "$WORK/bwn3.json")" == "workspace_not_found" ]] \
+  && ok "cross-project watch stream -> 404 workspace_not_found" || bad "cross-project watch expected 404, got HTTP $R"
+
+say "Test 11: kernel-trajectory-stream — entry replay, lane filter, live append, keyset resume; auth"
+TJOWNER='sse-traj'
+TJP=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse-traj\",\"workspace\":\"/w\",\"creator_principal_id\":\"$TJOWNER\",\"brief\":$BRIEF}" | jfield '.project_id')
+[[ -n "$TJP" ]] || { echo "failed to create trajectory fixture"; exit 1; }
+(timeout 5 curl -sN --no-buffer -D "$WORK/ht1.txt" -o "$WORK/bt1.txt" \
+  "$BASE/v1/projects/$TJP/trajectory/stream?after_seq=0&lane=research" -H "x-principal-id: $TJOWNER" > /dev/null 2>&1 || true) &
+TJ_PID=$!
+sleep 1.2
+J2=$(api -X POST "$BASE/v1/projects/$TJP/jobs" -d '{"idempotency_key":"sse-traj-1","kind":"echo","payload":{"message":"x"}}' | jfield '.job_id')
+[[ -n "$J2" ]] || { bad "trajectory job submit"; }
+api -X POST "$BASE/v1/projects/$TJP/session" -d '{"session_id":"sess_traj_1"}' > /dev/null
+wait "$TJ_PID" 2>/dev/null || true
+CTT=$(ctype "$WORK/ht1.txt")
+if [[ "$CTT" == "text/event-stream" ]]; then
+  ok "trajectory stream content-type: $CTT"
+else
+  bad "trajectory stream: expected text/event-stream, got '$CTT'"
+fi
+if grep -qF 'event: subscribed' "$WORK/bt1.txt" && grep -qF "\"project_id\":\"$TJP\"" "$WORK/bt1.txt" && grep -qF '"lane":"research"' "$WORK/bt1.txt"; then
+  ok "trajectory stream subscribed event carries project_id + lane"
+else
+  bad "trajectory stream missing subscribed event"
+fi
+TJ_KINDS=$(sse_events "$WORK/bt1.txt" entry | cut -f2 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const out=[];for(const l of d.split("\n")){if(!l.trim())continue;try{out.push(JSON.parse(l).kind)}catch{}}console.log(out.join(","))})')
+if printf '%s' "$TJ_KINDS" | grep -q 'project.created' && printf '%s' "$TJ_KINDS" | grep -q 'job.submitted'; then
+  ok "research lane entries live: [$TJ_KINDS] (project.created replayed, job.submitted appended live)"
+else
+  bad "trajectory research entries unexpected: [$TJ_KINDS]"
+fi
+TJ_SUMMARY=$(sse_events "$WORK/bt1.txt" entry | head -1 | cut -f2 | jfield '.summary')
+if [[ -n "$TJ_SUMMARY" ]]; then
+  ok "entry carries a redacted summary string"
+else
+  bad "entry summary missing"
+fi
+sse_read "$WORK/bt2.txt" "$WORK/ht2.txt" 2 "$BASE/v1/projects/$TJP/trajectory/stream?after_seq=0&lane=session" -H "x-principal-id: $TJOWNER"
+SESS_KINDS=$(sse_events "$WORK/bt2.txt" entry | cut -f2 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const out=[];for(const l of d.split("\n")){if(!l.trim())continue;try{out.push(JSON.parse(l).kind)}catch{}}console.log(out.join(","))})')
+if [[ "$SESS_KINDS" == "session.linked" ]]; then
+  ok "session lane filter -> only session events: [$SESS_KINDS]"
+else
+  bad "session lane filter unexpected: [$SESS_KINDS]"
+fi
+TJ_LAST_SEQ=$(sse_events "$WORK/bt1.txt" entry | tail -1 | cut -f2 | jfield '.event_seq')
+TJ_LAST_EID=$(sse_events "$WORK/bt1.txt" entry | tail -1 | cut -f2 | jfield '.entry_id')
+sse_read "$WORK/bt3.txt" "$WORK/ht3.txt" 2 "$BASE/v1/projects/$TJP/trajectory/stream?after_seq=$TJ_LAST_SEQ&after_event_id=$TJ_LAST_EID&lane=research" -H "x-principal-id: $TJOWNER"
+if grep -q 'event: entry' "$WORK/bt3.txt"; then
+  bad "after_seq=$TJ_LAST_SEQ replayed entries"
+else
+  ok "after_seq=$TJ_LAST_SEQ (keyset incl. after_event_id) -> no entry replayed"
+fi
+R=$(curl -s -o "$WORK/btn1.json" -w '%{http_code}' "$BASE/v1/projects/$TJP/trajectory/stream?after_seq=0")
+[[ "$R" == "422" && "$(jfield '.error.code' < "$WORK/btn1.json")" == "principal_required" ]] \
+  && ok "trajectory stream without principal -> 422 principal_required" || bad "no-principal trajectory stream expected 422, got HTTP $R"
+R=$(curl -s -o "$WORK/btn2.json" -w '%{http_code}' -H 'x-principal-id: evil' "$BASE/v1/projects/$TJP/trajectory/stream?after_seq=0")
+[[ "$R" == "404" && "$(jfield '.error.code' < "$WORK/btn2.json")" == "project_not_found" ]] \
+  && ok "trajectory stream as non-member -> 404 project_not_found" || bad "non-member trajectory stream expected 404, got HTTP $R"
+
 # ── standalone BFF proxy ────────────────────────────────────────────────────
 start_bff || { bad "standalone BFF failed to start"; }
 BFF="http://127.0.0.1:$BPORT"
@@ -368,6 +651,141 @@ if grep -q 'event: ' "$WORK/b7.json" 2>/dev/null; then
   bad "non-member response leaked SSE bytes"
 else
   ok "non-member response body is a plain error (no SSE events)"
+fi
+
+# ── BFF passthrough of the three real-time streams (api-contracts.md §22) ───
+# The standalone BFF handles the new stream routes exactly like the terminal
+# SSE: bearer (401), CSRF GET exemption, membership BEFORE streaming (404
+# with no SSE bytes), x-service-token + x-principal-id injection.
+say "Test 12: bff-watch-stream — workspace watch stream through the BFF proxy"
+BWID=$(BAPI -X POST "$BFF/v1/projects/$BP/workspaces" -d '{"kind":"code","name":"c"}' | jfield '.workspace_id')
+if [[ -n "$BWID" ]]; then
+  ok "workspace created via proxy -> $BWID"
+else
+  bad "workspace create via proxy"
+fi
+(timeout 5 curl -sN --no-buffer -D "$WORK/hw1b.txt" -o "$WORK/bw1b.txt" \
+  "$BFF/v1/projects/$BP/workspaces/$BWID/watch/stream?after_revision=0" -H "Authorization: Bearer $BTOKEN" > /dev/null 2>&1 || true) &
+BWATCH_PID=$!
+sleep 1.2
+BAPI -X POST "$BFF/v1/projects/$BP/workspaces/$BWID/nodes" -d '{"path":"bff.txt","content":"hello"}' > /dev/null
+wait "$BWATCH_PID" 2>/dev/null || true
+CTW1=$(ctype "$WORK/hw1b.txt")
+if [[ "$CTW1" == "text/event-stream" ]] && grep -qF 'event: subscribed' "$WORK/bw1b.txt"; then
+  ok "proxied watch stream content-type $CTW1 + subscribed"
+else
+  bad "proxied watch stream: expected text/event-stream + subscribed, got '$CTW1'"
+fi
+BCHANGE=$(sse_events "$WORK/bw1b.txt" change | head -1 | cut -f2 | jfield '.node.path')
+if [[ "$BCHANGE" == "bff.txt" ]]; then
+  ok "proxied change event carries the node written through the proxy"
+else
+  bad "proxied change event: expected bff.txt, got '$BCHANGE'"
+fi
+CODE=$(curl -s -o "$WORK/bw1c.json" -w '%{http_code}' "$BFF/v1/projects/$BP/workspaces/$BWID/watch/stream?after_revision=0" || true)
+if [[ "$CODE" == "401" ]]; then
+  ok "proxied watch stream without token -> HTTP 401"
+else
+  bad "no-token watch stream: expected 401, got HTTP $CODE"
+fi
+# Non-member: bob's workspace on the BFF kernel -> 404 before any SSE bytes.
+FWS=$(curl -sf -H 'content-type: application/json' -H "Authorization: Bearer $BFFKTOKEN" -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects/$FP/workspaces" \
+  -d '{"kind":"code","name":"c"}' | jfield '.workspace_id')
+CODE=$(curl -s -o "$WORK/bw1d.json" -w '%{http_code}' -H "Authorization: Bearer $BTOKEN" "$BFF/v1/projects/$FP/workspaces/$FWS/watch/stream?after_revision=0")
+ERR=$(jfield '.error.code' < "$WORK/bw1d.json")
+if [[ "$CODE" == "404" && "$ERR" == "project_not_found" ]]; then
+  ok "non-member watch stream via BFF -> HTTP 404 ($ERR) before any SSE bytes"
+else
+  bad "non-member watch stream expected 404, got HTTP $CODE ($ERR)"
+fi
+if grep -q 'event: ' "$WORK/bw1d.json" 2>/dev/null; then
+  bad "non-member watch response leaked SSE bytes"
+else
+  ok "non-member watch response body is a plain error (no SSE events)"
+fi
+
+say "Test 13: bff-trajectory-stream — trajectory stream through the BFF proxy"
+(timeout 4 curl -sN --no-buffer -D "$WORK/ht1b.txt" -o "$WORK/bt1b.txt" \
+  "$BFF/v1/projects/$BP/trajectory/stream?after_seq=0&lane=research" -H "Authorization: Bearer $BTOKEN" > /dev/null 2>&1 || true) &
+BTJ_PID=$!
+sleep 1.5
+BAPI -X POST "$BFF/v1/projects/$BP/jobs" -d '{"idempotency_key":"sse-bff-traj","kind":"echo","payload":{"message":"t"}}' > /dev/null
+wait "$BTJ_PID" 2>/dev/null || true
+CTT1=$(ctype "$WORK/ht1b.txt")
+BTJ_KINDS=$(sse_events "$WORK/bt1b.txt" entry | cut -f2 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const out=[];for(const l of d.split("\n")){if(!l.trim())continue;try{out.push(JSON.parse(l).kind)}catch{}}console.log(out.join(","))})')
+if [[ "$CTT1" == "text/event-stream" ]] && printf '%s' "$BTJ_KINDS" | grep -q 'job.submitted'; then
+  ok "proxied trajectory stream ($CTT1) delivered live job.submitted entry"
+else
+  bad "proxied trajectory stream: ctype='$CTT1' kinds=[$BTJ_KINDS]"
+fi
+CODE=$(curl -s -o "$WORK/bt1c.json" -w '%{http_code}' "$BFF/v1/projects/$BP/trajectory/stream?after_seq=0" || true)
+if [[ "$CODE" == "401" ]]; then
+  ok "proxied trajectory stream without token -> HTTP 401"
+else
+  bad "no-token trajectory stream: expected 401, got HTTP $CODE"
+fi
+CODE=$(curl -s -o "$WORK/bt1d.json" -w '%{http_code}' -H "Authorization: Bearer $BTOKEN" "$BFF/v1/projects/$FP/trajectory/stream?after_seq=0")
+ERR=$(jfield '.error.code' < "$WORK/bt1d.json")
+if [[ "$CODE" == "404" && "$ERR" == "project_not_found" ]] && ! grep -q 'event: ' "$WORK/bt1d.json" 2>/dev/null; then
+  ok "non-member trajectory stream via BFF -> HTTP 404 before any SSE bytes"
+else
+  bad "non-member trajectory stream expected 404, got HTTP $CODE ($ERR)"
+fi
+
+say "Test 14: bff-pty-stream — pty frame stream through the BFF proxy"
+BP_OPEN=$(BAPI -X POST "$BFF/v1/pty/sessions" \
+  -d "{\"project_id\":\"$BP\",\"workspace_id\":\"$BWID\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}")
+BP_ID=$(printf '%s' "$BP_OPEN" | jfield '.pty_session_id')
+BP_LEASE=$(printf '%s' "$BP_OPEN" | jfield '.lease_token')
+if [[ -n "$BP_ID" && -n "$BP_LEASE" ]]; then
+  ok "pty session opened via BFF proxy ($BP_ID)"
+else
+  bad "pty session open via BFF (got: $(printf '%s' "$BP_OPEN" | head -c 160))"
+fi
+(timeout 6 curl -sN --no-buffer -D "$WORK/hp1b.txt" -o "$WORK/bp1b.txt" \
+  "$BFF/v1/pty/sessions/$BP_ID/frames/stream?after_seq=0" -H "Authorization: Bearer $BTOKEN" > /dev/null 2>&1 || true) &
+BPTY_PID=$!
+sleep 1.2
+CTL14=$(node -e 'const text="echo BFF_LIVE_1; echo BFF_LIVE_2; exit\n"; console.log(JSON.stringify({client_seq:1,type:"bytes",payload:{text,byte_length:text.length}}))')
+curl -s -X POST "$BFF/v1/pty/sessions/$BP_ID/control" -H 'content-type: application/json' -H "Authorization: Bearer $BTOKEN" -H "x-pty-lease: $BP_LEASE" \
+  -d "$CTL14" > /dev/null
+wait "$BPTY_PID" 2>/dev/null || true
+CTP1B=$(ctype "$WORK/hp1b.txt")
+if [[ "$CTP1B" == "text/event-stream" ]] && grep -qF 'event: subscribed' "$WORK/bp1b.txt" && grep -qF "\"session_id\":\"$BP_ID\"" "$WORK/bp1b.txt"; then
+  ok "proxied pty stream content-type $CTP1B + subscribed with session_id"
+else
+  bad "proxied pty stream: expected text/event-stream + subscribed, got '$CTP1B'"
+fi
+if sse_has_text "$WORK/bp1b.txt" frame BFF_LIVE_1 && sse_has_text "$WORK/bp1b.txt" frame BFF_LIVE_2; then
+  ok "proxied pty frames carry real echoed text (BFF_LIVE_1..2)"
+else
+  bad "proxied pty frames missing echoed text"
+fi
+if grep -qF 'event: exit' "$WORK/bp1b.txt"; then
+  ok "proxied pty stream ended with the exit event"
+else
+  bad "proxied pty stream missing exit event"
+fi
+CODE=$(curl -s -o "$WORK/bp1c.json" -w '%{http_code}' "$BFF/v1/pty/sessions/$BP_ID/frames/stream?after_seq=0" || true)
+if [[ "$CODE" == "401" ]]; then
+  ok "proxied pty stream without token -> HTTP 401"
+else
+  bad "no-token pty stream: expected 401, got HTTP $CODE"
+fi
+# Non-member: bob's pty session on the BFF kernel -> 404 before any SSE bytes.
+FPTY_OPEN=$(curl -s -H 'content-type: application/json' -H "Authorization: Bearer $BFFKTOKEN" -H 'x-principal-id: bob' -X POST "http://127.0.0.1:$BFF_KPORT/v1/pty/sessions" \
+  -d "{\"project_id\":\"$FP\",\"workspace_id\":\"$FWS\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}")
+FPTY_ID=$(printf '%s' "$FPTY_OPEN" | jfield '.pty_session_id')
+if [[ -n "$FPTY_ID" ]]; then
+  CODE=$(curl -s -o "$WORK/bp1d.json" -w '%{http_code}' -H "Authorization: Bearer $BTOKEN" "$BFF/v1/pty/sessions/$FPTY_ID/frames/stream?after_seq=0")
+  ERR=$(jfield '.error.code' < "$WORK/bp1d.json")
+  if [[ "$CODE" == "404" && "$ERR" == "project_not_found" ]] && ! grep -q 'event: ' "$WORK/bp1d.json" 2>/dev/null; then
+    ok "non-member pty stream via BFF -> HTTP 404 before any SSE bytes"
+  else
+    bad "non-member pty stream expected 404, got HTTP $CODE ($ERR)"
+  fi
+else
+  bad "foreign pty session open on BFF kernel"
 fi
 
 say "Note: revoke-on-disconnect and backpressure are NOT covered — the kernel and BFF do not implement them"

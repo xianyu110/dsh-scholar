@@ -28,9 +28,11 @@
  *    workspace_move_destination_exists / …) onto the reload/refresh
  *    decision the panel prompts — the editor never silently overwrites.
  *  - WATCH/listSince: `applyWorkspaceListSince` merges changed nodes +
- *    delete tombstones into the tree (the panel polls with the watch
- *    cursor; SSE transport is recorded as a later round — the merge model
- *    is identical either way).
+ *    delete tombstones into the tree (the panel consumes the SSE watch
+ *    stream via `WorkspaceWatchClient` — client/sse-client.ts; the merge
+ *    model is identical on the stream and the poll path). When the stream
+ *    gives up (max reconnect attempts) the client falls back to listSince
+ *    POLLING (a designed degradation — same payloads, same merge).
  *  - SEARCH: path filtering only — the server implements prefix/glob
  *    PATH search (workspace_search) and NO content search; the client
  *    model mirrors that honestly (substring path filter + search call
@@ -49,6 +51,7 @@
 import { getLocale, t, type Locale } from './i18n/index'
 import { zh as workspaceZh, en as workspaceEn } from './i18n/locales/workspace'
 import { isEditorDirty } from './manuscript-dirty'
+import { SseClient, defaultSseScheduler, type SseEvent, type SseFetch, type SseScheduler } from './sse-client'
 import type {
   WorkspaceInfoLite, WorkspaceListSincePayload, WorkspaceNodeLite,
   WorkspaceOpLite, WorkspaceRevisionLite, WorkspaceTreePayload,
@@ -58,9 +61,8 @@ import type {
  *  pre-flags oversize uploads; the server enforces the same 32 MiB). */
 export const WORKSPACE_MAX_FILE_BYTES = 32 * 1024 * 1024
 
-/** Default watch poll interval (ms). The DOM layer polls listSince with
- *  this cadence; SSE is a later transport round — the merge model is the
- *  same. */
+/** Watch poll interval (ms) — the listSince POLL cadence (the default
+ *  transport and the fallback when the SSE watch stream gives up). */
 export const WORKSPACE_WATCH_POLL_MS = 5000
 
 /* ─────────────────────── tree model ─────────────────────── */
@@ -631,10 +633,242 @@ export function applyWorkspaceListSince(prev: WorkspaceTreeState, payload: Works
   const serverDirs = new Set(nodes.filter(n => n.kind === 'dir').map(n => n.path))
   return {
     ...prev,
-    info: typeof payload.info === 'object' && payload.info !== null ? payload.info : prev.info,
+    // info MERGES (never replaces): stream feeds carry only {revision} —
+    // the workspace identity fields come from the tree load / poll feeds.
+    info: typeof payload.info === 'object' && payload.info !== null
+      ? { ...(prev.info ?? {}), ...(payload.info as Partial<WorkspaceInfoLite>) } as WorkspaceInfoLite
+      : prev.info,
     nodes,
     virtualDirs: prev.virtualDirs.filter(dir => !serverDirs.has(dir)),
     status: 'ready',
+  }
+}
+
+/* ─────────────────────── SSE watch stream client ─────────────────────── */
+
+/** Watch transport lifecycle: 'idle' → 'connecting' → 'live' ⇄
+ *  'reconnecting' → ('disconnected' | 'polling'). 'polling' = the SSE
+ *  stream gave up and the client polls listSince (designed fallback). */
+export type WorkspaceWatchStatus =
+  | 'idle' | 'connecting' | 'live' | 'reconnecting' | 'disconnected' | 'polling' | 'stopped'
+
+export interface WorkspaceWatchOptions {
+  projectId: string
+  /** Resolve the CURRENT watch target at (re)connect/poll time (the panel
+   *  switches workspaces; null = nothing to watch right now). */
+  target: () => { workspaceId: string; revision: number } | null
+  /** Inject the stream transport (client/sse-client.ts). */
+  fetchImpl?: SseFetch
+  /** Extra per-connect headers (auth). */
+  headers?: () => Promise<Record<string, string>> | Record<string, string>
+  /** Timer scheduler (fake in tests; global setTimeout in the browser). */
+  scheduler?: SseScheduler
+  /** listSince POLL fallback (the panel wires its authenticated api() call;
+   *  absent → the client only reports the 'polling' status). */
+  pollListSince?: (afterRevision: number) => Promise<WorkspaceListSincePayload | null>
+  /** Poll cadence — WORKSPACE_WATCH_POLL_MS by default. */
+  pollIntervalMs?: number
+  /** One watch feed (nodes + deleted tombstones — the consumer merges it
+   *  with applyWorkspaceListSince). */
+  onFeed: (payload: WorkspaceListSincePayload) => void
+  onStatus?: (status: WorkspaceWatchStatus) => void
+  /** No stream bytes for this long → reconnect (server heartbeats must
+   *  arrive more often). Default 30s. */
+  heartbeatTimeoutMs?: number
+  reconnectBaseMs?: number
+  reconnectMaxMs?: number
+  /** Consecutive failed connect attempts before the POLL fallback. */
+  maxReconnectAttempts?: number
+}
+
+/** The Workspace watch consumer: SSE stream
+ *  (GET /v1/projects/{id}/workspaces/{wid}/watch/stream?after_revision=N)
+ *  with listSince poll fallback. Change nodes + delete tombstones are
+ *  normalized into WorkspaceListSincePayload feeds — the SAME payload the
+ *  poll endpoint returns, so applyWorkspaceListSince (and the tabs
+ *  conflict detection) behave identically on both transports. PURE LOGIC —
+ *  NO DOM: fetch + scheduler injected. */
+export class WorkspaceWatchClient {
+  readonly options: WorkspaceWatchOptions
+  status: WorkspaceWatchStatus = 'idle'
+  private readonly scheduler: SseScheduler
+  private sse: SseClient | null = null
+  private pollTimer: unknown = null
+  private retryTimer: unknown = null
+  private stopped = false
+
+  constructor(options: WorkspaceWatchOptions) {
+    this.options = options
+    this.scheduler = options.scheduler ?? defaultSseScheduler
+  }
+
+  /** Start watching (idempotent while live/connecting/reconnecting; a
+   *  stopped watcher can be started again). When no watch target exists
+   *  yet (workspace not loaded), retries on the poll cadence until one
+   *  does. */
+  start(): void {
+    if (this.status === 'live' || this.status === 'connecting' || this.status === 'reconnecting') return
+    this.stopped = false
+    if (this.options.target() === null) {
+      this.setStatus('idle')
+      if (this.retryTimer === null) {
+        this.retryTimer = this.scheduler.setTimeout(() => {
+          this.retryTimer = null
+          if (!this.stopped) this.start()
+        }, this.options.pollIntervalMs ?? WORKSPACE_WATCH_POLL_MS)
+      }
+      return
+    }
+    this.connectStream()
+  }
+
+  /** Stop watching (tab leave): aborts the stream and clears the poll
+   *  fallback timer. */
+  stop(): void {
+    if (this.stopped) return
+    this.stopped = true
+    this.sse?.close()
+    this.sse = null
+    if (this.pollTimer !== null) {
+      this.scheduler.clearTimeout(this.pollTimer)
+      this.pollTimer = null
+    }
+    if (this.retryTimer !== null) {
+      this.scheduler.clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    this.setStatus('stopped')
+  }
+
+  private setStatus(status: WorkspaceWatchStatus): void {
+    if (this.status === status) return
+    this.status = status
+    this.options.onStatus?.(status)
+  }
+
+  /** Open the watch stream for the CURRENT target (the url builder folds
+   *  the live revision in — reconnect resumes from where the stream
+   *  stopped, never replays the whole feed). */
+  private connectStream(): void {
+    const target = this.options.target()
+    if (target === null) {
+      this.setStatus('idle')
+      return
+    }
+    const { workspaceId } = target
+    const projectId = this.options.projectId
+    this.sse?.close()
+    const client = new SseClient({
+      url: () => {
+        const t = this.options.target()
+        if (t === null || t.workspaceId !== workspaceId) return ''
+        return `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(t.workspaceId)}/watch/stream?after_revision=${t.revision}`
+      },
+      fetchImpl: this.options.fetchImpl,
+      headers: this.options.headers,
+      scheduler: this.options.scheduler,
+      heartbeatTimeoutMs: this.options.heartbeatTimeoutMs,
+      reconnectBaseMs: this.options.reconnectBaseMs,
+      reconnectMaxMs: this.options.reconnectMaxMs,
+      maxReconnectAttempts: this.options.maxReconnectAttempts,
+      onEvent: (event) => { this.onStreamEvent(event) },
+      onStatus: (status) => {
+        this.setStatus(status === 'closed' ? 'disconnected' : status)
+      },
+      onEnd: (reason) => {
+        if (reason !== 'max-retries') return
+        // The stream gave up → listSince POLL fallback (designed
+        // degradation; the revision cursor was never lost, so the poll
+        // resumes exactly where the stream stopped).
+        this.sse?.close()
+        this.sse = null
+        this.startPollFallback()
+      },
+    })
+    this.sse = client
+    client.open()
+  }
+
+  /** listSince poll fallback loop (same cadence as the legacy watcher). */
+  private startPollFallback(): void {
+    if (this.stopped) return
+    this.setStatus('polling')
+    if (this.options.pollListSince === undefined) return
+    const tick = (): void => {
+      if (this.stopped) return
+      const target = this.options.target()
+      if (target !== null && this.options.pollListSince !== undefined) {
+        void this.options.pollListSince(target.revision).then(payload => {
+          if (this.stopped) return
+          if (payload !== null) this.options.onFeed(payload)
+        })
+      }
+      this.pollTimer = this.scheduler.setTimeout(tick, this.options.pollIntervalMs ?? WORKSPACE_WATCH_POLL_MS)
+    }
+    this.pollTimer = this.scheduler.setTimeout(tick, this.options.pollIntervalMs ?? WORKSPACE_WATCH_POLL_MS)
+  }
+
+  /** One SSE dispatch → a listSince-shaped feed. The server emits ONE
+   *  change/delete event per node ({node, revision} / {path, revision});
+   *  batch shapes ({nodes, deleted}) and bare arrays are accepted too
+   *  (defensive). */
+  private onStreamEvent(event: SseEvent): void {
+    let data: unknown
+    try {
+      data = JSON.parse(event.data)
+    } catch {
+      return // malformed frame: skip
+    }
+    if (event.event === 'heartbeat' || event.event === 'subscribed' || event.event === 'revision') return
+    if (Array.isArray(data)) {
+      // bare node batch
+      this.feed(data as WorkspaceNodeLite[], [])
+      return
+    }
+    if (typeof data !== 'object' || data === null) return
+    const obj = data as Record<string, unknown>
+    if (event.event === 'change') {
+      // one changed node: {node, revision}
+      if (typeof obj.node === 'object' && obj.node !== null) {
+        this.feed([obj.node as WorkspaceNodeLite], [], typeof obj.revision === 'number' ? { revision: obj.revision } : undefined)
+      }
+      return
+    }
+    if (event.event === 'delete') {
+      // one delete tombstone: {path, revision}
+      if (typeof obj.path === 'string') {
+        this.feed([], [obj.path], typeof obj.revision === 'number' ? { revision: obj.revision } : undefined)
+      }
+      return
+    }
+    if (Array.isArray(obj.nodes) || Array.isArray(obj.deleted)) {
+      this.feed(
+        Array.isArray(obj.nodes) ? obj.nodes as WorkspaceNodeLite[] : [],
+        Array.isArray(obj.deleted) ? obj.deleted as string[] : [],
+        // a bare {revision} advance merges into the tree info (the cursor
+        // and the UI revision both follow the stream)
+        obj.info ?? (typeof obj.revision === 'number' ? { revision: obj.revision } : undefined),
+      )
+      return
+    }
+    if (typeof obj.path === 'string' && (obj.deleted === true || obj.tombstone === true)) {
+      this.feed([], [obj.path], typeof obj.revision === 'number' ? { revision: obj.revision } : undefined)
+      return
+    }
+    // unknown event shapes are ignored (future-proof)
+  }
+
+  /** Normalize into the listSince payload shape (info optional on stream
+   *  feeds — applyWorkspaceListSince keeps the current info when absent;
+   *  the poll endpoint always returns it). */
+  private feed(nodes: WorkspaceNodeLite[], deleted: string[], info?: unknown): void {
+    if (this.stopped) return
+    const payload: WorkspaceListSincePayload = {
+      info: info as WorkspaceInfoLite | undefined,
+      nodes,
+      deleted,
+    } as WorkspaceListSincePayload
+    this.options.onFeed(payload)
   }
 }
 

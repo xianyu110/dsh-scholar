@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@dsh-scholar/research-schemas": "file:../research-schemas"
+    "@dsh-scholar/research-schemas": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

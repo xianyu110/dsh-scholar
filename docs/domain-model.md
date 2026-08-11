@@ -55,9 +55,14 @@ fixture_id: null
 created_at: timestamp
 updated_at: timestamp
 history: []
+deleted_at: null
+deleted_by: null
+deletion_reason: null
 ~~~
 
 Project name 去除首尾空白后长度 1–120。archive 是可恢复动作；ARCHIVED 项目默认只读，unarchive 恢复 archive 前状态。
+
+删除是独立于生命周期状态的 tombstone 轴，不新增 `DELETED` 状态。只有 `ARCHIVED` 项目可由 PI 删除；请求必须携带 `expected_revision`、精确项目名确认和非空 reason。成功时在同一 Kernel 事务写 `deleted_at/deleted_by/deletion_reason`、递增 revision 并追加 `project.deleted` Outbox。正常列表、读取、投影和全部项目写入必须把 tombstone 当作 404；相同 request id 的重放返回同一 DeletionReceipt。删除不能物理移除 Project、成员、Decision、Outbox、Artifact 引用或共享 Blob；这些记录由 retention/hold 与后续 purge/GC 协议处理。
 
 `runner_profile` 是 v1 兼容字段；迁移后由 `runner_profile_id` 取代并映射同名本机 profile。Project/Job 只能引用已登记的 opaque profile ID，不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
 

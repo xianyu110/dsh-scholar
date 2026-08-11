@@ -11,14 +11,14 @@ DSH 兼容基线：
 | 项 | 固定值 |
 |---|---|
 | repository | DeepSeek Harness / @deepseek-ai/dsh-root |
-| local verified commit | 895a2f84133204c92ad3d62297fbb63af182b94f |
+| local reference commit | 895a2f84133204c92ad3d62297fbb63af182b94f（仅开发参考，不构成安装兼容性 PASS） |
 | root version | 0.0.1 |
 | cordis peer | >=4.0.0-rc.7 |
 | schemastery peer | >=3.18.0 |
 | required host modules | @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-local |
 | optional dev module | @deepseek-ai/dsh-tool-cordis |
 
-构建仓库必须生成 packages/dsh-host-compat：只暴露本项目使用的 Context、Tool、Command 和 Session 类型。该模块不暴露 HttpServer、Slot、LocaleFace 或 ThemeFace。contract test 同时对本地固定 commit 的真实包和最小 fake host 运行。升级 DSH commit 时先更新本文件和兼容测试。
+构建仓库必须生成 packages/dsh-host-compat：只暴露本项目使用的 Context、Tool、Command 和 Session 类型。该模块不暴露 HttpServer、Slot、LocaleFace 或 ThemeFace。contract test 可对本地固定 commit 和最小 fake host 运行以加速反馈，但它们不是发布兼容性证据。插件集成兼容性必须从配置的私有 registry 在全新目录安装固定版本的真实 `@deepseek-ai/*` 包，使用全新 `DSH_HOME` 通过公开 DSH CLI/Profile/Cordis 生命周期完成加载、启动和 dispose。源码 checkout、symlink、伪造 host、`file:` override 或仅安装 Scholar tarball 均不得替代该证据。升级 DSH 版本时先更新本文件、锁定 spec 和兼容测试。
 
 ## 2. 固定 ID 与 canonical JSON
 
@@ -85,9 +85,10 @@ Gate type 有五种；Gate 控制的目标状态有四个。Budget Gate 不进�
 | RELEASE_READY | WRITING/ARCHIVED | PI | revision or private archive |
 | any non-ARCHIVED | ARCHIVED | PI | no running jobs; otherwise 409 |
 | ARCHIVED | previous_status | PI | stored pre_archive_status, no stale Gate |
+| ARCHIVED | tombstoned | PI Human BFF | exact name + reason + expected_revision；写 project.deleted，正常读取变 404 |
 | any active | BLOCKED_GATE | Kernel policy transaction | budget/data/security Gate + resume_to |
 | BLOCKED_GATE | resume_to | Budget/policy Gate transaction | resume_to must equal saved allowed state |
-| terminal status | none | none | RELEASED/STOPPED/FAILED remain read-only except archive |
+| terminal status | none | none | RELEASED/STOPPED/FAILED remain read-only except archive；删除只接受已经 ARCHIVED 的项目 |
 
 通用 transition 只允许表中触发者含 Orchestrator/Director/Writer 的非 Gate 行。PI stop/archive 走专用 BFF route；Policy block 走内部事务。
 

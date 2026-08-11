@@ -85,6 +85,21 @@ function isKernelPiOnlyForward(pathname: string): boolean {
   return KERNEL_PI_ONLY_FORWARD_ROUTES.some(re => re.test(pathname))
 }
 
+/** The v1 SSE real-time stream routes (api-contracts.md §22) that sit under
+ * a PATH project and demand the authenticated principal at the kernel
+ * (requireProjectMember fail-closed): the BFF injects its server-derived
+ * operator identity on these forwards exactly like /v1/topology. The pty
+ * frames stream (/v1/pty/sessions/{id}/frames/stream) is already covered
+ * by the /v1/pty/sessions prefix rule below. */
+const SSE_STREAM_FORWARD_ROUTES: ReadonlyArray<RegExp> = [
+  /^\/v1\/projects\/[^/]+\/workspaces\/[^/]+\/watch\/stream$/,
+  /^\/v1\/projects\/[^/]+\/trajectory\/stream$/,
+]
+
+function isSseStreamForward(pathname: string): boolean {
+  return SSE_STREAM_FORWARD_ROUTES.some(re => re.test(pathname))
+}
+
 /** Models this Scholar surface may route the research agent onto. Mirrors the
  * DSH harness advisory catalog (llm-deepseek): ''/auto = agent default. */
 const MODEL_CATALOG = ['deepseek-v4-flash', 'deepseek-v4-pro']
@@ -1302,6 +1317,16 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // childProjectId; viewer/auditor write attempts (followup) are
         // rejected by the role policy (read-only roles block all writes).
         if (options.principal !== null && url.pathname.startsWith('/v1/topology/')) {
+          proxyHeaders['x-principal-id'] = options.principal
+        }
+        // API-01/§22 (acceptance-tests.md §21 SSE 实时流替代轮询): the new
+        // v1 SSE stream routes under a PATH project (workspace watch/stream,
+        // trajectory/stream) enforce principal + membership fail-closed at
+        // the kernel (requireProjectMember) — inject the loopback operator
+        // identity like /v1/topology. BFF membership was already enforced
+        // above via projectIdFromPath BEFORE any stream byte; the pty
+        // frames stream is covered by the /v1/pty/sessions rule.
+        if (options.principal !== null && isSseStreamForward(url.pathname)) {
           proxyHeaders['x-principal-id'] = options.principal
         }
         // GOV-01/ONBOARD-01 (hardening §5 P1): the PI-only v1 routes (intake

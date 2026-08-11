@@ -40,6 +40,7 @@ import {
 import { MORE_TAB_KEYS, parseDeepLink } from '../../packages/dsh-research-ui/src/client/nav'
 import {
   WORKSPACE_MAX_FILE_BYTES, WORKSPACE_WATCH_POLL_MS,
+  WorkspaceWatchClient,
   activateWorkspaceTab, activeWorkspaceTab, addWorkspaceVirtualDir,
   applySavedWorkspaceTab, applyWorkspaceFeedToTabs, applyWorkspaceListSince,
   applyWorkspaceTree, binaryDownload, binaryTooLarge, binaryUploadCall,
@@ -55,6 +56,7 @@ import {
   workspaceNodeAt, workspaceOpText, workspaceParentDir, workspaceSearchCall,
   workspaceTabDirty,
 } from '../../packages/dsh-research-ui/src/client/workspace-model'
+import { MockSseFetch, type SseScheduler } from '../../packages/dsh-research-ui/src/client/sse-client'
 import type {
   WorkspaceInfoLite, WorkspaceListSincePayload, WorkspaceNodeLite,
   WorkspaceRevisionLite, WorkspaceTreePayload,
@@ -545,5 +547,226 @@ describe('WORK-01 nav + i18n (More tab, deep link, zh/en parity, zero missing ke
     const zhKeys = Object.keys(workspaceZh).sort()
     const enKeys = Object.keys(workspaceEn).sort()
     expect(enKeys).toEqual(zhKeys)
+  })
+})
+
+/* ─────────────────── SSE watch stream (client/sse-client.ts) ─────────────────── */
+
+/** Deterministic manual timer queue (mirrors the pty suite's fake). */
+class FakeScheduler implements SseScheduler {
+  timers: Array<{ id: number; fn: () => void }> = []
+  private nextId = 1
+  setTimeout(fn: () => void, _ms?: number): unknown {
+    const id = this.nextId
+    this.nextId += 1
+    this.timers.push({ id, fn })
+    return id
+  }
+  clearTimeout(timer: unknown): void {
+    this.timers = this.timers.filter(t => t.id !== timer)
+  }
+  get pending(): number {
+    return this.timers.length
+  }
+  runOnce(): void {
+    const batch = [...this.timers]
+    this.timers = this.timers.filter(t => !batch.includes(t))
+    for (const t of batch) t.fn()
+  }
+}
+
+const sse = (event: string, data: unknown): string => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+const flush = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
+
+function watchUrl(workspaceId: string, revision: number): string {
+  return `/v1/projects/rsp_demo/workspaces/${encodeURIComponent(workspaceId)}/watch/stream?after_revision=${revision}`
+}
+
+describe('WORK-01 SSE watch stream (watch/stream — client/sse-client.ts)', () => {
+  it('stream change events merge IDENTICALLY to the listSince poll path (upsert + tombstone + implied dirs)', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    const feeds: WorkspaceListSincePayload[] = []
+    const client = new WorkspaceWatchClient({
+      projectId: 'rsp_demo',
+      target: () => ({ workspaceId: 'ws_main', revision: 1 }),
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      onFeed: (p) => { feeds.push(p) },
+    })
+    const stream = fetchMock.enqueueStream(watchUrl('ws_main', 1))
+    client.start()
+    await flush()
+    expect(client.status).toBe('live')
+    // the REAL wire: one `change` event per node + one `delete` tombstone
+    // per path (each carrying the revision advance) + heartbeats
+    stream.push(sse('change', { workspace_id: 'ws_main', revision: 2, node: node({ path: 'a.txt', version: 2, etag: '"2-xyz"', size: 5 }) }))
+    stream.push(sse('delete', { workspace_id: 'ws_main', revision: 2, path: 'old.txt' }))
+    stream.push(sse('change', { workspace_id: 'ws_main', revision: 3, node: node({ path: 'src/main.ts', version: 1 }) }))
+    stream.push(sse('delete', { workspace_id: 'ws_main', revision: 3, path: 'src/lib' }))
+    stream.push(sse('heartbeat', { time: 'x' }))
+    await flush()
+    expect(feeds).toHaveLength(4)
+    expect(feeds[0]!.nodes.map(n => n.path)).toEqual(['a.txt'])
+    expect(feeds[0]!.deleted).toEqual([])
+    expect(feeds[1]!.deleted).toEqual(['old.txt'])
+    expect(feeds[3]!.deleted).toEqual(['src/lib'])
+
+    // The SAME payloads through the poll endpoint converge to the SAME tree.
+    const streamTree = feeds.reduce(
+      (acc, feed) => applyWorkspaceListSince(acc, feed),
+      applyWorkspaceTree(initialWorkspaceTreeState('ws_main'), tree([
+        node({ path: 'a.txt', version: 1 }),
+        node({ path: 'old.txt' }),
+        node({ path: 'src/lib/util.ts' }),
+        node({ path: 'src/main.ts' }),
+      ])),
+    )
+    const pollTree = applyWorkspaceListSince(
+      applyWorkspaceListSince(
+        applyWorkspaceTree(initialWorkspaceTreeState('ws_main'), tree([
+          node({ path: 'a.txt', version: 1 }),
+          node({ path: 'old.txt' }),
+          node({ path: 'src/lib/util.ts' }),
+          node({ path: 'src/main.ts' }),
+        ])),
+        { info: info({ revision: 2 }), nodes: [node({ path: 'a.txt', version: 2, etag: '"2-xyz"', size: 5 })], deleted: ['old.txt'] },
+      ),
+      { info: info({ revision: 3 }), nodes: [node({ path: 'src/main.ts', version: 1 })], deleted: ['src/lib'] },
+    )
+    const paths = (s: ReturnType<typeof initialWorkspaceTreeState>): Array<[string, string, number]> =>
+      s.nodes.map(n => [n.path, n.kind, n.version] as [string, string, number])
+    expect(paths(streamTree)).toEqual(paths(pollTree))
+    expect(streamTree.nodes.map(n => n.path)).toEqual(['a.txt', 'src', 'src/main.ts'])
+    // the per-event revision advances merged into the tree info
+    expect(streamTree.info!.revision).toBe(3)
+    client.stop()
+  })
+
+  it('bare node arrays and revision-only events are handled defensively', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    const feeds: WorkspaceListSincePayload[] = []
+    const client = new WorkspaceWatchClient({
+      projectId: 'rsp_demo',
+      target: () => ({ workspaceId: 'ws_main', revision: 1 }),
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      onFeed: (p) => { feeds.push(p) },
+    })
+    const stream = fetchMock.enqueueStream(watchUrl('ws_main', 1))
+    client.start()
+    await flush()
+    // a bare node array (no event wrapper) still feeds
+    stream.push(`data: ${JSON.stringify([node({ path: 'bare.txt' })])}\n\n`)
+    // revision-only advances are cursor heartbeats — no feed, no error
+    stream.push(sse('revision', { revision: 7 }))
+    await flush()
+    expect(feeds).toHaveLength(1)
+    expect(feeds[0]!.nodes.map(n => n.path)).toEqual(['bare.txt'])
+    client.stop()
+  })
+
+  it('stream give-up falls back to listSince POLLING with the current revision', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    let revision = 1
+    const polled: number[] = []
+    const feeds: WorkspaceListSincePayload[] = []
+    const client = new WorkspaceWatchClient({
+      projectId: 'rsp_demo',
+      target: () => ({ workspaceId: 'ws_main', revision }),
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      maxReconnectAttempts: 1,
+      pollListSince: async (afterRevision) => {
+        polled.push(afterRevision)
+        return { info: info({ revision: afterRevision }), nodes: [node({ path: 'poll.txt', version: 1 })], deleted: [] }
+      },
+      onFeed: (p) => { feeds.push(p) },
+    })
+    // the first connect fails → the budget (1) is exhausted → POLL fallback
+    fetchMock.enqueueError(watchUrl('ws_main', 1), 500)
+    client.start()
+    await flush()
+    expect(client.status).toBe('polling')
+    // poll tick: fetches listSince at the CURRENT revision and feeds
+    scheduler.runOnce()
+    await flush()
+    expect(polled).toEqual([1])
+    expect(feeds).toHaveLength(1)
+    expect(feeds[0]!.nodes[0]!.path).toBe('poll.txt')
+    // revision advanced by the feed → next tick polls from it
+    revision = 2
+    scheduler.runOnce()
+    await flush()
+    expect(polled).toEqual([1, 2])
+    client.stop()
+  })
+
+  it('watcher waits for a watch target (workspace not loaded) and retries on the poll cadence', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    let target: { workspaceId: string; revision: number } | null = null
+    const client = new WorkspaceWatchClient({
+      projectId: 'rsp_demo',
+      target: () => target,
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      pollIntervalMs: 100,
+      onFeed: () => {},
+    })
+    client.start()
+    expect(client.status).toBe('idle')
+    expect(fetchMock.calls).toHaveLength(0)
+    const stream = fetchMock.enqueueStream(watchUrl('ws_main', 5))
+    target = { workspaceId: 'ws_main', revision: 5 }
+    scheduler.runOnce() // the retry timer fires → target exists → connect
+    await flush()
+    expect(client.status).toBe('live')
+    expect(fetchMock.calls.at(-1)!.url).toBe(watchUrl('ws_main', 5))
+    client.stop()
+    void stream
+  })
+
+  it('stop() aborts the stream and the poll fallback (tab-leave hygiene)', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    const client = new WorkspaceWatchClient({
+      projectId: 'rsp_demo',
+      target: () => ({ workspaceId: 'ws_main', revision: 1 }),
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      maxReconnectAttempts: 0,
+      onFeed: () => {},
+    })
+    const stream = fetchMock.enqueueStream(watchUrl('ws_main', 1))
+    client.start()
+    await flush()
+    expect(client.status).toBe('live')
+    client.stop()
+    expect(client.status).toBe('stopped')
+    expect(scheduler.pending).toBe(0)
+    expect(fetchMock.calls[0]!.signal?.aborted).toBe(true)
+    stream.push(sse('changes', { nodes: [node({ path: 'late.txt' })], deleted: [] }))
+    await flush()
+    expect(scheduler.pending).toBe(0) // no reconnect scheduled
+    client.start() // restart allowed after stop
+    await flush()
+    expect(client.status).toBe('live')
+    client.stop()
+  })
+
+  it('watch status keys resolve in BOTH locales (no missing-key reports)', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      setLocale(locale)
+      missing = []
+      for (const key of ['connecting', 'live', 'reconnecting', 'disconnected', 'polling'] as const) {
+        const text = t('workspace', `workspace.watch.${key}`)
+        expect(text).not.toBe('')
+        expect(text).not.toBe(`workspace.watch.${key}`)
+      }
+      expect(missing).toEqual([])
+    }
   })
 })

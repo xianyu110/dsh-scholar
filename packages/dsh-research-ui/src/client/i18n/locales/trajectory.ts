@@ -31,6 +31,12 @@ export const zh = {
   'trajectory.detail.entry': '条目 ID',
   'trajectory.detail.time': '时间',
   'trajectory.redactedNote': '摘要与详情已由内核脱敏:原始负载、令牌、密钥与绝对路径不会离开内核。',
+  // incremental stream status (SSE vs pagination fallback)
+  'trajectory.stream.connecting': '流连接中…',
+  'trajectory.stream.live': '实时',
+  'trajectory.stream.reconnecting': '流重连中…',
+  'trajectory.stream.disconnected': '流已断开',
+  'trajectory.stream.polling': '分页回退',
 } as const
 
 export type TrajectoryKey = keyof typeof zh
@@ -59,4 +65,10 @@ export const en: Record<TrajectoryKey, string> = {
   'trajectory.detail.entry': 'Entry ID',
   'trajectory.detail.time': 'Time',
   'trajectory.redactedNote': 'Summaries and details are redacted by the kernel: raw payloads, tokens, secrets and absolute paths never leave it.',
+  // incremental stream status (SSE vs pagination fallback)
+  'trajectory.stream.connecting': 'stream connecting…',
+  'trajectory.stream.live': 'live',
+  'trajectory.stream.reconnecting': 'stream reconnecting…',
+  'trajectory.stream.disconnected': 'stream disconnected',
+  'trajectory.stream.polling': 'pagination fallback',
 }

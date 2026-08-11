@@ -17,6 +17,13 @@
  *    merges one wire page into the state with entry_id dedupe (idempotent
  *    cursor contract), and `nextTrajectoryCursor` derives the next
  *    `?lane=&after_seq=&after_event_id=` query (null = no more pages).
+ *  - the LIVE stream: `TrajectoryStreamClient` consumes the SSE
+ *    incremental stream (GET /v1/projects/{id}/trajectory/stream
+ *    ?after_seq=N&lane=research|session — client/sse-client.ts) with
+ *    lane filtering and entry_id dedupe (`applyTrajectoryStreamEntries`).
+ *    When the stream gives up (max reconnect attempts) the client falls
+ *    back to PAGINATION (the same keyset page fetch) — a designed
+ *    degradation; both paths merge into the same page state.
  *  - the entry view model: seq/time/redacted-summary/status + the detail
  *    rows available WITHOUT raw payloads (aggregate refs, source, session,
  *    status, ids — the kernel never projects raw detail, so the expandable
@@ -28,6 +35,7 @@
 import { getLocale, t, type Locale } from './i18n/index'
 import { zh as trajectoryZh, en as trajectoryEn } from './i18n/locales/trajectory'
 import { zh as statusZh, en as statusEn } from './i18n/locales/status'
+import { SseClient, defaultSseScheduler, type SseEvent, type SseFetch, type SseScheduler } from './sse-client'
 import type { TrajectoryEntry, TrajectoryLaneKey, TrajectoryLanes, TrajectoryPage } from './types'
 
 /** Stable lane order (Research first — authoritative lane on top). */
@@ -116,6 +124,195 @@ export function nextTrajectoryCursor(state: TrajectoryPageState): { after_seq: n
 /** Whether the lane can be asked for another page right now. */
 export function canLoadMoreTrajectory(state: TrajectoryPageState): boolean {
   return state.status === 'ready' && state.hasMore === true && state.nextAfterSeq !== null
+}
+
+/**
+ * Merge LIVE stream entries into the state (the SSE incremental stream —
+ * GET /v1/projects/{id}/trajectory/stream?after_seq=N&lane=). Same entry_id
+ * dedupe as pages (idempotent — a reconnect replay can never duplicate a
+ * row); the pagination cursor/hasMore fields are preserved (the panel
+ * keeps its keyset state; `total` only ever grows). Never throws; malformed
+ * entries degrade to their usable fields.
+ */
+export function applyTrajectoryStreamEntries(prev: TrajectoryPageState, entries: readonly TrajectoryEntry[]): TrajectoryPageState {
+  const seen = new Set(prev.entries.map(e => e.entry_id))
+  const merged: TrajectoryEntry[] = [...prev.entries]
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (entry === null || typeof entry !== 'object') continue
+    const id = typeof entry.entry_id === 'string' ? entry.entry_id : ''
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    merged.push(entry as TrajectoryEntry)
+  }
+  if (merged.length === prev.entries.length) return prev
+  return { ...prev, entries: merged, total: Math.max(prev.total, merged.length), status: 'ready' }
+}
+
+/* ─────────────────────── SSE incremental stream client ─────────────────────── */
+
+/** Stream lifecycle: 'idle' → 'connecting' → 'live' ⇄ 'reconnecting' →
+ *  ('disconnected' | 'polling'). 'polling' = the SSE stream gave up and
+ *  the client paginates the keyset endpoint (designed fallback). */
+export type TrajectoryStreamStatus =
+  | 'idle' | 'connecting' | 'live' | 'reconnecting' | 'disconnected' | 'polling' | 'stopped'
+
+export interface TrajectoryStreamOptions {
+  projectId: string
+  lane: TrajectoryLaneKey
+  /** Resolve the CURRENT after_seq cursor at (re)connect/poll time (the
+   *  panel folds the last applied event_seq in here). */
+  afterSeq: () => number
+  /** Inject the stream transport (client/sse-client.ts). */
+  fetchImpl?: SseFetch
+  /** Extra per-connect headers (auth). */
+  headers?: () => Promise<Record<string, string>> | Record<string, string>
+  /** Timer scheduler (fake in tests; global setTimeout in the browser). */
+  scheduler?: SseScheduler
+  /** PAGINATION fallback (the panel wires its authenticated keyset fetch;
+   *  absent → the client only reports the 'polling' status). */
+  pollPage?: (afterSeq: number) => Promise<TrajectoryPage | null>
+  /** Poll cadence (ms) for the fallback, default 5000. */
+  pollIntervalMs?: number
+  /** Validated entries of THIS lane (lane-filtered + deduped by the
+   *  client; the consumer merges them with applyTrajectoryStreamEntries). */
+  onEntries: (entries: TrajectoryEntry[]) => void
+  onStatus?: (status: TrajectoryStreamStatus) => void
+  /** No stream bytes for this long → reconnect (server heartbeats must
+   *  arrive more often). Default 30s. */
+  heartbeatTimeoutMs?: number
+  reconnectBaseMs?: number
+  reconnectMaxMs?: number
+  /** Consecutive failed connect attempts before the PAGINATION fallback. */
+  maxReconnectAttempts?: number
+}
+
+/** The trajectory incremental stream consumer for ONE lane. Entries are
+ *  lane-filtered (a mislabeled event never leaks into the other lane) and
+ *  deduped by entry_id before onEntries. PURE LOGIC — NO DOM: fetch +
+ *  scheduler injected. */
+export class TrajectoryStreamClient {
+  readonly options: TrajectoryStreamOptions
+  status: TrajectoryStreamStatus = 'idle'
+  private readonly scheduler: SseScheduler
+  private sse: SseClient | null = null
+  private pollTimer: unknown = null
+  private stopped = false
+
+  constructor(options: TrajectoryStreamOptions) {
+    this.options = options
+    this.scheduler = options.scheduler ?? defaultSseScheduler
+  }
+
+  /** Start the stream (idempotent while live/connecting/reconnecting). */
+  start(): void {
+    if (this.stopped || this.status === 'live' || this.status === 'connecting' || this.status === 'reconnecting') return
+    this.stopped = false
+    this.connectStream()
+  }
+
+  /** Stop the stream (tab leave): aborts the stream and the poll fallback. */
+  stop(): void {
+    if (this.stopped) return
+    this.stopped = true
+    this.sse?.close()
+    this.sse = null
+    if (this.pollTimer !== null) {
+      this.scheduler.clearTimeout(this.pollTimer)
+      this.pollTimer = null
+    }
+    this.setStatus('stopped')
+  }
+
+  private setStatus(status: TrajectoryStreamStatus): void {
+    if (this.status === status) return
+    this.status = status
+    this.options.onStatus?.(status)
+  }
+
+  private connectStream(): void {
+    const { projectId, lane } = this.options
+    this.sse?.close()
+    const client = new SseClient({
+      url: () => `/v1/projects/${encodeURIComponent(projectId)}/trajectory/stream?after_seq=${this.options.afterSeq()}&lane=${lane}`,
+      fetchImpl: this.options.fetchImpl,
+      headers: this.options.headers,
+      scheduler: this.options.scheduler,
+      heartbeatTimeoutMs: this.options.heartbeatTimeoutMs,
+      reconnectBaseMs: this.options.reconnectBaseMs,
+      reconnectMaxMs: this.options.reconnectMaxMs,
+      maxReconnectAttempts: this.options.maxReconnectAttempts,
+      onEvent: (event) => { this.onStreamEvent(event) },
+      onStatus: (status) => {
+        this.setStatus(status === 'closed' ? 'disconnected' : status)
+      },
+      onEnd: (reason) => {
+        if (reason !== 'max-retries') return
+        // The stream gave up → PAGINATION fallback (designed degradation;
+        // the after_seq cursor was never lost, so the page fetches resume
+        // exactly where the stream stopped).
+        this.sse?.close()
+        this.sse = null
+        this.startPollFallback()
+      },
+    })
+    this.sse = client
+    client.open()
+  }
+
+  /** Keyset pagination fallback loop (same endpoint as the legacy
+   *  load-more path). */
+  private startPollFallback(): void {
+    if (this.stopped) return
+    this.setStatus('polling')
+    if (this.options.pollPage === undefined) return
+    const tick = (): void => {
+      if (this.stopped) return
+      if (this.options.pollPage !== undefined) {
+        void this.options.pollPage(this.options.afterSeq()).then(page => {
+          if (this.stopped) return
+          if (page !== null) this.emitEntries(page.entries)
+        })
+      }
+      this.pollTimer = this.scheduler.setTimeout(tick, this.options.pollIntervalMs ?? 5000)
+    }
+    this.pollTimer = this.scheduler.setTimeout(tick, this.options.pollIntervalMs ?? 5000)
+  }
+
+  /** One SSE dispatch → entries of THIS lane (defensive: the stream may
+   *  carry one entry, a batch ({entries: [...]}), or a bare array). */
+  private onStreamEvent(event: SseEvent): void {
+    let data: unknown
+    try {
+      data = JSON.parse(event.data)
+    } catch {
+      return // malformed frame: skip
+    }
+    if (event.event === 'heartbeat' || event.event === 'revision') return
+    let raw: unknown[] = []
+    if (Array.isArray(data)) raw = data
+    else if (typeof data === 'object' && data !== null && Array.isArray((data as Record<string, unknown>).entries)) {
+      raw = (data as Record<string, unknown>).entries as unknown[]
+    } else if (typeof data === 'object' && data !== null && typeof (data as Record<string, unknown>).entry_id === 'string') {
+      raw = [data]
+    } else {
+      return // cursor-only / unknown shapes are ignored
+    }
+    const entries: TrajectoryEntry[] = []
+    for (const item of raw) {
+      if (item === null || typeof item !== 'object') continue
+      const entry = item as Record<string, unknown>
+      // lane filter: a mislabeled event never leaks into the other lane
+      if (typeof entry.lane === 'string' && entry.lane !== this.options.lane) continue
+      if (typeof entry.entry_id !== 'string' || typeof entry.event_seq !== 'number') continue
+      entries.push(entry as unknown as TrajectoryEntry)
+    }
+    this.emitEntries(entries)
+  }
+
+  private emitEntries(entries: TrajectoryEntry[]): void {
+    if (this.stopped || entries.length === 0) return
+    this.options.onEntries(entries)
+  }
 }
 
 /* ─────────────────────── entry view model ─────────────────────── */

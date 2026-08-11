@@ -131,6 +131,11 @@ function tarList(tgz: string): string[] {
   return run('tar', ['-tzf', tgz], '/').split('\n').filter(Boolean)
 }
 
+/** Read a JSON file through the public tarball boundary. */
+function tarJson(tgz: string, path: string): Record<string, unknown> {
+  return JSON.parse(run('tar', ['-xOzf', tgz, path], '/')) as Record<string, unknown>
+}
+
 /** Write the same clean consumer project used by the PACK-01 tests:
  * tarball overrides with autoInstallPeers off, so the DSH host peers can
  * never be pulled from a registry. */
@@ -271,6 +276,19 @@ describe('packaging (PACK-01/SKILL-01)', () => {
       const files = tarList(packed.tarballs[name]!)
       expect(files.some(f => f.startsWith('package/lib/') && f.endsWith('.js')), `${name} has lib`).toBe(true)
       expect(files).toContain('package/package.json')
+    }
+  })
+
+  it('packed runtime manifests are registry-installable without checkout-relative dependencies', () => {
+    for (const name of PACKAGE_NAMES) {
+      const manifest = tarJson(packed.tarballs[name]!, 'package/package.json')
+      const dependencies = manifest['dependencies'] as Record<string, string> | undefined
+      for (const [dependency, specifier] of Object.entries(dependencies ?? {})) {
+        expect(
+          /^(?:file|link|workspace):/.test(specifier),
+          `${name} dependency ${dependency} must be a registry version in the packed manifest (received ${specifier})`,
+        ).toBe(false)
+      }
     }
   })
 

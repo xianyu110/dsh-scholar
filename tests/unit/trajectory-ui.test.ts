@@ -25,12 +25,13 @@ import { zh as trajectoryZh, en as trajectoryEn } from '../../packages/dsh-resea
 import { zh as topologyZh, en as topologyEn } from '../../packages/dsh-research-ui/src/client/i18n/locales/topology'
 import { zh as shellZh, en as shellEn } from '../../packages/dsh-research-ui/src/client/i18n/locales/shell'
 import {
-  getLocale, localeParityReport, resetMissingKeyWarnings, setLocale, setMissingKeyReporter,
+  getLocale, localeParityReport, resetMissingKeyWarnings, setLocale, setMissingKeyReporter, t,
 } from '../../packages/dsh-research-ui/src/client/i18n/index'
 import { chromeTabs } from '../../packages/dsh-research-ui/src/client/i18n/chrome'
 import { ALL_TAB_KEYS, MORE_TAB_KEYS, isTabKey, parseDeepLink } from '../../packages/dsh-research-ui/src/client/nav'
 import {
-  TRAJECTORY_LANE_KEYS, applyTrajectoryPage, canLoadMoreTrajectory,
+  TRAJECTORY_LANE_KEYS, TrajectoryStreamClient, applyTrajectoryPage,
+  applyTrajectoryStreamEntries, canLoadMoreTrajectory,
   initialTrajectoryPageState, nextTrajectoryCursor, trajectoryEntryView,
   trajectoryLaneMeta, trajectoryPanelView, trajectoryStatusText,
 } from '../../packages/dsh-research-ui/src/client/trajectory-model'
@@ -40,6 +41,7 @@ import {
   followupCall, followupReceiptView, initialTopologyLevel, nextTopologyCursor,
   toggleTopologyNode,
 } from '../../packages/dsh-research-ui/src/client/topology-model'
+import { MockSseFetch, type SseScheduler } from '../../packages/dsh-research-ui/src/client/sse-client'
 import type { TrajectoryEntry, TrajectoryPage, TopologyNode } from '../../packages/dsh-research-ui/src/client/types'
 
 interface Missing { namespace: string; key: string; locale: string }
@@ -513,5 +515,186 @@ describe('TRAJ-01/SUBAGENT-01 nav integration (More 深链) + i18n parity', () =
     followupReceiptView({ message_id: 'm', child_id: 'c', project_id: 'p', accepted: true, read_only: true, state_unchanged: true, note: '' })
     expect(missing).toEqual([])
     expect(getLocale()).toBe('en')
+  })
+})
+
+/* ─────────────────── SSE incremental stream (client/sse-client.ts) ─────────────────── */
+
+/** Deterministic manual timer queue (mirrors the pty/workspace suites). */
+class FakeScheduler implements SseScheduler {
+  timers: Array<{ id: number; fn: () => void }> = []
+  private nextId = 1
+  setTimeout(fn: () => void, _ms?: number): unknown {
+    const id = this.nextId
+    this.nextId += 1
+    this.timers.push({ id, fn })
+    return id
+  }
+  clearTimeout(timer: unknown): void {
+    this.timers = this.timers.filter(t => t.id !== timer)
+  }
+  get pending(): number {
+    return this.timers.length
+  }
+  runOnce(): void {
+    const batch = [...this.timers]
+    this.timers = this.timers.filter(t => !batch.includes(t))
+    for (const t of batch) t.fn()
+  }
+}
+
+const sse = (event: string, data: unknown): string => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+const flush = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
+
+function trajUrl(lane: string, afterSeq: number): string {
+  return `/v1/projects/rsp_demo/trajectory/stream?after_seq=${afterSeq}&lane=${lane}`
+}
+
+describe('TRAJ-01 SSE incremental stream (trajectory/stream — client/sse-client.ts)', () => {
+  it('applyTrajectoryStreamEntries dedupes by entry_id and preserves the keyset cursor', () => {
+    const e1 = entry(); const e2 = entry(); const e3 = entry()
+    const base = applyTrajectoryPage(initialTrajectoryPageState(), page([e1, e2], { has_more: true, next_after_seq: 2, next_after_event_id: e2.entry_id, total: 7 }))
+    // a reconnect replay of e2 must not duplicate; e3 appends
+    const merged = applyTrajectoryStreamEntries(base, [e2, e3])
+    expect(merged.entries.map(x => x.entry_id)).toEqual([e1.entry_id, e2.entry_id, e3.entry_id])
+    // cursor/hasMore survive (the panel keeps its keyset state)
+    expect(merged.nextAfterSeq).toBe(2)
+    expect(merged.nextAfterEventId).toBe(e2.entry_id)
+    expect(merged.hasMore).toBe(true)
+    expect(merged.total).toBe(7) // total only grows (7 > 3)
+    expect(merged.status).toBe('ready')
+    // an empty replay returns the SAME state object (no churn)
+    expect(applyTrajectoryStreamEntries(merged, [e3])).toBe(merged)
+  })
+
+  it('stream entries are lane-filtered and entry_id-deduped (model pipeline)', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    // the panel wiring: onEntries → applyTrajectoryStreamEntries (dedupe)
+    let state = initialTrajectoryPageState()
+    const client = new TrajectoryStreamClient({
+      projectId: 'rsp_demo',
+      lane: 'research',
+      afterSeq: () => 0,
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      onEntries: (entries) => { state = applyTrajectoryStreamEntries(state, entries) },
+    })
+    const stream = fetchMock.enqueueStream(trajUrl('research', 0))
+    client.start()
+    await flush()
+    expect(client.status).toBe('live')
+    // one research entry, one session entry (wrong lane → dropped), one
+    // batch containing a duplicate replay (→ deduped), one malformed
+    stream.push(sse('entry', entry({ entry_id: 'evt_r1', event_seq: 1, lane: 'research' })))
+    stream.push(sse('entry', entry({ entry_id: 'evt_s1', event_seq: 2, lane: 'session' })))
+    stream.push(sse('entries', { entries: [entry({ entry_id: 'evt_r2', event_seq: 3, lane: 'research' }), entry({ entry_id: 'evt_r1', event_seq: 1, lane: 'research' })] }))
+    stream.push(sse('entry', { event_seq: 9 })) // no entry_id → dropped
+    await flush()
+    expect(state.entries.map(e => e.entry_id)).toEqual(['evt_r1', 'evt_r2'])
+    expect(state.total).toBe(2)
+    client.stop()
+  })
+
+  it('stream end reconnects from the last applied after_seq (the url builder folds the cursor)', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    let cursor = 0
+    const received: TrajectoryEntry[] = []
+    const client = new TrajectoryStreamClient({
+      projectId: 'rsp_demo',
+      lane: 'session',
+      afterSeq: () => cursor,
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      onEntries: (entries) => {
+        received.push(...entries)
+        const last = entries.at(-1)
+        if (last !== undefined) cursor = last.event_seq
+      },
+    })
+    const stream = fetchMock.enqueueStream(trajUrl('session', 0))
+    client.start()
+    await flush()
+    stream.push(sse('entry', entry({ entry_id: 'evt_s2', event_seq: 4, lane: 'session' })))
+    await flush()
+    expect(cursor).toBe(4)
+    stream.end()
+    await flush()
+    expect(client.status).toBe('reconnecting')
+    const stream2 = fetchMock.enqueueStream(trajUrl('session', 4))
+    scheduler.runOnce()
+    await flush()
+    expect(client.status).toBe('live')
+    expect(fetchMock.calls.at(-1)!.url).toBe(trajUrl('session', 4))
+    client.stop()
+    void stream2
+  })
+
+  it('stream give-up falls back to keyset PAGINATION (the load-more path)', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    const polled: number[] = []
+    const received: TrajectoryEntry[] = []
+    const client = new TrajectoryStreamClient({
+      projectId: 'rsp_demo',
+      lane: 'research',
+      afterSeq: () => 3,
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      maxReconnectAttempts: 1,
+      pollPage: async (afterSeq) => {
+        polled.push(afterSeq)
+        return page([entry({ entry_id: 'evt_p1', event_seq: 4, lane: 'research' })], { lane: 'research', has_more: false, total: 4 })
+      },
+      onEntries: (entries) => { received.push(...entries) },
+    })
+    fetchMock.enqueueError(trajUrl('research', 3), 500)
+    client.start()
+    await flush()
+    expect(client.status).toBe('polling')
+    scheduler.runOnce() // first pagination tick
+    await flush()
+    expect(polled).toEqual([3])
+    expect(received.map(e => e.entry_id)).toEqual(['evt_p1'])
+    client.stop()
+    expect(scheduler.pending).toBe(0)
+  })
+
+  it('stop() aborts the stream (tab-leave hygiene): no reconnect, no further fetches', async () => {
+    const scheduler = new FakeScheduler()
+    const fetchMock = new MockSseFetch()
+    const client = new TrajectoryStreamClient({
+      projectId: 'rsp_demo',
+      lane: 'research',
+      afterSeq: () => 0,
+      fetchImpl: fetchMock.fetchImpl.bind(fetchMock),
+      scheduler,
+      onEntries: () => {},
+    })
+    const stream = fetchMock.enqueueStream(trajUrl('research', 0))
+    client.start()
+    await flush()
+    expect(client.status).toBe('live')
+    client.stop()
+    expect(client.status).toBe('stopped')
+    expect(scheduler.pending).toBe(0)
+    expect(fetchMock.calls[0]!.signal?.aborted).toBe(true)
+    stream.push(sse('entry', entry()))
+    await flush()
+    expect(scheduler.pending).toBe(0)
+  })
+
+  it('stream status keys resolve in BOTH locales (no missing-key reports)', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      setLocale(locale)
+      missing = []
+      for (const key of ['connecting', 'live', 'reconnecting', 'disconnected', 'polling'] as const) {
+        const text = t('trajectory', `trajectory.stream.${key}`)
+        expect(text).not.toBe('')
+        expect(text).not.toBe(`trajectory.stream.${key}`)
+      }
+      expect(missing).toEqual([])
+    }
   })
 })

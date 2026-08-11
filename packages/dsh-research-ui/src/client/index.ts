@@ -29,7 +29,7 @@ import { renderArtifacts } from './panels/artifacts'
 import { renderEvidence } from './panels/evidence'
 import { renderBudget } from './panels/budget'
 import { renderManuscript } from './panels/manuscript'
-import { renderTrajectory } from './panels/trajectory'
+import { renderTrajectory, stopTrajectoryStream } from './panels/trajectory'
 import { renderTopology } from './panels/topology'
 import { renderWorkspace, stopWorkspaceWatch } from './panels/workspace'
 import { renderPty, ptyPanelDetachAll } from './panels/pty'
@@ -983,9 +983,12 @@ export function apply(): void {
     // dsh-web terminal hygiene: leaving the Terminal tab closes the stream
     // (state stays for the return; a new visit reconnects from lastSeq).
     if (state.activeTab !== 'terminal' && state.terminalStatus !== 'idle') terminalDisconnect()
-    // WORK-01: leaving the Workspace tab stops its listSince watch poll
-    // (the panel state survives; the next visit restarts the poll).
+    // WORK-01: leaving the Workspace tab stops its watch stream + poll
+    // fallback (the panel state survives; the next visit restarts it).
     if (state.activeTab !== 'workspace') stopWorkspaceWatch()
+    // TRAJ-01: leaving the Trajectory tab closes both lane streams (SSE +
+    // pagination fallback) — same hygiene as stopWorkspaceWatch.
+    if (state.activeTab !== 'trajectory') stopTrajectoryStream()
     // PTY-01: leaving the PTY tab detaches the session wire (the process
     // keeps running server-side; the next visit reconnects via after_seq).
     if (state.activeTab !== 'pty') ptyPanelDetachAll()

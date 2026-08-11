@@ -14,20 +14,23 @@
  *     verbatim; ANSI/xterm-class rendering and keyboard input are
  *     NOT_RUN_MANUAL_PENDING — the panel shows the honest note);
  *   - the status line: session state, in/out seq, masked lease + expiry,
- *     generation, byte totals, close-reason notices and stable error copy.
+ *     generation, byte totals, frames-consumption copy (SSE stream
+ *     connecting/live/reconnecting/disconnected or poll fallback —
+ *     client/sse-client.ts), close-reason notices and stable error copy.
  *
  * All chrome copy goes through the `pty` i18n namespace (zh/en parity);
  * wire codes and enum values are displayed via mapped keys, never raw.
  */
-import { apiResult } from '../api'
+import { apiResult, authHeaders, base } from '../api'
 import { t } from '../i18n/index'
 import { el } from '../ui'
 import {
   PtyClientModel, ptyStatusView,
   type PtyControlFrame, type PtyErrorEnvelope, type PtyFramesPageWire,
   type PtyOpenParams, type PtyPreset, type PtyResult, type PtySessionWire,
-  type PtySignal, type PtyTransport,
+  type PtySignal, type PtyStreamTransport, type PtyTransport,
 } from '../pty-session-model'
+import type { SseFetch } from '../sse-client'
 import type { Projection, WorkspaceInfoLite } from '../types'
 
 /** Preset allowlist — the only argv a PTY may ever run (server-enforced). */
@@ -80,6 +83,7 @@ function ensureState(projectId: string): PtyPanelState {
   if (st === undefined) {
     const model = new PtyClientModel({
       transport: ptyTransport(),
+      stream: ptyStreamTransport(),
       pollIntervalMs: 1000,
       sessionRefreshEvery: 10,
       maxControlRetries: 3,
@@ -146,6 +150,28 @@ function ptyTransport(): PtyTransport {
   }
 }
 
+/** SSE frames-stream transport (client/sse-client.ts): the authenticated
+ *  fetch wrapper — the model supplies the x-pty-lease header per connect
+ *  and builds the after_seq URL itself. When the stream gives up (max
+ *  reconnect attempts) the model falls back to the frames POLL above. */
+function ptyStreamTransport(): PtyStreamTransport {
+  const streamFetch: SseFetch = async (url, init) => {
+    const response = await fetch(`${base()}${url}`, {
+      ...init,
+      headers: {
+        ...(init.headers ?? {}),
+        accept: 'text/event-stream',
+        ...(await authHeaders()),
+      },
+    })
+    return { ok: response.ok, status: response.status, body: response.body }
+  }
+  return {
+    fetch: streamFetch,
+    maxReconnectAttempts: 5,
+  }
+}
+
 /* ────────────────────────────── paint helpers ────────────────────────────── */
 
 function outputRow(entry: PtyDisplayEntryLike, model: PtyClientModel): HTMLElement {
@@ -184,7 +210,7 @@ function paintStream(streamEl: HTMLElement, model: PtyClientModel): void {
 
 function paintStatusLine(statusEl: HTMLElement, model: PtyClientModel): void {
   const view = ptyStatusView(model)
-  const parts = [view.stateText, view.seqText, view.leaseText, view.generationText, view.bytesText].filter(p => p !== '')
+  const parts = [view.stateText, view.seqText, view.leaseText, view.generationText, view.bytesText, view.streamText].filter(p => p !== '')
   statusEl.textContent = parts.join(' · ')
   statusEl.style.color = view.state === 'open'
     ? 'var(--tone-green)'

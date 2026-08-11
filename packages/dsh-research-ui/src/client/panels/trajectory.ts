@@ -2,22 +2,27 @@
  * TRAJ-01 Trajectory panel (DOM assembly over trajectory-model.ts — the
  * pure logic layer, docs/trajectory-subagents.md §1/§6): dual Research /
  * Session lanes, per-lane keyset pagination, server-redacted summaries,
- * and the expandable allowlisted detail. All chrome copy goes through the
- * `trajectory` i18n namespace (zh/en parity); the kernel's redacted
+ * and the expandable allowlisted detail. Live increments arrive over the
+ * SSE incremental stream (client/sse-client.ts, one stream per lane);
+ * when a stream gives up the lane falls back to keyset PAGINATION (the
+ * load-more path — a designed degradation). All chrome copy goes through
+ * the `trajectory` i18n namespace (zh/en parity); the kernel's redacted
  * summaries and enum wire values are displayed verbatim.
  *
  * Virtualized/scroll-paginated browsing and browser visual acceptance stay
  * NOT_RUN_MANUAL_PENDING (hardening §5) — the logic layer implements the
  * pagination state machine; the DOM layer renders accumulated pages.
  */
-import { api } from '../api'
+import { api, authHeaders, base } from '../api'
 import { t } from '../i18n/index'
 import { el } from '../ui'
 import {
-  applyTrajectoryPage, canLoadMoreTrajectory, initialTrajectoryPageState,
+  TrajectoryStreamClient, applyTrajectoryPage, applyTrajectoryStreamEntries,
+  canLoadMoreTrajectory, initialTrajectoryPageState,
   nextTrajectoryCursor, trajectoryPanelView,
-  type TrajectoryEntryView, type TrajectoryPageState,
+  type TrajectoryStreamStatus, type TrajectoryEntryView, type TrajectoryPageState,
 } from '../trajectory-model'
+import type { SseFetch } from '../sse-client'
 import type { TrajectoryLaneKey, TrajectoryLanes, TrajectoryPage } from '../types'
 
 /** Initial page size (server caps at 500; 100 keeps the first paint light). */
@@ -33,6 +38,96 @@ interface TrajectoryPanelState {
 const panelStates = new Map<string, TrajectoryPanelState>()
 /** entry_id → detail expanded (module-scoped, ephemeral UI state). */
 const expandedDetail = new Set<string>()
+
+/** Live stream clients (one per lane, per active project). */
+let streamClients: { research?: TrajectoryStreamClient; session?: TrajectoryStreamClient } = {}
+let streamProject: string | null = null
+/** Lane stream status keys ('trajectory.stream.*', '' = none). */
+let laneStreamStatus: Record<TrajectoryLaneKey, string> = { research: '', session: '' }
+/** Live status chips in the current paint (rebuilt on paint). */
+let laneStatusEls: Record<TrajectoryLaneKey, HTMLElement | null> = { research: null, session: null }
+
+/** Stop both lane streams (SSE + pagination fallback) — called by index.ts
+ *  when the Trajectory tab is left (same hygiene as stopWorkspaceWatch). */
+export function stopTrajectoryStream(): void {
+  streamClients.research?.stop()
+  streamClients.session?.stop()
+  streamClients = {}
+  streamProject = null
+  laneStreamStatus = { research: '', session: '' }
+  laneStatusEls = { research: null, session: null }
+}
+
+/** The incremental stream fetch wrapper (authenticated, accept
+ *  text/event-stream). */
+function trajectoryStreamFetch(): SseFetch {
+  return async (url, init) => {
+    const response = await fetch(`${base()}${url}`, {
+      ...init,
+      headers: {
+        ...(init.headers ?? {}),
+        accept: 'text/event-stream',
+        ...(await authHeaders()),
+      },
+    })
+    return { ok: response.ok, status: response.status, body: response.body }
+  }
+}
+
+function laneStreamKey(status: TrajectoryStreamStatus): string {
+  switch (status) {
+    case 'connecting': return 'trajectory.stream.connecting'
+    case 'live': return 'trajectory.stream.live'
+    case 'reconnecting': return 'trajectory.stream.reconnecting'
+    case 'polling': return 'trajectory.stream.polling'
+    case 'disconnected': return 'trajectory.stream.disconnected'
+    default: return ''
+  }
+}
+
+/** Start the per-lane incremental SSE stream (pagination fallback when the
+ *  stream gives up). Entries merge through applyTrajectoryStreamEntries
+ *  (entry_id dedupe) — identical to the page-merge semantics. */
+function startTrajectoryStreams(body: HTMLElement, projectId: string, st: TrajectoryPanelState): void {
+  if (streamProject === projectId && (streamClients.research !== undefined || streamClients.session !== undefined)) return
+  stopTrajectoryStream()
+  streamProject = projectId
+  const startLane = (laneKey: TrajectoryLaneKey): void => {
+    if (streamClients[laneKey] !== undefined) return
+    const client = new TrajectoryStreamClient({
+      projectId,
+      lane: laneKey,
+      afterSeq: () => {
+        const lane = laneKey === 'research' ? st.research : st.session
+        return lane.nextAfterSeq ?? (lane.entries.at(-1)?.event_seq ?? 0)
+      },
+      fetchImpl: trajectoryStreamFetch(),
+      pollPage: async (afterSeq) => {
+        const params = new URLSearchParams({ lane: laneKey, limit: String(PAGE_LIMIT), after_seq: String(afterSeq) })
+        return api<TrajectoryPage>(`/v1/projects/${encodeURIComponent(projectId)}/trajectory?${params.toString()}`)
+      },
+      onEntries: (entries) => {
+        if (laneKey === 'research') st.research = applyTrajectoryStreamEntries(st.research, entries)
+        else st.session = applyTrajectoryStreamEntries(st.session, entries)
+        paintTrajectory(body, st, projectId)
+      },
+      onStatus: (status) => {
+        laneStreamStatus[laneKey] = laneStreamKey(status)
+        const chip = laneStatusEls[laneKey]
+        if (chip !== null) {
+          const key = laneStreamKey(status)
+          const text = key === '' ? '' : t('trajectory', key)
+          chip.textContent = text
+          chip.title = text
+        }
+      },
+    })
+    streamClients[laneKey] = client
+    client.start()
+  }
+  startLane('research')
+  startLane('session')
+}
 
 function ensureState(projectId: string): TrajectoryPanelState {
   let st = panelStates.get(projectId)
@@ -131,6 +226,13 @@ function paintTrajectory(body: HTMLElement, st: TrajectoryPanelState, projectId:
       ? ';color:var(--tone-green);border-color:var(--tone-green);flex-shrink:0'
       : ';flex-shrink:0'
     head.appendChild(badge)
+    // Live stream status chip (trajectory.stream.* — '' when none).
+    const streamKey = laneStreamStatus[lane.key]
+    const streamChip = el('span', 'artifact-kind', streamKey === '' ? '' : t('trajectory', streamKey))
+    streamChip.style.cssText = 'flex-shrink:0;color:var(--text-3)'
+    if (streamKey !== '') streamChip.title = t('trajectory', streamKey)
+    laneStatusEls[lane.key] = streamChip
+    head.appendChild(streamChip)
     section.appendChild(head)
     const total = el('div', 'muted', t('trajectory', 'trajectory.total', { count: String(lane.total) }))
     total.style.cssText = 'font-size:10px;padding:4px 2px 2px'
@@ -184,8 +286,9 @@ async function loadMoreTrajectory(body: HTMLElement, projectId: string, laneKey:
   paintTrajectory(body, st, projectId)
 }
 
-/** Panel entry (index.ts dispatch): paints the accumulated state, then
- *  fetches the initial dual-lane page when this project was never loaded. */
+/** Panel entry (index.ts dispatch): paints the accumulated state, fetches
+ *  the initial dual-lane page when this project was never loaded, then
+ *  starts the per-lane live SSE streams. */
 export async function renderTrajectory(body: HTMLElement, projectId: string): Promise<void> {
   const st = ensureState(projectId)
   paintTrajectory(body, st, projectId)
@@ -205,4 +308,5 @@ export async function renderTrajectory(body: HTMLElement, projectId: string): Pr
     }
     paintTrajectory(body, st, projectId)
   }
+  startTrajectoryStreams(body, projectId, st)
 }

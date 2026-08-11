@@ -394,3 +394,71 @@ Remote Agent internal 面提供 enroll/heartbeat/capability/claim/CAS fetch/stag
 `GET /v1/projects/{id}/projection`（v2 同路由）返回双字段（GUIDE-01）：`next_actions: string[]`（legacy，由 `next_actions_v2` 中非 done 动作的 label 稳定派生，终态为空数组——旧 UI/API 消费端不受破坏）与 `next_actions_v2: NextAction[]`（权威结构化投影，wire 字段见 reconstruction-contracts.md §24 / domain-model.md §14）。
 
 NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contracts、ideas、evidence、claims 确定性生成（`nextActionProjection` 纯函数，无 DB、无副作用、不抛错）。状态、reason、required 缺口、revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label 与路由。未知/未来状态退化 `code='unknown'` 的只读动作（state=blocked、required=['state_mapping']），UI 不得为 unknown 构造 mutation。Intake/Grill 阶段动作在 ONBOARD-01 落地后由同一投影扩展。
+
+## 22. SSE 实时流端点（增量流替代轮询）
+
+三个 v1 stream 端点与 §9 Terminal SSE 同模式（Content-Type `text/event-stream`、`Cache-Control: no-store`、`x-accel-buffering: no`、连接前完成鉴权——错误以 JSON 返回、绝不半开 SSE；`after_seq`/`after_revision` 重放、live 尾随、命名 `heartbeat` 事件（服务端周期发送，`data: {"time": …}`，客户端不得伪造/依赖其语义）。服务端以 ~200ms 轮询**既有轮询数据源**（pty frames store / workspace op-ledger listSince / trajectory outbox 投影）并推送增量——stream 与 poll 读同一份数据，永不漂移。轮询端点全部保留（向后兼容），客户端自行选择流或轮询。
+
+### GET /v1/pty/sessions/{id}/frames/stream?after_seq=N
+
+PTY-01 帧流（对应轮询 `GET /v1/pty/sessions/{id}/frames?after_seq=`）。鉴权与轮询 frames 完全一致（fail-closed）：缺 `x-principal-id` → 422 `principal_required`、非 owner → 403 `pty_principal_mismatch`、未知会话 → 404 `pty_session_not_found`、`after_seq` 非法 → 422 `pty_after_seq_invalid`；可选 `x-pty-lease` 出现即必须有效（错误 → 403 `lease_invalid`）。事件：
+
+~~~text
+event: subscribed
+data: {"session_id":"pty_x","last_seq":41,"retained_from_seq":1}
+
+event: frame
+data: {"session_id":"pty_x","seq":42,"type":"output","payload":{"text":"…","byte_length":128,"channel":"stdout"},"time":"…"}
+
+event: gap
+data: {"session_id":"pty_x","seq":5,"gap_from_seq":5,"gap_to_seq":40,"dropped_bytes":2048,"dropped_frames":36,"retained_from_seq":41,"time":"…"}
+
+event: exit
+data: {"session_id":"pty_x","seq":99,"exit_code":0,"signal":null,"time":"…"}
+
+event: heartbeat
+data: {"time":"…"}
+~~~
+
+规则：`seq` 为会话内单调 server_seq，客户端按 seq 去重；`gap.seq` 取首个被淘汰序号（与 Terminal SSE 约定一致），游标推进到 retained 窗口；`exit` 是权威终态并结束该连接（可经 `after_seq` 重放续接）；心跳为命名事件（服务端周期发送）。
+
+### GET /v1/projects/{id}/workspaces/{wid}/watch/stream?after_revision=N
+
+WORK-01 workspace 变更流（对应轮询 `GET …/workspaces/{wid}/nodes?after_revision=` watch feed）。鉴权同 project-scoped 读（fail-closed）：缺 `x-principal-id` → 422 `principal_required`、非成员 → 404 `project_not_found`、`after_revision` 非法 → 422 `invalid_revision`；workspace 钉定路径项目（跨项目 → 404 `workspace_not_found`）。事件：
+
+~~~text
+event: subscribed
+data: {"workspace_id":"ws_x","project_id":"rsp_x","revision":7,"after_revision":0}
+
+event: change
+data: {"workspace_id":"ws_x","revision":7,"node":{"path":"src/a.ts","kind":"file","version":2,"etag":"…","hash":"…","size":…,…}}
+
+event: delete
+data: {"workspace_id":"ws_x","revision":7,"path":"src/old.ts"}
+
+event: heartbeat
+data: {"time":"…"}
+~~~
+
+规则：`change` 携带该路径**当前**节点（与 listSince 投影一致——中间 revision 收敛为最新状态），`delete` 为 tombstone；每批推送后游标前进到 workspace 当前 `revision`，重连以 `after_revision` 续传无重复。文本节点不随事件携带 content（节点字节另经 `GET …/nodes?path=` 读取）。流无自然终态（open-ended），断开由客户端按 `after_revision` 重连。
+
+### GET /v1/projects/{id}/trajectory/stream?after_seq=N&after_event_id=…&lane=research|session
+
+TRAJ-01 trajectory 增量流（对应轮询 `GET …/trajectory`，同一 keyset 投影——redaction 由投影保证，raw payload 永不出现）。鉴权同 trajectory 轮询（fail-closed）：缺 `x-principal-id` → 422 `principal_required`、非成员 → 404 `project_not_found`。`lane` 过滤 research/session 双泳道（缺省 = 双泳道合并）。事件：
+
+~~~text
+event: subscribed
+data: {"project_id":"rsp_x","lane":"research","after_seq":11,"after_event_id":"evt_…"}
+
+event: entry
+data: {"entry_id":"evt_…","event_seq":12,"event_version":1,"project_id":"rsp_x","aggregate_type":"project","aggregate_id":"rsp_x","kind":"job.submitted","lane":"research","source":"kernel-outbox","occurred_at":"…","session_id":null,"summary":"…","status":"running"}
+
+event: heartbeat
+data: {"time":"…"}
+~~~
+
+规则：keyset 与轮询页完全一致——`(after_seq, after_event_id)` 以 (event_seq, event_id) 排序，相等 seq 跨 bucket 由 event_id 续传；**精确续传必须同时携带 after_event_id**（最后一条 entry 的 `entry_id`，subscribed 事件回显当前游标）；仅带 `after_seq` 时与轮询语义相同（同 seq 平局条目会重放，客户端按 `entry_id` 幂等去重，绝不漏数据）。`summary` 为白名单 redacted 投影。流无自然终态，断开按 keyset 重连。
+
+### BFF 透传
+
+standalone BFF 对三个 stream 路由与 Terminal SSE 同等处理：bearer 401、CSRF GET 豁免、project/global-id 路由在**首字节前**完成 membership（非成员/未知 → 404 JSON，零 SSE 字节）、`x-service-token` 注入同现有、`x-principal-id` 注入（pty 流走 `/v1/pty/sessions` 既有规则；watch/trajectory 流由 BFF 对 `…/watch/stream` 与 `…/trajectory/stream` 注入 server-derived 身份）；`proxy_buffering off` 由 nginx 层处理（响应头含 `x-accel-buffering: no`）。

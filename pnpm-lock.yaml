@@ -9,23 +9,23 @@ importers:
   .:
     dependencies:
       '@dsh-scholar/research-client':
-        specifier: file:packages/research-client
+        specifier: workspace:^
         version: link:packages/research-client
       '@dsh-scholar/research-kernel':
-        specifier: file:packages/research-kernel
+        specifier: workspace:^
         version: link:packages/research-kernel
       '@dsh-scholar/research-schemas':
-        specifier: file:packages/research-schemas
+        specifier: workspace:^
         version: link:packages/research-schemas
       '@dsh-scholar/scholar-connectors':
-        specifier: file:packages/scholar-connectors
+        specifier: workspace:^
         version: link:packages/scholar-connectors
       zod:
         specifier: ^3.24.0
         version: 3.25.76
     devDependencies:
       '@dsh-scholar/runner-gateway':
-        specifier: file:workers/runner-gateway
+        specifier: workspace:^
         version: link:workers/runner-gateway
       '@types/node':
         specifier: ^24.0.0
@@ -46,13 +46,13 @@ importers:
   packages/dsh-research-ui:
     dependencies:
       '@dsh-scholar/research-kernel':
-        specifier: file:../research-kernel
+        specifier: workspace:^
         version: link:../research-kernel
       '@dsh-scholar/research-schemas':
-        specifier: file:../research-schemas
+        specifier: workspace:^
         version: link:../research-schemas
       '@dsh-scholar/scholar-connectors':
-        specifier: file:../scholar-connectors
+        specifier: workspace:^
         version: link:../scholar-connectors
     devDependencies:
       '@types/node':
@@ -68,7 +68,7 @@ importers:
   packages/research-client:
     dependencies:
       '@dsh-scholar/research-schemas':
-        specifier: file:../research-schemas
+        specifier: workspace:^
         version: link:../research-schemas
     devDependencies:
       '@types/node':
@@ -81,10 +81,10 @@ importers:
   packages/research-kernel:
     dependencies:
       '@dsh-scholar/analysis-worker':
-        specifier: file:../../workers/analysis-worker
+        specifier: workspace:^
         version: link:../../workers/analysis-worker
       '@dsh-scholar/research-schemas':
-        specifier: file:../research-schemas
+        specifier: workspace:^
         version: link:../research-schemas
       zod:
         specifier: ^3.24.0
@@ -113,7 +113,7 @@ importers:
   packages/scholar-connectors:
     dependencies:
       '@dsh-scholar/research-schemas':
-        specifier: file:../research-schemas
+        specifier: workspace:^
         version: link:../research-schemas
     devDependencies:
       '@types/node':
@@ -135,7 +135,7 @@ importers:
   workers/research-orchestrator:
     dependencies:
       '@dsh-scholar/research-schemas':
-        specifier: file:../../packages/research-schemas
+        specifier: workspace:^
         version: link:../../packages/research-schemas
     devDependencies:
       '@types/node':
@@ -148,10 +148,10 @@ importers:
   workers/runner-gateway:
     dependencies:
       '@dsh-scholar/research-client':
-        specifier: file:../../packages/research-client
+        specifier: workspace:^
         version: link:../../packages/research-client
       '@dsh-scholar/research-schemas':
-        specifier: file:../../packages/research-schemas
+        specifier: workspace:^
         version: link:../../packages/research-schemas
     devDependencies:
       '@types/node':

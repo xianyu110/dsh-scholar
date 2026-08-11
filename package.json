@@ -37,10 +37,10 @@
     "prepare": "pnpm run build:plugin"
   },
   "dependencies": {
-    "@dsh-scholar/research-client": "file:packages/research-client",
-    "@dsh-scholar/research-kernel": "file:packages/research-kernel",
-    "@dsh-scholar/research-schemas": "file:packages/research-schemas",
-    "@dsh-scholar/scholar-connectors": "file:packages/scholar-connectors",
+    "@dsh-scholar/research-client": "workspace:^",
+    "@dsh-scholar/research-kernel": "workspace:^",
+    "@dsh-scholar/research-schemas": "workspace:^",
+    "@dsh-scholar/scholar-connectors": "workspace:^",
     "zod": "^3.24.0"
   },
   "peerDependencies": {
@@ -63,7 +63,7 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
-    "@dsh-scholar/runner-gateway": "file:workers/runner-gateway"
+    "@dsh-scholar/runner-gateway": "workspace:^"
   },
   "exports": {
     ".": {

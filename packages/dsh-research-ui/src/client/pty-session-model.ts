@@ -19,6 +19,14 @@
  *            reordered/gapped seq is 409 pty_client_seq_out_of_order)
  *   frames   GET  /v1/pty/sessions/{id}/frames?after_seq= (server_seq
  *            monotonic; gap frame + page.gap when retention evicted)
+ *   stream   GET  /v1/pty/sessions/{id}/frames/stream?after_seq= — SSE
+ *            (client/sse-client.ts): `frame` (seq 单调)/`gap`/`exit`/
+ *            `heartbeat` events; the stream transport is injected and the
+ *            SseClient reconnects from the last applied server_seq. When
+ *            the stream gives up (max reconnect attempts) the model falls
+ *            back to the after_seq POLL (framesMode 'poll') — a designed
+ *            degradation, documented; gap/exit/retention semantics are the
+ *            same on both paths (applyFrame / applyPage).
  *
  * Client session state machine:
  *
@@ -33,20 +41,22 @@
  *   response never double-applies input).
  * - Only ONE control frame is in flight at a time (the server requires
  *   strict +1 ordering); further frames queue behind it.
- * - `serverSeq` is the after_seq cursor; reconnect replays from it
- *   (generation + after_seq fencing — a new generation marks a new session
- *   period, the cursor still replays without duplicates).
+ * - `serverSeq` is the after_seq cursor; reconnect (SSE or poll) replays
+ *   from it (generation + after_seq fencing — a new generation marks a new
+ *   session period, the cursor still replays without duplicates).
  * - 403 lease_invalid/lease_required is fatal: the session is unusable,
  *   the model lands in `error` and the UI prompts to reopen.
  * - Server-side closes (idle TTL / lease expiry / permission revocation /
- *   adapter failure) are detected by the periodic session refresh and
- *   surface a close-reason notice (pty.notice.* keys).
+ *   adapter failure) are detected by the periodic session refresh (every
+ *   N polls, or a stream-mode timer) and surface a close-reason notice
+ *   (pty.notice.* keys).
  *
  * Real browser terminal rendering (ANSI/xterm-class), keyboard input and
  * narrow-viewport acceptance stay NOT_RUN_MANUAL_PENDING (hardening §5) —
  * the output is rendered as plain text only.
  */
 import { getLocale, t, type Locale } from './i18n/index'
+import { SseClient, type SseClientStatus, type SseEvent, type SseFetch, type SseScheduler } from './sse-client'
 
 /* ─────────────────────────── wire shapes (mirrors) ─────────────────────────── */
 
@@ -166,19 +176,42 @@ const defaultScheduler: PtyScheduler = {
   clearTimeout: (timer) => { clearTimeout(timer as ReturnType<typeof setTimeout>) },
 }
 
+/** SSE frames-stream transport (client/sse-client.ts). `fetch` is the
+ *  injectable stream fetch (the panel wraps the authenticated fetch; tests
+ *  use mock streams). The model builds the URL from its own server_seq
+ *  cursor and supplies the x-pty-lease header per connect. */
+export interface PtyStreamTransport {
+  fetch: SseFetch
+  /** No stream bytes for this long → reconnect (server heartbeats must
+   *  arrive more often). Default 30s. */
+  heartbeatTimeoutMs?: number
+  /** Reconnect backoff base (ms), default 1000. */
+  reconnectBaseMs?: number
+  /** Reconnect backoff cap (ms), default 15000. */
+  reconnectMaxMs?: number
+  /** Consecutive failed connect attempts before the POLL fallback. */
+  maxReconnectAttempts?: number
+}
+
 export interface PtyClientOptions {
   transport: PtyTransport
   scheduler?: PtyScheduler
-  /** Frames poll interval (ms). */
+  /** Frames poll interval (ms) — also the fallback cadence when the SSE
+   *  stream gives up (framesMode 'poll'). */
   pollIntervalMs?: number
   /** GET the session row every N polls (server-side close / generation
-   *  detection; 0 disables). */
+   *  detection; 0 disables). In SSE mode the same cadence runs on a timer
+   *  (sessionRefreshEvery * pollIntervalMs). */
   sessionRefreshEvery?: number
   /** Control retries for transient failures (network/5xx) before the frame
    *  stays queued with lastControlError (same client_seq each retry). */
   maxControlRetries?: number
   /** Display buffer bound (retention hint, never an unbounded DOM). */
   maxDisplayFrames?: number
+  /** SSE frames stream (GET .../frames/stream). When present, frames are
+   *  consumed from the stream with after_seq poll as the fallback; when
+   *  absent the model stays pure-polling (existing behavior). */
+  stream?: PtyStreamTransport
 }
 
 /* ───────────────────────────── display entries ───────────────────────────── */
@@ -301,9 +334,18 @@ export class PtyClientModel {
   generationChanged = false
   /** Last successful open params (reopen() after lease expiry / TTL). */
   lastOpenParams: PtyOpenParams | null = null
+  /** Frames consumption mode: 'sse' = live stream (client/sse-client.ts),
+   *  'poll' = after_seq polling (initial mode, and the fallback when the
+   *  stream gives up — a designed degradation). */
+  framesMode: 'sse' | 'poll' = 'poll'
+  /** SSE stream lifecycle ('idle' when polling-only or no session). */
+  streamStatus: SseClientStatus = 'idle'
+  /** Last transient stream error (heartbeat timeout / HTTP errors). */
+  streamError: { code: string; status: number } | null = null
   /** Repaint hook (the panel wires a targeted DOM paint here). */
   onChange: (() => void) | null = null
 
+  private readonly streamTransport: PtyStreamTransport | null
   private pending: PtyControlFrame[] = []
   private inflight: PtyControlFrame | null = null
   private controlAttempts = 0
@@ -311,6 +353,8 @@ export class PtyClientModel {
   private pollTimer: unknown = null
   private pollCount = 0
   private pollBackoffMs = 0
+  private streamClient: SseClient | null = null
+  private streamRefreshTimer: unknown = null
   private disposed = false
 
   constructor(options: PtyClientOptions) {
@@ -320,6 +364,7 @@ export class PtyClientModel {
     this.sessionRefreshEvery = options.sessionRefreshEvery ?? 10
     this.maxControlRetries = options.maxControlRetries ?? 3
     this.maxDisplayFrames = options.maxDisplayFrames ?? 3000
+    this.streamTransport = options.stream ?? null
   }
 
   get hasSession(): boolean {
@@ -328,6 +373,11 @@ export class PtyClientModel {
 
   get polling(): boolean {
     return this.pollTimer !== null
+  }
+
+  /** True while an SSE frames stream is connected (not in poll fallback). */
+  get streaming(): boolean {
+    return this.framesMode === 'sse' && this.streamStatus === 'live'
   }
 
   get hasPendingControls(): boolean {
@@ -364,23 +414,27 @@ export class PtyClientModel {
   }
 
   /** Wire down (leaving the tab) — the process keeps running server-side;
-   *  reconnect() resumes the after_seq replay. */
+   *  reconnect() resumes the after_seq replay (SSE stream or poll). */
   detach(): void {
     if (this.state !== 'open') return
     this.stopPolling()
+    this.stopStreaming()
     this.state = 'detached'
     this.notify()
   }
 
-  /** Wire up again — state → open, polling resumes from serverSeq (the
-   *  after_seq replay contract; generation bumps are surfaced as notices). */
+  /** Wire up again — state → open, frames consumption resumes from
+   *  serverSeq (the after_seq replay contract; generation bumps are
+   *  surfaced as notices). */
   reconnect(): void {
     if (!this.hasSession || this.state === 'error' || this.state === 'closed') return
     this.state = 'open'
     this.controlAttempts = 0
     this.pollCount = 0
+    this.pollBackoffMs = 0
+    this.streamError = null
     this.notify()
-    this.startPolling()
+    this.startFrames()
   }
 
   /** Explicit close control (queue + flush; acked → closed, reason
@@ -421,7 +475,7 @@ export class PtyClientModel {
   }
 
   /** Drop the session and return to idle (keeps lastOpenParams for
-   *  reopen()). Stops polling and clears queued controls. */
+   *  reopen()). Stops polling/streaming and clears queued controls. */
   reset(): void {
     this.dispose()
     this.state = 'idle'
@@ -441,6 +495,9 @@ export class PtyClientModel {
     this.lastError = null
     this.lastControlError = null
     this.generationChanged = false
+    this.framesMode = 'poll'
+    this.streamStatus = 'idle'
+    this.streamError = null
     this.display = []
     this.pending = []
     this.inflight = null
@@ -455,6 +512,7 @@ export class PtyClientModel {
   dispose(): void {
     this.disposed = true
     this.stopPolling()
+    this.stopStreaming()
     if (this.controlRetryTimer !== null) {
       this.scheduler.clearTimeout(this.controlRetryTimer)
       this.controlRetryTimer = null
@@ -478,7 +536,7 @@ export class PtyClientModel {
     this.totalBytes = session.total_bytes
     this.state = 'open'
     this.notify()
-    this.startPolling()
+    this.startFrames()
   }
 
   /* ─────────────────────────── control queue ─────────────────────────── */
@@ -521,7 +579,7 @@ export class PtyClientModel {
       this.clientSeq = Math.max(this.clientSeq, frame.client_seq)
       if (frame.type === 'close') {
         // close control acked: the server ran the close transition.
-        this.stopPolling()
+        this.stopFrames()
         this.state = 'closed'
         this.closeReason = 'explicit'
         this.pending = []
@@ -541,7 +599,7 @@ export class PtyClientModel {
     if (code === 'pty_session_closed' || code === 'pty_session_not_found') {
       this.inflight = null
       this.pending = []
-      this.stopPolling()
+      this.stopFrames()
       this.state = 'closed'
       this.closeReason = null
       this.lastError = { code, status: result.error.status ?? 409 }
@@ -587,7 +645,7 @@ export class PtyClientModel {
     const session = result.data
     if (session.state === 'closed') {
       this.pending = []
-      this.stopPolling()
+      this.stopFrames()
       this.state = 'closed'
       this.closeReason = session.close_reason ?? 'explicit'
       this.notify()
@@ -598,7 +656,7 @@ export class PtyClientModel {
       this.clientSeq = Math.max(this.clientSeq, session.last_client_seq)
       this.pending.shift()
       if (frame.type === 'close') {
-        this.stopPolling()
+        this.stopFrames()
         this.state = 'closed'
         this.closeReason = 'explicit'
         this.pending = []
@@ -612,7 +670,7 @@ export class PtyClientModel {
     // Real desync (server cursor behind our seq): the session cannot take
     // our frames — fatal, prompt to reconnect/reopen.
     this.pending = []
-    this.stopPolling()
+    this.stopFrames()
     this.state = 'error'
     this.lastError = { code: 'pty_client_seq_out_of_order', status }
     this.notify()
@@ -621,7 +679,7 @@ export class PtyClientModel {
   /** Fatal session failure (lease invalid / unresolvable desync): stop
    *  everything, drop queued controls, land in `error`. */
   private failFatal(code: string): void {
-    this.stopPolling()
+    this.stopFrames()
     this.state = 'error'
     this.lastError = { code, status: 403 }
     this.pending = []
@@ -629,7 +687,196 @@ export class PtyClientModel {
     this.notify()
   }
 
+  /** Stop BOTH frames consumers (poll timer + SSE stream). */
+  private stopFrames(): void {
+    this.stopPolling()
+    this.stopStreaming()
+  }
+
   /* ─────────────────────────── frames consumption ─────────────────────────── */
+
+  /** Start the frames consumer for the open session: the SSE stream when a
+   *  stream transport is configured, else the after_seq poll (the stream
+   *  falls back to polling when it gives up). */
+  private startFrames(): void {
+    if (this.disposed || this.state !== 'open' || this.sessionId === null) return
+    if (this.streamTransport !== null) this.startStreaming()
+    else this.startPolling()
+  }
+
+  /* ── SSE frames stream (client/sse-client.ts) ── */
+
+  /** Open the frames SSE stream at after_seq=serverSeq. Reconnects (with
+   *  backoff) resume from the latest cursor via the url() builder. */
+  private startStreaming(): void {
+    if (this.disposed || this.state !== 'open' || this.sessionId === null) return
+    if (this.streamTransport === null) return
+    if (this.streamClient !== null && (this.streamClient.status === 'live' || this.streamClient.status === 'connecting')) return
+    this.stopPolling() // never poll while a stream is live
+    this.framesMode = 'sse'
+    this.streamError = null
+    const sessionId = this.sessionId
+    const client = new SseClient({
+      url: () => `/v1/pty/sessions/${encodeURIComponent(sessionId)}/frames/stream?after_seq=${this.serverSeq}`,
+      fetchImpl: this.streamTransport.fetch,
+      headers: () => Promise.resolve({ 'x-pty-lease': this.leaseToken ?? '' }),
+      scheduler: this.scheduler as SseScheduler,
+      heartbeatTimeoutMs: this.streamTransport.heartbeatTimeoutMs,
+      reconnectBaseMs: this.streamTransport.reconnectBaseMs,
+      reconnectMaxMs: this.streamTransport.reconnectMaxMs,
+      maxReconnectAttempts: this.streamTransport.maxReconnectAttempts,
+      onEvent: (event) => { this.onStreamEvent(event) },
+      onStatus: (status) => {
+        this.streamStatus = status
+        if (status === 'live') {
+          this.pollBackoffMs = 0
+          this.streamError = null
+        }
+        this.notify()
+      },
+      onError: (error) => {
+        // A 403 on the stream route mirrors the frames-poll lease contract:
+        // fatal — the session lease is unusable.
+        if (error.status === 403) {
+          this.failFatal('lease_invalid')
+          return
+        }
+        this.streamError = { code: error.code, status: error.status }
+        this.notify()
+      },
+      onEnd: (reason) => {
+        if (reason === 'max-retries') {
+          // The stream gave up — fall back to the after_seq POLL (designed
+          // degradation; the cursor was never lost, so the poll resumes
+          // exactly where the stream stopped).
+          this.stopStreaming()
+          this.framesMode = 'poll'
+          this.streamStatus = 'idle'
+          this.startPolling()
+        }
+      },
+    })
+    this.streamClient = client
+    client.open()
+    this.scheduleStreamRefresh()
+    this.notify()
+  }
+
+  /** Close the frames stream (tab leave / dispose / fallback switch). */
+  private stopStreaming(): void {
+    this.streamClient?.close()
+    this.streamClient = null
+    if (this.streamRefreshTimer !== null) {
+      this.scheduler.clearTimeout(this.streamRefreshTimer)
+      this.streamRefreshTimer = null
+    }
+  }
+
+  /** Stream-mode session refresh cadence (same semantics as the poll-mode
+   *  every-N-polls refresh: server-side close / generation detection). */
+  private scheduleStreamRefresh(): void {
+    if (this.disposed || this.framesMode !== 'sse' || this.sessionRefreshEvery <= 0) return
+    if (this.streamRefreshTimer !== null) return
+    const interval = Math.max(1000, this.sessionRefreshEvery * this.pollIntervalMs)
+    this.streamRefreshTimer = this.scheduler.setTimeout(() => {
+      this.streamRefreshTimer = null
+      void this.refreshSession().then(() => {
+        if (this.disposed || this.state !== 'open' || this.framesMode !== 'sse') return
+        this.scheduleStreamRefresh()
+      })
+    }, interval)
+  }
+
+  /** One SSE dispatch → frames/gap/exit semantics (identical to the poll
+   *  path — the same applyFrame cursor/retention logic). Defensive: the
+   *  wire shape may carry either a PtyOutputFrame projection or a
+   *  flattened {seq, kind, ...} object. */
+  private onStreamEvent(event: SseEvent): void {
+    let data: Record<string, unknown>
+    try {
+      data = JSON.parse(event.data) as Record<string, unknown>
+    } catch {
+      return // malformed frame: skip
+    }
+    if (typeof data !== 'object' || data === null) return
+    if (event.event === 'heartbeat') return
+    if (event.event === 'gap') {
+      this.applyGapPayload(data)
+      return
+    }
+    if (event.event === 'exit') {
+      this.applyExitPayload(data)
+      return
+    }
+    if (event.event === 'frame' || event.event === 'message') {
+      this.applyStreamFrame(data)
+    }
+    // unknown event names are ignored (future-proof)
+  }
+
+  /** Normalize one stream frame and fold it into the cursor/display. */
+  private applyStreamFrame(data: Record<string, unknown>): void {
+    const seq = Number(data.server_seq ?? data.seq ?? 0)
+    const type = typeof data.type === 'string' && (data.type === 'output' || data.type === 'exit' || data.type === 'gap')
+      ? data.type
+      : (typeof data.kind === 'string' && (data.kind === 'output' || data.kind === 'exit' || data.kind === 'gap') ? data.kind : 'output')
+    let payload: Record<string, unknown>
+    if (typeof data.payload === 'object' && data.payload !== null) {
+      payload = data.payload as Record<string, unknown>
+    } else {
+      // flattened shape: the remaining fields ARE the payload
+      const { server_seq: _a, seq: _b, type: _c, kind: _d, pty_session_id: _e, created_at: _f, event: _g, ...rest } = data
+      payload = rest
+    }
+    this.applyFrame({
+      pty_session_id: typeof data.pty_session_id === 'string' ? data.pty_session_id : '',
+      server_seq: seq,
+      type,
+      payload,
+      created_at: typeof data.created_at === 'string' ? data.created_at : undefined,
+    })
+  }
+
+  /** SSE gap event (retention eviction) — same marker as the page-gap
+   *  path. Prefers the server's explicit gap_from_seq/gap_to_seq fields
+   *  (the wire carries them); falls back to the derived range. */
+  private applyGapPayload(data: Record<string, unknown>): void {
+    const retainedFrom = Number(data.retained_from_seq ?? data.retained ?? this.retainedFromSeq)
+    const dropped = Number(data.dropped_bytes ?? 0)
+    const droppedFrames = Number(data.dropped_frames ?? Math.max(0, retainedFrom - 1 - this.serverSeq))
+    const gapFrom = Number(data.gap_from_seq ?? this.serverSeq + 1)
+    const gapTo = Number(data.gap_to_seq ?? Math.max(0, retainedFrom - 1))
+    this.retainedFromSeq = Math.max(this.retainedFromSeq, retainedFrom)
+    this.droppedBytes = dropped
+    if (gapTo >= gapFrom || retainedFrom > this.serverSeq + 1) {
+      this.display.push({
+        kind: 'gap',
+        seq: retainedFrom,
+        gapFrom,
+        gapTo,
+        droppedBytes: dropped,
+        droppedFrames,
+      })
+      this.trimDisplay()
+    }
+    this.notify()
+  }
+
+  /** SSE exit event — same recording as the exit frame path. */
+  private applyExitPayload(data: Record<string, unknown>): void {
+    const frame: PtyOutputFrame = {
+      pty_session_id: typeof data.pty_session_id === 'string' ? data.pty_session_id : '',
+      server_seq: Number(data.server_seq ?? data.seq ?? this.serverSeq + 1),
+      type: 'exit',
+      payload: {
+        exit_code: data.exit_code !== undefined ? data.exit_code : null,
+        signal: data.signal !== undefined ? data.signal : null,
+      },
+    }
+    this.applyFrame(frame)
+  }
+
+  /* ── after_seq poll (default + stream fallback) ── */
 
   private startPolling(): void {
     if (this.disposed || this.state !== 'open' || this.pollTimer !== null) return
@@ -710,34 +957,41 @@ export class PtyClientModel {
       this.trimDisplay()
     }
     for (const frame of page.frames) {
-      if (frame.server_seq <= this.serverSeq) continue // idempotent replay
-      if (frame.type === 'output') {
-        const payload = frame.payload as { text?: string; byte_length?: number; channel?: 'stdout' | 'stderr' }
-        this.display.push({
-          kind: 'output',
-          seq: frame.server_seq,
-          channel: payload.channel ?? 'stdout',
-          text: payload.text ?? '',
-        })
-      } else if (frame.type === 'exit') {
-        const payload = frame.payload as { exit_code?: number | null; signal?: string | null }
-        this.exitCode = payload.exit_code ?? null
-        this.exitSignal = payload.signal ?? null
-        this.display.push({ kind: 'exit', seq: frame.server_seq, exitCode: this.exitCode, exitSignal: this.exitSignal })
-      } else if (frame.type === 'gap') {
-        const payload = frame.payload as { gap_from_seq?: number; gap_to_seq?: number; dropped_bytes?: number; dropped_frames?: number }
-        this.display.push({
-          kind: 'gap',
-          seq: frame.server_seq,
-          gapFrom: payload.gap_from_seq ?? 0,
-          gapTo: payload.gap_to_seq ?? 0,
-          droppedBytes: payload.dropped_bytes ?? 0,
-          droppedFrames: payload.dropped_frames ?? 0,
-        })
-      }
-      this.serverSeq = Math.max(this.serverSeq, frame.server_seq)
-      this.trimDisplay()
+      this.applyFrame(frame)
     }
+  }
+
+  /** Fold ONE frame into the cursor/display (shared by the poll page path
+   *  and the SSE stream path — identical gap/exit/retention semantics).
+   *  Idempotent: frames at or below serverSeq are skipped (replay-safe). */
+  private applyFrame(frame: PtyOutputFrame): void {
+    if (frame.server_seq <= this.serverSeq) return // idempotent replay
+    if (frame.type === 'output') {
+      const payload = frame.payload as { text?: string; byte_length?: number; channel?: 'stdout' | 'stderr' }
+      this.display.push({
+        kind: 'output',
+        seq: frame.server_seq,
+        channel: payload.channel ?? 'stdout',
+        text: payload.text ?? '',
+      })
+    } else if (frame.type === 'exit') {
+      const payload = frame.payload as { exit_code?: number | null; signal?: string | null }
+      this.exitCode = payload.exit_code ?? null
+      this.exitSignal = payload.signal ?? null
+      this.display.push({ kind: 'exit', seq: frame.server_seq, exitCode: this.exitCode, exitSignal: this.exitSignal })
+    } else if (frame.type === 'gap') {
+      const payload = frame.payload as { gap_from_seq?: number; gap_to_seq?: number; dropped_bytes?: number; dropped_frames?: number }
+      this.display.push({
+        kind: 'gap',
+        seq: frame.server_seq,
+        gapFrom: payload.gap_from_seq ?? 0,
+        gapTo: payload.gap_to_seq ?? 0,
+        droppedBytes: payload.dropped_bytes ?? 0,
+        droppedFrames: payload.dropped_frames ?? 0,
+      })
+    }
+    this.serverSeq = Math.max(this.serverSeq, frame.server_seq)
+    this.trimDisplay()
   }
 
   private trimDisplay(): void {
@@ -760,7 +1014,7 @@ export class PtyClientModel {
     this.idleTtlS = session.idle_ttl_s
     this.leaseExpiresAt = session.lease_expires_at
     if (session.state === 'closed') {
-      this.stopPolling()
+      this.stopFrames()
       this.state = 'closed'
       this.closeReason = session.close_reason ?? 'explicit'
     }
@@ -778,10 +1032,24 @@ export interface PtyStatusView {
   leaseText: string
   generationText: string
   bytesText: string
+  /** Frames-consumption copy: 'pty.stream.*' when the SSE stream is active
+   *  (connecting/live/reconnecting/disconnected), 'pty.stream.poll' in the
+   *  poll fallback ('' without a session). */
+  streamText: string
   noticeText: string
   errorText: string
   controlErrorText: string
   exitText: string
+}
+
+/** Stable i18n key for the SSE stream lifecycle (SseClientStatus). */
+export function ptyStreamKey(status: SseClientStatus): string {
+  switch (status) {
+    case 'connecting': return 'pty.stream.connecting'
+    case 'live': return 'pty.stream.live'
+    case 'reconnecting': return 'pty.stream.reconnecting'
+    default: return 'pty.stream.disconnected'
+  }
 }
 
 export function ptyStatusView(model: PtyClientModel, locale: Locale = getLocale()): PtyStatusView {
@@ -807,6 +1075,11 @@ export function ptyStatusView(model: PtyClientModel, locale: Locale = getLocale(
   const bytesText = model.hasSession
     ? t('pty', 'pty.status.bytes', { bytes: String(model.totalBytes) })
     : ''
+  const streamText = model.hasSession
+    ? (model.framesMode === 'poll'
+        ? t('pty', 'pty.stream.poll')
+        : t('pty', ptyStreamKey(model.streamStatus)))
+    : ''
   let noticeText = ''
   if (model.state === 'closed' && model.closeReason !== null) {
     noticeText = t('pty', ptyCloseReasonKey(model.closeReason), { ttl: String(model.idleTtlS ?? 0) })
@@ -825,5 +1098,5 @@ export function ptyStatusView(model: PtyClientModel, locale: Locale = getLocale(
         signal: model.exitSignal !== null ? t('pty', 'pty.exit.signal', { signal: model.exitSignal }) : '',
       })
     : ''
-  return { state: model.state, stateText, seqText, leaseText, generationText, bytesText, noticeText, errorText, controlErrorText, exitText }
+  return { state: model.state, stateText, seqText, leaseText, generationText, bytesText, streamText, noticeText, errorText, controlErrorText, exitText }
 }

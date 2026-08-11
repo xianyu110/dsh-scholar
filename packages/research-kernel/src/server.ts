@@ -1023,6 +1023,13 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               if (subId !== undefined) {
                 // Every workspace route below is bound to the path project.
                 kernel.assertWorkspaceInProject(subId, id)
+                if (method === 'GET' && subSubId === 'watch' && parts[6] === 'stream') {
+                  // Workspace watch SSE stream (api-contracts.md §22):
+                  // change/delete events + revision advance, same
+                  // listSince data source as the polling watch feed.
+                  void handleWorkspaceWatchSse(req, res, kernel, id, subId, url)
+                  return
+                }
                 if (method === 'GET' && subSubId === 'tree') {
                   ok(res, kernel.workspaceTree(subId))
                   return
@@ -1368,6 +1375,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             // surface): read-only trajectory projection + child topology.
             // Principal + project membership are enforced here (fail-closed);
             // the BFF injects x-principal-id and pre-checks membership.
+            if (method === 'GET' && sub === 'trajectory' && subId === 'stream') {
+              // Trajectory incremental SSE stream (api-contracts.md §22):
+              // keyset after_seq replay + live tail, lane-filtered, redacted
+              // by the projection. Registered BEFORE the polling check so
+              // .../trajectory/stream never falls through to the JSON page.
+              void handleTrajectorySse(req, res, kernel, id, url)
+              return
+            }
             if (method === 'GET' && sub === 'trajectory') {
               if (requireProjectMember(kernel, req, res, id) === null) return
               const q = url.searchParams
@@ -2025,6 +2040,15 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, result)
               return
             }
+            if (sub !== undefined && subId === 'frames' && subSubId === 'stream' && method === 'GET') {
+              // PTY frame SSE stream (api-contracts.md §22): replay + live
+              // tail with the same owner+lease validation as the polling
+              // frames route below (checked INSIDE the handler before any
+              // SSE byte). Registered BEFORE the polling check so
+              // .../frames/stream never falls through to the JSON page.
+              void handlePtyFramesSse(req, res, kernel, sub, url)
+              return
+            }
             if (sub !== undefined && subId === 'frames' && method === 'GET') {
               // Output replay with server seq / gap / retention. PTY-01
               // (hardening §5 P0-2): same fail-closed principal + owner as
@@ -2235,6 +2259,332 @@ function handleTerminalSse(
   sendBatch()
   poll = setInterval(sendBatch, 500)
   heartbeat = setInterval(() => { if (!closed) res.write(`: heartbeat ${Date.now()}\n\n`) }, 15000)
+}
+
+/**
+ * SSE real-time stream timing knobs (acceptance-tests.md §21 "SSE 实时流替代
+ * 轮询"): the three stream endpoints below poll their EXISTING polling data
+ * sources (pty frames / workspace listSince / trajectory projection) with a
+ * bounded cursor every `pollMs` and push deltas — deliberately the same
+ * data source the polling endpoints read, so stream and poll can never
+ * diverge. `heartbeatMs` is the named-heartbeat interval. Unit tests shrink
+ * both knobs (module-level state, reset after each test).
+ */
+export const sseStreamTiming = { pollMs: 200, heartbeatMs: 15000 }
+
+/**
+ * PTY frame stream (api-contracts.md §22, PTY-01): text/event-stream replay
+ * + live tail of a session's output frames, mirroring the terminal SSE
+ * pattern (handleTerminalSse). Auth is IDENTICAL to the polling frames
+ * route (requirePtyOwner: missing principal → 422, non-owner → 403,
+ * unknown session → 404; an OPTIONAL lease must be valid when present).
+ * Events: subscribed / frame (server_seq monotonic) / gap (retention
+ * eviction) / exit (ends the stream, replayable via after_seq) / heartbeat.
+ * Data comes from kernel.ptyFrames — the same store the polling
+ * GET /v1/pty/sessions/{id}/frames reads.
+ */
+function handlePtyFramesSse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  kernel: ResearchKernel,
+  sessionId: string,
+  url: URL,
+): void {
+  // Same wire validation as the polling frames route: after_seq must be a
+  // non-negative integer (422 pty_after_seq_invalid, thrown → router fail()).
+  const raw = url.searchParams.get('after_seq')
+  const afterSeq = raw === null ? 0 : Number(raw)
+  if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+    throw new KernelError(422, 'pty_after_seq_invalid', 'after_seq must be a non-negative integer')
+  }
+  // Fail-closed owner check BEFORE any SSE byte: requirePtyOwner writes the
+  // JSON error itself (422/403/404) and returns null on rejection.
+  if (requirePtyOwner(kernel, req, res, sessionId, { requireLease: false }) === null) return
+  const writeEvent = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  // Initial snapshot before the headers: an unknown session propagates as a
+  // JSON 404 (pty_session_not_found) instead of half-open SSE.
+  const initial = kernel.ptyFrames(sessionId, 0)
+  const initialLastSeq = initial.frames.length > 0 ? initial.frames[initial.frames.length - 1]!.server_seq : 0
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-store',
+    'x-accel-buffering': 'no',
+    connection: 'keep-alive',
+  })
+  writeEvent('subscribed', {
+    session_id: sessionId,
+    last_seq: initialLastSeq,
+    retained_from_seq: initial.retained_from_seq,
+  })
+  let cursor = afterSeq
+  let heartbeat: NodeJS.Timeout | undefined
+  let poll: NodeJS.Timeout | undefined
+  let closed = false
+  const cleanup = (): void => {
+    if (closed) return
+    closed = true
+    if (heartbeat !== undefined) clearInterval(heartbeat)
+    if (poll !== undefined) clearInterval(poll)
+  }
+  req.on('close', cleanup)
+  req.on('error', cleanup)
+  res.on('error', cleanup)
+
+  const sendBatch = (): void => {
+    if (closed) return
+    let data
+    try {
+      data = kernel.ptyFrames(sessionId, cursor)
+    } catch {
+      cleanup()
+      res.end()
+      return
+    }
+    for (const frame of data.frames) {
+      const seq = frame.server_seq
+      const time = frame.created_at
+      if (frame.type === 'gap') {
+        // Retention evicted seqs the client missed: the store synthesizes a
+        // gap frame; surface it as the gap event. seq = first DROPPED seq
+        // (same convention as the terminal SSE gap event), the cursor still
+        // advances past the retained window so no evicted seq is re-asked.
+        writeEvent('gap', {
+          session_id: sessionId,
+          seq: frame.payload.gap_from_seq,
+          gap_from_seq: frame.payload.gap_from_seq,
+          gap_to_seq: frame.payload.gap_to_seq,
+          dropped_bytes: frame.payload.dropped_bytes,
+          dropped_frames: frame.payload.dropped_frames,
+          retained_from_seq: data.retained_from_seq,
+          time,
+        })
+        cursor = Math.max(cursor, seq)
+      } else if (frame.type === 'exit') {
+        writeEvent('exit', {
+          session_id: sessionId,
+          seq,
+          exit_code: frame.payload.exit_code ?? null,
+          signal: frame.payload.signal ?? null,
+          time,
+        })
+        // Exit is authoritative; the client replays via after_seq if needed.
+        cleanup()
+        res.end()
+        return
+      } else {
+        writeEvent('frame', {
+          session_id: sessionId,
+          seq,
+          type: frame.type,
+          payload: frame.payload,
+          time,
+        })
+        cursor = seq
+      }
+    }
+    void data
+  }
+
+  // Initial snapshot + live tail (poll the frames store for new seqs).
+  sendBatch()
+  poll = setInterval(sendBatch, sseStreamTiming.pollMs)
+  heartbeat = setInterval(() => {
+    if (!closed) writeEvent('heartbeat', { time: new Date().toISOString() })
+  }, sseStreamTiming.heartbeatMs)
+}
+
+/**
+ * Workspace watch stream (api-contracts.md §22, WORK-01): text/event-stream
+ * replay + live tail of workspace mutations — change nodes + delete
+ * tombstones + revision advance. Auth mirrors the project-scoped reads:
+ * authenticated principal + project membership fail-closed
+ * (requireProjectMember: missing principal → 422, non-member → 404), and
+ * the workspace is pinned to the PATH project (cross-project → 404
+ * workspace_not_found). Data comes from kernel.workspaceListSince — the
+ * same watch feed the polling GET .../nodes?after_revision= reads; the
+ * cursor advances to the workspace's current revision after each batch, so
+ * reconnects with after_revision resume without duplicates. Open-ended
+ * stream: no exit event; the client closes or reconnects via after_revision.
+ */
+function handleWorkspaceWatchSse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  kernel: ResearchKernel,
+  projectId: string,
+  workspaceId: string,
+  url: URL,
+): void {
+  // Same wire validation as the polling watch feed: after_revision must be
+  // a non-negative integer (422 invalid_revision, thrown → router fail()).
+  const raw = url.searchParams.get('after_revision')
+  const since = raw === null ? 0 : Number(raw)
+  if (!Number.isInteger(since) || since < 0) {
+    throw new KernelError(422, 'invalid_revision', 'after_revision must be a non-negative integer')
+  }
+  // Fail-closed principal + membership BEFORE any SSE byte.
+  if (requireProjectMember(kernel, req, res, projectId) === null) return
+  // Path-project binding: cross-project workspace → 404 (router fail()).
+  kernel.assertWorkspaceInProject(workspaceId, projectId)
+  const writeEvent = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  // Initial snapshot before the headers: an unknown workspace propagates as
+  // a JSON 404 (workspace_not_found) instead of half-open SSE.
+  const initial = kernel.workspaceListSince(workspaceId, 0)
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-store',
+    'x-accel-buffering': 'no',
+    connection: 'keep-alive',
+  })
+  writeEvent('subscribed', {
+    workspace_id: workspaceId,
+    project_id: projectId,
+    revision: initial.info.revision,
+    after_revision: since,
+  })
+  let cursor = since
+  let heartbeat: NodeJS.Timeout | undefined
+  let poll: NodeJS.Timeout | undefined
+  let closed = false
+  const cleanup = (): void => {
+    if (closed) return
+    closed = true
+    if (heartbeat !== undefined) clearInterval(heartbeat)
+    if (poll !== undefined) clearInterval(poll)
+  }
+  req.on('close', cleanup)
+  req.on('error', cleanup)
+  res.on('error', cleanup)
+
+  const sendBatch = (): void => {
+    if (closed) return
+    let data
+    try {
+      data = kernel.workspaceListSince(workspaceId, cursor)
+    } catch {
+      cleanup()
+      res.end()
+      return
+    }
+    if (data.nodes.length > 0 || data.deleted.length > 0 || data.info.revision > cursor) {
+      const revision = data.info.revision
+      for (const node of data.nodes) {
+        writeEvent('change', { workspace_id: workspaceId, revision, node })
+      }
+      for (const path of data.deleted) {
+        writeEvent('delete', { workspace_id: workspaceId, revision, path })
+      }
+      // Revision advance: the cursor always lands on the CURRENT workspace
+      // revision, so a reconnect with after_revision resumes without
+      // duplicates (intermediate revisions collapse — listSince projects
+      // current node state per touched path).
+      cursor = revision
+    }
+    void data
+  }
+
+  // Initial snapshot + live tail (poll the op-ledger watch feed).
+  sendBatch()
+  poll = setInterval(sendBatch, sseStreamTiming.pollMs)
+  heartbeat = setInterval(() => {
+    if (!closed) writeEvent('heartbeat', { time: new Date().toISOString() })
+  }, sseStreamTiming.heartbeatMs)
+}
+
+/**
+ * Trajectory incremental stream (api-contracts.md §22, TRAJ-01):
+ * text/event-stream replay + live tail of the redacted trajectory
+ * projection. Keyset cursor (after_seq, after_event_id) with the SAME
+ * (event_seq, event_id) ordering as the polling GET .../trajectory — the
+ * stream calls kernel.projectTrajectory, so redaction is guaranteed by the
+ * projection and the lane filter (research|session) matches the polling
+ * endpoint. Auth: principal + project membership fail-closed (422/404).
+ * Events: subscribed / entry (redacted TrajectoryEntry) / heartbeat.
+ * Open-ended stream; reconnects resume via after_seq (+ after_event_id).
+ */
+function handleTrajectorySse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  kernel: ResearchKernel,
+  projectId: string,
+  url: URL,
+): void {
+  // Fail-closed principal + membership BEFORE any SSE byte.
+  if (requireProjectMember(kernel, req, res, projectId) === null) return
+  const q = url.searchParams
+  const afterSeq = parseSeqParam(q.get('after_seq')) ?? 0
+  const afterEventId = q.get('after_event_id') ?? ''
+  const lane = parseLaneParam(q.get('lane')) ?? null
+  const writeEvent = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  // Initial snapshot before the headers: an unknown project propagates as a
+  // JSON 404 (project_not_found) instead of half-open SSE.
+  const initial = kernel.projectTrajectory(projectId, { after_seq: 0, limit: 1, lane: lane ?? undefined })
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-store',
+    'x-accel-buffering': 'no',
+    connection: 'keep-alive',
+  })
+  writeEvent('subscribed', {
+    project_id: projectId,
+    lane,
+    after_seq: afterSeq,
+    after_event_id: afterEventId,
+  })
+  let cursorSeq = afterSeq
+  let cursorEventId = afterEventId
+  let heartbeat: NodeJS.Timeout | undefined
+  let poll: NodeJS.Timeout | undefined
+  let closed = false
+  const cleanup = (): void => {
+    if (closed) return
+    closed = true
+    if (heartbeat !== undefined) clearInterval(heartbeat)
+    if (poll !== undefined) clearInterval(poll)
+  }
+  req.on('close', cleanup)
+  req.on('error', cleanup)
+  res.on('error', cleanup)
+
+  const sendBatch = (): void => {
+    if (closed) return
+    let page
+    try {
+      page = kernel.projectTrajectory(projectId, {
+        after_seq: cursorSeq,
+        after_event_id: cursorEventId,
+        limit: 200,
+        lane: lane ?? undefined,
+      })
+    } catch {
+      cleanup()
+      res.end()
+      return
+    }
+    for (const entry of page.entries) {
+      writeEvent('entry', entry)
+    }
+    if (page.entries.length > 0 && page.next_after_seq !== null) {
+      // Keyset advance mirrors the polling cursor semantics: (event_seq,
+      // event_id) of the LAST entry — equal seqs across buckets are resumed
+      // by event_id, so no duplicate and no missing on reconnect.
+      cursorSeq = page.next_after_seq
+      cursorEventId = page.next_after_event_id ?? cursorEventId
+    }
+    void page
+  }
+
+  // Initial snapshot + live tail (poll the outbox projection).
+  sendBatch()
+  poll = setInterval(sendBatch, sseStreamTiming.pollMs)
+  heartbeat = setInterval(() => {
+    if (!closed) writeEvent('heartbeat', { time: new Date().toISOString() })
+  }, sseStreamTiming.heartbeatMs)
 }
 
 /** Start the kernel API server; returns the listening server. */

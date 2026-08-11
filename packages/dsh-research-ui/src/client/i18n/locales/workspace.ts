@@ -75,7 +75,14 @@ export const zh = {
   'workspace.history.rollback': '回退到此版本',
   'workspace.history.rollbackConfirm': '回退到 v{version}?该版本的字节将带版本检查写回(并发修改会冲突,不会覆盖)。',
   'workspace.history.rolledBack': '已回退到 v{version}',
-  'workspace.watch.note': '树按 {seconds}s 轮询 listSince 增量刷新;SSE 传输留待后续。',
+  'workspace.watch.note': '树通过 SSE watch 流实时增量刷新;流不可用时回退 {seconds}s 轮询 listSince。',
+  'workspace.watch.aria': '工作区实时同步状态',
+  // watch stream status (SSE vs poll fallback)
+  'workspace.watch.connecting': '实时连接中…',
+  'workspace.watch.live': '实时',
+  'workspace.watch.reconnecting': '重连中…',
+  'workspace.watch.disconnected': '已断开',
+  'workspace.watch.polling': '轮询回退',
 } as const
 
 export type WorkspaceKey = keyof typeof zh
@@ -148,5 +155,12 @@ export const en: Record<WorkspaceKey, string> = {
   'workspace.history.rollback': 'Roll back to this version',
   'workspace.history.rollbackConfirm': 'Roll back to v{version}? The bytes of that version are written back with a version check (concurrent changes conflict instead of being overwritten).',
   'workspace.history.rolledBack': 'Rolled back to v{version}',
-  'workspace.watch.note': 'The tree refreshes incrementally via listSince polling every {seconds}s; SSE transport is a later round.',
+  'workspace.watch.note': 'The tree refreshes live via an SSE watch stream; it falls back to listSince polling every {seconds}s when the stream is unavailable.',
+  'workspace.watch.aria': 'workspace live sync status',
+  // watch stream status (SSE vs poll fallback)
+  'workspace.watch.connecting': 'connecting…',
+  'workspace.watch.live': 'live',
+  'workspace.watch.reconnecting': 'reconnecting…',
+  'workspace.watch.disconnected': 'disconnected',
+  'workspace.watch.polling': 'polling fallback',
 }

@@ -21,9 +21,9 @@
     "kernel": "node lib/bin/kernel.js"
   },
   "dependencies": {
-    "@dsh-scholar/research-schemas": "file:../research-schemas",
+    "@dsh-scholar/research-schemas": "workspace:^",
     "zod": "^3.24.0",
-    "@dsh-scholar/analysis-worker": "file:../../workers/analysis-worker"
+    "@dsh-scholar/analysis-worker": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

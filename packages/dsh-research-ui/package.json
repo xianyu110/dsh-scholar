@@ -33,9 +33,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json"
   },
   "dependencies": {
-    "@dsh-scholar/research-kernel": "file:../research-kernel",
-    "@dsh-scholar/research-schemas": "file:../research-schemas",
-    "@dsh-scholar/scholar-connectors": "file:../scholar-connectors"
+    "@dsh-scholar/research-kernel": "workspace:^",
+    "@dsh-scholar/research-schemas": "workspace:^",
+    "@dsh-scholar/scholar-connectors": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

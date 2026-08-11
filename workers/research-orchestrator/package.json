@@ -24,7 +24,7 @@
     "orchestrator": "node lib/bin/orchestrator.js"
   },
   "dependencies": {
-    "@dsh-scholar/research-schemas": "file:../../packages/research-schemas"
+    "@dsh-scholar/research-schemas": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

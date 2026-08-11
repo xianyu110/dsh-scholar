@@ -20,6 +20,7 @@ import { t } from '../i18n/index'
 import { el } from '../ui'
 import {
   WORKSPACE_WATCH_POLL_MS,
+  WorkspaceWatchClient,
   activeWorkspaceTab, activateWorkspaceTab, addWorkspaceVirtualDir,
   applySavedWorkspaceTab, applyWorkspaceFeedToTabs, applyWorkspaceListSince,
   applyWorkspaceTree, binaryDownload, binaryTooLarge, binaryUploadCall,
@@ -31,6 +32,7 @@ import {
   workspaceBasename, workspaceConflictKind, workspaceDirVirtual,
   workspaceHistoryView, workspaceKindText, workspaceNodeAt, workspaceTabDirty,
 } from '../workspace-model'
+import type { SseFetch } from '../sse-client'
 import type {
   WorkspaceInfoLite, WorkspaceNodeLite, WorkspaceRevisionLite,
   WorkspaceTreePayload, WorkspaceListSincePayload,
@@ -70,41 +72,93 @@ function ensureState(projectId: string): WorkspacePanelState {
   return st
 }
 
-/* ─────────────────────── watch polling (active tab only) ─────────────────────── */
+/* ─────────────────── watch stream (active tab only) ─────────────────── */
 
-let watchTimer: ReturnType<typeof setInterval> | null = null
+let watchClient: WorkspaceWatchClient | null = null
 let watchProject: string | null = null
+/** Live watch status key ('' = none) — repainted by the watch status hook. */
+let watchStatusText = ''
+/** The watch status chip in the current note row (rebuilt on paint). */
+let watchStatusEl: HTMLElement | null = null
 
-/** Stop the listSince poll (called by index.ts when the Workspace tab is
- *  left — same hygiene as terminalDisconnect). */
+/** Stop the watch (SSE stream + poll fallback) — called by index.ts when
+ *  the Workspace tab is left (same hygiene as terminalDisconnect). */
 export function stopWorkspaceWatch(): void {
-  if (watchTimer !== null) clearInterval(watchTimer)
-  watchTimer = null
+  watchClient?.stop()
+  watchClient = null
   watchProject = null
+  watchStatusText = ''
+  watchStatusEl = null
 }
 
+/** The watch stream fetch wrapper (authenticated, accept text/event-stream). */
+function watchStreamFetch(): SseFetch {
+  return async (url, init) => {
+    const response = await fetch(`${base()}${url}`, {
+      ...init,
+      headers: {
+        ...(init.headers ?? {}),
+        accept: 'text/event-stream',
+        ...(await authHeaders()),
+      },
+    })
+    return { ok: response.ok, status: response.status, body: response.body }
+  }
+}
+
+/** Watch status copy (workspace.watch.* — the panel paints it in the
+ *  watch note row). */
+function watchStatusKey(status: string): string {
+  switch (status) {
+    case 'connecting': return 'workspace.watch.connecting'
+    case 'live': return 'workspace.watch.live'
+    case 'reconnecting': return 'workspace.watch.reconnecting'
+    case 'polling': return 'workspace.watch.polling'
+    case 'disconnected': return 'workspace.watch.disconnected'
+    default: return ''
+  }
+}
+
+/** Start the SSE watch stream for the active workspace (falls back to
+ *  listSince polling when the stream gives up). One client per project;
+ *  the tree/tabs merge is identical on both transports. */
 function startWorkspaceWatch(body: HTMLElement, projectId: string, st: WorkspacePanelState): void {
-  if (watchTimer !== null && watchProject === projectId) return
+  if (watchClient !== null && watchProject === projectId) return
   stopWorkspaceWatch()
   watchProject = projectId
-  watchTimer = setInterval(() => { void watchTick(body, projectId, st) }, WORKSPACE_WATCH_POLL_MS)
-}
-
-async function watchTick(body: HTMLElement, projectId: string, st: WorkspacePanelState): Promise<void> {
-  const wsId = st.activeWorkspaceId
-  if (wsId === '' || st.tree.info === null || st.tree.status !== 'ready') return
-  const since = st.tree.info.revision
-  const payload = await api<WorkspaceListSincePayload>(
-    `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wsId)}/nodes?after_revision=${since}`,
-  )
-  if (payload === null) return
-  const hadChanges = (Array.isArray(payload.nodes) && payload.nodes.length > 0)
-    || (Array.isArray(payload.deleted) && payload.deleted.length > 0)
-  st.tree = applyWorkspaceListSince(st.tree, payload)
-  st.tabs = applyWorkspaceFeedToTabs(st.tabs, payload.nodes)
-  // Repaint only when the feed actually changed something (typing in the
-  // editor must never be disrupted by an empty poll tick).
-  if (hadChanges) paintWorkspace(body, st, projectId)
+  watchClient = new WorkspaceWatchClient({
+    projectId,
+    target: () => {
+      const wsId = st.activeWorkspaceId
+      if (wsId === '' || st.tree.info === null || st.tree.status !== 'ready') return null
+      return { workspaceId: wsId, revision: st.tree.info.revision }
+    },
+    fetchImpl: watchStreamFetch(),
+    pollListSince: async (afterRevision) => {
+      const wsId = st.activeWorkspaceId
+      if (wsId === '') return null
+      return api<WorkspaceListSincePayload>(
+        `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wsId)}/nodes?after_revision=${afterRevision}`,
+      )
+    },
+    onFeed: (payload) => {
+      const hadChanges = (Array.isArray(payload.nodes) && payload.nodes.length > 0)
+        || (Array.isArray(payload.deleted) && payload.deleted.length > 0)
+      st.tree = applyWorkspaceListSince(st.tree, payload)
+      st.tabs = applyWorkspaceFeedToTabs(st.tabs, payload.nodes)
+      // Repaint only when the feed actually changed something (typing in the
+      // editor must never be disrupted by an empty tick).
+      if (hadChanges) paintWorkspace(body, st, projectId)
+    },
+    onStatus: (status) => {
+      watchStatusText = watchStatusKey(status)
+      if (watchStatusEl !== null) {
+        const text = watchStatusText === '' ? '' : t('workspace', watchStatusText)
+        watchStatusEl.textContent = text
+      }
+    },
+  })
+  watchClient.start()
 }
 
 /* ─────────────────────── data loading ─────────────────────── */
@@ -583,9 +637,16 @@ function paintWorkspace(body: HTMLElement, st: WorkspacePanelState, projectId: s
     split.appendChild(editorBox)
     panel.appendChild(split)
 
+    const watchRow = el('div', 'row')
+    watchRow.style.cssText = 'font-size:10px;padding-top:6px;border-top:1px solid var(--border-2);margin-top:8px;gap:8px'
     const watchNote = el('div', 'muted', t('workspace', 'workspace.watch.note', { seconds: String(Math.round(WORKSPACE_WATCH_POLL_MS / 1000)) }))
-    watchNote.style.cssText = 'font-size:10px;padding-top:6px;border-top:1px solid var(--border-2);margin-top:8px'
-    panel.appendChild(watchNote)
+    watchNote.style.cssText = 'flex:1'
+    watchRow.appendChild(watchNote)
+    const statusEl = el('span', 'artifact-kind', watchStatusText === '' ? '' : t('workspace', watchStatusText))
+    statusEl.setAttribute('aria-label', t('workspace', 'workspace.watch.aria'))
+    watchRow.appendChild(statusEl)
+    watchStatusEl = statusEl
+    panel.appendChild(watchRow)
     body.appendChild(panel)
   })
 }
