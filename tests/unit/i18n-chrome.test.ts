@@ -132,7 +132,7 @@ function stripInterpolation(span: string): string {
 const ALLOWED_HARDCODED: Record<string, string> = {
   // nested-template edge case: the line is already i18n'd —
   // t('common','common.updatedAt') + Intl time + raw lastError wire text.
-  'packages/dsh-research-ui/src/client/index.ts:1010': 'stamp line: t(updatedAt) + Intl time + raw lastError (nested template)',
+  'packages/dsh-research-ui/src/client/index.ts:1022': 'stamp line: t(updatedAt) + Intl time + raw lastError (nested template)',
   // nested-template edge case: raw wire join of verification history
   // (timestamp · reason), displayed verbatim.
   'packages/dsh-research-ui/src/client/panels/evidence.ts:254': 'raw history join: when · reason (nested template)',

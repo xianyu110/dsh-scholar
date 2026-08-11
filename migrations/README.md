@@ -3,10 +3,10 @@
 The Research Kernel owns its schema version and ordered migration steps in
 `packages/research-kernel/src/migrations.ts` (storage-migrations.md §8):
 
-- `SCHEMA_VERSION` — the current database schema version (integer, currently 15
-  after migrations 0001–0017).
+- `SCHEMA_VERSION` — the current database schema version (integer, currently 16
+  after migrations 0001–0018).
 - `MIGRATIONS` — the ordered, checksummed, idempotent migration steps
-  (`0001_schema_v2_initial` … `0017_v1_legacy_marks`). Each step records
+  (`0001_schema_v2_initial` … `0018_workspace_recovery_quarantine`). Each step records
   `(id, checksum, applied_at, report_json)` in `schema_migrations`; re-running
   the same id+checksum is a no-op, a different checksum fails loud.
 - The legacy v1 fixture for upgrade drills lives at

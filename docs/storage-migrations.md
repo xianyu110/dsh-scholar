@@ -627,3 +627,29 @@ jobs/status/kind、Evidence provenance、Claim status 等 enum 由文中 CHECK �
 备份包含 SQLite consistent backup、CAS inventory、schema version 和 instance metadata。恢复后运行：foreign_key_check、Artifact Blob existence/hash、跨项目引用、Job lease/run_id、Decision Principal、Evidence provenance、Workspace/Tex manifest/file refs、PTY generation/expiry、Config hash、Intake adoption completeness、Trajectory cursor/event uniqueness、Bundle hashes。
 
 Kernel kill -9 后 WAL 恢复必须保持 Gate、Job、Terminal/PTY exit、Workspace/TeX revision、Adoption、Config revision 和 Outbox 一致。恢复流程不得把 running 直接视为 succeeded；过期 lease 进入 retryable，in-progress adoption 只能重驱同一 transaction 或回滚。
+
+### 10.1 Workspace 崩溃恢复协议（WORK-01 §5 P2，migration 0018）
+
+workspace 的每次 mutation 是**两种介质上的两个提交**：磁盘字节的原子写（临时文件+rename / rename / unlink）与 SQLite 的 `workspace_nodes` row + `workspace_ops` ledger 更新。两者之间崩溃会留下两个窗口——"磁盘新字节+旧 row"（rename 已完成、row 更新未落）或 "row 指向缺失字节"（unlink 已完成、row 删除未落）。恢复协议 = **op-ledger 回放 + 启动恢复扫描**（`WorkspaceStore.scanWorkspaceIntegrity()`，kernel 构造期自动运行（`KernelOptions.recoverWorkspacesOnOpen`，默认 true）+ 按需调用；每 workspace 的修复在单事务内应用，全部幂等——double-scan 收敛到同一状态）。
+
+**ledger 可回放性**：`workspace_ops` 已记录的内容足以回放——create/write 携带目标 `version`+`sha256`，delete 携带被删 `version`+`sha256`，move 携带目标 `path`+`from_path`+`version`+`sha256`；每个路径的"最后一条 op"即该路径应处的状态。无需扩展 ledger 字段。
+
+**逐窗口处理**（对每个 fs/DB 边界）：
+
+- **写（rename 后、row 更新前）**：磁盘新字节 + 旧 row → 按磁盘字节前滚 row（version+1、hash/size/media 取自字节、补记 write op、revision+1）。二进制节点要求新字节已在 CAS（writeBinary 先 `cas.put` 再 rename）；新字节不在 CAS → 视为篡改，从 CAS 恢复**已提交**字节。
+- **row 指向缺失字节**：
+  - 二进制 → 从 artifact CAS 恢复精确字节（blob_sha256 即内容寻址副本）；
+  - 文本且本版本字节保留于 history（`{path}@{version}`——只有 delete 路径先 keepHistory 再 unlink）→ 前滚完成 in-flight delete（删 row、补记 delete op；undo 经 readVersion 仍可回退）；
+  - move rename 已发生但未落库 → 孤儿文件 hash 与源 row 匹配 → 回滚 re-associate（rename 回源路径）；目标 row 已插入（同 hash 兄弟 row 持有磁盘字节）→ 前滚完成 move（删源 row、补记 move op 带 from_path）；
+  - 无任何可证副本 → **隔离**。
+- **孤儿磁盘文件（无 row 无 op 且非 move 目标）**：未提交的 create（rename 完成、row insert 未落）→ 回滚删除。
+- **已删 row 但缺 delete op**（row+字节已无、op 未落）→ 补记 delete op，ledger 保持完整历史。
+- **磁盘字节等于某更早 ledger 版本**（operator 从 history 恢复过）→ row 回滚到该版本（op 已存在，不补记）。
+- **孤儿 `.ws-tmp-<8hex>`**（树内 + `.ws-meta` 历史区）→ 删除；被 row 覆盖的同名文件不误删。
+- **超上限文件 / 树内 symlink**：外部篡改——有 CAS 副本则恢复，否则隔离。
+
+**隔离语义**：无法可证修复时把 `workspaces.quarantine = <reason>` 落库（migration 0018 增加列，SCHEMA_VERSION 16，幂等 ensureColumn；0011 已发布 WORKSPACE_DDL 不原地改，store 自身连接用同款存在性检查收敛——STORE-08）。隔离 workspace 的一切读写/move/delete/history/watch/快照拒绝（HTTP 503 `workspace_inconsistent`）直到字节恢复后下一次扫描干净收敛自动清除（自愈，无手工 flag）。列由 0018 增加，旧库升级即得。
+
+**验证**：tests/unit/crash-recovery.test.ts 11/11（全窗口 + 双扫幂等 + 重启持久 + 自愈）、tests/unit/workspace-store.test.ts 16/16、tests/unit/backup.test.ts 2/2、tests/unit/migrations.test.ts 16/16（0018 列/rewind 幂等）、tests/security/run-workspace-tests.sh 41/41（ws-crash-recovery 3 断言：真实 kernel 进程 kill+重启同 dataDir——启动隔离 503、恢复字节自愈、rename-before-row 前滚 v2）。
+
+**Fleet 侧**（§5 P2 附项）：`InMemoryAgentRegistry`、`RemoteFleetServer` 的 pending/outstanding/stages/claimedJobIds 与代理端 `AgentOutboundSpool` 全部为内存态（无磁盘 spool）。重启丢失按既有 lease 过期语义自愈，不引入大持久化框架：agent 重启后重新 register/heartbeat；fleet 重启后 kernel lease 过期（默认 300s TTL）→ 旧 claim 后续写入 409 lease_stale、job 回 queued retryable → fleet 重新 claim 分发；spool 内存条目随 agent 进程丢失 → terminal 帧缺 seq（kernel retention/gap 语义兜底），业务终态仍由 complete/cancel transaction 决定（详见 remote-runner-wire.md §5.3 / execution-runtime.md §5.1）。

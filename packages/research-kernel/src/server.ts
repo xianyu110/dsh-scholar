@@ -690,11 +690,14 @@ function fail(res: ServerResponse, error: unknown): void {
   } else if (error instanceof WorkspaceError) {
     // WORK-01 wire mapping: version/etag/destination conflicts → 409,
     // missing nodes/workspaces → 404, oversized nodes → 413, path/binary/
-    // kind validation → 422.
+    // kind validation → 422, quarantined workspace (recovery scan could not
+    // provably repair it) → 503 (server-side consistency state, retry will
+    // not help until the operator restores the bytes).
     const status = error.code === 'workspace_not_found' || error.code === 'workspace_file_not_found' ? 404
       : error.code === 'workspace_version_conflict' || error.code === 'workspace_etag_conflict' || error.code === 'workspace_move_destination_exists' ? 409
         : error.code === 'workspace_file_too_large' ? 413
-          : 422
+          : error.code === 'workspace_inconsistent' ? 503
+            : 422
     send(res, status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof z.ZodError) {
     const issues = error.issues.map(i => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ')

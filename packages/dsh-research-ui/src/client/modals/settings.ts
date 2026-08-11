@@ -6,19 +6,32 @@ import { accentColor, accentSet, autoRefreshEnabled, autoRefreshSet, chatClear, 
 import { ACCENTS, ACCENT_DARK, copyText, el, rootHost, showToast, trapFocus } from '../ui'
 import { tokenProvider } from '../api'
 import { RADII, TEXTURES } from '../state'
-import { settingsKey, settingsSections } from '../settings-model'
+import {
+  configPinChanged, settingsConfigModel, settingsConfigPin, settingsConfigWrite,
+  settingsFieldDisplay, settingsKey, settingsSectionsForData,
+} from '../settings-model'
+import type { SettingsConfigField, SettingsEffectiveWire, SettingsSchemaWire } from '../settings-model'
 /* ─────────────────────────── settings modal ─────────────────────────── */
 
 /**
  * dsh-web "Settings" counterpart with UI-SIMPLE-01 progressive disclosure
- * (acceptance-tests.md §8 ui-settings): every section is an Accordion that
- * starts COLLAPSED (defaultCollapsed in the pure settingsSections() model),
- * each item carries its source / effective-status line, and the config
- * provenance section shows the kernel's effective config pin hash when the
- * registry data is available (health config_pin) — otherwise an honest
- * placeholder. Rows without a static value are dynamic slots filled below
- * with live controls (kernel health, selects, toggles). All copy goes
- * through t()/settingsKey() — no hardcoded chrome (i18n §8).
+ * (acceptance-tests.md §8 ui-settings) + CONFIG-01 dynamic generation
+ * (hardening §5 P1 CONFIG-01/UI-02/UI-03): every section is an Accordion
+ * that starts COLLAPSED (defaultCollapsed in the pure settingsSections()
+ * model), each item carries its source / effective-status line, and the
+ * config surface is GENERATED from GET /v1/config/schema +
+ * GET /v1/config/effective — one section per ConfigScope with every field
+ * showing its current (server-redacted) value, scope, declared sources,
+ * hot-reload verdict, security-floor marker and validation metadata.
+ * Secrets are never echoed (the server effective view is already redacted;
+ * the client only renders the set-but-hidden mask, never a plaintext). The
+ * effective config pin is shown with a change hint; the write surface does
+ * not exist in this revision, so the submit button is disabled with the
+ * honest read-only note. When the registry data is unavailable the honest
+ * placeholder sections remain (settingsSectionsForData(false)). Rows
+ * without a static value are dynamic slots filled below with live controls
+ * (kernel health, selects, toggles). All copy goes through t()/settingsKey()
+ * — no hardcoded chrome (i18n §8).
  */
 export async function openSettingsModal(root: ShadowRoot | null | undefined): Promise<void> {
   if (root == null) return
@@ -48,36 +61,54 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   }
   const openSections = settingsOpenLoad()
 
-  // One kernel health probe serves the connection section and the config
-  // provenance section (CONFIG-01: health carries config_pin).
-  const health = await api<{ ok?: boolean; instance?: string; config_pin?: string }>('/v1/health')
+  // One kernel health probe serves the connection section; the CONFIG-01
+  // surface (schema + effective) drives the dynamic config sections.
+  const [health, schema, effective] = await Promise.all([
+    api<{ ok?: boolean; instance?: string; config_pin?: string }>('/v1/health'),
+    api<SettingsSchemaWire>('/v1/config/schema'),
+    api<SettingsEffectiveWire>('/v1/config/effective'),
+  ])
+  const hasConfig = schema !== null && effective !== null &&
+    typeof effective.config === 'object' && effective.config !== null
+  const dynamicSections = hasConfig && schema !== null && effective !== null
+    ? settingsConfigModel(schema, effective)
+    : []
 
-  // ── Accordion sections from the pure model (settingsSections()) ──
-  for (const section of settingsSections()) {
+  /** One Accordion section (head + collapsible body, expand memory). */
+  const makeAccordion = (id: string, title: string, summary: string, defaultCollapsed: boolean):
+    { acc: HTMLElement; head: HTMLButtonElement; body: HTMLElement } => {
     const acc = el('div', 'settings-section')
-    acc.dataset.section = section.id
-    const open = openSections.has(section.id) || !section.defaultCollapsed
+    acc.dataset.section = id
+    const open = openSections.has(id) || !defaultCollapsed
     acc.dataset.open = open ? 'true' : 'false'
     const head = el('button', 'settings-section-head')
-    head.id = `settings-head-${section.id}`
+    head.id = `settings-head-${id}`
     head.setAttribute('aria-expanded', open ? 'true' : 'false')
-    head.setAttribute('aria-controls', `settings-body-${section.id}`)
-    head.setAttribute('aria-label', t('shell', 'shell.settings.accordion.toggle', { title: settingsKey(section.titleKey) }))
+    head.setAttribute('aria-controls', `settings-body-${id}`)
+    head.setAttribute('aria-label', t('shell', 'shell.settings.accordion.toggle', { title }))
     const caret = el('span', 'settings-section-caret', '▸')
-    const title = el('span', '', settingsKey(section.titleKey))
-    const summary = el('span', 'settings-section-summary', settingsKey(section.summaryKey))
-    head.append(caret, title, summary)
+    const titleEl = el('span', '', title)
+    const summaryEl = el('span', 'settings-section-summary', summary)
+    head.append(caret, titleEl, summaryEl)
     head.onclick = () => {
       const next = acc.dataset.open !== 'true'
       acc.dataset.open = next ? 'true' : 'false'
       head.setAttribute('aria-expanded', next ? 'true' : 'false')
-      if (next) openSections.add(section.id)
-      else openSections.delete(section.id)
+      if (next) openSections.add(id)
+      else openSections.delete(id)
       settingsOpenPersist(openSections)
     }
     acc.appendChild(head)
     const body = el('div', 'settings-section-body')
-    body.id = `settings-body-${section.id}`
+    body.id = `settings-body-${id}`
+    acc.appendChild(body)
+    return { acc, head, body }
+  }
+
+  // ── static sections (connection/appearance/preferences + config
+  // provenance; placeholders only when the registry data is unavailable) ──
+  for (const section of settingsSectionsForData(hasConfig)) {
+    const { acc, body } = makeAccordion(section.id, settingsKey(section.titleKey), settingsKey(section.summaryKey), section.defaultCollapsed)
     for (const row of section.rows) {
       const rowEl = el('div', 'settings-row')
       rowEl.dataset.row = row.id
@@ -96,8 +127,86 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       rowEl.appendChild(slot)
       body.appendChild(rowEl)
     }
-    acc.appendChild(body)
     modal.appendChild(acc)
+  }
+
+  // ── CONFIG-01 dynamic sections: one Accordion per ConfigScope generated
+  // from /v1/config/schema + /v1/config/effective (replaces the runner /
+  // workspace / terminal / tex / agent placeholders) ──
+  if (dynamicSections.length > 0) {
+    /** One schema field row: label + value (secret-masked) + meta + desc. */
+    const renderConfigField = (field: SettingsConfigField): HTMLElement => {
+      const row = el('div', 'settings-row settings-row-stack')
+      row.dataset.row = `config.${field.key}`
+      row.appendChild(el('span', 'settings-row-label', settingsKey(field.labelKey)))
+      const slot = el('div', 'settings-row-slot')
+      const display = settingsFieldDisplay(field)
+      const valueEl = el('span', 'mono settings-field-value')
+      if (display.kind === 'secret') {
+        // SecretRef future note: the server effective view is already
+        // redacted; the client only renders the mask, never a plaintext.
+        valueEl.textContent = t('shell', 'shell.settings.secretSet')
+        valueEl.style.color = 'var(--text-2)'
+        slot.appendChild(valueEl)
+      } else if (display.kind === 'none') {
+        valueEl.textContent = t('shell', 'shell.settings.valueNone')
+        slot.appendChild(valueEl)
+      } else {
+        valueEl.textContent = String(display.value ?? '') || '—'
+        if (display.kind === 'absent') {
+          const note = el('span', 'muted', settingsKey('shell.settings.notInEffective'))
+          note.style.cssText = 'font-size:10px'
+          slot.append(valueEl, note)
+        } else {
+          slot.appendChild(valueEl)
+        }
+      }
+      // meta chips: scope · sources · reload verdict · floor · env
+      const meta = el('div', 'settings-field-meta')
+      const chips: Array<{ text: string; color: string }> = [
+        { text: t('shell', 'shell.settings.scopeLabel', { scope: settingsKey(`shell.settings.scope.${field.scope}`) }), color: '' },
+        { text: t('shell', 'shell.settings.sourcesLabel', { sources: field.sources.join('/') }), color: '' },
+        {
+          text: field.reload === 'hot' ? t('shell', 'shell.settings.reloadHot') : t('shell', 'shell.settings.reloadRestart'),
+          color: field.reload === 'hot' ? 'var(--tone-green)' : 'var(--tone-amber)',
+        },
+      ]
+      if (field.securityFloor) chips.push({ text: t('shell', 'shell.settings.securityFloor'), color: 'var(--tone-red)' })
+      if (field.env !== undefined) chips.push({ text: t('shell', 'shell.settings.envAlias', { env: field.env }), color: '' })
+      for (const chip of chips) {
+        const chipEl = el('span', 'settings-chip', chip.text)
+        if (chip.color !== '') chipEl.style.color = chip.color
+        meta.appendChild(chipEl)
+      }
+      slot.appendChild(meta)
+      if (field.description !== '') {
+        // raw registry description — wire/model text displayed verbatim (§8 line 115)
+        slot.appendChild(el('div', 'settings-field-desc', field.description))
+      }
+      row.appendChild(slot)
+      return row
+    }
+
+    const configSectionEl = modal.querySelector('[data-section="config"]')
+    const holder = el('div')
+    for (const section of dynamicSections) {
+      if (section.fields.length === 0) continue
+      const { acc, body } = makeAccordion(section.id, settingsKey(section.titleKey), settingsKey(section.summaryKey), true)
+      for (const field of section.fields) body.appendChild(renderConfigField(field))
+      holder.appendChild(acc)
+    }
+    // Read-only footer: no PUT /v1/config (or project PATCH) in this
+    // revision — submit is disabled with the honest note.
+    const write = settingsConfigWrite()
+    const footer = el('div', 'settings-readonly-note')
+    footer.appendChild(el('span', '', settingsKey(write.noteKey)))
+    const saveBtn = el('button', 'hbtn', t('common', 'common.action.save'))
+    saveBtn.disabled = true
+    saveBtn.style.cssText = 'padding:2px 10px;opacity:.5;cursor:not-allowed'
+    footer.appendChild(saveBtn)
+    holder.appendChild(footer)
+    if (configSectionEl !== null) modal.insertBefore(holder, configSectionEl)
+    else modal.appendChild(holder)
   }
 
   /** Dynamic-slot lookup: rows without a static value get live controls. */
@@ -358,13 +467,27 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
     }
   }
 
-  // ── config provenance: effective config pin from the kernel registry ──
+  // ── config provenance: effective config pin from the CONFIG-01 surface
+  // (fallback: kernel health config_pin) with a change hint vs the last
+  // seen pin (persisted locally — the pin changes with ANY config change,
+  // including secrets, so a change means the running config moved) ──
   const pinSlot = slot('config', 'config.pin')
   if (pinSlot !== null) {
-    const pin = health?.config_pin
-    pinSlot.appendChild(el('span', 'mono', pin !== undefined && pin !== ''
-      ? t('shell', 'shell.settings.configPinValue', { pin })
-      : t('shell', 'shell.settings.configPinNone')))
+    const pin = effective !== null ? settingsConfigPin(effective) : health?.config_pin
+    if (pin !== undefined) {
+      pinSlot.appendChild(el('span', 'mono', t('shell', 'shell.settings.configPinValue', { pin })))
+      const PIN_KEY = 'dsh-scholar-ui-config-pin'
+      let previous: string | null = null
+      try { previous = localStorage.getItem(PIN_KEY) } catch { /* private mode */ }
+      if (configPinChanged(previous ?? undefined, pin)) {
+        const hint = el('span', '', t('shell', 'shell.settings.configPinChanged'))
+        hint.style.cssText = 'font-size:10.5px;color:var(--tone-amber)'
+        pinSlot.appendChild(hint)
+      }
+      try { localStorage.setItem(PIN_KEY, pin) } catch { /* private mode */ }
+    } else {
+      pinSlot.appendChild(el('span', 'mono', t('shell', 'shell.settings.configPinNone')))
+    }
   }
 
   overlay.appendChild(modal)

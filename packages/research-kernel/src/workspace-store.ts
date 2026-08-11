@@ -44,6 +44,37 @@
  *     `*`/`?` glob, `*` does not cross `/`) — content search is NOT
  *     implemented (documented limitation, no full-text index).
  *
+ * ── crash recovery (hardening-v0.2-status.md §5 P2, WORK-01) ──────────────────────────────
+ *
+ * Every mutation is TWO commits on two media: the atomic disk write/move/
+ * delete (temp+rename / rename / unlink) and the SQLite row+op-ledger
+ * update. A crash between them leaves a window: "new bytes on disk + old
+ * row" (rename done, row update pending) or "row pointing at missing
+ * bytes" (delete unlink done, row delete pending). `scanWorkspaceIntegrity()`
+ * is the recovery protocol (run at kernel startup and on demand):
+ *
+ *   - removes orphan `.ws-tmp-*` files (never referenced by any protocol);
+ *   - reconciles every row against its disk bytes and the `workspace_ops`
+ *     ledger (last op per path: create/write carry the expected version+hash,
+ *     delete the removed version+hash, move the dest path + from_path +
+ *     version + hash — sufficient to replay every committed op);
+ *   - repairs forward (roll the row to the disk bytes after a rename-before-
+ *     row crash; restore binary bytes from the artifact CAS; complete an
+ *     in-flight delete whose bytes are preserved in history; roll an
+ *     uncommitted move back by re-associating the orphan bytes with the
+ *     source row; record the delete op of an already-removed row) or rolls
+ *     back (an orphan file with no row and no op is an uncommitted create —
+ *     deleted);
+ *   - ISOLATES what it cannot provably repair (text bytes vanished with no
+ *     CAS/history copy, oversized/tampered files): the workspace is marked
+ *     `workspaces.quarantine = <reason>` (migration 0018) and every read/
+ *     write/move/delete is refused with `workspace_inconsistent` until the
+ *     bytes are restored and a later scan reconciles cleanly (which clears
+ *     the marker). All repairs are idempotent — re-running the scan after a
+ *     crash mid-scan converges to the same state.
+ *
+ *     implemented (documented limitation, no full-text index).
+ *
  * ── path safety (execution-runtime.md §4 snapshot-walk contract) ──────────
  *
  * Root-relative POSIX paths only; absolute paths, Windows drive prefixes,
@@ -131,6 +162,28 @@ export interface WorkspaceStoreLike {
 export interface WorkspaceExpected {
   version?: number
   etag?: string
+}
+
+/** One inconsistency found (and usually repaired) by the recovery scan
+ * (WORK-01 §5 P2, hardening-v0.2-status.md §5). */
+export interface WorkspaceIntegrityIssue {
+  path: string
+  kind: 'row_disk_missing' | 'row_disk_hash_mismatch' | 'size_cap_violation' | 'orphan_file' | 'symlink' | 'orphan_tmp' | 'ledger_gap'
+  detail: string
+  resolution: 'repaired' | 'isolated' | 'informational'
+}
+
+/** Per-workspace outcome of the recovery scan (`scanWorkspaceIntegrity`):
+ * `clean` = nothing to do; `repaired` = crash-window inconsistencies fixed;
+ * `isolated` = quarantined (unrepairable — reads/writes refused until a
+ * later scan reconciles cleanly); `recovered` = quarantine cleared. */
+export interface WorkspaceIntegrityReport {
+  workspace_id: string
+  status: 'clean' | 'repaired' | 'isolated' | 'recovered'
+  issues: WorkspaceIntegrityIssue[]
+  isolated: boolean
+  quarantined: boolean
+  orphan_tmp_removed: number
 }
 
 function nowIso(): string {
@@ -232,6 +285,13 @@ interface WorkspaceInfoRow {
   revision: number
   created_at: string
   updated_at: string
+  /** WORK-01 §5 P2: durable quarantine reason (NULL = healthy). Set by the
+   * recovery scan when an inconsistency cannot be provably repaired; every
+   * read/write/move/delete is then refused (workspace_inconsistent) until a
+   * later scan reconciles cleanly and clears it. Column added by migration
+   * 0018 and by the store's own connection convergence (never edited into
+   * the released WORKSPACE_DDL — STORE-08). */
+  quarantine: string | null
 }
 
 interface WorkspaceNodeRow {
@@ -265,6 +325,16 @@ export function openWorkspaceStore(dbPath: string, casRoot: string, workspacesRo
   return new WorkspaceStore(dbPath, casRoot, workspacesRoot)
 }
 
+/** Add a column to an existing table if absent (additive, idempotent —
+ * local copy of the migrations helper so the store's own WAL connection
+ * converges without an import cycle; see migration 0018). */
+function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>
+  if (!cols.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+  }
+}
+
 export class WorkspaceStore implements WorkspaceStoreLike {
   private readonly db: DatabaseSync
   private readonly cas: ArtifactCas
@@ -276,6 +346,10 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     this.db = new DatabaseSync(dbPath)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(WORKSPACE_DDL)
+    // WORK-01 §5 P2: the durable quarantine marker converges here (own
+    // connection) AND via migration 0018 (kernel connection) — the released
+    // WORKSPACE_DDL (0011) is never edited in place (STORE-08).
+    ensureColumn(this.db, 'workspaces', 'quarantine', 'TEXT')
     this.cas = new ArtifactCas(casRoot)
     this.workspacesRoot = workspacesRoot
     // WORK-01 §5: mkdir(mode) is umask-dependent — calibrate the created
@@ -317,6 +391,14 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     const segments = cleanPath.split('/')
     const last = segments.at(-1) ?? 'file'
     return join(this.historyRoot(workspaceId), ...segments.slice(0, -1), `${last}@${version}`)
+  }
+
+  /** History file path WITHOUT the quarantine gate — the recovery scan must
+   * be able to inspect a quarantined workspace's history. */
+  private historyPathDirect(workspaceId: string, cleanPath: string, version: number): string {
+    const segments = cleanPath.split('/')
+    const last = segments.at(-1) ?? 'file'
+    return join(this.workspacesRoot, '.ws-meta', workspaceId, 'history', ...segments.slice(0, -1), `${last}@${version}`)
   }
 
   /**
@@ -429,10 +511,31 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }
   }
 
-  private getInfoRow(workspaceId: string): WorkspaceInfoRow {
+  /** WORK-01 §5 P2: quarantine gate. Throws `workspace_inconsistent` when
+   * the workspace is marked (the recovery scan could not provably repair
+   * an inconsistency). Every public entry point reaches this through
+   * getInfoRow/getNodeRow/ensure, so a quarantined workspace is refused
+   * for reads, writes, moves, deletes, history, watch and snapshots alike. */
+  private assertHealthy(workspaceId: string): void {
+    const row = this.db.prepare('SELECT quarantine FROM workspaces WHERE workspace_id = ?').get(workspaceId) as { quarantine: string | null } | undefined
+    if (row === undefined) return // workspace_not_found is raised by the caller's row read
+    if (row.quarantine !== null && row.quarantine !== '') {
+      throw new WorkspaceError('workspace_inconsistent',
+        `workspace ${workspaceId} is quarantined after an integrity inconsistency: ${row.quarantine} — restore the workspace bytes (or roll the workspace back) and re-run the recovery scan (scanWorkspaceIntegrity)`)
+    }
+  }
+
+  /** Raw info row WITHOUT the quarantine gate (the recovery scan must be
+   * able to read quarantined workspaces). */
+  private infoRowDirect(workspaceId: string): WorkspaceInfoRow {
     const row = this.db.prepare('SELECT * FROM workspaces WHERE workspace_id = ?').get(workspaceId) as WorkspaceInfoRow | undefined
     if (row === undefined) throw new WorkspaceError('workspace_not_found', `workspace ${workspaceId} not found`)
     return row
+  }
+
+  private getInfoRow(workspaceId: string): WorkspaceInfoRow {
+    this.assertHealthy(workspaceId)
+    return this.infoRowDirect(workspaceId)
   }
 
   get(workspaceId: string): WorkspaceInfo {
@@ -450,7 +553,12 @@ export class WorkspaceStore implements WorkspaceStoreLike {
    * on disk with a 0750 chain. */
   ensure(projectId: string, kind: WorkspaceKind, name: string): WorkspaceInfo {
     const existing = this.db.prepare('SELECT * FROM workspaces WHERE project_id = ? AND kind = ? AND name = ?').get(projectId, kind, name) as WorkspaceInfoRow | undefined
-    if (existing !== undefined) return this.infoFromRow(existing)
+    if (existing !== undefined) {
+      // WORK-01 §5 P2: an existing quarantined workspace is never silently
+      // re-opened — the caller must repair it first (fail closed).
+      this.assertHealthy(existing.workspace_id)
+      return this.infoFromRow(existing)
+    }
     const at = nowIso()
     const info: WorkspaceInfo = {
       workspace_id: `ws_${randomUUID().slice(0, 12)}`,
@@ -484,6 +592,7 @@ export class WorkspaceStore implements WorkspaceStoreLike {
   }
 
   private getNodeRow(workspaceId: string, path: string): WorkspaceNodeRow | undefined {
+    this.assertHealthy(workspaceId)
     return this.db.prepare('SELECT * FROM workspace_nodes WHERE workspace_id = ? AND path = ?').get(workspaceId, path) as WorkspaceNodeRow | undefined
   }
 
@@ -771,6 +880,409 @@ export class WorkspaceStore implements WorkspaceStoreLike {
       created_at: row?.created_at ?? '',
       updated_at: row?.updated_at ?? '',
     }
+  }
+
+  // ── crash recovery (WORK-01 §5 P2, hardening-v0.2-status.md §5) ──────────────────────────────
+
+  /**
+   * WORK-01 §5 P2 recovery protocol: reconcile the disk bytes ↔
+   * `workspace_nodes` ↔ the `workspace_ops` ledger for one or every generic
+   * workspace, repairing crash-window inconsistencies (or isolating the
+   * workspace when a repair cannot be proven), and removing orphan
+   * `.ws-tmp-*` leftovers. Run at kernel startup and on demand; idempotent
+   * (re-running after a crash mid-scan converges to the same state).
+   *
+   * Per workspace, in order:
+   *  1. orphan `.ws-tmp-*` removal (tree + history area; a file covered by
+   *     a row is never touched);
+   *  2. symlink removal (the tree is regular files only);
+   *  3. row reconciliation — binary rows restore their exact bytes from the
+   *     artifact CAS; an orphan file carrying exactly a row's hash is the
+   *     uncommitted rename of a move (rolled back); a same-hash sibling row
+   *     with bytes on disk is the move window after the destination insert
+   *     (completed forward); a row whose own version is preserved in history
+   *     is an in-flight delete (completed forward); a row whose disk bytes
+   *     differ from the row is rolled forward (crash between atomic rename
+   *     and row update — the task-prescribed repair), rolled back to a
+   *     known older ledger version when the bytes match one, or restored
+   *     from CAS when the row is binary;
+   *  4. orphan files with no row and no op are uncommitted creates (rolled
+   *     back — deleted);
+   *  5. ledger paths whose node is gone without a delete op get the delete op
+   *     recorded (the delete's row+bytes were already removed);
+   *  6. anything still unprovable marks `workspaces.quarantine = reason`
+   *     (workspace_inconsistent until a later scan reconciles cleanly).
+   *
+   * Returns one report per scanned workspace; scans all generic workspaces
+   * when `workspaceId` is omitted (manuscript workspaces are TeX-facade
+   * backed and never enter this store's tables).
+   */
+  scanWorkspaceIntegrity(workspaceId?: string): WorkspaceIntegrityReport[] {
+    const ids = workspaceId !== undefined
+      ? [workspaceId]
+      : (this.db.prepare('SELECT workspace_id FROM workspaces ORDER BY workspace_id').all() as unknown as Array<{ workspace_id: string }>)
+          .map(r => r.workspace_id)
+    return ids.map(id => this.scanOneWorkspace(id))
+  }
+
+  /** One workspace of the recovery protocol (see scanWorkspaceIntegrity). */
+  private scanOneWorkspace(workspaceId: string): WorkspaceIntegrityReport {
+    const info = this.infoRowDirect(workspaceId)
+    const report: WorkspaceIntegrityReport = {
+      workspace_id: workspaceId,
+      status: 'clean',
+      issues: [],
+      isolated: false,
+      quarantined: info.quarantine !== null && info.quarantine !== '',
+      orphan_tmp_removed: 0,
+    }
+    const push = (path: string, kind: WorkspaceIntegrityIssue['kind'], detail: string, resolution: WorkspaceIntegrityIssue['resolution']): void => {
+      report.issues.push({ path, kind, detail, resolution })
+    }
+    // NOTE: never route through absPath/workspaceRoot here — they carry the
+    // quarantine gate and the scan must be able to read quarantined state.
+    const root = join(this.workspacesRoot, info.project_id, workspaceId)
+
+    // Ledger view: last op per path, all ops per path, moved-from paths.
+    const ops = this.db.prepare('SELECT * FROM workspace_ops WHERE workspace_id = ? ORDER BY seq').all(workspaceId) as unknown as WorkspaceOpRow[]
+    const lastOpByPath = new Map<string, WorkspaceOpRow>()
+    const opsByPath = new Map<string, WorkspaceOpRow[]>()
+    const movedFrom = new Set<string>()
+    for (const op of ops) {
+      lastOpByPath.set(op.path, op)
+      const list = opsByPath.get(op.path) ?? []
+      list.push(op)
+      opsByPath.set(op.path, list)
+      if (op.op === 'move' && op.from_path !== null) movedFrom.add(op.from_path)
+    }
+    let maxRev = info.revision
+    for (const op of ops) maxRev = Math.max(maxRev, op.workspace_revision)
+
+    // Rows + disk inventory.
+    const rows = this.db.prepare('SELECT * FROM workspace_nodes WHERE workspace_id = ? ORDER BY path').all(workspaceId) as unknown as WorkspaceNodeRow[]
+    const rowByPath = new Map(rows.map(r => [r.path, r] as const))
+    const disk = this.walkTree(root)
+    const hashCache = new Map<string, string>()
+    const diskHash = (rel: string): string | null => {
+      const cached = hashCache.get(rel)
+      if (cached !== undefined) return cached
+      try {
+        const h = sha256Hex(readFileSync(join(root, ...rel.split('/'))))
+        hashCache.set(rel, h)
+        return h
+      } catch {
+        return null
+      }
+    }
+
+    // 1. Orphan `.ws-tmp-*` cleanup (files covered by a row are protected —
+    // a legitimately named node must never be mistaken for debris).
+    report.orphan_tmp_removed =
+      this.removeOrphanTmp(root, rel => rowByPath.has(rel)) +
+      this.removeOrphanTmp(join(this.workspacesRoot, '.ws-meta', workspaceId), () => false)
+
+    // 2. Symlink pre-pass: the tree is regular files only; a symlink is
+    //    host tampering — remove it, then the row pass sees a missing file.
+    for (const rel of [...disk.keys()]) {
+      let st
+      try {
+        st = lstatSync(join(root, ...rel.split('/')))
+      } catch {
+        disk.delete(rel)
+        continue
+      }
+      if (!st.isSymbolicLink()) continue
+      try {
+        unlinkSync(join(root, ...rel.split('/')))
+      } catch { /* raced */ }
+      disk.delete(rel)
+      push(rel, 'symlink', 'symlink where a regular file is expected — removed (host tampering)', 'repaired')
+    }
+
+    // 3. Orphan candidates: disk files with no row, no op and no move-from
+    //    path — an uncommitted create (rename done, row insert pending) or
+    //    an uncommitted move destination. The hash decides which.
+    const orphanCandidates = new Set(
+      [...disk.keys()].filter(rel => !rowByPath.has(rel) && !lastOpByPath.has(rel) && !movedFrom.has(rel)),
+    )
+
+    // Repair actions (applied atomically per workspace at the end).
+    const rowUpdates: Array<{ row: WorkspaceNodeRow; version: number; hash: string; size: number; media: string; binary: number; blob_sha256: string | null }> = []
+    const rowDeletes: Array<{ row: WorkspaceNodeRow; kind: 'delete' | 'move'; moveDest?: string; moveVersion?: number }> = []
+    const recordDeletes: Array<{ path: string; version: number | null; sha256: string | null }> = []
+    const unrepairable: string[] = []
+
+    // 4. Row reconciliation.
+    for (const row of rows) {
+      const target = join(root, ...row.path.split('/'))
+      const st = disk.get(row.path)
+      if (st === undefined) {
+        // ── row points at missing bytes ──
+        // (a) binary node: the artifact CAS holds the exact committed bytes.
+        if (row.binary === 1 && row.blob_sha256 !== null && this.cas.has(row.blob_sha256)) {
+          this.writeBytesAtomic(target, this.cas.read(row.blob_sha256))
+          push(row.path, 'row_disk_missing', 'binary node bytes restored from the artifact CAS', 'repaired')
+          continue
+        }
+        // (b) uncommitted move rollback: an orphan file carrying exactly the
+        //     row's bytes (moveNode renamed the file, the DB was never told).
+        let matched: string | null = null
+        for (const rel of orphanCandidates) {
+          if (diskHash(rel) === row.content_hash) {
+            matched = rel
+            break
+          }
+        }
+        if (matched !== null) {
+          orphanCandidates.delete(matched)
+          disk.delete(matched)
+          mkdirMode(dirname(target), 0o750)
+          renameSync(join(root, ...matched.split('/')), target)
+          push(row.path, 'row_disk_missing', `uncommitted move rolled back: orphan bytes at ${matched} re-associated with the source row`, 'repaired')
+          continue
+        }
+        // (c) in-flight move (destination row already inserted): a sibling
+        //     row with the same hash holds the bytes on disk — complete the
+        //     move forward (source row removed, move op recorded).
+        const sibling = rows.find(r2 => r2.path !== row.path && r2.content_hash === row.content_hash && disk.has(r2.path))
+        if (sibling !== undefined) {
+          rowDeletes.push({ row, kind: 'move', moveDest: sibling.path, moveVersion: sibling.version })
+          push(row.path, 'row_disk_missing', `uncommitted move completed forward: bytes live at ${sibling.path} (same hash), source row removed`, 'repaired')
+          continue
+        }
+        // (d) in-flight delete: the row's own bytes are preserved in history
+        //     (`{path}@{version}` — only the delete path removes the live
+        //     file while keeping the current version) — complete it forward.
+        const historyFile = this.historyPathDirect(workspaceId, row.path, row.version)
+        if (existsSync(historyFile) && sha256Hex(readFileSync(historyFile)) === row.content_hash) {
+          rowDeletes.push({ row, kind: 'delete' })
+          push(row.path, 'row_disk_missing', 'row bytes preserved in history — in-flight delete completed forward (undo keeps the version)', 'repaired')
+          continue
+        }
+        // (e) nothing provable — isolate.
+        unrepairable.push(`row ${row.path} (v${row.version}) has no disk bytes and no recoverable copy (CAS/history/orphan)`)
+        push(row.path, 'row_disk_missing', 'no recoverable copy — workspace isolated', 'isolated')
+        continue
+      }
+      if (st.size > WORKSPACE_MAX_FILE_BYTES) {
+        // Oversized disk file: only external tampering can produce one
+        // (every write enforces the cap). Restore the committed bytes when
+        // a copy exists, otherwise isolate.
+        if (row.binary === 1 && row.blob_sha256 !== null && this.cas.has(row.blob_sha256)) {
+          this.writeBytesAtomic(target, this.cas.read(row.blob_sha256))
+          push(row.path, 'size_cap_violation', 'disk file exceeded the size cap — restored committed bytes from the artifact CAS', 'repaired')
+          continue
+        }
+        unrepairable.push(`disk file ${row.path} is ${st.size} bytes (cap ${WORKSPACE_MAX_FILE_BYTES}) with no committed copy — external tampering`)
+        push(row.path, 'size_cap_violation', 'no committed copy available — workspace isolated', 'isolated')
+        continue
+      }
+      const h = diskHash(row.path)
+      if (h === null) continue // vanished between walk and hash — next scan converges
+      if (h === row.content_hash) {
+        // Consistent row+disk. Informational ledger check: the last op for
+        // the path must describe this exact state (a missing/mismatched op
+        // record is a crash window whose row+disk already agree — nothing
+        // to repair, the history feed is simply one entry short).
+        const last = lastOpByPath.get(row.path)
+        if (last === undefined) {
+          push(row.path, 'ledger_gap', 'row/disk consistent but the ledger has no op for this path — informational', 'informational')
+        } else if (last.op !== 'delete' && last.op !== 'move' && (last.version !== row.version || last.sha256 !== row.content_hash)) {
+          push(row.path, 'ledger_gap', 'row/disk consistent but the ledger last op does not match the row — informational', 'informational')
+        }
+        continue
+      }
+      // ── disk carries different bytes than the row ──
+      // (a) the disk holds a KNOWN older ledger version (e.g. an operator
+      //     restored bytes from history): roll the row back to that version
+      //     (the op already exists — nothing to record).
+      const known = (opsByPath.get(row.path) ?? []).find(o =>
+        (o.op === 'create' || o.op === 'write' || o.op === 'move') && o.version !== null && o.version < row.version && o.sha256 === h)
+      if (known !== undefined) {
+        rowUpdates.push({
+          row, version: known.version as number, hash: h, size: st.size,
+          media: row.binary === 1 ? row.media : mediaTypeOf(row.path), binary: row.binary,
+          blob_sha256: row.binary === 1 ? h : null,
+        })
+        push(row.path, 'row_disk_hash_mismatch', `disk holds the bytes of ledger version ${known.version} — row rolled back to that version`, 'repaired')
+        continue
+      }
+      if (row.binary === 1) {
+        if (row.blob_sha256 !== null && this.cas.has(h)) {
+          // In-flight binary write: the new bytes are already in the CAS
+          // (writeBinary registers the CAS first, then renames).
+          rowUpdates.push({ row, version: row.version + 1, hash: h, size: st.size, media: row.media, binary: 1, blob_sha256: h })
+          push(row.path, 'row_disk_hash_mismatch', 'disk carries new bytes present in CAS — in-flight binary write rolled forward', 'repaired')
+          continue
+        }
+        if (row.blob_sha256 !== null && this.cas.has(row.blob_sha256)) {
+          this.writeBytesAtomic(target, this.cas.read(row.blob_sha256))
+          push(row.path, 'row_disk_hash_mismatch', 'disk bytes match neither row nor CAS — restored committed bytes from the artifact CAS', 'repaired')
+          continue
+        }
+        unrepairable.push(`binary row ${row.path} bytes on disk match neither row nor CAS`)
+        push(row.path, 'row_disk_hash_mismatch', 'no committed copy available — workspace isolated', 'isolated')
+        continue
+      }
+      // Text node: crash window "rename done, row update pending" — the
+      // bytes are the newest committed truth on disk; roll the row forward
+      // deterministically (version+1; hash/size/media from the bytes; the op
+      // is recorded with the exact shape the write would have produced).
+      rowUpdates.push({ row, version: row.version + 1, hash: h, size: st.size, media: mediaTypeOf(row.path), binary: 0, blob_sha256: null })
+      push(row.path, 'row_disk_hash_mismatch', `crash between atomic rename and row update — row rolled forward to the disk bytes (v${row.version + 1})`, 'repaired')
+    }
+
+    // 5. Orphan files (no row, no op, not moved-from): an uncommitted
+    //    create whose rename completed but whose row insert never ran —
+    //    roll the create back (the file was never committed anywhere).
+    for (const rel of [...orphanCandidates]) {
+      try {
+        unlinkSync(join(root, ...rel.split('/')))
+      } catch { /* raced */ }
+      push(rel, 'orphan_file', 'disk file with no row and no ledger op — uncommitted create rolled back', 'repaired')
+    }
+
+    // 6. Ledger paths whose node is gone without a delete op: the delete
+    //    window "row+bytes already removed, op record pending" — record the
+    //    delete op so the ledger stays a complete history. (Rows still
+    //    present were handled in step 4 and are skipped here.)
+    for (const [path, op] of lastOpByPath) {
+      if (op.op === 'delete' || movedFrom.has(path) || rowByPath.has(path)) continue
+      if (op.op === 'move') {
+        // A move op's destination row missing is not explainable by any
+        // crash window (the dest row insert precedes the op record).
+        push(path, 'ledger_gap', 'move op exists but the destination row is missing — informational', 'informational')
+        continue
+      }
+      if (op.op === 'create' || op.op === 'write') {
+        recordDeletes.push({ path, version: op.version, sha256: op.sha256 })
+        push(path, 'row_disk_missing', 'row and bytes already gone — in-flight delete completed forward (delete op recorded)', 'repaired')
+      }
+    }
+
+    // 7. Isolation decision: a durable quarantine marker refuses every read
+    //    and write (workspace_inconsistent) until the bytes are restored and
+    //    a later scan reconciles cleanly (which clears the marker).
+    if (unrepairable.length > 0) {
+      report.isolated = true
+      report.status = 'isolated'
+      this.db.prepare('UPDATE workspaces SET quarantine = ?, updated_at = ? WHERE workspace_id = ?')
+        .run(unrepairable.join('; '), nowIso(), workspaceId)
+    }
+
+    // 8. Apply repairs atomically (idempotent — re-running converges).
+    if (rowUpdates.length > 0 || rowDeletes.length > 0 || recordDeletes.length > 0) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        const updateRow = this.db.prepare(
+          'UPDATE workspace_nodes SET version = ?, binary = ?, media = ?, size_bytes = ?, blob_sha256 = ?, content_hash = ?, updated_at = ? WHERE workspace_id = ? AND path = ?')
+        for (const u of rowUpdates) {
+          updateRow.run(u.version, u.binary, u.media, u.size, u.blob_sha256, u.hash, nowIso(), workspaceId, u.row.path)
+          maxRev += 1
+          this.recordOp(workspaceId, 'write', u.row.path, maxRev, { version: u.version, sha256: u.hash })
+        }
+        const deleteRow = this.db.prepare('DELETE FROM workspace_nodes WHERE workspace_id = ? AND path = ?')
+        for (const d of rowDeletes) {
+          deleteRow.run(workspaceId, d.row.path)
+          maxRev += 1
+          if (d.kind === 'move' && d.moveDest !== undefined) {
+            this.recordOp(workspaceId, 'move', d.moveDest, maxRev, { from_path: d.row.path, version: d.moveVersion ?? null, sha256: d.row.content_hash })
+          } else {
+            this.recordOp(workspaceId, 'delete', d.row.path, maxRev, { version: d.row.version, sha256: d.row.content_hash })
+          }
+        }
+        for (const d of recordDeletes) {
+          maxRev += 1
+          this.recordOp(workspaceId, 'delete', d.path, maxRev, { version: d.version, sha256: d.sha256 })
+        }
+        if (maxRev > info.revision) {
+          this.db.prepare('UPDATE workspaces SET revision = ?, updated_at = ? WHERE workspace_id = ?').run(maxRev, nowIso(), workspaceId)
+        }
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }
+
+    // 9. Quarantine lifecycle: a previously quarantined workspace that now
+    //    reconciles cleanly is un-quarantined (status 'recovered').
+    if (!report.isolated && info.quarantine !== null && info.quarantine !== '') {
+      this.db.prepare('UPDATE workspaces SET quarantine = NULL, updated_at = ? WHERE workspace_id = ?').run(nowIso(), workspaceId)
+      report.quarantined = false
+      report.status = 'recovered'
+    } else if (!report.isolated && report.issues.some(i => i.resolution === 'repaired')) {
+      report.status = 'repaired'
+    }
+    return report
+  }
+
+  /** Recursively remove leftover atomic-write temp files
+   * (`<name>.ws-tmp-<8hex>`) under `dir` (missing dir → 0). Files for which
+   * `protectedRel` returns true (a row covers the relative path) are never
+   * touched. These files are not referenced by any protocol — a crash
+   * during writeBytesAtomic leaves exactly this debris. */
+  private removeOrphanTmp(dir: string, protectedRel: (rel: string) => boolean): number {
+    const TMP_RE = /\.ws-tmp-[0-9a-f]{8}$/
+    let removed = 0
+    const walk = (d: string, prefix: string): void => {
+      let entries: string[]
+      try {
+        entries = readdirSync(d)
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        const full = join(d, entry)
+        const rel = prefix === '' ? entry : `${prefix}/${entry}`
+        let st
+        try {
+          st = lstatSync(full)
+        } catch {
+          continue
+        }
+        if (st.isDirectory()) {
+          walk(full, rel)
+        } else if (st.isFile() && TMP_RE.test(entry) && !protectedRel(rel)) {
+          try {
+            unlinkSync(full)
+            removed += 1
+          } catch { /* raced */ }
+        }
+      }
+    }
+    walk(dir, '')
+    return removed
+  }
+
+  /** Recursive file inventory of a workspace tree root: relative path →
+   * {size}. Symlinks are reported (their size is 0 — the caller's lstat
+   * pre-pass removes them before hashing); directories are walked; a
+   * missing root yields an empty map. */
+  private walkTree(root: string): Map<string, { size: number }> {
+    const out = new Map<string, { size: number }>()
+    const walk = (dir: string, prefix: string): void => {
+      let entries: string[]
+      try {
+        entries = readdirSync(dir)
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        const full = join(dir, entry)
+        const rel = prefix === '' ? entry : `${prefix}/${entry}`
+        let st
+        try {
+          st = lstatSync(full)
+        } catch {
+          continue
+        }
+        if (st.isDirectory()) walk(full, rel)
+        else if (st.isFile() || st.isSymbolicLink()) out.set(rel, { size: st.isFile() ? st.size : 0 })
+      }
+    }
+    walk(root, '')
+    return out
   }
 }
 

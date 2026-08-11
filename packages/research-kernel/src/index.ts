@@ -33,7 +33,7 @@ export {
 export {
   openWorkspaceStore, WorkspaceStore, WorkspaceError, normalizeWorkspacePath, mediaTypeOf, withImpliedDirs, EMPTY_CONTENT_HASH,
   matchWorkspaceGlob, HISTORY_KEEP_VERSIONS, WORKSPACE_MAX_FILE_BYTES,
-  type WorkspaceStoreLike, type WorkspaceExpected,
+  type WorkspaceStoreLike, type WorkspaceExpected, type WorkspaceIntegrityIssue, type WorkspaceIntegrityReport,
 } from './workspace-store.js'
 export { TexWorkspaceFacade, texWorkspaceId, texDocumentId, texInfoToWorkspaceInfo, texEntryToWorkspaceNode } from './tex-facade.js'
 export {

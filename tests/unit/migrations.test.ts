@@ -51,13 +51,13 @@ describe('explicit migrations', () => {
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(15)
+    expect(SCHEMA_VERSION).toBe(16)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('15')
+    expect(meta.schema_version).toBe('16')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash', '0016_v2_shape_alignment', '0017_v1_legacy_marks'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash', '0016_v2_shape_alignment', '0017_v1_legacy_marks', '0018_workspace_recovery_quarantine'])
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
@@ -114,7 +114,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('15')
+    expect(version).toBe('16')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -158,7 +158,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('16')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -207,8 +207,8 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(16)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(17)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('16')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -233,7 +233,7 @@ describe('explicit migrations', () => {
     db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run()
     runMigrations(db)
     // Version bumped; outbox columns re-added by the new migration.
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('16')
     const cols = tableInfo(db, 'events').map(c => c.name)
     for (const c of outboxCols) expect(cols).toContain(c)
     // Existing rows get default envelope values + a stable backfilled seq.
@@ -362,7 +362,7 @@ describe('explicit migrations', () => {
     const casDir = mkdtempSync(join(tmpdir(), 'dsh-mig-cas-'))
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path, undefined, casDir)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('16')
     // STORE-08 rule: the canonical body binds the up source AND the helpers
     // it executes — editing either changes the recorded checksum.
     const m17 = MIGRATIONS.find(x => x.id === '0017_v1_legacy_marks')
@@ -408,7 +408,7 @@ describe('explicit migrations', () => {
     // Re-open: idempotent — same marks, no duplicate artifacts, version stable.
     db.close()
     const db2 = openDatabase(path, undefined, casDir)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(16)
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(17)
     const echo2 = db2.prepare('SELECT synthetic_fixture, signature_status, legacy_log_artifact FROM jobs WHERE job_id = ?').get('job_echo1') as { synthetic_fixture: number; signature_status: string | null; legacy_log_artifact: string | null }
     expect(echo2.synthetic_fixture).toBe(1)
     expect(echo2.signature_status).toBeNull()
@@ -480,6 +480,30 @@ describe('explicit migrations', () => {
     expect(echo.legacy_log_artifact).toBe('legacy:in-payload')
     // No phantom artifact row referencing a missing blob (integrity stays clean).
     expect((db.prepare("SELECT COUNT(*) AS n FROM artifacts WHERE kind = 'log'").get() as { n: number }).n).toBe(0)
+    db.close()
+    rmSync(path, { recursive: false, force: true })
+  })
+
+  it('0018 (WORK-01 §5 P2): workspaces.quarantine column, idempotent rewind, durable marker survives re-open', () => {
+    const path = tmpDbPath()
+    const db = openDatabase(path)
+    // Fresh databases carry the column (0018 runs after 0011's released DDL).
+    const wsCols = tableInfo(db, 'workspaces').map(c => c.name)
+    expect(wsCols).toContain('quarantine')
+    // A quarantined row (as written by the recovery scan) reads back intact.
+    db.prepare("INSERT INTO workspaces (workspace_id, project_id, kind, name, revision, created_at, updated_at, quarantine) VALUES (?, 'p1', 'code', 'w', 1, ?, ?, ?)")
+      .run('ws_q1', '2026-08-11T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 'row a.txt (v1) has no disk bytes')
+    // Rewind 0018 (simulate a database produced by the PREVIOUS release):
+    // re-running adds the column back and touches nothing else.
+    db.exec("DELETE FROM schema_migrations WHERE id = '0018_workspace_recovery_quarantine'")
+    db.prepare("UPDATE meta SET value = '15' WHERE key = 'schema_version'").run()
+    runMigrations(db)
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('16')
+    const q = db.prepare('SELECT quarantine FROM workspaces WHERE workspace_id = ?').get('ws_q1') as { quarantine: string | null }
+    expect(q.quarantine).toContain('a.txt')
+    // The report row counts the quarantined marker (idempotent).
+    const m18 = MIGRATIONS.find(x => x.id === '0018_workspace_recovery_quarantine')
+    expect(m18?.body).toContain('ensureColumn')
     db.close()
     rmSync(path, { recursive: false, force: true })
   })

@@ -345,6 +345,8 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 所有 path、ETag、Revision 和 multipart 行为以 reconstruction-contracts.md 为准。TeX Document route 是绑定 manuscript workspace subtree 的领域 facade，不能维护第二套文件存储。
 
+**崩溃恢复语义（WORK-01 §5 P2，hardening §5 行，storage-migrations.md §10.1）**：kernel 启动与按需 `scanWorkspaceIntegrity()` 恢复扫描会把磁盘字节与 `workspace_nodes`/`workspace_ops` 收敛——可证修复（rename-before-row 前滚、CAS/历史恢复、孤儿回滚等）静默完成；不可证修复把 workspace 标记隔离，此后该 workspace 的全部路由（tree/nodes/assets/moves/history/search/events/snapshots/blob）返回 **503 `workspace_inconsistent`**，直到字节恢复后下一次扫描干净收敛自动解除。
+
 ## 18. Interactive Terminal
 
 | 方法 | 路径 | 说明 |

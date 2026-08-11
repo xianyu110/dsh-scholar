@@ -127,13 +127,26 @@ node scripts/generate-config-artifacts.mjs
 - 四个二进制均支持注册表生成的 `--help`；
 - ResearchKernel 构造（pin + fail fast）、createProject（project scope 经
   registry 校验，security floor 生效）、kernel HTTP（响应头 + health +
-  config/effective + config/schema）、standalone BFF（启动校验 + 响应头）。
+  config/effective + config/schema）、standalone BFF（启动校验 + 响应头）；
+- Settings UI（浏览器层，2026-08-11 修复轮，hardening §5 CONFIG-01/UI-02/UI-03）：
+  由 `/v1/config/schema` + `/v1/config/effective` 动态生成（settings-model.ts
+  `settingsConfigModel` 纯模型 + modals/settings.ts 接线）——每 ConfigScope 一组
+  Accordion（7 组覆盖注册表全部键），每字段展示 effective 当前值（服务端 redacted，
+  secret 只渲染掩码）、scope、声明来源、安全基线标记、env 别名、schema 描述与默认；
+  config pin 显示 + 变化提示；本修订无写接口（kernel 仅 GET effective/schema），
+  提交按钮禁用并注明“当前配置只读,经 CLI/env 提供”。
+
+注册表尚无 `hot_reload` 标记（如实记录）：Settings UI 的热生效/需重启按键的声明
+`sources` 推断——含 `http`/`ui` 来源的键按请求/新对象读取 → “保存后即时生效”；
+仅 `cli`/`env`/`file` 的键在进程启动时读取 → “需重启生效”。该推断规则与
+sources 客户端镜像一起由 tests/unit/settings-model.test.ts 对真实注册表钉死
+（逐键相等，防漂移）。
 
 后续（如实记录，未在本阶段实现）：
 
-- Settings UI（浏览器层）由 `/v1/config/schema` + `/v1/config/effective` 生成；
-  api-contracts.md §19 的 `/bff/research/config/*`（schema/effective/revisions/
-  PATCH/reset）随 Settings UI 一并落地；
+- api-contracts.md §19 的 `/bff/research/config/*`（schema/effective/revisions/
+  PATCH/reset）写面——落地后 Settings 提交按钮启用（本地校验与错误映射机制已
+  就绪并单测）；
 - job scope 键（每 Job 策略仍由 runner-profile + Job payload 派生）；
 - SecretRef 存储层（当前 secret 仍以 CLI/env/0600 文件提供，仅 registry 层脱敏与
-  pin 提交）。
+  pin 提交；客户端只显示掩码，明文永不回显）。

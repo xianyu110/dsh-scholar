@@ -129,6 +129,16 @@ frames/stage/finalize/complete 保存到本地有界 spool（`maxEntries`/
 - resume 幂等：断连恢复后 poll 回放同一 claim 时，代理端按 run_id 返回已存
   结果，不重复执行。
 
+> **持久化结论（WORK-01 §5 P2，hardening §5 行）**：spool（`AgentOutboundSpool`）
+> 与注册表（`InMemoryAgentRegistry`）、fleet 服务端的 pending/outstanding/
+> stages 状态全部为**内存态**，无磁盘 spool——进程重启即丢失，不引入大持久化
+> 框架。自愈依赖既有 lease 过期语义：agent 重启后重新 register/heartbeat；
+> fleet 重启后 kernel lease 过期（默认 300s TTL）→ 旧 claim 的后续写入 409
+> `lease_stale`、job 回 queued retryable → fleet 重新 claim 分发；spool 内存
+> 条目随 agent 进程丢失 → terminal 帧缺 seq（kernel retention/gap 语义兜底），
+> 业务终态仍由 complete/cancel transaction 决定（同一 run 不会因 spool 丢失
+> 被重复执行——执行与 complete 都在 agent 侧按 run_id 幂等）。
+
 ### 5.4 artifacts：staged + finalize + sha256
 
 - stage 只声明 `sha256`（64 位小写 hex）/`size`/`kind`/元数据；finalize 携带

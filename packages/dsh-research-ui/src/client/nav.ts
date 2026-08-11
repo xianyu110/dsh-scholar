@@ -19,6 +19,8 @@ import type { ProjectRow } from './types'
 /** Every panel tab key that exists in the app (panel renderers in index.ts). */
 export const ALL_TAB_KEYS = [
   'chat', 'phase', 'gates', 'runs', 'artifacts', 'evidence', 'budget', 'manuscript', 'terminal',
+  // TRAJ-01/SUBAGENT-01 (hardening §5): Trajectory / Topology tabs.
+  'trajectory', 'topology',
 ] as const
 export type TabKey = (typeof ALL_TAB_KEYS)[number]
 
@@ -29,8 +31,8 @@ export function isTabKey(key: string): key is TabKey {
 /** Four primary tabs (概览 / 运行 / 证据 / 文稿). */
 export const PRIMARY_TAB_KEYS: readonly TabKey[] = ['phase', 'runs', 'evidence', 'manuscript']
 
-/** Tabs collapsed behind the More menu (Gate、预算、产物、终端、对话). */
-export const MORE_TAB_KEYS: readonly TabKey[] = ['chat', 'gates', 'artifacts', 'budget', 'terminal']
+/** Tabs collapsed behind the More menu (Gate、预算、产物、终端、对话、轨迹、拓扑). */
+export const MORE_TAB_KEYS: readonly TabKey[] = ['chat', 'gates', 'artifacts', 'budget', 'terminal', 'trajectory', 'topology']
 
 /** More menu modal entry (Settings). */
 export const MORE_MODAL_KEYS = ['settings'] as const

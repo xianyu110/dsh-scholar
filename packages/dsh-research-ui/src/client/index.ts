@@ -29,6 +29,8 @@ import { renderArtifacts } from './panels/artifacts'
 import { renderEvidence } from './panels/evidence'
 import { renderBudget } from './panels/budget'
 import { renderManuscript } from './panels/manuscript'
+import { renderTrajectory } from './panels/trajectory'
+import { renderTopology } from './panels/topology'
 import { openSettingsModal } from './modals/settings'
 import { openCommandsModal, openShortcutsModal } from './modals/commands'
 import { openNotificationsModal, openSessionSearchModal, openProjectSwitcherModal } from './modals/search'
@@ -484,6 +486,14 @@ export function apply(): void {
 .settings-row-label { width:120px; color:var(--text-2); font-size:11.5px; flex-shrink:0; }
 .settings-row-slot { flex:1; min-width:0; display:flex; align-items:center; gap:8px; }
 .settings-row-slot .mono { font-size:10.5px; word-break:break-all; }
+/* CONFIG-01 dynamic field rows: stacked value + meta + description */
+.settings-row-stack { align-items:flex-start; }
+.settings-row-stack .settings-row-slot { flex-direction:column; align-items:stretch; gap:3px; padding:2px 0; }
+.settings-field-value { font-size:11px; word-break:break-all; }
+.settings-field-meta { display:flex; flex-wrap:wrap; gap:6px; margin-top:2px; }
+.settings-chip { font:400 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--text-3); background:var(--bg-hover); border:1px solid var(--border-2); border-radius:6px; padding:0 6px; }
+.settings-field-desc { color:var(--text-3); font-size:10.5px; line-height:1.5; }
+.settings-readonly-note { display:flex; align-items:center; gap:10px; justify-content:space-between; border:1px dashed var(--border-2); border-radius:10px; padding:8px 12px; margin:8px 0; color:var(--text-2); font-size:11px; }
 `
   root.appendChild(style)
 
@@ -1006,6 +1016,8 @@ export function apply(): void {
       case 'evidence': await renderEvidence(body, target); break
       case 'budget': renderBudget(body, projection); break
       case 'manuscript': renderManuscript(body, projection, target); break
+      case 'trajectory': await renderTrajectory(body, target); break
+      case 'topology': await renderTopology(body, target); break
     }
     const stamp = el('div', 'stamp', `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${state.lastError !== undefined ? ` · ⚠ ${state.lastError}` : ''}`)
     body.appendChild(stamp)

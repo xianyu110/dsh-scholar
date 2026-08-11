@@ -124,7 +124,7 @@ Diagnostics 将错误整理为 file:line；点击可跳到编辑器。TeX 原始
 
 Overview 的 Research Trajectory 显示权威 Gate/Job/Evidence/Manuscript 事件；Session Trajectory 显示 Agent 的消息和工具过程，后者不是科研事实。打开 Agent Topology 可展开 parent→child、查看 role/mode/running、时长、token/cost 和失败，点击 child 进入其安全 history，并用 breadcrumb 返回。
 
-one-shot child 只读；continuable child 只有 parent 在线且有权限才出现续问框。读取历史不会唤醒 Agent，原始 prompt、工具参数/结果、环境和 secret 默认不展示。服务端已实现:TRAJ-01/SUBAGENT-01 投影与拓扑 API 层(Outbox 只读投影、redaction、10k 事件分页、exact direct-child、breadcrumb、只读 history、followup 记录 message_id 不冒充执行);浏览器 Trajectory/Topology 树、进入 child 与 SSE 实时流仍属 UI 浏览器层剩余(Playwright 类环境不可用,未验收)。
+one-shot child 只读；continuable child 只有 parent 在线且有权限才出现续问框。读取历史不会唤醒 Agent，原始 prompt、工具参数/结果、环境和 secret 默认不展示。服务端已实现:TRAJ-01/SUBAGENT-01 投影与拓扑 API 层(Outbox 只读投影、redaction、10k 事件分页、exact direct-child、breadcrumb、只读 history、followup 记录 message_id 不冒充执行)。**UI 逻辑层已实现（commit 待定主代理统一提交）**：More 导航新增「轨迹」（Trajectory，`#tab=trajectory`）与「拓扑」（Topology，`#tab=topology`）两个面板——轨迹面板双泳道渲染 Research（权威）与 Session（观察）事件，每条泳道可「加载更多」分页（服务端 keyset 游标），条目显示 event_seq/时间/脱敏摘要，点击可展开 allowlisted 详情（聚合引用/来源/会话/状态/条目 ID，原始负载永不展示）；拓扑面板展示项目子代理直系树（点击节点懒加载其直接子项），「进入 child 详情」后顶部 breadcrumb 可逐级返回 parent，详情含状态/模式/类型与只读历史列表，底部为 one-shot 只读 follow-up 输入框（提交后仅返回 message_id，不激活 child）。剩余（浏览器视觉验收，Playwright 类环境不可用，记 NOT_RUN_MANUAL_PENDING）：双 lane 滚动/虚拟化（10k 节点 DOM 有界）、树展开/键盘/ARIA、follow-up 交互观感与 SSE 实时流。
 
 ## 10. Review 与 Release
 
@@ -144,7 +144,7 @@ Budget 页面显示模型、API、GPU、存储和并发。超过硬上限时项�
 
 Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步：每张卡含 code 徽标、三态标记（ready 可执行 / blocked 受阻 / done 已完成——done 灰显、blocked 因缺失前置条件而禁用、ready 高亮）、原因、需要 Human/Agent/Runner、缺失前置条件列表（点击受阻卡展开）、阻断说明和跳转目标页面的按钮（gates/runs/evidence/manuscript/budget 直达，ideas/contracts/release 收敛到总览）。标签优先按字典翻译，未登记 code 原样显示内核 label；未知状态动作（code='unknown'）只读，不提供猜测的执行按钮。旧内核的 `next_actions: string[]` 仍以列表形式兼容显示。
 
-所有配置集中在 Settings，默认折叠 Essentials、Execution、Workspace、Terminal、LaTeX、Agent/Trajectory、Security & Secrets、Diagnostics。每项显示 effective value、来源 scope/revision/hash、默认/修改和热更新/重启；Secret 只显示引用。修改只影响新 Job/PTY/Build。服务端已实现:canonical Config Registry(CONFIG-01,单一注册表 + parseCli 四二进制接入 + security floor + effective pin/redacted 视图 + 生成物 configs/generated/)与 kernel/standalone 的 x-config-pin 响应头、/v1/config/effective、/v1/config/schema;Settings UI(浏览器层,由 /v1/config/schema + /v1/config/effective 生成)与 /bff/research/config/*、job scope 键、SecretRef 存储层仍属后续阶段。
+所有配置集中在 Settings，默认折叠 Essentials、Execution、Workspace、Terminal、LaTeX、Agent/Trajectory、Security & Secrets、Diagnostics。每项显示 effective value、来源 scope/revision/hash、默认/修改和热更新/重启；Secret 只显示引用。修改只影响新 Job/PTY/Build。服务端已实现:canonical Config Registry(CONFIG-01,单一注册表 + parseCli 四二进制接入 + security floor + effective pin/redacted 视图 + 生成物 configs/generated/)与 kernel/standalone 的 x-config-pin 响应头、/v1/config/effective、/v1/config/schema。**Settings UI 已由 /v1/config/schema + /v1/config/effective 动态生成(2026-08-11,只读视图)**:每个 ConfigScope 一组折叠面板(global/project/job 保留/runner-profile/orchestrator/kernel/standalone,覆盖注册表全部键),每字段显示 effective 当前值(secret 只显示"已设置,不显示明文"掩码,明文永不回显)、scope、声明来源、安全基线标记、env 别名、schema 描述与默认;config pin 显示并在变化时提示;热生效/需重启按声明来源推断(注册表尚无 hot_reload 标记——含 http/ui 来源的键"保存后即时生效",仅 cli/env/file 的键"需重启生效",规则见 docs/config-registry.md §6);本版本无配置写接口(kernel 仅提供读取面),提交按钮禁用并注明"当前配置只读,经 CLI/env 提供"——修改配置请用各二进制 CLI flag 或 DSH_* env。/bff/research/config/* 写面、job scope 键与 SecretRef 存储层仍属后续阶段(本地校验与错误回显映射机制已就绪)。
 
 ## 12. 常见问题
 

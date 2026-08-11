@@ -143,6 +143,117 @@ export interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?:
 export interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
 export interface ProjectRow { project_id?: string; name?: string; status?: string; updated_at?: string }
 
+/* ── TRAJ-01/SUBAGENT-01 wire shapes (research-schemas/trajectory.ts
+ *  contract, docs/trajectory-subagents.md §1/§3 — mirrored structurally so
+ *  the browser bundle stays dependency-light). ── */
+
+export type TrajectoryLaneKey = 'research' | 'session'
+
+/** One projected, REDACTED trajectory entry (raw payload never leaves the
+ *  kernel; `summary` is the allowlisted, truncated projection). */
+export interface TrajectoryEntry {
+  entry_id: string
+  event_seq: number
+  event_version?: number
+  project_id: string
+  aggregate_type?: string | null
+  aggregate_id?: string | null
+  kind: string
+  lane: TrajectoryLaneKey
+  source?: string
+  occurred_at: string
+  session_id?: string | null
+  summary: string
+  status?: string | null
+}
+
+/** Keyset-paginated trajectory page ((event_seq, event_id) cursor). */
+export interface TrajectoryPage {
+  project_id: string
+  entries: TrajectoryEntry[]
+  next_after_seq: number | null
+  next_after_event_id: string | null
+  has_more: boolean
+  total: number
+  limit: number
+  lane: TrajectoryLaneKey | null
+}
+
+/** Research vs Session lanes for one project, each with its own cursor. */
+export interface TrajectoryLanes {
+  project_id: string
+  research: TrajectoryPage
+  session: TrajectoryPage
+}
+
+/** One topology node (direct children only; state/mode are wire enums). */
+export interface TopologyNode {
+  child_id: string
+  project_id: string
+  parent_id?: string | null
+  label?: string | null
+  summary?: string
+  kind?: string
+  mode?: string
+  state?: string
+  role?: string | null
+  started_at: string
+  ended_at?: string | null
+  has_children: boolean
+  children_count: number
+  seq: number
+  refs?: Array<{ kind: string; id: string }>
+}
+
+/** Direct children of one parent (or roots when parent_id is null). */
+export interface TopologyChildren {
+  project_id: string
+  parent_id: string | null
+  items: TopologyNode[]
+  total: number
+  next_after_seq: number | null
+  has_more: boolean
+}
+
+/** Exact-parent + breadcrumb (root → parent, self excluded) for one child. */
+export interface ChildDetail {
+  child_id: string
+  project_id: string
+  node: TopologyNode
+  parent: TopologyNode | null
+  breadcrumb: TopologyNode[]
+}
+
+/** Append-only per-child history row (started / state / followup). */
+export interface ChildHistoryEntry {
+  seq: number
+  event_id: string
+  child_id: string
+  type: string
+  occurred_at: string
+  summary: string
+}
+
+export interface ChildHistoryPage {
+  child_id: string
+  project_id: string
+  items: ChildHistoryEntry[]
+  next_after_seq: number | null
+  has_more: boolean
+  total: number
+}
+
+/** One-shot READ-ONLY followup acceptance (message_id only, never executes). */
+export interface FollowupReceipt {
+  message_id: string
+  child_id: string
+  project_id: string
+  accepted: boolean
+  read_only: boolean
+  state_unchanged: boolean
+  note: string
+}
+
 /** Shared client data shapes (kernel projections + row shapes). */
 
 export interface ContextMenuItem {

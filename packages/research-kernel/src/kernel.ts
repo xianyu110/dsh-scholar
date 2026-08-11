@@ -190,6 +190,16 @@ export interface KernelOptions {
    * open) decides each session's deadline. 0 disables the timer.
    */
   ptyIdleSweepMs?: number
+  /**
+   * WORK-01 §5 P2 (hardening-v0.2-status.md §5): run the workspace recovery
+   * scan at kernel startup — repair (or isolate) every generic workspace
+   * left inconsistent by a crash between the atomic disk write/move/delete
+   * and the SQLite row/op-ledger update, and remove orphan `.ws-tmp-*`
+   * leftovers. Default true (healthy databases scan as a no-op); tests that
+   * inject disk corruption AFTER construction opt out when they need the
+   * corruption to survive the open.
+   */
+  recoverWorkspacesOnOpen?: boolean
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -712,6 +722,14 @@ export class ResearchKernel {
       // WORK-01 disk adapter: one tree root per project under the kernel's
       // data directory (dataDir/workspaces/{project_id}/{workspace_id}).
       join(dirname(options.dbPath ?? ':memory:'), 'workspaces'))
+    // WORK-01 §5 P2: startup recovery scan — a crash between the atomic
+    // disk write/move/delete and the SQLite row/op update leaves a window
+    // ("new bytes + old row" or "row pointing at missing bytes"); repair or
+    // isolate each workspace now, before any route can serve it. Healthy
+    // databases scan as a no-op.
+    if (options.recoverWorkspacesOnOpen !== false) {
+      this.workspaces.scanWorkspaceIntegrity()
+    }
     this.texFacade = new TexWorkspaceFacade(this.tex)
     // TRAJ-01/SUBAGENT-01: the trajectory/topology store shares THIS
     // connection (single-writer SQLite) and emits its outbox events through
@@ -5035,6 +5053,19 @@ export class ResearchKernel {
       if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
       return this.texFacade.readVersion(workspaceId, path, version)
     }
+  }
+
+  /**
+   * WORK-01 §5 P2 (hardening-v0.2-status.md §5): recovery scan over the
+   * generic (disk-backed) workspaces — reconcile disk bytes ↔
+   * `workspace_nodes` ↔ the `workspace_ops` ledger, repair crash-window
+   * inconsistencies (or isolate the workspace with a durable quarantine
+   * marker), and remove orphan `.ws-tmp-*` leftovers. Run automatically at
+   * kernel startup; call on demand after host-side repairs. Returns one
+   * report per scanned workspace (all when `workspaceId` is omitted).
+   */
+  scanWorkspaceIntegrity(workspaceId?: string): import('./workspace-store.js').WorkspaceIntegrityReport[] {
+    return this.workspaces.scanWorkspaceIntegrity(workspaceId)
   }
 
   // ── evidence & claims (design §4.7) ──────────────────────────────────────

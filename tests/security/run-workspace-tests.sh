@@ -372,6 +372,74 @@ else
   bad "ws-manuscript-list: expected manuscript workspace ws_$DOC in list, got $MANU_LIST"
 fi
 
+# ── ws-crash-recovery (WORK-01 §5 P2, storage-migrations.md §10.1) ─────────
+# Real process restart on the same dataDir: the startup recovery scan must
+# isolate an unrepairable workspace (503 workspace_inconsistent), clear the
+# quarantine after the operator restores the bytes, and repair the
+# rename-before-row crash window forward — all over HTTP.
+CR_WS=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces" -d '{"kind":"code","name":"crash"}' | jqfield "j.workspace_id")
+[ -n "$CR_WS" ] || { echo "workspace: crash-recovery workspace create failed" >&2; exit 2; }
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$CR_WS/nodes" \
+  -d '{"path":"crash.txt","content":"c1"}' > /dev/null
+# Crash window: the host removed the only copy of the current bytes (first
+# version — no history, no CAS) while the row survives.
+rm -f "$WORK/workspaces/$PROJ/$CR_WS/crash.txt"
+restart_kernel() {
+  kill "$KERNEL_PID" 2>/dev/null || true
+  wait "$KERNEL_PID" 2>/dev/null || true
+  nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
+  KERNEL_PID=$!
+  for _ in $(seq 1 100); do
+    curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && return 0
+    if ! kill -0 "$KERNEL_PID" 2>/dev/null; then return 1; fi
+    sleep 0.1
+  done
+  return 1
+}
+if restart_kernel; then
+  CR_CODE=$(curl -s -o "$WORK/cr.json" -w '%{http_code}' \
+    "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$CR_WS/nodes?path=crash.txt")
+  CR_ERR=$(jqfield "j.error?.code??''" < "$WORK/cr.json")
+  if [ "$CR_CODE" = "503" ] && [ "$CR_ERR" = "workspace_inconsistent" ]; then
+    ok "ws-crash-recovery: unrepairable text node isolated at startup -> 503 workspace_inconsistent"
+  else
+    bad "ws-crash-recovery: expected 503 workspace_inconsistent, got HTTP $CR_CODE (error=$CR_ERR)"
+  fi
+  # Operator restores the bytes; the next startup scan reconciles cleanly and
+  # clears the quarantine (self-healing, no manual flag).
+  printf 'c1' > "$WORK/workspaces/$PROJ/$CR_WS/crash.txt"
+  if restart_kernel; then
+    CR_READ=$(curl -sf "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$CR_WS/nodes?path=crash.txt")
+    CR_CONTENT=$(printf '%s' "$CR_READ" | jqfield "j.content")
+    if [ "$CR_CONTENT" = "c1" ]; then
+      ok "ws-crash-recovery: restored bytes + restart -> quarantine cleared, node readable"
+    else
+      bad "ws-crash-recovery: expected content c1 after healing, got '$CR_CONTENT'"
+    fi
+  else
+    bad "ws-crash-recovery: kernel restart (heal) failed"
+  fi
+  # Rename-before-row crash window: bytes on disk are newer than the row —
+  # the startup scan must roll the row forward (v2, hash from the bytes).
+  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$CR_WS/nodes" \
+    -d '{"path":"fwd.txt","content":"f1"}' > /dev/null
+  printf 'f2-crash' > "$WORK/workspaces/$PROJ/$CR_WS/fwd.txt"
+  if restart_kernel; then
+    CR_FWD=$(curl -sf "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$CR_WS/nodes?path=fwd.txt")
+    CR_V=$(printf '%s' "$CR_FWD" | jqfield "j.version")
+    CR_C=$(printf '%s' "$CR_FWD" | jqfield "j.content")
+    if [ "$CR_V" = "2" ] && [ "$CR_C" = "f2-crash" ]; then
+      ok "ws-crash-recovery: rename-before-row crash repaired forward at startup (v2 + new hash)"
+    else
+      bad "ws-crash-recovery: expected v2/f2-crash after forward repair, got version=$CR_V content=$CR_C"
+    fi
+  else
+    bad "ws-crash-recovery: kernel restart (forward repair) failed"
+  fi
+else
+  bad "ws-crash-recovery: kernel restart failed to come back healthy"
+fi
+
 # ── standalone BFF proxy ───────────────────────────────────────────────────
 BPORT=$((23900 + $$ % 400))
 BKPORT=$((BPORT + 1))

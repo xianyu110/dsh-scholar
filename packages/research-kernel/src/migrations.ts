@@ -19,7 +19,7 @@ import { TRAJECTORY_DDL } from './trajectory.js'
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 15
+export const SCHEMA_VERSION = 16
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1063,6 +1063,25 @@ const v1LegacyMarks = (db: DatabaseSync, report: MigrationReport, ctx?: Migratio
 }
 
 /**
+ * 0018 — WORK-01 §5 P2 (hardening-v0.2-status.md §5, storage-migrations.md
+ * §10.1): durable workspace quarantine marker for the crash-recovery scan.
+ * When `scanWorkspaceIntegrity()` finds a disk/DB inconsistency it cannot
+ * provably repair (e.g. a text node whose bytes vanished with no CAS/history
+ * copy), the workspace is marked `workspaces.quarantine = <reason>`; every
+ * read/write/move/delete is then refused (`workspace_inconsistent`) until
+ * the bytes are restored and a later scan reconciles cleanly (which clears
+ * the marker). Additive + idempotent: ensureColumn by name; fresh databases
+ * get the column here (0011's released WORKSPACE_DDL stays byte-identical
+ * per STORE-08), and the live workspace store converges on its own WAL
+ * connection with the same existence check.
+ */
+const workspaceRecoveryQuarantine = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'workspaces', 'quarantine', 'TEXT')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.workspaces_quarantined = Number((db.prepare('SELECT COUNT(*) AS n FROM workspaces WHERE quarantine IS NOT NULL AND trim(quarantine) != \'\'').get() as { n: number }).n)
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -1165,6 +1184,12 @@ export const MIGRATIONS: Migration[] = [
     // executes — the up source PLUS the two helper functions it relies on.
     body: `${v1LegacyMarks.toString()}\n\n${manifestHasSignature.toString()}\n${composeLegacyLog.toString()}`,
     up: v1LegacyMarks,
+  },
+  {
+    id: '0018_workspace_recovery_quarantine',
+    description: 'WORK-01 §5 P2: workspaces.quarantine TEXT — durable marker for the crash-recovery scan (scanWorkspaceIntegrity isolates unrepairable workspaces until a later scan reconciles cleanly)',
+    body: workspaceRecoveryQuarantine.toString(),
+    up: workspaceRecoveryQuarantine,
   },
 ]
 

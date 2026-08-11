@@ -37,6 +37,9 @@ export function chromeTabGroups(): ChromeTabGroup[] {
         { key: 'artifacts', label: t('shell', 'shell.tab.artifacts'), description: t('shell', 'shell.tab.artifacts.desc') },
         { key: 'evidence', label: t('shell', 'shell.tab.evidence'), description: t('shell', 'shell.tab.evidence.desc') },
         { key: 'manuscript', label: t('shell', 'shell.tab.manuscript'), description: t('shell', 'shell.tab.manuscript.desc') },
+        // TRAJ-01/SUBAGENT-01 (hardening §5): Trajectory / Topology tabs.
+        { key: 'trajectory', label: t('shell', 'shell.tab.trajectory'), description: t('shell', 'shell.tab.trajectory.desc') },
+        { key: 'topology', label: t('shell', 'shell.tab.topology'), description: t('shell', 'shell.tab.topology.desc') },
       ],
     },
     {
