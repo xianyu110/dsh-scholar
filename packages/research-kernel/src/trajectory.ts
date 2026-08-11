@@ -115,6 +115,10 @@ const RESEARCH_KINDS: ReadonlySet<string> = new Set([
   'budget.updated', 'policy.violation',
   'project.membership.updated',
   'intake.accepted', 'intake.rejected', 'intake.expired',
+  // TEX-SAVE: a successful TeX file save is an authoritative research-lane
+  // business event (the manuscript artifact being produced), same lane as
+  // 'manuscript.built'.
+  'tex.file.saved',
 ])
 
 /** Session lane: observational session/subagent activity (never research
@@ -253,6 +257,11 @@ export function summaryForKind(kind: string, payload: Record<string, unknown>): 
     }
     case 'trajectory.child.followup':
       return `followup message recorded${ref}`
+    case 'tex.file.saved': {
+      const path = str(payload.path)
+      const docId = str(payload.document_id)
+      return `tex file saved${path !== null ? `: ${path}` : ''}${docId !== null ? ` (${docId})` : ''}`
+    }
     default:
       return `event ${kind}`
   }

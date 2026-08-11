@@ -496,6 +496,8 @@ CREATE TABLE tex_builds (
 
 保存文件在一个事务中校验 expected version、写新 Blob 引用、插入 revision、增加 document revision、生成 tex.file.saved Outbox。Blob 字节先原子落 CAS；若事务失败，孤儿 Blob 可由 GC 处理，不能先覆盖旧文件。
 
+**TEX-SAVE 已落地（审计报告 §4 #3，commit 待定主代理统一提交）**：`tex-workspace.ts` 的 writeFile/deleteFile/moveFile 现在把「文件行变更 + document revision 递增」包在 tex store 连接自己的单事务里（withTx：BEGIN IMMEDIATE/COMMIT/ROLLBACK；`isTransaction` 守卫使 moveFile→writeFile 嵌套复用同一事务，无嵌套 BEGIN；失败整体回滚，不留半写——文件行与 revision 永不脱节）。保存成功后 kernel 在同一 project aggregate 追加 `tex.file.saved` Outbox 事件（KernelEventKind 新增；payload: project_id/document_id/path/revision + 可选 request_id/session_id；event_seq 单调、aggregate_type='project'、aggregate_revision=保存后 document revision；409 版本冲突不发事件）。**跨连接原子性取舍（§7）**：tex store 是独立 WAL 连接（openTexWorkspace），tex 写与 outbox 追加无法同事务——tex 写先提交、outbox 后写；outbox 追加失败只记录 error（console.error）不阻塞保存（写已提交、客户端已见成功，失败只会导致 409 重试）。验证：tests/unit/tex-workspace.test.ts（单事务失败路径无半写：write/delete/move 三面）、tests/unit/tex-event.test.ts（事件信封/单调 seq/aggregate 身份/revision 正确/409 无事件/outbox 失败不阻塞保存/research lane 投影）。
+
 ### 5.1 通用 Workspace 与 PTY
 
 ~~~sql

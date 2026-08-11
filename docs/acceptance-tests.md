@@ -467,3 +467,12 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 - v1-fixture-three-marks（storage-migrations.md §9）：v1 fixture 库迁移后——echo/smoke 旧作业 `synthetic_fixture=1`（非 fixture 旧行保持 0）；run_manifest 无签名的旧作业与 succeeded 且无 manifest 的非 fixture 旧作业 `signature_status='legacy_unsigned'`；payload 内联 stdout/stderr 的旧作业获得 final log Artifact（`kind='log'` Artifact 行 + 真实 CAS blob + `jobs.legacy_log_artifact='sha256:<hex>'`，blob 内容与记录 sha256 逐字节一致、media_type/file_name/legacy metadata 齐备），不产生任何 terminal_frames——tests/unit/migrations.test.ts；
 - migration-0017-idempotent（storage-migrations.md §8.5/§9）：重复打开幂等（无重复标记、无重复 Artifact、SCHEMA_VERSION 15）；rewind 重跑 0017 只补旧行——signed/pending 运行、签名 manifest 作业、kernel 写入的 echo/smoke 新行均不受回填影响（新行不被误标 legacy_unsigned/synthetic_fixture）——tests/unit/migrations.test.ts；
 - legacy-log-no-cas-marker（storage-migrations.md §9）：openDatabase 无 casRoot 时旧日志只记 `legacy:in-payload` 标记，不创建引用缺失 Blob 的 Artifact 行（完整性扫描不产生 missing blob）——tests/unit/migrations.test.ts。
+
+## 20. TeX save 单事务 + tex.file.saved Outbox 新增场景（2026-08，TEX-SAVE，审计报告 §4 #3）
+
+- tex-save-single-transaction（storage-migrations.md §5/§7，execution-runtime.md §12）：writeFile/deleteFile/moveFile 的「文件行变更 + document revision 递增」在 tex store 连接上包单事务（withTx：BEGIN IMMEDIATE/COMMIT/ROLLBACK；`isTransaction` 守卫使 moveFile→writeFile 嵌套复用同一事务，无嵌套 BEGIN）。最后一条语句（revision bump）注入失败时整体回滚——writeFile 无文件行且 revision 不变（无半写）、deleteFile 文件原样保留且 revision 不前进、moveFile 源保留且目标不出现；成功路径文件行与 revision 原子落库——tests/unit/tex-workspace.test.ts；
+- tex-file-saved-outbox（storage-migrations.md §5/§7，domain-model.md §12）：kernel texWriteFile 成功保存后追加一条 `tex.file.saved` 事件——event_seq 按 project aggregate 单调、aggregate_type='project'/aggregate_id=project_id/aggregate_revision=保存后 document revision、payload 含 project_id/document_id/path/revision（request_id/session_id 由调用方传入时透传，HTTP PUT file 路由以 x-request-id/x-principal-session 关联）——tests/unit/tex-event.test.ts；
+- tex-file-saved-no-event-on-conflict：保存 409 document_version_conflict 时不追加事件（写未提交即无 outbox），文件内容与 revision 均未动——tests/unit/tex-event.test.ts；
+- tex-file-saved-delete-move-quiet：delete/move 按设计不发事件（只有 save 发出 tex.file.saved）——tests/unit/tex-event.test.ts；
+- tex-file-saved-trajectory-lane：tex.file.saved 投影为 research lane 条目（redacted summary，raw payload 不出投影）——tests/unit/tex-event.test.ts；
+- tex-cross-connection-ordering（storage-migrations.md §7 取舍）：tex store 是独立 WAL 连接，tex 写先提交、outbox 后写；kernel 连接损坏时保存仍成功（outbox 追加失败只记录 error 不阻塞保存——写已提交、客户端已见成功，失败只会导致 409 重试）——tests/unit/tex-event.test.ts。

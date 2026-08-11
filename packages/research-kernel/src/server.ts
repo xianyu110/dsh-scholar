@@ -1642,7 +1642,16 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               content: z.string(),
               expected_version: z.number().int().nonnegative().optional(),
             }).parse(body)
-            ok(res, kernel.texWriteFile(id, input.path, input.content, input.expected_version))
+            // TEX-SAVE: correlate the tex.file.saved outbox event with the
+            // request id (x-request-id) and, when present, the forwarded
+            // BFF session (x-principal-session) — same convention as the
+            // gate-decision route below.
+            const forwardedSession = req.headers['x-principal-session']
+            const sessionId = typeof forwardedSession === 'string' && forwardedSession !== '' ? forwardedSession : undefined
+            ok(res, kernel.texWriteFile(id, input.path, input.content, input.expected_version, {
+              request_id: currentRequestId,
+              session_id: sessionId,
+            }))
             return
           }
           if (id !== undefined && sub === 'file' && method === 'DELETE') {

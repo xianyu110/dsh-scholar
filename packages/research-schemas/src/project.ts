@@ -70,6 +70,14 @@ export const KernelEventKind = z.enum([
   'trajectory.child.started',
   'trajectory.child.updated',
   'trajectory.child.followup',
+  // TEX-SAVE (storage-migrations.md §5/§7, domain-model.md §12): one event
+  // per successful TeX file save (CAS write landed). Emitted by the kernel
+  // AFTER the tex store write committed (the tex store owns a second WAL
+  // connection — the outbox append cannot share the write transaction;
+  // storage-migrations.md §7 documents the ordering tradeoff). Payload:
+  // project_id/document_id/path/revision (+ request_id/session_id when the
+  // caller provided them). Version conflicts (409) emit nothing.
+  'tex.file.saved',
 ])
 export type KernelEventKind = z.infer<typeof KernelEventKind>
 

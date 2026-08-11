@@ -269,6 +269,8 @@ WorkspaceSearch 是短期投影，不是科研权威：请求包含 query、glob
 
 TexDocument 绑定一个 `workspace_id` 和根相对 subtree。`TexPreview` 是可取消、可 supersede 的非权威 Build，保存成功后按配置 debounce 触发；它包含 preview_id、document_id、input_manifest_id、input_revision、config_sha256、job_id、status、diagnostics、pdf/log Artifact 与 superseded_by。任何 source revision 变化立即使旧 Preview/PDF `fresh=false`。显式 Compile 创建权威 latex-compile Job；Preview 永远不能直接产生 accepted Evidence。
 
+**现状注记（已实现，commit 待定主代理统一提交）**：保存路径已满足 §12 的原子性与可审计要求（TEX-SAVE，审计报告 §4 #3）——`tex-workspace.ts` 的 writeFile/deleteFile/moveFile 把「文件行 + document revision 递增」放在同一单事务内（失败整体回滚，无半写）；每次成功保存后 kernel 追加 `tex.file.saved` Outbox 事件（payload: project_id/document_id/path/revision，request_id/session_id 可透传；409 版本冲突不发事件；delete/move 按设计不发事件）。跨连接取舍见 storage-migrations.md §7 注记：tex store 为独立 WAL 连接，tex 写先提交、outbox 后写，outbox 追加失败记录 error 不阻塞保存。验证：tests/unit/tex-workspace.test.ts（单事务失败路径无半写）、tests/unit/tex-event.test.ts（事件信封/单调 seq/aggregate/revision/409 无事件/outbox 失败不阻塞）。
+
 ## 13. Intake、Proposal 与 Adoption
 
 Intake 的完整行为由 research-onboarding.md 定义。存储模型必须至少包含：

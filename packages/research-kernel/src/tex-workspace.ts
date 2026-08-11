@@ -255,6 +255,32 @@ export class TexWorkspaceStore {
     `)
   }
 
+  /**
+   * Run `fn` inside ONE SQLite transaction on THIS connection (the tex store
+   * owns its own WAL connection — the kernel's withTransaction cannot span
+   * it). Every multi-statement mutation (writeFile/deleteFile/moveFile) goes
+   * through here so a mid-write failure rolls back as a unit: no half-written
+   * file rows, no revision bump without the file write (TEX-SAVE,
+   * storage-migrations.md §5/§7).
+   *
+   * Nested calls (moveFile → writeFile) reuse the already-open transaction:
+   * node:sqlite forbids nested BEGIN, so `isTransaction` makes the inner
+   * call join the outer one and the OUTER caller commits/rolls back both as a
+   * single unit.
+   */
+  private withTx<T>(fn: () => T): T {
+    if (this.db.isTransaction) return fn()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = fn()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+      throw error
+    }
+  }
+
   close(): void {
     this.db.close()
   }
@@ -329,27 +355,32 @@ export class TexWorkspaceStore {
   writeFile(documentId: string, path: string, content: string, expectedVersion?: number): { version: number; content_hash: string } {
     const clean = normalizePath(path)
     this.getDocument(documentId)
-    const existing = this.db.prepare('SELECT version, content FROM tex_files WHERE document_id = ? AND path = ?')
-      .get(documentId, clean) as { version: number; content: string } | undefined
-    if (existing === undefined) {
-      if (expectedVersion !== undefined && expectedVersion !== 0) {
-        throw new TexError('document_version_conflict', `file ${clean} does not exist (expected version ${expectedVersion})`)
+    // TEX-SAVE: file row + document revision bump are ONE transaction — an
+    // error anywhere (CAS check is outside; writes below are inside) rolls
+    // the whole write back instead of leaving a half-write.
+    return this.withTx(() => {
+      const existing = this.db.prepare('SELECT version, content FROM tex_files WHERE document_id = ? AND path = ?')
+        .get(documentId, clean) as { version: number; content: string } | undefined
+      if (existing === undefined) {
+        if (expectedVersion !== undefined && expectedVersion !== 0) {
+          throw new TexError('document_version_conflict', `file ${clean} does not exist (expected version ${expectedVersion})`)
+        }
+        const hash = sha256(content)
+        this.db.prepare('INSERT INTO tex_files (document_id, path, version, content, content_hash, created_at) VALUES (?, ?, 1, ?, ?, ?)')
+          .run(documentId, clean, content, hash, nowIso())
+        this.bumpRevision(documentId)
+        return { version: 1, content_hash: hash }
+      }
+      if (expectedVersion !== undefined && expectedVersion !== existing.version) {
+        throw new TexError('document_version_conflict',
+          `file ${clean} version ${existing.version} does not match expected version ${expectedVersion} — reload and merge`)
       }
       const hash = sha256(content)
-      this.db.prepare('INSERT INTO tex_files (document_id, path, version, content, content_hash, created_at) VALUES (?, ?, 1, ?, ?, ?)')
-        .run(documentId, clean, content, hash, nowIso())
+      this.db.prepare('UPDATE tex_files SET version = version + 1, content = ?, content_hash = ?, created_at = ? WHERE document_id = ? AND path = ?')
+        .run(content, hash, nowIso(), documentId, clean)
       this.bumpRevision(documentId)
-      return { version: 1, content_hash: hash }
-    }
-    if (expectedVersion !== undefined && expectedVersion !== existing.version) {
-      throw new TexError('document_version_conflict',
-        `file ${clean} version ${existing.version} does not match expected version ${expectedVersion} — reload and merge`)
-    }
-    const hash = sha256(content)
-    this.db.prepare('UPDATE tex_files SET version = version + 1, content = ?, content_hash = ?, created_at = ? WHERE document_id = ? AND path = ?')
-      .run(content, hash, nowIso(), documentId, clean)
-    this.bumpRevision(documentId)
-    return { version: existing.version + 1, content_hash: hash }
+      return { version: existing.version + 1, content_hash: hash }
+    })
   }
 
   /**
@@ -365,8 +396,11 @@ export class TexWorkspaceStore {
     if (expectedVersion !== undefined && expectedVersion !== existing.version) {
       throw new TexError('document_version_conflict', `file ${clean} version changed; reload before deleting`)
     }
-    this.db.prepare('DELETE FROM tex_files WHERE document_id = ? AND path = ?').run(documentId, clean)
-    this.bumpRevision(documentId)
+    // TEX-SAVE: delete + revision bump are one transaction.
+    this.withTx(() => {
+      this.db.prepare('DELETE FROM tex_files WHERE document_id = ? AND path = ?').run(documentId, clean)
+      this.bumpRevision(documentId)
+    })
   }
 
   /**
@@ -383,9 +417,15 @@ export class TexWorkspaceStore {
     if (expectedVersion !== undefined && expectedVersion !== file.version) {
       throw new TexError('document_version_conflict', `file ${from} version changed; reload before moving`)
     }
-    this.writeFile(documentId, to, file.content)
-    this.db.prepare('DELETE FROM tex_files WHERE document_id = ? AND path = ?').run(documentId, from)
-    this.bumpRevision(documentId)
+    // TEX-SAVE: destination write + source delete + revision bump are ONE
+    // transaction (writeFile reuses it via isTransaction — no nested BEGIN).
+    // A failure anywhere rolls back the whole move: no orphan destination,
+    // no vanished source, no revision bump without the move.
+    this.withTx(() => {
+      this.writeFile(documentId, to, file.content)
+      this.db.prepare('DELETE FROM tex_files WHERE document_id = ? AND path = ?').run(documentId, from)
+      this.bumpRevision(documentId)
+    })
   }
 
   history(documentId: string): Array<{ revision: number; at: string }> {

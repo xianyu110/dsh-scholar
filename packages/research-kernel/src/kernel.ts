@@ -4170,13 +4170,51 @@ export class ResearchKernel {
     return this.tex.readFile(documentId, path)
   }
 
-  texWriteFile(documentId: string, path: string, content: string, expectedVersion?: number) {
+  /**
+   * TEX-SAVE (storage-migrations.md §5/§7, domain-model.md §12): CAS save of
+   * one TeX file. The write itself is a SINGLE transaction on the tex store
+   * connection (file row + document revision bump — a mid-write failure
+   * leaves no half-write). On success a `tex.file.saved` outbox event is
+   * appended (see emitTexFileSaved for the cross-connection ordering).
+   * Optional meta carries the caller's request_id/session_id into the event
+   * envelope. Version conflicts (TexError 409) emit nothing. API semantics
+   * unchanged: returns { version, content_hash } exactly as before.
+   */
+  texWriteFile(documentId: string, path: string, content: string, expectedVersion?: number, meta?: { request_id?: string; session_id?: string }) {
     const result = this.tex.writeFile(documentId, path, content, expectedVersion)
+    this.emitTexFileSaved(documentId, path, meta)
     // §12.1 (TEX-03): with previewAutoTrigger the save-success event itself
     // schedules the debounced preview build (kernel-internal Workspace event
     // path; the explicit POST preview-builds hook remains the canonical one).
     if (this.previewAutoTrigger) this.maybeAutoPreview(documentId)
     return result
+  }
+
+  /**
+   * TEX-SAVE: append the tex.file.saved outbox event AFTER a successful save.
+   * The tex store owns a SECOND WAL connection (openTexWorkspace), so the
+   * outbox append cannot share the write transaction: the tex write commits
+   * FIRST, then the event lands on the kernel connection. This ordering is
+   * documented in storage-migrations.md §7 — cross-connection atomicity is
+   * impossible; the write is the authority, the event is at-least-once
+   * derivable. An outbox failure is recorded (console.error) and NEVER fails
+   * the save: the write already committed and the client already observed
+   * success — failing here would only force a doomed 409 retry.
+   */
+  private emitTexFileSaved(documentId: string, path: string, meta?: { request_id?: string; session_id?: string }): void {
+    const document = this.tex.getDocument(documentId)
+    try {
+      this.emit(document.project_id, 'tex.file.saved', {
+        project_id: document.project_id,
+        document_id: documentId,
+        path,
+        revision: document.revision,
+        request_id: meta?.request_id,
+        session_id: meta?.session_id,
+      })
+    } catch (error) {
+      console.error(`tex.file.saved outbox append failed (document ${documentId}, path ${path}):`, error)
+    }
   }
 
   texDeleteFile(documentId: string, path: string, expectedVersion?: number): void {
