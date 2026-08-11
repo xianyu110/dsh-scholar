@@ -139,16 +139,27 @@ describe('trajectory projection (kernel)', () => {
       if (!page.has_more || page.next_after_seq === null || page.next_after_event_id === null) break
       cursor = { after_seq: page.next_after_seq, after_event_id: page.next_after_event_id }
     }
-    // All five entries exactly once, in stable order — the seq-2 tie (evt_n2
-    // vs evt_p2) is resumed by event_id, nothing dropped.
-    expect(all).toEqual([
-      expect.stringMatching(/^evt_[a-z2-7]{16,}$/), // project.created (seq 1, base32 id)
-      'evt_n1',
-      'evt_n2',
-      'evt_p2',
-      'evt_p3',
-    ])
+    // All five entries exactly once, in STABLE order — the seq-2 tie (evt_n2
+    // vs evt_p2) is resumed by event_id, nothing dropped. The order is
+    // (event_seq asc, entry_id asc); the seq-1 pair (project.created random
+    // base32 id vs 'evt_n1') is id-ordered, so we assert monotonicity rather
+    // than a fixed position (random ids may sort before or after 'evt_n1').
     expect(new Set(all).size).toBe(5)
+    for (const named of ['evt_n1', 'evt_n2', 'evt_p2', 'evt_p3']) expect(all).toContain(named)
+    const created = all.find(id => !['evt_n1', 'evt_n2', 'evt_p2', 'evt_p3'].includes(id))
+    expect(created).toMatch(/^evt_[a-z2-7]{16,}$/)
+    // Monotone (seq, id) order across the whole page sequence.
+    const seqOf = (id: string): number => {
+      if (id === 'evt_n1') return 1
+      if (id === 'evt_n2' || id === 'evt_p2') return 2
+      if (id === 'evt_p3') return 3
+      return 1 // project.created
+    }
+    for (let i = 1; i < all.length; i++) {
+      const a = all[i - 1]!, b = all[i]!
+      const sa = seqOf(a), sb = seqOf(b)
+      expect(sa < sb || (sa === sb && a < b)).toBe(true)
+    }
     kernel.close()
   })
 
