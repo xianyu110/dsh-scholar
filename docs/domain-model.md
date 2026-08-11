@@ -114,7 +114,7 @@ Paper 使用规范化 paper_id，优先 DOI，其次 arXiv ID，再用来源 ID�
 
 CorpusSnapshot 包含 snapshot_id、project_id、schema_version、查询及时间、每源状态、Paper、Passage、citation_edges、external_claims、coverage 和 frozen=true。创建后不可编辑；新调研产生新快照。任一来源失败必须保存在 source_status。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：v2 形状对齐组（审计报告 §4 #9）已落地——`CorpusSnapshot.schema_version`（默认 1）与 `source_status`（`pending|complete`，默认 `complete` 兼容旧快照）在 `snapshotCorpus` 写入时填充，显式 `source_status='pending'` 用于记录来源失败；`Passage.content_hash` 为**新写必填、旧读兼容**：kernel 快照写入时对每条 passage 强制计算 `sha256(text)`（调用方提供的 content_hash 一律被覆盖，客户端不可声明 hash），验证步骤要求非空（`passage_content_hash_required` 422），旧行（无该字段）仍可解析读取；`is_untrusted` 保持既有语义（默认 `true`，外部内容提示注入标记）。证据：tests/unit/v2-shape.test.ts 15/15（六项正/负向 + 旧数据兼容）、根 pnpm test 692/692。
+**现状注记（已实现，commit d960f34）**：v2 形状对齐组（审计报告 §4 #9）已落地——`CorpusSnapshot.schema_version`（默认 1）与 `source_status`（`pending|complete`，默认 `complete` 兼容旧快照）在 `snapshotCorpus` 写入时填充，显式 `source_status='pending'` 用于记录来源失败；`Passage.content_hash` 为**新写必填、旧读兼容**：kernel 快照写入时对每条 passage 强制计算 `sha256(text)`（调用方提供的 content_hash 一律被覆盖，客户端不可声明 hash），验证步骤要求非空（`passage_content_hash_required` 422），旧行（无该字段）仍可解析读取；`is_untrusted` 保持既有语义（默认 `true`，外部内容提示注入标记）。证据：tests/unit/v2-shape.test.ts 15/15（六项正/负向 + 旧数据兼容）、根 pnpm test 692/692。
 
 标题去重顺序为 NFKC、Unicode case fold、字母数字保留、标点和空白归一；不得使用只支持 ASCII 的规则。
 
@@ -124,7 +124,7 @@ CorpusSnapshot 包含 snapshot_id、project_id、schema_version、查询及时�
 
 MVE 必须包含 dataset_ref、baseline_ref、primary_metric 和 estimated_gpu_hours。Novelty Audit 保存查询、结果、重叠论文和未解决风险。Idea 进入 Gate 前必须绑定冻结 Corpus、至少一个最近邻、明确反证、可执行 MVE 和数据或伦理评估。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：`IdeaCard.corpus_snapshot_id` 已落地（可空，旧卡兼容——无该字段的卡 parse 为 null 且不被 Gate 拦截）。Idea Gate 决策（decideGate 的 idea 分支）执行绑定校验：当 card 携带 `corpus_snapshot_id` 时，snapshot 必须存在（否则 422 `idea_corpus_unknown`）且属于 Gate 所在项目（跨项目 422 `idea_corpus_foreign`，绝不批准）；不携带该字段的旧卡与无 idea_id payload 的 idea gate 原样放行。`createIdea` 接受并持久化 `corpus_snapshot_id`；HTTP ideaSchema 同步放行。证据：tests/unit/v2-shape.test.ts（同项目批准 / 未知 422 / 跨项目 422 / 旧卡放行）。
+**现状注记（已实现，commit d960f34）**：`IdeaCard.corpus_snapshot_id` 已落地（可空，旧卡兼容——无该字段的卡 parse 为 null 且不被 Gate 拦截）。Idea Gate 决策（decideGate 的 idea 分支）执行绑定校验：当 card 携带 `corpus_snapshot_id` 时，snapshot 必须存在（否则 422 `idea_corpus_unknown`）且属于 Gate 所在项目（跨项目 422 `idea_corpus_foreign`，绝不批准）；不携带该字段的旧卡与无 idea_id payload 的 idea gate 原样放行。`createIdea` 接受并持久化 `corpus_snapshot_id`；HTTP ideaSchema 同步放行。证据：tests/unit/v2-shape.test.ts（同项目批准 / 未知 422 / 跨项目 422 / 旧卡放行）。
 
 ## 7. ExperimentContract
 
@@ -182,7 +182,7 @@ BlobObject 只有 sha256、size_bytes、storage_uri、created_at，是全局内�
 
 Artifact kind 至少支持 code、pdf、data、log、model、chart、paper、analysis、manifest、bundle、tex-source、bib、compile-log、compile-aux。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：`ArtifactKind` 已扩展 `tex-source|bib|compile-log|compile-aux`（kernel `registerArtifact`、HTTP artifact 路由与 multipart upload 的 kind 校验同步放行，非法 kind 仍 422 `invalid_kind`）。TeX 构建产物按新 kind 注册：runner latex-compile 完成路径把 TeX 日志注册为 `compile-log`（原泛型 `log`）、aux/bbl/blg/fls 打包 JSON 注册为 `compile-aux`（原泛型 `data`），PDF 保持 `pdf`；`tex-source`/`bib` 供显式登记 TeX 源码与参考文献使用。旧 kind（log/data）与旧行为完全兼容。证据：tests/unit/v2-shape.test.ts（四新 kind 注册/回读/HTTP 放行 + 旧 kind 兼容）。
+**现状注记（已实现，commit d960f34）**：`ArtifactKind` 已扩展 `tex-source|bib|compile-log|compile-aux`（kernel `registerArtifact`、HTTP artifact 路由与 multipart upload 的 kind 校验同步放行，非法 kind 仍 422 `invalid_kind`）。TeX 构建产物按新 kind 注册：runner latex-compile 完成路径把 TeX 日志注册为 `compile-log`（原泛型 `log`）、aux/bbl/blg/fls 打包 JSON 注册为 `compile-aux`（原泛型 `data`），PDF 保持 `pdf`；`tex-source`/`bib` 供显式登记 TeX 源码与参考文献使用。旧 kind（log/data）与旧行为完全兼容。证据：tests/unit/v2-shape.test.ts（四新 kind 注册/回读/HTTP 放行 + 旧 kind 兼容）。
 
 CodeSnapshot 和 TexWorkspaceSnapshot 都保存实际内容的 archive Artifact 与 manifest Artifact。Manifest 文件路径是根相对 POSIX 路径，拒绝绝对路径、..、NUL、设备、FIFO 和越界 symlink。
 
@@ -194,7 +194,7 @@ JobSpec 至少包含 project_id、contract_id 可选、kind、idempotency_key、
 
 Job 还必须持久化 created_by_principal_id；researcher 的 own cancel 以此字段判断。full-auto 项目必须有 fixture_id，且所有 Job 绑定同一受信任 fixture profile；无 fixture_id 的 full-auto 创建直接 422。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：`jobs.created_by_principal_id` 已落地（migration 0016 追加列，可空，旧行 NULL 兼容）。`submitJob` 接受可选 `created_by_principal_id` 并落库；HTTP 作业路由从 BFF 注入的 `x-principal-id` 头解析（body 覆写仅供内部调用方），两者皆缺 → NULL；`getJob`/`listJobs` 读回该字段。证据：tests/unit/v2-shape.test.ts（kernel 落库/读回/缺省 NULL + HTTP 头解析 + 裸请求 NULL）。
+**现状注记（已实现，commit d960f34）**：`jobs.created_by_principal_id` 已落地（migration 0016 追加列，可空，旧行 NULL 兼容）。`submitJob` 接受可选 `created_by_principal_id` 并落库；HTTP 作业路由从 BFF 注入的 `x-principal-id` 头解析（body 覆写仅供内部调用方），两者皆缺 → NULL；`getJob`/`listJobs` 读回该字段。证据：tests/unit/v2-shape.test.ts（kernel 落库/读回/缺省 NULL + HTTP 头解析 + 裸请求 NULL）。
 
 Lease 包含 owner、generation、opaque token、expires_at 和 heartbeat_at。每次重新 claim 增加 generation 并生成新 token。
 
@@ -206,7 +206,7 @@ RunManifest 必须包含 run_id、project_id、job_id、contract 和版本、代
 
 `RunnerProfile` 包含 runner_profile_id、target_id、image allowlist/digest、network policy、resource limits、artifact transport、interaction policy、config_revision/config_sha256 和 enabled/draining 状态。Job submit 固定 profile/config hash；target 变更不会修改已存在 attempt。无 capability、离线或 draining 目标拒绝新 claim；除显式创建新 attempt 外，不得自动从远端回退本机。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地——`research-schemas/src/runner-profile.ts` 定义 `RunnerProfile`（profile_id/display_name/runner_mode(local-docker|isolated-subprocess)/锁内 image digest/network_policy=none/limits/capabilities/config_hash + enabled，`.strict()` 拒绝 docker flags/hostname/credential/endpoint）与内置注册表（`profile_local_docker_cpu_v1`、`profile_local_docker_gpu_v1`（无 GPU 路径，CPU-only pin）、`profile_isolated_subprocess_v1`（trusted-smoke-fixture 专用））；注册表 image 与 `configs/runner-profiles/images.lock.json` 的 node_fixture digest 对齐；v1 enum 经 `LEGACY_RUNNER_PROFILE_ENUM_TO_ID` 映射同名本机 opaque id。ExecutionConfig 增可选 `runner_profile_id`（优先于 enum；未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`）。kernel submitJob 对 secure kinds 把解析出的 profile 的 `profile_id` + `config_hash` 注入 Job payload（`payload.runner_profile_id`/`payload.profile_config_hash`，与 image digest 同一 pin 语义）；runner executeJob 按注册表复算校验，未知 id 或 hash 不一致 → `failure_class=environment`（绝不执行），docker 参数（limits/network/opaque profile_id）取自 profile 记录且缺省值与既有容器基线字节级一致；RemoteFleetServer 的 plan 固定同一 profile pin（不一致 → retryable，不带病分发）。legacy jobs（无 pin）行为不变。证据：tests/unit/runner-profile.test.ts 11/11、kernel.test.ts 109/109、根 pnpm test 664/664。
+**现状注记（已实现，commit d960f34）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地——`research-schemas/src/runner-profile.ts` 定义 `RunnerProfile`（profile_id/display_name/runner_mode(local-docker|isolated-subprocess)/锁内 image digest/network_policy=none/limits/capabilities/config_hash + enabled，`.strict()` 拒绝 docker flags/hostname/credential/endpoint）与内置注册表（`profile_local_docker_cpu_v1`、`profile_local_docker_gpu_v1`（无 GPU 路径，CPU-only pin）、`profile_isolated_subprocess_v1`（trusted-smoke-fixture 专用））；注册表 image 与 `configs/runner-profiles/images.lock.json` 的 node_fixture digest 对齐；v1 enum 经 `LEGACY_RUNNER_PROFILE_ENUM_TO_ID` 映射同名本机 opaque id。ExecutionConfig 增可选 `runner_profile_id`（优先于 enum；未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`）。kernel submitJob 对 secure kinds 把解析出的 profile 的 `profile_id` + `config_hash` 注入 Job payload（`payload.runner_profile_id`/`payload.profile_config_hash`，与 image digest 同一 pin 语义）；runner executeJob 按注册表复算校验，未知 id 或 hash 不一致 → `failure_class=environment`（绝不执行），docker 参数（limits/network/opaque profile_id）取自 profile 记录且缺省值与既有容器基线字节级一致；RemoteFleetServer 的 plan 固定同一 profile pin（不一致 → retryable，不带病分发）。legacy jobs（无 pin）行为不变。证据：tests/unit/runner-profile.test.ts 11/11、kernel.test.ts 109/109、根 pnpm test 664/664。
 
 远端 Runner 仍由 Kernel 掌握 Job、Run、lease、budget、Artifact、Manifest 和 Outbox；Runner Agent 只执行冻结 `ExecutionPlan` 并回传事实。每次 claim 返回 Kernel 创建的唯一 run_id，任何 adapter 都不得自行生成替代 run_id。
 
@@ -274,7 +274,7 @@ WorkspaceSearch 是短期投影，不是科研权威：请求包含 query、glob
 
 TexDocument 绑定一个 `workspace_id` 和根相对 subtree。`TexPreview` 是可取消、可 supersede 的非权威 Build，保存成功后按配置 debounce 触发；它包含 preview_id、document_id、input_manifest_id、input_revision、config_sha256、job_id、status、diagnostics、pdf/log Artifact 与 superseded_by。任何 source revision 变化立即使旧 Preview/PDF `fresh=false`。显式 Compile 创建权威 latex-compile Job；Preview 永远不能直接产生 accepted Evidence。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：保存路径已满足 §12 的原子性与可审计要求（TEX-SAVE，审计报告 §4 #3）——`tex-workspace.ts` 的 writeFile/deleteFile/moveFile 把「文件行 + document revision 递增」放在同一单事务内（失败整体回滚，无半写）；每次成功保存后 kernel 追加 `tex.file.saved` Outbox 事件（payload: project_id/document_id/path/revision，request_id/session_id 可透传；409 版本冲突不发事件；delete/move 按设计不发事件）。跨连接取舍见 storage-migrations.md §7 注记：tex store 为独立 WAL 连接，tex 写先提交、outbox 后写，outbox 追加失败记录 error 不阻塞保存。验证：tests/unit/tex-workspace.test.ts（单事务失败路径无半写）、tests/unit/tex-event.test.ts（事件信封/单调 seq/aggregate/revision/409 无事件/outbox 失败不阻塞）。
+**现状注记（已实现，commit d960f34）**：保存路径已满足 §12 的原子性与可审计要求（TEX-SAVE，审计报告 §4 #3）——`tex-workspace.ts` 的 writeFile/deleteFile/moveFile 把「文件行 + document revision 递增」放在同一单事务内（失败整体回滚，无半写）；每次成功保存后 kernel 追加 `tex.file.saved` Outbox 事件（payload: project_id/document_id/path/revision，request_id/session_id 可透传；409 版本冲突不发事件；delete/move 按设计不发事件）。跨连接取舍见 storage-migrations.md §7 注记：tex store 为独立 WAL 连接，tex 写先提交、outbox 后写，outbox 追加失败记录 error 不阻塞保存。验证：tests/unit/tex-workspace.test.ts（单事务失败路径无半写）、tests/unit/tex-event.test.ts（事件信封/单调 seq/aggregate/revision/409 无事件/outbox 失败不阻塞）。
 
 ## 13. Intake、Proposal 与 Adoption
 
@@ -309,7 +309,7 @@ NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolve
 
 预算记录 model_cost_usd、gpu_hours、api_requests、storage_bytes 和 updated_at。增量必须非负并在事务内原子累计。越限时同一事务把项目置 BLOCKED_GATE、创建 Budget Gate 并写 policy.violation Outbox。恢复状态只接受 Gate payload 中经过校验的 resume_to。
 
-**现状注记（已实现，commit 待定主代理统一提交）**：`BudgetRecord.storage_bytes` 已落地（默认 0，旧行兼容；migration 0016 追加 `budget.storage_bytes INTEGER NOT NULL DEFAULT 0` 列）。`recordUsage` 接受 `storage_bytes` 并在同一事务内与 model_cost_usd/gpu_hours/api_requests 原子累计（非负增量）；`getBudget` 读回该字段；HTTP budget 路由与 budgetSchema 同步放行。证据：tests/unit/v2-shape.test.ts（累计/读回/legacy 行 0 + HTTP 放行）。
+**现状注记（已实现，commit d960f34）**：`BudgetRecord.storage_bytes` 已落地（默认 0，旧行兼容；migration 0016 追加 `budget.storage_bytes INTEGER NOT NULL DEFAULT 0` 列）。`recordUsage` 接受 `storage_bytes` 并在同一事务内与 model_cost_usd/gpu_hours/api_requests 原子累计（非负增量）；`getBudget` 读回该字段；HTTP budget 路由与 budgetSchema 同步放行。证据：tests/unit/v2-shape.test.ts（累计/读回/legacy 行 0 + HTTP 放行）。
 
 ## 17. Outbox Event
 
