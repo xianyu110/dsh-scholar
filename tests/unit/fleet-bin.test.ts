@@ -26,8 +26,10 @@
  * §3/§9：生产必须 mTLS；本测试用 x-service-token 等价实现）。
  */
 import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createTcpServer } from 'node:net'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   ConfigRegistryError,
@@ -55,6 +57,7 @@ import {
   appendTerminalFramesWithLease,
   buildAgentRegistration,
   canonicalJson,
+  createFleetKernelClient,
   createRemoteRunnerAgent,
   FailingFleetTransport,
   FleetCliConfigError,
@@ -89,6 +92,13 @@ function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
+function sha256HexBytes(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+/** secure kinds 的 output contract（metrics 路径；fake executor 据此写 MetricsFileV1）。 */
+const OUT = { metrics: 'metrics.json' }
+
 interface RecordedFrame {
   job_id: string
   run_id: string
@@ -117,7 +127,10 @@ interface RecordedComplete {
 class FakeFleetKernel implements FleetKernelClient {
   now: () => number = Date.now
   readonly jobs = new Map<string, JobRecord & { run_id?: string | null }>()
-  readonly artifacts = new Map<string, { sha256: string; content: string }>()
+  /** artifact id（含 sha256: 前缀/裸 hex）→ {sha256, content}（**字节**，CAS 语义）。 */
+  readonly artifacts = new Map<string, { sha256: string; content: Buffer }>()
+  /** secure kinds 的 required-facts 校验开关（默认开——镜像 kernel verifySecureRunFacts）。 */
+  enforceSecureFacts = true
   readonly frames: RecordedFrame[] = []
   readonly completes: RecordedComplete[] = []
   manifestPublicKeyPem: string | null = null
@@ -148,9 +161,10 @@ class FakeFleetKernel implements FleetKernelClient {
     return record
   }
 
-  seedCas(id: string, content: string): string {
-    const sha = sha256Hex(content)
-    this.artifacts.set(id, { sha256: sha, content })
+  seedCas(id: string, content: string | Buffer): string {
+    const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
+    const sha = sha256HexBytes(bytes)
+    this.artifacts.set(id, { sha256: sha, content: bytes })
     return sha
   }
 
@@ -243,8 +257,9 @@ class FakeFleetKernel implements FleetKernelClient {
     media_type?: string
     file_name?: string
   }): Promise<{ artifact_id: string; sha256: string }> {
-    const content = Buffer.from(input.content_base64, 'base64').toString('utf8')
-    const sha = sha256Hex(content)
+    // **字节**哈希（不经过 UTF-8 编解码——二进制 round-trip 依赖此语义）。
+    const content = Buffer.from(input.content_base64, 'base64')
+    const sha = sha256HexBytes(content)
     this.artifacts.set(`sha256:${sha}`, { sha256: sha, content })
     this.artifacts.set(sha, { sha256: sha, content })
     return { artifact_id: `sha256:${sha}`, sha256: sha }
@@ -279,7 +294,12 @@ class FakeFleetKernel implements FleetKernelClient {
     if (input.status === 'succeeded' && input.run_manifest === undefined && job.kind !== 'echo' && job.kind !== 'smoke') {
       throw kernelError(422, 'run_manifest_required', `job ${input.job_id} succeeded without a run manifest`)
     }
-    if (input.run_manifest !== undefined) this.verifyManifest(input.run_manifest)
+    if (input.run_manifest !== undefined) {
+      this.verifyManifest(input.run_manifest)
+      // §5 两行：镜像 kernel verifySecureRunFacts——secure kinds 的 run_id
+      // 全链绑定 + required facts（缺一 422）。
+      this.verifySecureFacts(input.run_manifest, job, input.status === 'succeeded')
+    }
     this.completes.push({
       job_id: input.job_id,
       status: input.status,
@@ -308,11 +328,12 @@ class FakeFleetKernel implements FleetKernelClient {
     return job
   }
 
-  async fetchArtifact(_projectId: string, sha256OrId: string): Promise<string | null> {
+  async fetchArtifactBytes(_projectId: string, sha256OrId: string): Promise<{ content: Buffer; media_type: string | null } | null> {
     const direct = this.artifacts.get(sha256OrId)
-    if (direct !== undefined) return direct.content
+    if (direct !== undefined) return { content: direct.content, media_type: null }
     const bare = sha256OrId.startsWith('sha256:') ? sha256OrId.slice('sha256:'.length) : sha256OrId
-    return this.artifacts.get(bare)?.content ?? null
+    const byBare = this.artifacts.get(bare)
+    return byBare !== undefined ? { content: byBare.content, media_type: null } : null
   }
 
   private verifyManifest(manifest: Record<string, unknown>): void {
@@ -332,6 +353,46 @@ class FakeFleetKernel implements FleetKernelClient {
       const publicKey = createPublicKey(this.manifestPublicKeyPem)
       const valid = verify(null, Buffer.from(canonicalJson(signedPayload), 'utf8'), publicKey, Buffer.from(String(signature), 'base64'))
       if (!valid) throw kernelError(422, 'manifest_signature_invalid', 'run manifest signature verification failed')
+    }
+  }
+
+  /**
+   * §5 两行：镜像 kernel verifySecureRunFacts——secure kinds（baseline/pilot/
+   * formal/reproduce/latex-compile）的 run_id 全链绑定 + succeeded required
+   * facts（metrics_artifact/seed/code snapshot/container_digest/data_hash）。
+   */
+  private verifySecureFacts(manifest: Record<string, unknown>, job: JobRecord & { run_id?: string | null }, succeeded: boolean): void {
+    if (!this.enforceSecureFacts) return
+    const SECURE: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
+    if (!SECURE.includes(job.kind)) return
+    if (job.run_id !== undefined && job.run_id !== null && manifest.run_id !== job.run_id) {
+      throw kernelError(422, 'manifest_run_mismatch',
+        `run manifest run_id ${String(manifest.run_id)} does not match the claim's run_id ${job.run_id}`)
+    }
+    if (!succeeded) return
+    if (typeof manifest.metrics_artifact !== 'string' || manifest.metrics_artifact === '') {
+      throw kernelError(422, 'manifest_facts_missing', `run manifest for ${job.kind} job ${job.job_id} lacks metrics_artifact`)
+    }
+    const payload = job.payload as Record<string, unknown>
+    const jobSeed = typeof payload.seed === 'number' && Number.isFinite(payload.seed) ? payload.seed : null
+    if (jobSeed !== null && manifest.seed !== jobSeed) {
+      throw kernelError(422, 'manifest_seed_mismatch',
+        `run manifest seed ${String(manifest.seed)} does not match the job's fixed seed ${jobSeed}`)
+    }
+    if (job.code_snapshot_id !== null && job.code_snapshot_id !== undefined && job.code_snapshot_id !== ''
+      && manifest.code_snapshot_id !== job.code_snapshot_id) {
+      throw kernelError(422, 'manifest_snapshot_mismatch',
+        `run manifest code_snapshot_id ${String(manifest.code_snapshot_id)} does not match the job's code snapshot ${job.code_snapshot_id}`)
+    }
+    const imageDigest = typeof payload.image_digest === 'string' ? payload.image_digest : ''
+    if (imageDigest !== '' && manifest.container_digest !== `docker:${imageDigest}`) {
+      throw kernelError(422, 'manifest_container_mismatch',
+        `run manifest container_digest ${String(manifest.container_digest)} does not match docker:${imageDigest}`)
+    }
+    const jobDataHash = typeof payload.data_hash === 'string' && payload.data_hash !== '' ? payload.data_hash : null
+    if (jobDataHash !== null && manifest.data_hash !== jobDataHash) {
+      throw kernelError(422, 'manifest_data_mismatch',
+        `run manifest data_hash ${String(manifest.data_hash)} does not match the job's data hash ${jobDataHash}`)
     }
   }
 
@@ -382,6 +443,19 @@ function fakeExecutor(chunks: Array<{ channel: 'stdout' | 'stderr'; text: string
     for (const chunk of chunks) {
       ctx.onChunk?.(chunk.channel, chunk.text, offset, Buffer.byteLength(chunk.text, 'utf8'))
       offset += Buffer.byteLength(chunk.text, 'utf8')
+    }
+    // §12.5：模拟容器写回 MetricsFileV1（secure kinds 的 required fact）。
+    if (plan.output_contract.metrics_path !== null && plan.output_contract.metrics_path !== '') {
+      const outputsDir = join(ctx.cwd ?? '', 'outputs')
+      mkdirSync(outputsDir, { recursive: true })
+      const rel = plan.output_contract.metrics_path.replace(/^\/outputs\/?/, '')
+      writeFileSync(join(outputsDir, rel), JSON.stringify({
+        schema_version: 1,
+        run_id: plan.run_id,
+        ...(plan.output_contract.contract_id !== null ? { contract_id: plan.output_contract.contract_id } : {}),
+        seed: plan.output_contract.seed ?? 0,
+        metrics: [{ name: 'm', value: 1, unit: '' }],
+      }))
     }
     return {
       run_id: plan.run_id,
@@ -582,7 +656,7 @@ describe('FLEET-01 HTTP 传输（startFleetServer 真实 listener + HttpRemoteFl
 
   it('全链（真实 HTTP）：runFleetAgentMain 客户端循环 register→heartbeat→claim→执行→frames/artifacts/complete', async () => {
     const fixture = makeFleet()
-    fixture.kernel.seedJob({ job_id: 'job_cli', project_id: 'prj_1', payload: { target_id: 'local-docker', image_digest: DIGEST } })
+    fixture.kernel.seedJob({ job_id: 'job_cli', project_id: 'prj_1', payload: { target_id: 'local-docker', image_digest: DIGEST, output_contract: OUT } })
     const { server, baseUrl } = await startFleetServer(fixture.fleet)
     try {
       const agentKey = makeKeypair('agent-cli')
@@ -622,7 +696,7 @@ describe('FLEET-01 HTTP 传输（startFleetServer 真实 listener + HttpRemoteFl
 
   it('离线 spool 恢复（HTTP 层）：断网期间全量进本地有界 spool，恢复后按序重放完成 Job', async () => {
     const fixture = makeFleet()
-    fixture.kernel.seedJob({ job_id: 'job_spool_http', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
+    fixture.kernel.seedJob({ job_id: 'job_spool_http', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
     const { server, baseUrl } = await startFleetServer(fixture.fleet)
     try {
       const failing = new FailingFleetTransport(new HttpRemoteFleetTransport(baseUrl))
@@ -675,6 +749,81 @@ describe('FLEET-01 HTTP 传输（startFleetServer 真实 listener + HttpRemoteFl
       })
     } finally {
       server.close()
+    }
+  })
+
+  it('kernel Bearer fail fast + CAS bytes round-trip：无 token 的 fleet 对 token-required kernel 立即 401（非 retryable，不静默当 cas_missing）；带 token 字节往返一致', async () => {
+    // 真实 HTTP kernel stub：要求 Authorization: Bearer，否则 401；artifact 以
+    // 原始字节响应（含 NUL/0xFF——UTF-8 text round-trip 会损坏）。
+    const bytes = Buffer.from([0x00, 0xff, 0x9c, 0x01, 0x00, 0x80, 0x0a, 0x0d, 0xfe, 0x41])
+    const seen: Array<{ path: string; authed: boolean }> = []
+    const kernelServer = createHttpServer((req, res) => {
+      const authed = req.headers.authorization === 'Bearer kt-1'
+      seen.push({ path: req.url ?? '', authed })
+      if (!authed) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 'unauthorized', message: 'missing bearer token', retryable: false } }))
+        return
+      }
+      if ((req.method ?? 'GET') === 'POST' && (req.url ?? '').startsWith('/v1/jobs-claim/run')) {
+        const job: JobRecord & { run_id?: string | null } = {
+          job_id: 'job_bearer', project_id: 'prj_1', contract_id: null, idempotency_key: 'ik-bearer',
+          kind: 'formal', command: [], payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
+          status: 'running', failure_class: null, lease_owner: 'fleet-owner', lease_expires_at: '2099-01-01T00:00:00.000Z',
+          heartbeat_at: null, lease_generation: 1, lease_token: 'lt-1', attempts: 1, max_attempts: 3,
+          run_manifest: null, error: '', created_at: '2026-08-11T00:00:00.000Z', updated_at: '2026-08-11T00:00:00.000Z',
+          run_id: 'run_bearer_1',
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify([job]))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(bytes.byteLength) })
+      res.end(bytes)
+    })
+    await new Promise<void>(resolve => kernelServer.listen(0, '127.0.0.1', resolve))
+    const address = kernelServer.address()
+    if (address === null || typeof address === 'string') throw new Error('bind failed')
+    const endpoint = `http://127.0.0.1:${address.port}`
+    try {
+      // 1) ResearchClient 层：fetchArtifactBytes 对 401 抛 KernelApiError（fail
+      //    fast，不返回 null 冒充 cas_missing）；legacy text 变体保持 null。
+      const bareClient = new ResearchClient({ endpoint })
+      await expect(bareClient.fetchArtifactBytes('prj_1', 'sha256:aa')).rejects.toMatchObject({ status: 401 })
+      expect(await bareClient.fetchArtifact('prj_1', 'sha256:aa')).toBeNull()
+
+      // 2) fleet 层 fail fast：无 kernel token 的 fleet server 在 claim/pump
+      //    即被 kernel 401 拒绝（非 retryable kernel_unauthorized——任务绝不
+      //    滞留 pending 假装可执行；也不是 cas_missing 404）。
+      const noToken = new RemoteFleetServer({
+        registry: new InMemoryAgentRegistry(),
+        client: createFleetKernelClient(new ResearchClient({ endpoint })),
+        owner: 'fleet-owner',
+      })
+      noToken.handleRegister(makeRegistration())
+      await expect(noToken.handleClaims('agent-gpu-1', { schema_version: 1, limit: 1 }))
+        .rejects.toMatchObject({ status: 401, retryable: false })
+      expect(seen.some(r => r.path.startsWith('/v1/jobs-claim/'))).toBe(true)
+
+      // 3) 带 kernel token：claim 成功 + CAS 字节往返 hash/size 完全一致。
+      const withToken = new RemoteFleetServer({
+        registry: new InMemoryAgentRegistry(),
+        client: createFleetKernelClient(new ResearchClient({ endpoint, token: 'kt-1' })),
+        owner: 'fleet-owner',
+      })
+      withToken.handleRegister(makeRegistration())
+      const claims2 = await withToken.handleClaims('agent-gpu-1', { schema_version: 1, limit: 1 })
+      expect(claims2.claims).toHaveLength(1)
+      const cas = await withToken.handleCas('agent-gpu-1', `sha256:${bytes.toString('hex')}`, 'prj_1')
+      expect(cas.content_base64).toBe(bytes.toString('base64'))
+      expect(cas.sha256).toBe(createHash('sha256').update(bytes).digest('hex'))
+      expect(Buffer.from(cas.content_base64, 'base64')).toEqual(bytes)
+      const artifactSeen = seen.filter(r => r.path.startsWith('/v1/artifacts/'))
+      expect(artifactSeen.length).toBeGreaterThan(0)
+      // 最后一条 artifact 请求来自带 token 的 client → 必须带 Bearer。
+      expect(artifactSeen[artifactSeen.length - 1]!.authed).toBe(true)
+    } finally {
+      kernelServer.close()
     }
   })
 

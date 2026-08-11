@@ -213,6 +213,40 @@ describe('nextActionCardModel: i18n label mapping + blocking note', () => {
   })
 })
 
+describe('intake_* overlay actions (ONBOARD-01 landing — wizard CTA)', () => {
+  it('intake codes map to route "intake" with intake/project refs extracted', () => {
+    setLocale('zh')
+    const m = nextActionCardModel(action({
+      code: 'intake_adopt', label: 'Adopt intake proposal (PI)', state: 'ready', route: 'overview',
+      refs: [{ kind: 'intake', id: 'intk_1' }, { kind: 'project', id: 'rsp_9' }],
+    }))
+    expect(m.route).toBe('intake')
+    expect(m.hasRoute).toBe(true)
+    expect(m.intakeId).toBe('intk_1')
+    expect(m.intakeProjectId).toBe('rsp_9')
+    expect(m.disabled).toBe(false)
+    // 标题经字典翻译(zh),不是内核 label 原样
+    expect(m.title).toBe(overviewZh['overview.nextaction.code.intake_adopt'])
+    setLocale('en')
+    expect(nextActionCardModel(action({ code: 'intake_scan', refs: [{ kind: 'intake', id: 'i' }] })).title)
+      .toBe(overviewEn['overview.nextaction.code.intake_scan'])
+  })
+
+  it('intake codes without refs degrade safely (no ids, route still intake)', () => {
+    const m = nextActionCardModel(action({ code: 'intake_resume' }))
+    expect(m.route).toBe('intake')
+    expect(m.hasRoute).toBe(true)
+    expect(m.intakeId).toBeNull()
+    expect(m.intakeProjectId).toBeNull()
+  })
+
+  it('non-intake codes never get intake ids', () => {
+    const m = nextActionCardModel(action({ code: 'survey_run', refs: [{ kind: 'intake', id: 'intk_1' }] }))
+    expect(m.intakeId).toBeNull()
+    expect(m.route).toBe('runs')
+  })
+})
+
 describe('resolveNextActionInput: v2 preferred, legacy fallback', () => {
   it('v2 projection wins over legacy strings (both present)', () => {
     const input = resolveNextActionInput({ next_actions: ['old label'], next_actions_v2: [{ code: 'survey_run' }] })

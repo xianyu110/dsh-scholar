@@ -429,6 +429,117 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
       ok "API-01: role-forbidden body has no '$NEEDLE'"
     fi
   done
+  # ── hardening §5 P1 (GOV-01/ONBOARD-01): PI-only adopt/archive/unarchive ──
+  # Explicit capability route table: intake ADOPT and project archive/
+  # unarchive are PI/operator-only decisions. researcher/viewer/auditor get
+  # 403 at the BFF ('role forbidden', never forwarded) AND at the KERNEL
+  # (role_forbidden, resolved from the kernel's OWN project_members table —
+  # never a single BFF layer); a missing principal at the kernel is 422
+  # principal_required (GOV-01 fail-closed). The BFF injects its
+  # server-derived x-principal-id/x-principal-role on these forwards so the
+  # kernel second layer can enforce.
+  echo "== §5 P1: PI-only intake adopt / project archive / unarchive =="
+  KAPI2() { curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" "$@"; }
+  # BFF layer negatives on MP (researcher-1/viewer-1/auditor-1 are members).
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$RROLE_WEB/v1/projects/$MP/intake/intk_nonexistent/adopt" -d '{}')
+  [ "$R" = "403" ] && ok "P1: researcher intake adopt -> 403 (BFF route table)" || fail "P1: researcher adopt -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$RROLE_WEB/v1/projects/$MP/archive")
+  [ "$R" = "403" ] && ok "P1: researcher project archive -> 403 (BFF route table)" || fail "P1: researcher archive -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$RROLE_WEB/v1/projects/$MP/unarchive")
+  [ "$R" = "403" ] && ok "P1: researcher project unarchive -> 403 (BFF route table)" || fail "P1: researcher unarchive -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$VROLE_WEB/v1/projects/$MP/intake/intk_nonexistent/adopt" -d '{}')
+  [ "$R" = "403" ] && ok "P1: viewer intake adopt -> 403" || fail "P1: viewer adopt -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$AROLE_WEB/v1/projects/$MP/unarchive")
+  [ "$R" = "403" ] && ok "P1: auditor project unarchive -> 403" || fail "P1: auditor unarchive -> $R"
+  RB=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$RROLE_WEB/v1/projects/$MP/intake/intk_nonexistent/adopt" -d '{}')
+  case "$RB" in
+    *'"ok":false'*'role forbidden'*) ok "P1: researcher adopt body is the stable role-forbidden shape" ;;
+    *) fail "P1: researcher adopt body -> $RB" ;;
+  esac
+  # Dedicated project for the kernel second layer + PI positive path.
+  PROJ2=$(KAPI2 -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
+    -d '{"name":"p1-intake-pi","workspace":"/w/p1","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+  [ -n "$PROJ2" ] && ok "P1: PI-only project created on kernel ($PROJ2)" || fail "P1: PI-only project create"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/members" \
+    -d '{"principal_id":"researcher-1","role":"researcher","actor":"ops-1"}')
+  [ "$R" = "200" ] && ok "P1: researcher-1 added to PI-only project (role researcher)" || fail "P1: add researcher-1 -> $R"
+  # Kernel second layer (direct kernel calls with the kernel bearer): a
+  # researcher-role x-principal-id is 403 role_forbidden on adopt/archive/
+  # unarchive; a non-member principal is 404 (no enumeration); no identity at
+  # all is 422 principal_required.
+  IID=$(KAPI2 -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/intake" -d '{"source_label":"p1-intake"}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.intake_id||'')})")
+  [ -n "$IID" ] && ok "P1: intake session begun on kernel ($IID)" || fail "P1: intake begin"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -H 'x-principal-id: researcher-1' \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/intake/$IID/adopt" \
+    -d '{"principal":{"principal_id":"ops-1"},"expected_proposal_revision":1}')
+  [ "$R" = "403" ] && ok "P1: kernel direct adopt as researcher -> 403 role_forbidden" || fail "P1: kernel researcher adopt -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $MEMKTOKEN" -H 'x-principal-id: researcher-1' \
+    "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/archive")
+  [ "$R" = "403" ] && ok "P1: kernel direct archive as researcher -> 403" || fail "P1: kernel researcher archive -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $MEMKTOKEN" -H 'x-principal-id: researcher-1' \
+    "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/unarchive")
+  [ "$R" = "403" ] && ok "P1: kernel direct unarchive as researcher -> 403" || fail "P1: kernel researcher unarchive -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/intake/$IID/adopt" -d '{"expected_proposal_revision":1}')
+  [ "$R" = "422" ] && ok "P1: kernel direct adopt without principal -> 422 principal_required" || fail "P1: kernel no-principal adopt -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $MEMKTOKEN" \
+    "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/archive")
+  [ "$R" = "422" ] && ok "P1: kernel direct archive without principal -> 422 principal_required" || fail "P1: kernel no-principal archive -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -H 'x-principal-id: viewer-1' \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/intake/$IID/adopt" \
+    -d '{"principal":{"principal_id":"ops-1"},"expected_proposal_revision":1}')
+  [ "$R" = "404" ] && ok "P1: kernel direct adopt as non-member -> 404 (no enumeration)" || fail "P1: kernel non-member adopt -> $R"
+  # PI positive path through the BFF: the full intake pipeline on PROJ2, then
+  # the PI (ops-1) adopts — the BFF forwards with x-principal-id/x-principal-role
+  # and the kernel's own membership lookup lets pi through.
+  printf 'intake artifact bytes' > "$WORK/p1-intake.txt"
+  # Multipart raw-bytes passthrough (UPLOAD-01): NO content-type override —
+  # curl -F owns the multipart boundary header.
+  ST=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/intake/$IID/artifacts" \
+    -F "file=@$WORK/p1-intake.txt;filename=paper.txt" -F 'media_type=text/plain')
+  case "$ST" in
+    *'"artifact_id"'*) ok "P1: intake artifact staged via BFF" ;;
+    *) fail "P1: stage artifact -> $(printf '%s' "$ST" | head -c 160)" ;;
+  esac
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/intake/$IID/scan")
+  [ "$R" = "200" ] && ok "P1: intake scan -> 200" || fail "P1: scan -> $R"
+  ANS=$(curl -s -H "Authorization: Bearer $MEMKTOKEN" "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/intake/$IID/questions" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const q=(JSON.parse(d).questions)||[];const a=q.filter(x=>x.required).map(x=>({question_code:x.question_code,answer:x.question_code==='observed_phase_claim'?'brief':'yes',question_revision:x.question_revision}));console.log(JSON.stringify({answers:a,principal:{principal_id:'ops-1'}}))})")
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/intake/$IID/answers" -d "$ANS")
+  [ "$R" = "200" ] && ok "P1: intake grill answers -> 200" || fail "P1: answers -> $R"
+  PROPOSAL=$(curl -s -o "$WORK/p1-propose.json" -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/intake/$IID/propose")
+  PREV=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);console.log(j.revision||'')}catch(e){console.log('')}})" < "$WORK/p1-propose.json")
+  [ "$PROPOSAL" = "201" ] && [ -n "$PREV" ] && ok "P1: intake propose -> 201 (revision $PREV)" || fail "P1: propose -> $PROPOSAL ($(head -c 120 "$WORK/p1-propose.json"))"
+  ADOPT=$(curl -s -o "$WORK/p1-adopt.json" -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/intake/$IID/adopt" \
+    -d "{\"principal\":{\"principal_id\":\"ops-1\"},\"expected_proposal_revision\":$PREV}")
+  RECEIPT=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);console.log(j.adoption_id||'')}catch(e){console.log('')}})" < "$WORK/p1-adopt.json")
+  [ "$ADOPT" = "200" ] && [ -n "$RECEIPT" ] && ok "P1: PI intake adopt via BFF -> 200 (receipt $RECEIPT)" || fail "P1: PI adopt -> $ADOPT ($(head -c 120 "$WORK/p1-adopt.json"))"
+  # PI/operator archive + unarchive success through the BFF (200, not 403).
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/archive")
+  [ "$R" = "200" ] && ok "P1: PI project archive via BFF -> 200" || fail "P1: PI archive -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$PROJ2/unarchive")
+  [ "$R" = "200" ] && ok "P1: PI project unarchive via BFF -> 200" || fail "P1: PI unarchive -> $R"
+  # Revocation is immediate on the NEW kernel gate too: remove researcher-1
+  # from PROJ2 — the kernel's next adopt with that principal answers 404
+  # (membership/role re-resolved per request, no stale authorization).
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
+    -X DELETE "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/members/researcher-1" -d '{"actor":"ops-1"}')
+  [ "$R" = "200" ] && ok "P1: researcher-1 removed from PI-only project" || fail "P1: remove researcher-1 -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -H 'x-principal-id: researcher-1' \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$PROJ2/intake/$IID/adopt" \
+    -d '{"principal":{"principal_id":"ops-1"},"expected_proposal_revision":1}')
+  [ "$R" = "404" ] && ok "P1: revoked researcher adopt -> 404 on the very next request (no stale membership)" || fail "P1: revoked researcher adopt -> $R"
 fi
 
 # ── hardening §5 P0-2 (API-01/PTY-01): global-id routes are project-resolved

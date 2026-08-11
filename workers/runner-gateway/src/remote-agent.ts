@@ -11,14 +11,19 @@
  *    **必须验签**——缺签名/验签失败/未配置公钥 → 拒绝执行（fail closed）；
  * 3. 拉取 CAS 输入（代码快照 + data artifacts）并**复算 sha256**：与响应声明
  *    不一致（或与寻址 hash 不一致）→ 拒绝执行，绝不静默物化；
- * 4. 本地执行（默认 subprocess sandbox；executor 可注入，生产可换 docker 路径）：
+ * 4. 本地执行（hardening-v0.2-status.md §5 两行：secure kinds 只能进入
+ *    digest-pinned restricted container——默认执行器 defaultRemoteExecutor
+ *    按 kind 路由，docker 不可用 → environment 失败；subprocess 仅保留 echo
+ *    与显式 trusted smoke fixture）：
  *    按 generation/token 逐帧上报（chunk/exit，全局 seq 单调，owner/token
  *    请求级携带）；
  * 5. artifacts：staged（自生成 stage_id，与 finalize 跨 spool 一致）+ finalize
- *    （sha256 复算由服务端执行，不一致 → 409）；
- * 6. complete：Ed25519 签名的 run_manifest + fencing 字段；lease 过期后
- *    kernel 拒绝（409 lease_stale）——代理端只能丢弃或保留本地诊断，不能完成
- *    Job（不静默降级）；
+ *    （sha256 复算由服务端执行，不一致 → 409）；secure kinds 的 metrics facts
+ *    来自容器写回的 MetricsFileV1（与本地 runner 同一校验）；
+ * 6. complete：Ed25519 签名的 run_manifest（与 local 复用唯一 manifest
+ *    builder——container_digest/data_hash/code snapshot/seed/metrics facts +
+ *    fencing 字段）；lease 过期后 kernel 拒绝（409 lease_stale）——代理端只能
+ *    丢弃或保留本地诊断，不能完成 Job（不静默降级）；
  * 7. 断网（transport_unreachable 等 retryable 传输错误）→ 本地有界 spool
  *    （frames 可淘汰并合成 gap；artifact/complete 不可淘汰，满则本地失败），
  *    恢复后按序重放。
@@ -30,11 +35,12 @@
  * @module @dsh-scholar/runner-gateway/remote-agent
  */
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import {
   ExecutionPlan as ExecutionPlanSchema,
   executionPlanFingerprint,
@@ -61,6 +67,7 @@ import {
 } from '@dsh-scholar/research-schemas'
 import { AgentOutboundSpool, type AgentSpoolEntry } from './agent-spool.js'
 import {
+  buildLocalDockerArgs,
   deepFreezePlan,
   ExecutionPlanMutationError,
   type ExecutionAttachment,
@@ -71,7 +78,18 @@ import {
   type RunOutcome,
 } from './execution-target.js'
 import { signManifest, type RunnerSigningKey } from './manifest-signing.js'
+import {
+  extractMetrics,
+  metricsArtifactContent,
+  parseMetricsFile,
+  resolveMetricsFileWithin,
+  validateMetricsFileRecord,
+  type MetricsFileRecord,
+} from './metrics-file.js'
+import { buildRunManifest } from './run-manifest.js'
 import { materializeCodeSnapshot, unpackCodeSnapshot } from './snapshot-materialize.js'
+
+const execFileAsync = promisify(execFile)
 
 // ── 传输错误 / 传输面 ───────────────────────────────────────────────────────
 
@@ -203,7 +221,7 @@ export class HttpRemoteFleetTransport implements RemoteFleetTransport {
   }
 }
 
-// ── 本地执行 ───────────────────────────────────────────────────────────────
+// ── 本地执行（远端 sandbox；secure kinds 强制 digest-pinned container）──────
 
 /** 执行器上下文（与 ExecutionTargetContext 对齐；cwd 为 sandbox 目录，缺省 process.cwd()）。 */
 export interface AgentExecutionContext {
@@ -213,16 +231,65 @@ export interface AgentExecutionContext {
   runEnv?: Record<string, string>
 }
 
-/** 执行器：plan → RunOutcome。测试注入 fake；生产默认 subprocess sandbox。 */
+/** 执行器：plan → RunOutcome。测试注入 fake；生产默认 defaultRemoteExecutor。 */
 export type AgentExecutor = (plan: ExecutionPlan, context: AgentExecutionContext) => Promise<RunOutcome>
 
 /**
- * 默认执行器：隔离 subprocess sandbox（cwd 由调用方创建并物化代码快照）。
- * env 缩减白名单（PATH/HOME→cwd/TMPDIR→cwd/DSH_RUN_ID）；timeout 与
- * maxLogBytes 取自 plan.limits；超时/取消杀进程树（detached 进程组）。
- * 远端/调度路径永不产生非 sandbox 的宿主执行。
+ * 远端容器执行函数（生产默认 spawn `docker run <buildLocalDockerArgs>`；
+ * 测试注入记录 args 的 fake）。`args` 已经由 buildLocalDockerArgs 生成
+ * （digest-pinned image + 完整容器基线，见 execution-target.ts）。
+ */
+export type RemoteContainerRunFn = (plan: ExecutionPlan, args: string[], context: AgentExecutionContext) => Promise<RunOutcome>
+
+/**
+ * §3.2 / execution-runtime.md §1（与本地 runner 同语义）：secure kinds 只能
+ * 进入 digest-pinned restricted container；subprocess 仅保留 echo 与显式
+ * trusted smoke fixture。远端 Agent 默认执行器按此路由。
+ */
+export const REMOTE_SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
+
+/** 环境类失败 outcome（secure kind 无容器运行时等）——complete 记 failure_class=environment。 */
+export function environmentFailureOutcome(plan: ExecutionPlan, reason: string): RunOutcome {
+  const now = new Date().toISOString()
+  return {
+    run_id: plan.run_id,
+    exit_code: -1,
+    started_at: now,
+    finished_at: now,
+    stdout: '',
+    stderr: '',
+    error: `environment: ${reason}`,
+  }
+}
+
+/** 真实 docker 可用性探测（`docker info` 一次调用；失败 = 无容器运行时）。 */
+export async function probeDockerAvailable(timeoutMs = 5_000): Promise<boolean> {
+  try {
+    await execFileAsync('docker', ['info'], { timeout: timeoutMs })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 默认 subprocess 执行器：隔离 subprocess sandbox（cwd 由调用方创建并物化
+ * 代码快照）。env 缩减白名单（PATH/HOME→cwd/TMPDIR→cwd/DSH_RUN_ID）；
+ * timeout 与 maxLogBytes 取自 plan.limits；超时/取消杀进程树（detached
+ * 进程组）。
+ *
+ * **subprocess 仅保留 echo 与显式 trusted smoke fixture**（hardening §5
+ * RUN-REMOTE-01 两行）：secure kinds / 未标记 trusted_fixture 的 smoke /
+ * 其它 kind 一律返回 environment 失败 outcome——绝不 spawn 宿主进程。
  */
 export function defaultSubprocessExecutor(plan: ExecutionPlan, context: AgentExecutionContext): Promise<RunOutcome> {
+  const trustedFixture = plan.kind === 'smoke' && plan.output_contract.trusted_fixture === true
+  if (plan.kind !== 'echo' && !trustedFixture) {
+    const reason = plan.kind === 'smoke'
+      ? 'smoke jobs require container execution unless explicitly marked trusted-smoke-fixture (execution-runtime.md §1); host subprocess is prohibited'
+      : `job kind ${plan.kind} requires digest-pinned container execution (plan.image.digest=${plan.image.digest}); host subprocess is prohibited (v2 §3.2)`
+    return Promise.resolve(environmentFailureOutcome(plan, reason))
+  }
   return new Promise<RunOutcome>(resolve => {
     const { cwd, signal, onChunk } = context
     const timeoutMs = plan.limits.timeout_ms
@@ -323,6 +390,163 @@ export function defaultSubprocessExecutor(plan: ExecutionPlan, context: AgentExe
   })
 }
 
+/**
+ * 默认容器执行器：`docker run` + buildLocalDockerArgs（与本地 docker 路径
+ * 逐项一致的参数构造——digest-pinned image、--network none、--user 65534、
+ * --read-only、--cap-drop ALL、--security-opt no-new-privileges、pids/
+ * memory/cpus 取自 plan.limits、/work 只读 + /outputs 可写挂载、tmpfs）。
+ * docker 不可用 → environment 失败 outcome（绝不 subprocess 回退）。
+ * `containerRun` 可注入（测试捕获 args）。
+ */
+export async function defaultRemoteExecutor(
+  plan: ExecutionPlan,
+  context: AgentExecutionContext,
+  dockerProbe: () => Promise<boolean> = probeDockerAvailable,
+  containerRun: RemoteContainerRunFn = defaultDockerRun,
+): Promise<RunOutcome> {
+  if (plan.kind === 'echo') {
+    const now = new Date().toISOString()
+    return {
+      run_id: plan.run_id,
+      exit_code: 0,
+      started_at: now,
+      finished_at: now,
+      stdout: `echo ${plan.job_id}`,
+      stderr: '',
+    }
+  }
+  if (plan.kind === 'smoke' && plan.output_contract.trusted_fixture === true) {
+    return defaultSubprocessExecutor(plan, context)
+  }
+  if (!(await dockerProbe())) {
+    return environmentFailureOutcome(
+      plan,
+      `remote agent has no docker runtime; job kind ${plan.kind} requires digest-pinned container execution (plan.image.digest=${plan.image.digest}); refusing host subprocess`,
+    )
+  }
+  const cwd = context.cwd ?? process.cwd()
+  const container = `dsh-scholar-remote-${randomUUID().slice(0, 8)}`
+  const args = buildLocalDockerArgs({
+    plan,
+    cwd,
+    containerName: container,
+    env: {
+      DSH_RUN_ID: plan.run_id,
+      DSH_CONTRACT_ID: plan.output_contract.contract_id ?? '',
+      DSH_SEED: plan.output_contract.seed !== null ? String(plan.output_contract.seed) : '',
+      ...context.runEnv,
+    },
+    command: plan.command.length > 0 ? plan.command : ['true'],
+  })
+  return containerRun(plan, args, context)
+}
+
+/** 真实 `docker run <args>` spawn（timeout/取消杀进程树 + `docker rm -f` 兜底）。 */
+export async function defaultDockerRun(plan: ExecutionPlan, args: string[], context: AgentExecutionContext): Promise<RunOutcome> {
+  const cwd = context.cwd ?? process.cwd()
+  const container = args[args.indexOf('--name') + 1] ?? `dsh-scholar-remote-${randomUUID().slice(0, 8)}`
+  const startedAt = new Date().toISOString()
+  const timeoutMs = plan.limits.timeout_ms
+  const maxLogBytes = plan.limits.max_log_bytes
+  return new Promise<RunOutcome>(resolve => {
+    const { signal, onChunk } = context
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let outBytes = 0
+    let errBytes = 0
+    let outOffset = 0
+    let errOffset = 0
+    let timedOut = false
+    let cancelled = false
+    let bufferExceeded = false
+    let spawnError: string | undefined
+    let settled = false
+
+    const child: ChildProcess = spawn('docker', args, {
+      cwd,
+      env: {
+        PATH: process.env.PATH ?? '/usr/bin:/bin',
+        HOME: cwd,
+        TMPDIR: cwd,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+
+    const killTree = (): void => {
+      if (child.pid === undefined) return
+      try { process.kill(-child.pid, 'SIGKILL') } catch { /* group gone */ }
+      try { child.kill('SIGKILL') } catch { /* already exited */ }
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      killTree()
+    }, timeoutMs)
+
+    const onAbort = (): void => {
+      if (signal?.aborted !== true || settled) return
+      cancelled = true
+      killTree()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    const finish = (exitCode: number): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      const error = timedOut
+        ? `timed out after ${timeoutMs}ms`
+        : cancelled
+          ? 'cancelled: execution terminated by cancel request'
+          : bufferExceeded
+            ? `stdout maxBuffer exceeded (${maxLogBytes} bytes)`
+            : spawnError
+      resolve({
+        run_id: plan.run_id,
+        exit_code: exitCode,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        error,
+      })
+    }
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      outBytes += chunk.length
+      if (outBytes > maxLogBytes) {
+        bufferExceeded = true
+        killTree()
+        return
+      }
+      onChunk?.('stdout', chunk.toString('utf8'), outOffset, chunk.length)
+      outOffset += chunk.length
+      stdoutChunks.push(chunk)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      errBytes += chunk.length
+      if (errBytes > maxLogBytes) {
+        bufferExceeded = true
+        killTree()
+        return
+      }
+      onChunk?.('stderr', chunk.toString('utf8'), errOffset, chunk.length)
+      errOffset += chunk.length
+      stderrChunks.push(chunk)
+    })
+    child.on('error', (error: Error) => { spawnError = error.message })
+    child.on('close', async (code: number | null) => {
+      if (settled) return
+      // `--rm` only cleans up when the docker CLIENT exits normally; if the
+      // client is killed (timeout/cancel) the container survives — force-remove.
+      await execFileAsync('docker', ['rm', '-f', container], { timeout: 10_000 }).catch(() => undefined)
+      finish(code === null ? -1 : code)
+    })
+  })
+}
+
 // ── RemoteRunnerAgent（真实代理端）─────────────────────────────────────────
 
 /**
@@ -346,7 +570,18 @@ export interface RemoteAgentOptions {
   publicKeyPem?: string
   /** 代理端签名 run_manifest 的 Ed25519 密钥（kernel 侧须已注册其公钥）。 */
   signingKey?: RunnerSigningKey
+  /**
+   * 注入执行器（默认 defaultRemoteExecutor：echo 进程内 / trusted smoke
+   * subprocess / 其余 kind digest-pinned container）。生产不需要注入。
+   */
   executor?: AgentExecutor
+  /** 容器运行时可用性探测（默认 probeDockerAvailable；测试注入）。 */
+  dockerProbe?: () => Promise<boolean>
+  /**
+   * 容器执行函数（默认 defaultDockerRun 的 docker run spawn；测试注入记录
+   * args 的 fake——args 即 buildLocalDockerArgs 产物）。
+   */
+  containerRun?: RemoteContainerRunFn
   /** 有界本地 spool 上限。 */
   spool?: { maxEntries?: number; maxBytes?: number }
   /** 轮询间隔（runPollLoop 用）。 */
@@ -372,6 +607,8 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
   private readonly publicKeyPem: string | undefined
   private readonly signingKey: RunnerSigningKey | undefined
   private readonly executor: AgentExecutor
+  private readonly dockerProbe: () => Promise<boolean>
+  private readonly containerRun: RemoteContainerRunFn
   private readonly spool: AgentOutboundSpool
   private readonly pollIntervalMs: number
 
@@ -396,7 +633,9 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
     this._agent_id = options.registration.agent_id
     this.publicKeyPem = options.publicKeyPem
     this.signingKey = options.signingKey
-    this.executor = options.executor ?? defaultSubprocessExecutor
+    this.dockerProbe = options.dockerProbe ?? probeDockerAvailable
+    this.containerRun = options.containerRun ?? defaultDockerRun
+    this.executor = options.executor ?? ((plan, context) => defaultRemoteExecutor(plan, context, this.dockerProbe, this.containerRun))
     this.spool = new AgentOutboundSpool(options.spool)
     this.pollIntervalMs = options.pollIntervalMs ?? 2_000
   }
@@ -710,6 +949,12 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
           throw new RemoteRunnerAgentError(`run ${runId}: code snapshot ${codeSnapshotId} materialized zero files`)
         }
       }
+      // §12.2/§12.5 output contract: the container writes the fixed-schema
+      // metrics file into /outputs (rw mount) — the host mirror is
+      // <workDir>/outputs. uid 65534 must be able to write into it.
+      const outputsDir = join(workDir, 'outputs')
+      mkdirSync(outputsDir, { recursive: true })
+      chmodSync(outputsDir, 0o777)
 
       // 4) frames 管线（全局 seq 单调；owner/token 请求级携带）。
       let frameSeq = 0
@@ -764,8 +1009,62 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
         if (pendingFrames.length >= 64) void flushFrames()
       }
 
-      // 5) 本地执行（sandbox 内；onChunk 逐帧上报）。
-      const outcome = await this.executor(plan, { cwd: workDir, signal: context.signal, onChunk, runEnv: context.runEnv })
+      // 5) 本地执行（sandbox 内；onChunk 逐帧上报）。executor 默认按 kind
+      //    路由（echo 进程内 / trusted smoke subprocess / 其余 digest-pinned
+      //    container）；runEnv 注入 §12.5 的 run/contract/seed 身份。
+      const executionEnv: Record<string, string> = {
+        DSH_RUN_ID: runId,
+        DSH_CONTRACT_ID: plan.output_contract.contract_id ?? '',
+        DSH_SEED: plan.output_contract.seed !== null ? String(plan.output_contract.seed) : '',
+        ...context.runEnv,
+      }
+      const outcome = await this.executor(plan, { cwd: workDir, signal: context.signal, onChunk, runEnv: executionEnv })
+
+      // 5.1) §12.5 (RUN-01c parity)：secure kinds 的 metrics facts 来自容器
+      //     写回的 MetricsFileV1（与本地 runner 同一校验/同一 artifact 形状）。
+      const SECURE_METRICS_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
+      const metricsPath = plan.output_contract.metrics_path
+      let metricsFromFile: MetricsFileRecord | null = null
+      let metricsFileError: string | null = null
+      if (metricsPath !== null && metricsPath !== '') {
+        const real = resolveMetricsFileWithin(outputsDir, metricsPath)
+        if (real === null) {
+          metricsFileError = `metrics path ${metricsPath} escapes the outputs directory or is unreadable (path traversal rejected)`
+        } else {
+          try {
+            const fileContent = readFileSync(real, 'utf8')
+            metricsFromFile = parseMetricsFile(fileContent)
+            if (metricsFromFile === null) {
+              metricsFileError = `metrics file ${metricsPath} is missing or not a MetricsFileV1 (schema_version=1 + non-empty metrics)`
+            }
+          } catch {
+            metricsFileError = `metrics file ${metricsPath} not found after execution (output contract violated)`
+          }
+        }
+      } else if (SECURE_METRICS_KINDS.includes(plan.kind)) {
+        metricsFileError = 'secure job must declare output_contract.metrics (MetricsFileV1 path)'
+      }
+      if (metricsFromFile !== null && SECURE_METRICS_KINDS.includes(plan.kind)) {
+        // contract_metrics 与本地同语义：仅当 job 绑定非空名单时约束 metric 名
+        // （plan 对无绑定 job 归一为 []，不能把 [] 当作"必须为空"）。
+        const problems = validateMetricsFileRecord(metricsFromFile, {
+          run_id: runId,
+          contract_id: plan.output_contract.contract_id,
+          seed: plan.output_contract.seed,
+          contract_metrics: plan.output_contract.contract_metrics.length > 0 ? plan.output_contract.contract_metrics : undefined,
+        })
+        if (problems.length > 0) metricsFileError = `MetricsFileV1 validation failed: ${problems.join('; ')}`
+      }
+      let metrics: Array<{ metric: string; value: number; seed?: number }> = []
+      if (metricsFromFile !== null) {
+        metrics = metricsFromFile.metrics.map(m => ({
+          metric: m.name ?? m.metric ?? '',
+          value: m.value,
+          ...(m.seed !== undefined ? { seed: m.seed } : metricsFromFile!.seed !== undefined ? { seed: metricsFromFile!.seed } : {}),
+        }))
+      } else if (!SECURE_METRICS_KINDS.includes(plan.kind)) {
+        metrics = extractMetrics(outcome.stdout)
+      }
 
       // 6) exit frame（业务终态仍由 complete 决定）。先冲刷剩余 chunk 帧，
       //    再把 exit 作为独立条目发送——spool 中 exit_frame 不可淘汰（§6：
@@ -837,20 +1136,83 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
         byteSize: 0,
       }) as RemoteArtifactFinalizeResponse | undefined
 
-      // 8) 签名 manifest + complete（fencing 字段必带）。
+      // 7.1) metrics artifact（§12.5：secure kinds 的 required fact）。
+      let metricsArtifactId: string | undefined
+      if (metrics.length > 0 || outcome.exit_code === 0) {
+        const metricsContent = metricsArtifactContent(metricsFromFile, {
+          run_id: runId,
+          job_id: plan.job_id,
+          contract_id: plan.output_contract.contract_id,
+          metrics,
+        })
+        const metricsStageId = `stg_${randomUUID().replaceAll('-', '').slice(0, 12)}`
+        const metricsSha256 = createHash('sha256').update(metricsContent, 'utf8').digest('hex')
+        const metricsStaged = await this.sendWithSpool({
+          kind: 'artifact_stage',
+          agentId: this.agent_id,
+          runId,
+          payload: {
+            schema_version: 1,
+            run_id: runId,
+            stage_id: metricsStageId,
+            sha256: metricsSha256,
+            size: Buffer.byteLength(metricsContent, 'utf8'),
+            kind: 'analysis',
+            media_type: 'application/json',
+            file_name: `run-${runId}-metrics.json`,
+            metadata: {
+              run_id: runId, job_id: plan.job_id, metrics: metrics.length,
+              source: metricsFromFile !== null ? 'metrics-file' : 'stdout-json',
+            },
+          },
+          minSeq: 0,
+          maxSeq: 0,
+          byteSize: 0,
+        }) as RemoteArtifactStageResponse | undefined
+        const metricsFinalized = await this.sendWithSpool({
+          kind: 'artifact_finalize',
+          agentId: this.agent_id,
+          runId,
+          payload: {
+            schema_version: 1,
+            run_id: runId,
+            stage_id: metricsStaged?.stage_id ?? metricsStageId,
+            content_base64: Buffer.from(metricsContent, 'utf8').toString('base64'),
+          },
+          minSeq: 0,
+          maxSeq: 0,
+          byteSize: 0,
+        }) as RemoteArtifactFinalizeResponse | undefined
+        // CAS 是内容寻址：artifact_id = sha256:<content-hash> 可由代理端确定
+        // 推导——finalize 被 spool（断网，响应未知）时 manifest 仍携带完整
+        // facts（服务端 replay 时复算校验，不一致 409 fail closed）。
+        metricsArtifactId = metricsFinalized?.artifact_id ?? `sha256:${metricsSha256}`
+      }
+
+      // 8) 签名 manifest + complete（fencing 字段必带）。RUN-REMOTE-01（§5
+      //    两行）：remote 与 local 复用唯一 manifest builder——container_digest
+      //    = plan 固定的 digest-pinned image；data_hash/code_commit/
+      //    code_snapshot_id/seed 为 snapshot/seed facts（kernel 对 secure
+      //    kinds 校验 required facts）。
       const manifest: Record<string, unknown> = {
-        run_id: runId,
-        project_id: plan.project_id,
-        ...plan.output_contract.contract_id !== null && { contract_id: plan.output_contract.contract_id },
-        job_id: plan.job_id,
-        command: plan.command,
-        container_digest: '',
-        data_hash: '',
-        resources: { gpu: 0, cpu: 1, memory_gb: 1 },
-        started_at: outcome.started_at,
-        finished_at: outcome.finished_at,
-        exit_code: outcome.exit_code,
-        ...finalized !== undefined ? { log_artifact: finalized.artifact_id } : {},
+        ...buildRunManifest({
+          run_id: runId,
+          project_id: plan.project_id,
+          contract_id: plan.output_contract.contract_id,
+          job_id: plan.job_id,
+          command: plan.command,
+          code_commit: plan.code_commit,
+          code_snapshot_id: plan.snapshot.code_snapshot_id,
+          container_digest: `docker:${plan.image.digest}`,
+          data_hash: plan.data_hash,
+          seed: plan.output_contract.seed,
+          started_at: outcome.started_at,
+          finished_at: outcome.finished_at,
+          exit_code: outcome.exit_code,
+        }),
+        // 同上：log artifact id 内容寻址，spool 时仍可确定。
+        ...{ log_artifact: finalized?.artifact_id ?? `sha256:${logSha256}` },
+        ...metricsArtifactId !== undefined ? { metrics_artifact: metricsArtifactId } : {},
         lease: { generation: fencing.generation, token: fencing.token },
       }
       const finalManifest = this.signingKey !== undefined
@@ -860,6 +1222,19 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
       //    补发的 frames/stage/finalize 先于 complete 送达）；若本 run 仍有
       //    spool 条目（网络仍断），complete 强制入队（顺序保证，服务端不会在
       //    complete 之后拒绝已 settle claim 的补发帧）。
+      // §12.5/§3.2 parity：secure kinds 的 metrics 文件缺失/非法 → 强制失败
+      // （即使进程 exit 0）；docker 不可用等环境失败 → failure_class=environment。
+      const environmentFailure = outcome.error !== undefined && outcome.error.startsWith('environment:')
+      const metricsFailure = metricsFileError !== null && outcome.exit_code === 0
+        ? { failure_class: 'code_error' as const, error: metricsFileError }
+        : null
+      const status: 'succeeded' | 'failed' = outcome.exit_code === 0 && metricsFileError === null ? 'succeeded' : 'failed'
+      const failureClass = metricsFailure !== null
+        ? metricsFailure.failure_class
+        : outcome.exit_code === 0 ? null : environmentFailure ? 'environment' : 'unknown'
+      const failureError = metricsFailure !== null
+        ? metricsFailure.error
+        : outcome.error ?? (outcome.exit_code === 0 ? null : `exit code ${outcome.exit_code}`)
       const completeEntry: Omit<AgentSpoolEntry, 'id'> = {
         kind: 'complete',
         agentId: this.agent_id,
@@ -869,9 +1244,9 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
           claim_id: claim.claim_id,
           run_id: runId,
           job_id: plan.job_id,
-          status: outcome.exit_code === 0 ? 'succeeded' : 'failed',
-          failure_class: outcome.exit_code === 0 ? null : 'unknown',
-          error: outcome.error ?? (outcome.exit_code === 0 ? null : `exit code ${outcome.exit_code}`),
+          status,
+          failure_class: failureClass,
+          error: failureError,
           run_manifest: finalManifest,
           lease: { owner: fencing.owner, generation: fencing.generation, token: fencing.token },
         },

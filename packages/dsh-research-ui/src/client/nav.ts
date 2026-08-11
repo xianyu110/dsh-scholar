@@ -14,6 +14,7 @@
  */
 import { t } from './i18n/index'
 import { chromeTabs } from './i18n/chrome'
+import type { ProjectRow } from './types'
 
 /** Every panel tab key that exists in the app (panel renderers in index.ts). */
 export const ALL_TAB_KEYS = [
@@ -135,6 +136,43 @@ export function startActions(): StartAction[] {
       route: 'import',
     },
   ]
+}
+
+/* ─────────────────────── Start 三入口选择逻辑 (§5 P1) ───────────────────────
+ * ONBOARD-01 landing (2026-08-11): the Start screen is shown whenever no
+ * project is selected — projects are NEVER auto-selected (`projects[0]`),
+ * the user explicitly picks from the list or types an id. Pure functions
+ * keep the selection logic unit-testable without a DOM. */
+
+/** Whether the Start screen (three entries) must be shown: true iff no
+ *  project is selected yet (undefined or empty). No auto-select fallback
+ *  exists. */
+export function startScreenVisible(selectedProjectId: string | undefined): boolean {
+  return selectedProjectId === undefined || selectedProjectId === ''
+}
+
+/** Filter the open-project list by name or id substring ('' = full list). */
+export function filterProjects(projects: readonly ProjectRow[], query: string): ProjectRow[] {
+  const q = query.trim().toLowerCase()
+  if (q === '') return [...projects]
+  return projects.filter(p =>
+    (p.name ?? '').toLowerCase().includes(q) || (p.project_id ?? '').toLowerCase().includes(q),
+  )
+}
+
+/**
+ * Explicit project pick from user input: exact project_id match wins, then a
+ * UNIQUE full-name match, otherwise null. Never falls back to projects[0] —
+ * a null result means "show the user the choice again".
+ */
+export function pickProject(projects: readonly ProjectRow[], input: string): string | null {
+  const raw = input.trim()
+  if (raw === '') return null
+  const byId = projects.find(p => p.project_id === raw)
+  if (byId !== undefined) return byId.project_id ?? null
+  const byName = projects.filter(p => p.name === raw)
+  if (byName.length === 1) return byName[0]!.project_id ?? null
+  return null
 }
 
 /**

@@ -12,13 +12,13 @@ bash scripts/start-standalone-ui.sh
 
 ## 2. 首次进入：Init、Resume 或 Upload
 
-未选择项目时：
+未选择项目时页面显示三张启动卡（不会自动选中某个项目）：
 
-- **Init**：填写项目名、研究问题和主指标，确认默认 gate-only/Local Docker 策略后创建 DRAFT + Scope Gate；
-- **Resume**：选择最近项目，根据 status、pending Gate 和 NextAction 回到上次页面；
-- **Upload**：上传外部论文、TeX、代码、数据、日志或结果。系统先 hash/scan，再用 Grill Me 询问缺失的 scope、license、commit、dataset/split/seed、metric direction、Manifest、统计与隐私信息。
+- **新建研究（Init）**：填写项目名、研究问题和主指标，确认默认 gate-only/Local Docker 策略后创建 DRAFT + Scope Gate；
+- **打开已有项目（Resume）**：Start 屏下方列出此内核上的项目，搜索名称或输入完整 project id 后显式选择；根据 status、pending Gate 和 NextAction 回到上次页面；
+- **上传 / 接入（Upload）**：打开真实导入向导（ONBOARD-01）——选择目标项目（或新建）、来源标签与目标阶段（brief/survey/idea/baseline/contract/experiment/evidence/writing/review/release，问题清单按阶段裁剪）→ 上传文件（单文件 ≤32MiB，multipart；已 staged 文件可继续/重传——sha256 幂等，或删除后重传）→ 静态安全扫描（clean/quarantined/rejected 与拒因）→ Grill Me 回答必答问题（答案持久化为 human_assertion）→ 生成阶段提案（plan/risks/pre-accept 清单/置信度）→ PI 采用（AdoptionReceipt）或拒绝。每步从服务端投影恢复：刷新或重开页面后向导回到同一会话同一阶段；Overview 面板的 intake_* NextAction 卡可直接继续接入会话。
 
-Upload 可以创建新项目或合并有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI、分块 offset/hash 恢复上传与研究包 archive 解包扫描、Agent tool 面与 v2/BFF accept 面仍属后续阶段。不能用普通 Artifact/TeX 上传模拟安全接入。
+Upload 可以创建新项目或选择有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI 已接线(2026-08-11,视觉验收未完成——浏览器拖拽/真实上传交互与断点续接观感待人工环境,记 NOT_RUN_MANUAL_PENDING);分块 offset/hash 恢复上传(服务端整文件 staged ≤32MiB,UI 如实不做分块)与研究包 archive 解包扫描、Agent tool 面与 v2/BFF accept 面仍属后续阶段。不能用普通 Artifact/TeX 上传模拟安全接入。
 
 ## 3. 创建项目与 Scope Gate
 

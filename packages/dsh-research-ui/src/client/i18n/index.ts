@@ -22,6 +22,7 @@ import { zh as artifactsZh, en as artifactsEn } from './locales/artifacts'
 import { zh as evidenceZh, en as evidenceEn } from './locales/evidence'
 import { zh as budgetZh, en as budgetEn } from './locales/budget'
 import { zh as statusZh, en as statusEn } from './locales/status'
+import { zh as intakeZh, en as intakeEn } from './locales/intake'
 
 export type Locale = 'zh' | 'en'
 
@@ -41,6 +42,7 @@ const DICTS: AllDicts = {
     evidence: evidenceZh as unknown as Record<string, string>,
     budget: budgetZh as unknown as Record<string, string>,
     status: statusZh as unknown as Record<string, string>,
+    intake: intakeZh as unknown as Record<string, string>,
   },
   en: {
     common: commonEn as unknown as Record<string, string>,
@@ -54,6 +56,7 @@ const DICTS: AllDicts = {
     evidence: evidenceEn as unknown as Record<string, string>,
     budget: budgetEn as unknown as Record<string, string>,
     status: statusEn as unknown as Record<string, string>,
+    intake: intakeEn as unknown as Record<string, string>,
   },
 }
 

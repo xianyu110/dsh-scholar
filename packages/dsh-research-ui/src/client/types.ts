@@ -14,6 +14,109 @@ export interface NextActionV2 {
   required_by?: 'human' | 'agent' | 'runner'
 }
 
+/* ─────────────────────── ONBOARD-01 intake wire shapes ───────────────────────
+ * Mirror research-schemas intake.ts with optional fields (same
+ * dependency-light pattern as NextActionV2): the pure logic layer
+ * (intake-flow.ts) and the wizard (modals/intake.ts) consume these. */
+
+export interface IntakeSessionLite {
+  intake_id?: string
+  project_id?: string | null
+  owner?: { principal_id?: string; auth_method?: string; session_id?: string | null }
+  status?: string
+  revision?: number
+  source_label?: string
+  target_phase?: string | null
+  expires_at?: string
+  scan_summary?: Record<string, unknown>
+  created_at?: string
+  updated_at?: string
+  audit?: Array<{ at?: string; action?: string; detail?: string }>
+}
+
+export interface IntakeArtifactLite {
+  artifact_id?: string
+  intake_id?: string
+  file_name?: string
+  media_type?: string
+  size_bytes?: number
+  sha256?: string
+  quarantine?: string
+  scan_result?: Record<string, unknown>
+  created_at?: string
+}
+
+export interface IntakeObservationLite {
+  observation_id?: string
+  intake_id?: string
+  artifact_id?: string
+  locator?: string
+  detector?: string
+  detector_version?: string
+  value?: string
+  warnings?: string[]
+  trust?: string
+  created_at?: string
+}
+
+export interface GrillAnswerViewLite {
+  question_code?: string
+  label_key?: string
+  prompt?: string
+  reason?: string
+  required?: boolean
+  depends_on?: string[]
+  question_revision?: number
+  question_type?: string
+  answer?: string | null
+  answered_at?: string | null
+  answered_by?: string | null
+  provenance?: string
+}
+
+export interface PhaseProposalLite {
+  proposal_id?: string
+  intake_id?: string
+  revision?: number
+  observed_phase?: string
+  safe_project_status?: string
+  confidence?: number
+  plan?: string
+  risks?: string[]
+  pre_accept_checklist?: string[]
+  unresolved_gaps?: string[]
+  suggested_mappings?: Array<{ source_artifact_id?: string; target_kind?: string; note?: string }>
+  required_gates?: string[]
+  next_actions?: NextActionV2[]
+  created_at?: string
+}
+
+export interface AdoptionReceiptLite {
+  adoption_id?: string
+  intake_id?: string
+  project_id?: string
+  proposal_revision?: number
+  target_project_revision?: number
+  created_object_refs?: string[]
+  pending_gate_refs?: string[]
+  draft_evidence_refs?: string[]
+  idempotency_key?: string | null
+  request_hash?: string
+  adopted_by?: { principal_id?: string }
+  adopted_at?: string
+}
+
+/** Full resumable intake state (GET /v1/projects/{id}/intake/{iid} —
+ *  survives kernel restarts; every wizard step re-derives from it). */
+export interface IntakeProjectionLite {
+  session?: IntakeSessionLite
+  artifacts?: IntakeArtifactLite[]
+  observations?: IntakeObservationLite[]
+  questions?: GrillAnswerViewLite[]
+  proposal?: PhaseProposalLite | null
+  receipt?: AdoptionReceiptLite | null
+}
+
 export interface Projection {
   project?: {
     project_id?: string; name?: string; status?: string; revision?: number

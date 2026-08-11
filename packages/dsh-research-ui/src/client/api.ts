@@ -54,7 +54,30 @@ export function base(): string {
 
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
-  // SEC-UI-01: state-changing requests must carry the session CSRF token.
+  const result = await apiResult<T>(path, init)
+  return result.ok ? result.data : null
+}
+
+/** Kernel error envelope (server.ts errorEnvelope — stable error codes,
+ *  api-contracts §1). Kept structural so the intake wizard can surface the
+ *  machine code without depending on the kernel package. */
+export interface ApiErrorEnvelope {
+  code?: string
+  message?: string
+  request_id?: string
+  retryable?: boolean
+}
+
+export type ApiResult<T> =
+  | { ok: true; data: T; status: number }
+  | { ok: false; error: ApiErrorEnvelope; status: number }
+
+/**
+ * Like api() but returns the parsed error envelope instead of collapsing to
+ * null (ONBOARD-01 intake wizard needs the stable error code for copy).
+ * 401 (unauthorized) still resolves as an envelope.
+ */
+export async function apiResult<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   const method = (init?.method ?? 'GET').toUpperCase()
   const isWrite = method !== 'GET' && method !== 'HEAD'
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -69,13 +92,68 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T | null
           ...(isWrite ? { 'x-csrf-token': (await ensureCsrfToken()) ?? '' } : {}),
         },
       })
-      if (response.status === 401) return null
-      if (!response.ok) return null
-      return (await response.json()) as T
+      if (!response.ok) {
+        let error: ApiErrorEnvelope = {}
+        try {
+          const payload = (await response.json()) as { error?: unknown }
+          const e = typeof payload?.error === 'object' && payload.error !== null ? payload.error as Record<string, unknown> : {}
+          error = {
+            code: typeof e.code === 'string' ? e.code : undefined,
+            message: typeof e.message === 'string' ? e.message : undefined,
+            request_id: typeof e.request_id === 'string' ? e.request_id : undefined,
+            retryable: typeof e.retryable === 'boolean' ? e.retryable : undefined,
+          }
+        } catch { /* non-JSON error body */ }
+        if (error.code === undefined) {
+          error = { code: response.status === 401 ? 'unauthorized' : 'http_error', message: `HTTP ${response.status}` }
+        }
+        return { ok: false, error, status: response.status }
+      }
+      return { ok: true, data: (await response.json()) as T, status: response.status }
     } catch {
-      return null
+      // retry once on transport failures
     }
   }
-  return null
+  return { ok: false, error: { code: 'network_error', message: 'request failed' }, status: 0 }
+}
+
+/**
+ * UPLOAD-01 multipart passthrough: FormData with the BROWSER-set boundary
+ * (never a JSON content-type — the BFF/kernel parse the real multipart
+ * envelope). Same bearer/CSRF semantics as apiResult.
+ */
+export async function apiMultipart<T>(path: string, form: FormData): Promise<ApiResult<T>> {
+  const method = 'POST'
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(`${base()}${path}`, {
+        method,
+        body: form,
+        headers: {
+          accept: 'application/json',
+          ...(await authHeaders()),
+          'x-csrf-token': (await ensureCsrfToken()) ?? '',
+        },
+      })
+      if (!response.ok) {
+        let error: ApiErrorEnvelope = {}
+        try {
+          const payload = (await response.json()) as { error?: unknown }
+          const e = typeof payload?.error === 'object' && payload.error !== null ? payload.error as Record<string, unknown> : {}
+          error = {
+            code: typeof e.code === 'string' ? e.code : undefined,
+            message: typeof e.message === 'string' ? e.message : undefined,
+            retryable: typeof e.retryable === 'boolean' ? e.retryable : undefined,
+          }
+        } catch { /* non-JSON error body */ }
+        if (error.code === undefined) error = { code: 'http_error', message: `HTTP ${response.status}` }
+        return { ok: false, error, status: response.status }
+      }
+      return { ok: true, data: (await response.json()) as T, status: response.status }
+    } catch {
+      // retry once on transport failures
+    }
+  }
+  return { ok: false, error: { code: 'network_error', message: 'request failed' }, status: 0 }
 }
 

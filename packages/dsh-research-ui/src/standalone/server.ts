@@ -43,6 +43,48 @@ import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 const DEFAULT_PORT = 18610
 const DEFAULT_KERNEL_PORT = 17413
 
+/**
+ * GOV-01/ONBOARD-01 (hardening §5 P1): explicit capability ROUTE TABLE for
+ * PI-only writes, matched against the RAW pathname (segment-anchored, no
+ * query params — the previous substring regex, made explicit). Governance
+ * writes: transitions, gates, decisions, budget, approve, accept (existing)
+ * PLUS intake ADOPT (POST /v1/projects/{id}/intake/{iid}/adopt — the PI
+ * decision that converts a proposal into project state) and project
+ * archive/unarchive. researcher/viewer/auditor → 403 role forbidden;
+ * pi/operator are the only permitted roles. The same table is shared with
+ * the kernel (research-kernel server.ts isPiOnlyWrite) so the two layers
+ * can never drift apart.
+ */
+const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
+  /(?:^|\/)transitions(?:\/|$)/,
+  /(?:^|\/)gates(?:\/|$)/,
+  /(?:^|\/)decisions(?:\/|$)/,
+  /(?:^|\/)budget(?:\/|$)/,
+  /(?:^|\/)approve(?:\/|$)/,
+  /(?:^|\/)accept(?:\/|$)/,
+  /(?:^|\/)intake\/[^/]+\/adopt(?:\/|$)/,
+  /(?:^|\/)archive(?:\/|$)/,
+  /(?:^|\/)unarchive(?:\/|$)/,
+]
+
+function isPiOnlyWrite(pathname: string): boolean {
+  return PI_ONLY_WRITE_ROUTES.some(re => re.test(pathname))
+}
+
+/** The subset of PI-only routes the KERNEL re-enforces from its own
+ * project_members table (defense in depth): the BFF injects its
+ * server-derived x-principal-id/x-principal-role on these forwards so the
+ * kernel second layer can resolve the acting principal's role itself. */
+const KERNEL_PI_ONLY_FORWARD_ROUTES: ReadonlyArray<RegExp> = [
+  /(?:^|\/)intake\/[^/]+\/adopt(?:\/|$)/,
+  /(?:^|\/)archive(?:\/|$)/,
+  /(?:^|\/)unarchive(?:\/|$)/,
+]
+
+function isKernelPiOnlyForward(pathname: string): boolean {
+  return KERNEL_PI_ONLY_FORWARD_ROUTES.some(re => re.test(pathname))
+}
+
 /** Models this Scholar surface may route the research agent onto. Mirrors the
  * DSH harness advisory catalog (llm-deepseek): ''/auto = agent default. */
 const MODEL_CATALOG = ['deepseek-v4-flash', 'deepseek-v4-pro']
@@ -1083,7 +1125,9 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           }
           // API-01 role capabilities (defense in depth, kernel v2 semantics):
           // viewer/auditor are read-only; researcher cannot perform governance
-          // writes (transitions/gates/decisions/budget/approve/accept);
+          // writes — the PI-only capability route table (transitions/gates/
+          // decisions/budget/approve/accept PLUS intake adopt and project
+          // archive/unarchive, hardening §5 P1 GOV-01/ONBOARD-01);
           // pi/operator are unrestricted. Enforced BEFORE forwarding with a
           // stable body ({ok:false,error:'role forbidden'}) that never leaks
           // internal detail. The role comes from the BFF's own membership
@@ -1091,8 +1135,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           if (memberProjectId !== null && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
             const role = await projectRole(memberProjectId)
             if (role !== null) {
-              const governanceWrite = /(?:transitions|gates(?:\/|$)|decisions|budget|approve|accept)/.test(url.pathname)
-              if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && governanceWrite)) {
+              if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && isPiOnlyWrite(url.pathname))) {
                 sendJson(res, 403, { ok: false, error: 'role forbidden' })
                 return
               }
@@ -1260,6 +1303,22 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // rejected by the role policy (read-only roles block all writes).
         if (options.principal !== null && url.pathname.startsWith('/v1/topology/')) {
           proxyHeaders['x-principal-id'] = options.principal
+        }
+        // GOV-01/ONBOARD-01 (hardening §5 P1): the PI-only v1 routes (intake
+        // adopt, project archive/unarchive) are double-checked by the KERNEL,
+        // which resolves the acting principal's role from its OWN
+        // project_members table (researcher/viewer/auditor → 403
+        // role_forbidden, unknown principal → 404, missing identity → 422
+        // principal_required — never a single BFF layer). The BFF therefore
+        // injects its server-derived operator identity on these forwards;
+        // the role header is a hint for the kernel's fast path, the kernel
+        // membership lookup is the authority.
+        if (options.principal !== null && method === 'POST' && isKernelPiOnlyForward(url.pathname)) {
+          proxyHeaders['x-principal-id'] = options.principal
+          if (memberProjectId !== null) {
+            const role = await projectRole(memberProjectId)
+            if (role !== null) proxyHeaders['x-principal-role'] = role
+          }
         }
         // GOV-01 principal resolver: the authenticated operator session is a
         // DURABLE identity derived from the bearer token (session.json,

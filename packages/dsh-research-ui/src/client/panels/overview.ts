@@ -9,16 +9,26 @@
  * fallback) so older kernels are not broken.
  */
 import type { NextActionV2, Projection } from '../types'
-import { el } from '../ui'
+import { el, rootHost } from '../ui'
 import { t } from '../i18n/index'
 import { chromeTabs } from '../i18n/chrome'
 import { state, tabSave } from '../state'
 import { DEEP_LINK_TAB_PREFIX } from '../nav'
 import { nextActionCardModel, resolveNextActionInput, type NextActionCardModel } from '../next-action-cards'
+import { openIntakeModal } from '../modals/intake'
 
 /** Navigate to a panel tab through the existing nav mechanism: direct tab
- *  switch (immediate) + the stable deep link (survives reload/back-forward). */
-function navigateTo(tab: string): void {
+ *  switch (immediate) + the stable deep link (survives reload/back-forward).
+ *  Intake actions (route 'intake') open the intake wizard modal instead. */
+function navigateTo(model: NextActionCardModel): void {
+  if (model.route === 'intake') {
+    openIntakeModal(rootHost(), {
+      projectId: model.intakeProjectId ?? undefined,
+      intakeId: model.intakeId ?? undefined,
+    })
+    return
+  }
+  const tab = model.route
   state.activeTab = tab
   tabSave()
   state.rerender()
@@ -73,13 +83,15 @@ export function nextActionCardNode(model: NextActionCardModel): HTMLElement {
   if (model.hasRoute) {
     const foot = el('div', 'row nax-foot')
     foot.style.cssText = 'margin-top:8px;justify-content:flex-end'
-    const tabLabel = chromeTabs().find(tab => tab.key === model.route)?.label ?? model.route
+    const tabLabel = model.route === 'intake'
+      ? t('intake', 'intake.title')
+      : (chromeTabs().find(tab => tab.key === model.route)?.label ?? model.route)
     const go = el('button', 'hbtn nax-go', t('overview', 'overview.nextaction.open', { tab: tabLabel }))
     if (model.disabled) {
       go.disabled = true
       go.style.cssText += ';opacity:.45;cursor:not-allowed'
     }
-    go.onclick = () => { navigateTo(model.route) }
+    go.onclick = () => { navigateTo(model) }
     foot.appendChild(go)
     card.appendChild(foot)
   }

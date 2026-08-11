@@ -11,8 +11,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  ResearchKernel, nextActionProjection, legacyNextActionStrings,
-  type NextActionContext, type NextActionJob,
+  ResearchKernel, nextActionProjection, legacyNextActionStrings, INTAKE_ACTIVE_STATUSES,
+  type NextActionContext, type NextActionIntake, type NextActionJob,
 } from '@dsh-scholar/research-kernel'
 import {
   NEXT_ACTION_UNKNOWN_CODE, NextAction, ProjectStatus,
@@ -33,6 +33,10 @@ function gate(type: Gate['type'], id = `gate_${type}_x1`): Gate {
 
 function job(partial: Partial<NextActionJob> & { job_id: string; kind: string; status: NextActionJob['status'] }): NextActionJob {
   return { failure_class: null, attempts: 0, max_attempts: 3, contract_id: null, created_at: NOW, ...partial }
+}
+
+function intake(partial: Partial<NextActionIntake> & { status: string }): NextActionIntake {
+  return { intake_id: 'intk_1', status: partial.status, target_phase: 'experiment', artifact_count: 0, ...partial }
 }
 
 /** Minimal authoritative-state context; per-test overrides win. */
@@ -223,6 +227,80 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
   })
 })
 
+describe('GUIDE-01 intake overlay (ONBOARD-01 landing — intake_* actions)', () => {
+  it('no active intakes → no intake_* actions (backward compatible)', () => {
+    const actions = nextActionProjection(ctx({ status: 'DRAFT' }))
+    expect(actions.some(a => a.code.startsWith('intake_'))).toBe(false)
+  })
+
+  it('every active intake status projects intake_resume + the status step overlay', () => {
+    const cases: Array<[string, string[]]> = [
+      ['draft', ['intake_resume']],
+      ['uploading', ['intake_resume', 'intake_scan']],
+      ['scanning', ['intake_resume']],
+      ['needs_input', ['intake_resume', 'intake_answer']],
+      ['grilling', ['intake_resume', 'intake_answer']],
+      ['proposal_ready', ['intake_resume', 'intake_propose']],
+      ['awaiting_human', ['intake_resume', 'intake_adopt']],
+    ]
+    for (const [status, expected] of cases) {
+      const actions = nextActionProjection(ctx({
+        status: 'DRAFT',
+        intakes: [intake({ status, intake_id: 'intk_1', artifact_count: status === 'uploading' ? 1 : 0 })],
+      }))
+      const codes = actions.filter(a => a.code.startsWith('intake_')).map(a => a.code)
+      expect(codes, status).toEqual(expected)
+      for (const action of actions) {
+        expect(NextAction.safeParse(action).success).toBe(true)
+      }
+      // 幂等稳定:同一输入产生同一 id/code 集合
+      const again = nextActionProjection(ctx({
+        status: 'DRAFT',
+        intakes: [intake({ status, intake_id: 'intk_1', artifact_count: status === 'uploading' ? 1 : 0 })],
+      }))
+      expect(again.map(a => a.id)).toEqual(actions.map(a => a.id))
+    }
+  })
+
+  it('intake_scan only when artifacts are staged; uploading with 0 files emits resume only', () => {
+    const noArtifacts = nextActionProjection(ctx({ status: 'DRAFT', intakes: [intake({ status: 'uploading', artifact_count: 0 })] }))
+    expect(noArtifacts.filter(a => a.code.startsWith('intake_')).map(a => a.code)).toEqual(['intake_resume'])
+    const withArtifacts = nextActionProjection(ctx({ status: 'DRAFT', intakes: [intake({ status: 'uploading', artifact_count: 3 })] }))
+    expect(withArtifacts.filter(a => a.code.startsWith('intake_')).map(a => a.code)).toEqual(['intake_resume', 'intake_scan'])
+  })
+
+  it('intake_adopt requires the pi capability and carries intake+project refs', () => {
+    const actions = nextActionProjection(ctx({ status: 'DRAFT', intakes: [intake({ status: 'awaiting_human' })] }))
+    const adopt = actions.find(a => a.code === 'intake_adopt')
+    expect(adopt).toBeDefined()
+    expect(adopt?.capability).toBe('pi')
+    expect(adopt?.required_by).toBe('human')
+    expect(adopt?.blocking).toBe(false)
+    expect(adopt?.refs).toContainEqual({ kind: 'intake', id: 'intk_1' })
+    expect(adopt?.refs).toContainEqual({ kind: 'project', id: PROJECT_ID })
+    expect(adopt?.state).toBe('ready')
+    // 每个 active intake 各有一条 resume(ref 绑定)
+    const two = nextActionProjection(ctx({
+      status: 'DRAFT',
+      intakes: [intake({ status: 'draft', intake_id: 'intk_a' }), intake({ status: 'grilling', intake_id: 'intk_b' })],
+    }))
+    const resumes = two.filter(a => a.code === 'intake_resume')
+    expect(resumes.map(a => a.refs.find(r => r.kind === 'intake')?.id)).toEqual(['intk_a', 'intk_b'])
+  })
+
+  it('terminal intakes (accepted/rejected/expired/failed) project nothing', () => {
+    for (const status of ['accepted', 'rejected', 'expired', 'failed']) {
+      const actions = nextActionProjection(ctx({ status: 'DRAFT', intakes: [intake({ status })] }))
+      expect(actions.some(a => a.code.startsWith('intake_')), status).toBe(false)
+    }
+    // INTAKE_ACTIVE_STATUSES 导出与 schema 状态机一致
+    expect(INTAKE_ACTIVE_STATUSES).toEqual([
+      'draft', 'uploading', 'scanning', 'needs_input', 'grilling',
+      'proposal_ready', 'awaiting_human',
+    ])
+  })
+})
+
 describe('GUIDE-01 kernel integration (projectProjection)', () => {
   it('DRAFT projects project scope_gate_submit with derived legacy strings', () => {
     const { kernel, dir } = freshKernel()
@@ -274,6 +352,43 @@ describe('GUIDE-01 kernel integration (projectProjection)', () => {
       expect(resolve?.state).toBe('blocked')
       expect(resolve?.required).toEqual(['budget_headroom'])
       expect(blocked.next_actions_v2.some(a => a.code === 'gate_resolve')).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('an active intake session projects intake_* guidance in the projection', () => {
+    const { kernel, dir } = freshKernel()
+    try {
+      const out = kernel.createProjectWithInitialGate({
+        name: 'na', workspace: '/research/na',
+        brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
+        idempotency_key: 'k3', request_hash: 'h3',
+      })
+      const projectId = out.project.project_id
+      const session = kernel.beginIntake({
+        project_id: projectId, source_label: 'uploaded-paper', target_phase: 'experiment',
+        owner: { principal_id: 'human-1', auth_method: 'dsh-session' },
+      })
+      // draft → intake_resume
+      let projection = kernel.projectProjection(projectId)
+      expect(projection.next_actions_v2.find(a => a.code === 'intake_resume')).toBeDefined()
+      expect(projection.next_actions_v2.find(a => a.code === 'intake_resume')?.refs)
+        .toContainEqual({ kind: 'intake', id: session.intake_id })
+      expect(projection.next_actions.some(s => s.startsWith('Resume intake'))).toBe(true)
+      // stage a file → uploading → intake_resume + intake_scan
+      kernel.stageIntakeArtifact(session.intake_id, { file_name: 'paper.txt', content: 'hello world' })
+      projection = kernel.projectProjection(projectId)
+      expect(projection.next_actions_v2.filter(a => a.code.startsWith('intake_')).map(a => a.code))
+        .toEqual(['intake_resume', 'intake_scan'])
+      // scan → needs_input (required questions unanswered) → intake_answer
+      kernel.scanIntake(session.intake_id)
+      projection = kernel.projectProjection(projectId)
+      expect(projection.next_actions_v2.filter(a => a.code.startsWith('intake_')).map(a => a.code))
+        .toEqual(['intake_resume', 'intake_answer'])
+      // legacy strings derive from the non-done structured actions
+      const expectedLegacy = projection.next_actions_v2.filter(a => a.state !== 'done').map(a => a.label)
+      expect(projection.next_actions).toEqual(expectedLegacy)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

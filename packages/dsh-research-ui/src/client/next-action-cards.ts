@@ -71,6 +71,13 @@ export const NEXT_ACTION_LABEL_KEYS: Record<string, string> = {
   project_released: 'overview.nextaction.code.project_released',
   project_stopped: 'overview.nextaction.code.project_stopped',
   budget_resolve: 'overview.nextaction.code.budget_resolve',
+  // ONBOARD-01 intake overlay actions (GUIDE-01 landing): the wizard CTA is
+  // a modal, so these cards carry route 'intake' (opened by the panel layer).
+  intake_resume: 'overview.nextaction.code.intake_resume',
+  intake_scan: 'overview.nextaction.code.intake_scan',
+  intake_answer: 'overview.nextaction.code.intake_answer',
+  intake_propose: 'overview.nextaction.code.intake_propose',
+  intake_adopt: 'overview.nextaction.code.intake_adopt',
   unknown: 'overview.nextaction.code.unknown',
 }
 
@@ -100,7 +107,8 @@ export interface NextActionCardModel {
   reasonText: string
   /** Resolved missing-precondition texts (empty when none). */
   missingList: string[]
-  /** Panel tab the card navigates to ('' = no CTA). */
+  /** Panel tab the card navigates to ('' = no CTA; 'intake' = the intake
+   *  wizard modal, see intake-flow.ts). */
   route: string
   /** Whether a route CTA should be rendered. */
   hasRoute: boolean
@@ -110,6 +118,10 @@ export interface NextActionCardModel {
   stateLabel: string
   /** True for the kernel's read-only `unknown` code (api-contracts §21). */
   isUnknown: boolean
+  /** Intake session id when the card is an intake_* action (wizard CTA). */
+  intakeId: string | null
+  /** Project id from the intake action refs (project-scoped routes). */
+  intakeProjectId: string | null
 }
 
 /** True when `key` exists in the overview dictionary of `locale` (parity is
@@ -127,6 +139,12 @@ function hasOverviewKey(key: string, locale: Locale): boolean {
 export function nextActionCardModel(action: NextActionV2, locale: Locale = getLocale()): NextActionCardModel {
   const code = typeof action.code === 'string' && action.code !== '' ? action.code : NEXT_ACTION_UNKNOWN_CODE
   const isUnknown = code === NEXT_ACTION_UNKNOWN_CODE
+  // ONBOARD-01 intake overlay actions open the intake wizard modal (route
+  // 'intake'); the session/project ids come from the kernel refs.
+  const isIntake = code.startsWith('intake_')
+  const refs = Array.isArray(action.refs) ? action.refs : []
+  const intakeId = isIntake ? (refs.find(r => r?.kind === 'intake' && typeof r.id === 'string')?.id ?? null) : null
+  const intakeProjectId = isIntake ? (refs.find(r => r?.kind === 'project' && typeof r.id === 'string')?.id ?? null) : null
   const labelKey = NEXT_ACTION_LABEL_KEYS[code]
   const title = labelKey !== undefined && hasOverviewKey(labelKey, locale)
     ? t('overview', labelKey)
@@ -142,7 +160,7 @@ export function nextActionCardModel(action: NextActionV2, locale: Locale = getLo
   // unknown → always read-only (never a mutation CTA).
   const disabled = state === 'done' || isUnknown || (state === 'blocked' && required.length > 0)
   const rawRoute = typeof action.route === 'string' ? action.route : ''
-  const route = isUnknown ? '' : (ROUTE_TO_TAB[rawRoute] ?? 'phase')
+  const route = isUnknown ? '' : (isIntake ? 'intake' : (ROUTE_TO_TAB[rawRoute] ?? 'phase'))
   return {
     code,
     title,
@@ -155,6 +173,8 @@ export function nextActionCardModel(action: NextActionV2, locale: Locale = getLo
     blockingNote: action.blocking === true ? t('overview', 'overview.nextaction.blocking') : '',
     stateLabel: t('overview', `overview.nextaction.state.${tone}`),
     isUnknown,
+    intakeId,
+    intakeProjectId,
   }
 }
 

@@ -121,7 +121,11 @@ describe('tex diagnostics: file/line + structured kinds (§7)', () => {
       ...fenceArgs(kernel, job.job_id),
       status: 'succeeded',
       run_manifest: {
-        run_id: 'run_diag', job_id: job.job_id, project_id: project.project_id, exit_code: 0,
+        // §5 RUN-REMOTE-01: secure kinds 必须携带 claim 的 run_id + metrics_artifact。
+        run_id: kernel.getJob(job.job_id).run_id!,
+        job_id: job.job_id, project_id: project.project_id, exit_code: 0,
+        metrics_artifact: log.artifact_id,
+        container_digest: `docker:${kernel.getJob(job.job_id).image_digest}`,
         tex_pdf_artifact: pdf.artifact_id,
         tex_log_artifact: log.artifact_id,
         // The runner's first-pass diagnostics LACK file/line — the kernel
@@ -156,7 +160,7 @@ describe('tex diagnostics: file/line + structured kinds (§7)', () => {
       ...fenceArgs(kernel, job2.job_id),
       status: 'failed',
       failure_class: 'code_error',
-      run_manifest: { run_id: 'run_diag2', job_id: job2.job_id, project_id: project.project_id, exit_code: 1, tex_diagnostics: [{ level: 'error', message: 'halted' }] },
+      run_manifest: { run_id: kernel.getJob(job2.job_id).run_id!, job_id: job2.job_id, project_id: project.project_id, exit_code: 1, tex_diagnostics: [{ level: 'error', message: 'halted' }] },
     })
     const stored2 = JSON.parse(kernel.texGetBuild(build2.build_id).diagnostics) as LatexDiagnostic[]
     expect(stored2).toEqual([{ level: 'error', message: 'halted' }])
@@ -318,7 +322,8 @@ describe('tex compile freeze & replay (§7)', () => {
       ...fenceArgs(kernel, job.job_id),
       status: 'succeeded',
       run_manifest: {
-        run_id: 'run_history', job_id: job.job_id, project_id: project.project_id, exit_code: 0,
+        run_id: kernel.getJob(job.job_id).run_id!, job_id: job.job_id, project_id: project.project_id, exit_code: 0, metrics_artifact: log.artifact_id,
+        container_digest: `docker:${kernel.getJob(job.job_id).image_digest}`,
         tex_pdf_artifact: pdf.artifact_id,
         tex_log_artifact: log.artifact_id,
         tex_diagnostics: [],
@@ -354,12 +359,13 @@ describe('tex compile freeze & replay (§7)', () => {
     })
     const build = kernel.texCreateBuild(doc.document_id, snap.revision, 'paper.tex', job.job_id)
     kernel.claimJobs('test-runner', 300, 8)
+    const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [] }) })
     kernel.completeJob({
       job_id: job.job_id,
       owner: 'test-runner',
       ...fenceArgs(kernel, job.job_id),
       status: 'succeeded',
-      run_manifest: { run_id: 'run_stale', job_id: job.job_id, project_id: project.project_id, exit_code: 0, tex_diagnostics: [] },
+      run_manifest: { run_id: kernel.getJob(job.job_id).run_id!, job_id: job.job_id, project_id: project.project_id, exit_code: 0, metrics_artifact: metrics.artifact_id, container_digest: `docker:${kernel.getJob(job.job_id).image_digest}`, tex_diagnostics: [] },
     })
     // The build froze the then-current revision; after a source edit the
     // document revision moves ahead — the kernel exposes both so a UI can

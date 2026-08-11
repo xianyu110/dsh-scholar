@@ -109,6 +109,7 @@ describe('ExecutionPlan schema（research-schemas）', () => {
       contract_id: 'expc_test_1',
       seed: 11,
       contract_metrics: ['macro_f1', 'accuracy'],
+      trusted_fixture: false,
     })
     expect(plan.command).toEqual(['python', 'run.py'])
     // schema 可解析（buildExecutionPlan 已 parse；再显式 parse 一次证明）

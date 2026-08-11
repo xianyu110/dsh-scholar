@@ -43,7 +43,9 @@
 - 服务端从 kernel 按既有 `claimJobs` 路径拉取 Job（同一 lease owner/
   generation/token/run_id），固定并**签名 ExecutionPlan**，按 agent 的
   target_id + capability 匹配分发；
-- 代理端验签 → 拉取 CAS 输入并复算 hash（不一致拒绝执行）→ 隔离 sandbox
+- 代理端验签 → 拉取 CAS 输入并复算 hash（不一致拒绝执行）→ 执行（secure
+  kinds 只能进入 digest-pinned restricted container；subprocess 仅 echo 与
+  显式 trusted smoke fixture，hardening §5 两行）→ 隔离 sandbox
   执行 → 按 generation/token 上报 frames、stage/finalize Artifacts、
   complete；
 - 服务端把 frames/artifacts/complete 原样转发 kernel（与本地 runner 同路径，
@@ -138,7 +140,13 @@ frames/stage/finalize/complete 保存到本地有界 spool（`maxEntries`/
 ### 5.5 complete：manifest 签名 + fencing
 
 - `run_manifest` 必须携带 `signature`/`payload_sha256`/`signed_by`（§12.7，
-  kernel 验签）并携带 `lease.generation/token`；
+  kernel 验签）并携带 `lease.generation/token`；secure kinds 还须携带
+  required facts（`container_digest=docker:<plan digest>`、`data_hash`、
+  `code_snapshot_id`、`seed`、`metrics_artifact`、`run_id`——kernel
+  completeJob 缺失/不一致 → 422，见 hardening-v0.2-status.md §5 两行）；
+- **run_id 全链绑定**（hardening §5 两行）：complete 顶层 `run_id` 必须与
+  claim 的 `plan.run_id` 一致（旧 attempt → 422 `run_id_mismatch`）；
+  stage/finalize 请求体 `run_id` 同样必须与 URL run_id 一致；
 - lease 过期后旧 agent 的 complete 被 kernel 拒绝（409 `lease_stale`）——
   服务端把该 claim 置 settled，旧 agent 的后续 frames/stage/finalize/
   complete 一律 409；**旧 agent 只能丢弃或保留本地诊断，不能完成 Job**。
@@ -147,8 +155,14 @@ frames/stage/finalize/complete 保存到本地有界 spool（`maxEntries`/
 
 - 按 artifact id/sha 寻址（支持 `sha256:<hex>` / 裸 64-hex；注册 id 由 kernel
   侧解析，当前 mock 按 id 直查）；
-- 响应携带服务端对内容的 sha256；代理端复算内容 hash 并与响应比对，再与
+- **字节流**：服务端以 kernel artifact 原生字节 → base64 响应（fleet client
+  经 `fetchArtifactBytes` arrayBuffer 读取，**绝不经过 UTF-8 text 编解码**——
+  二进制内容往返无损，hardening §5 两行 / acceptance remote-cas-binary-auth）；
+  响应携带服务端对内容的 sha256；代理端复算内容 hash 并与响应比对，再与
   寻址 hash（当 id 为内容 hash 形态时）比对——任何不一致 → 拒绝执行；
+- **project binding**：`?project_id=` 必须落在该 agent 的 outstanding claim
+  所属项目内（越权 → 403 `cas_project_forbidden`）；kernel 鉴权失败（401）
+  非 retryable fail fast，不静默当 `cas_missing`；
 - 404 `cas_missing` 由代理端视为输入缺失（拒绝执行）。
 
 ## 6. 服务端离线判定

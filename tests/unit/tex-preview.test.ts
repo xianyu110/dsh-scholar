@@ -219,7 +219,7 @@ describe('TEX-03 preview: supersede + stale semantics', () => {
         owner: 'test-runner',
         ...fenceArgs(kernel, first.job!.job_id),
         status: 'succeeded',
-        run_manifest: { run_id: 'run_late', job_id: first.job!.job_id, exit_code: 0, tex_diagnostics: [] },
+        run_manifest: { run_id: kernel.getJob(first.job!.job_id).run_id!, job_id: first.job!.job_id, exit_code: 0, tex_diagnostics: [] },
       })
       throw new Error('expected job_not_running')
     } catch (error) {
@@ -242,7 +242,11 @@ describe('TEX-03 preview: supersede + stale semantics', () => {
       ...fenceArgs(kernel, first.job!.job_id),
       status: 'succeeded',
       run_manifest: {
-        run_id: 'run_done', job_id: first.job!.job_id, project_id, exit_code: 0,
+        // §5 RUN-REMOTE-01: secure kinds 必须携带 claim 的 run_id + metrics_artifact。
+        run_id: kernel.getJob(first.job!.job_id).run_id!,
+        job_id: first.job!.job_id, project_id, exit_code: 0,
+        metrics_artifact: log.artifact_id,
+        container_digest: `docker:${kernel.getJob(first.job!.job_id).image_digest}`,
         tex_pdf_artifact: pdf.artifact_id, tex_log_artifact: log.artifact_id,
         tex_diagnostics: [{ level: 'warning', message: 'Overfull \\hbox' }],
         tex: { document_id, revision: first.revision, root_file: 'paper.tex' },
@@ -332,7 +336,10 @@ describe('TEX-03 preview: authoritative separation', () => {
       ...fenceArgs(kernel, preview.job!.job_id),
       status: 'succeeded',
       run_manifest: {
-        run_id: 'run_preview', job_id: preview.job!.job_id, project_id, exit_code: 0,
+        run_id: kernel.getJob(preview.job!.job_id).run_id!,
+        job_id: preview.job!.job_id, project_id, exit_code: 0,
+        metrics_artifact: log.artifact_id,
+        container_digest: `docker:${kernel.getJob(preview.job!.job_id).image_digest}`,
         tex_pdf_artifact: pdf.artifact_id, tex_log_artifact: log.artifact_id,
         tex_diagnostics: [],
         tex: { document_id, revision: preview.revision, root_file: 'paper.tex' },

@@ -722,6 +722,71 @@ function requireProjectMember(kernel: ResearchKernel, req: IncomingMessage, res:
 }
 
 /**
+ * GOV-01/ONBOARD-01 (hardening §5 P1): explicit capability ROUTE TABLE for
+ * PI-only writes — the same table the standalone BFF enforces, so the two
+ * layers can never drift apart. Matched against the RAW pathname
+ * (segment-anchored, no query params). Governance writes: transitions, gates,
+ * decisions, budget, approve, accept (existing) PLUS intake ADOPT
+ * (POST /v1/projects/{id}/intake/{iid}/adopt — the PI decision that converts
+ * a proposal into project state) and project archive/unarchive.
+ */
+const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
+  /(?:^|\/)transitions(?:\/|$)/,
+  /(?:^|\/)gates(?:\/|$)/,
+  /(?:^|\/)decisions(?:\/|$)/,
+  /(?:^|\/)budget(?:\/|$)/,
+  /(?:^|\/)approve(?:\/|$)/,
+  /(?:^|\/)accept(?:\/|$)/,
+  /(?:^|\/)intake\/[^/]+\/adopt(?:\/|$)/,
+  /(?:^|\/)archive(?:\/|$)/,
+  /(?:^|\/)unarchive(?:\/|$)/,
+]
+
+function isPiOnlyWrite(pathname: string): boolean {
+  return PI_ONLY_WRITE_ROUTES.some(re => re.test(pathname))
+}
+
+/**
+ * GOV-01/ONBOARD-01 (hardening §5 P1): the KERNEL's own PI/operator gate for
+ * the v1 PI-only decision routes (intake adopt, project archive/unarchive) —
+ * defense in depth, never a single BFF layer. When x-principal-id is present
+ * (the BFF always injects it on these forwards; direct callers may supply
+ * it), the kernel resolves the acting principal's role from its OWN
+ * project_members table: researcher/viewer/auditor → 403 role_forbidden, an
+ * unknown principal → 404 project_not_found (no enumeration, same shape as
+ * memberOr404). With no header, the body `principal.principal_id` (intake
+ * adopt's direct-kernel service path) keeps the existing GOV-01 contract;
+ * when no identity exists at all (archive/unarchive carry no body principal)
+ * → 422 principal_required (fail-closed, same pattern as requireIntakePrincipal).
+ */
+function requirePiOnly(kernel: ResearchKernel, req: IncomingMessage, res: ServerResponse, projectId: string, body: unknown, action: string): boolean {
+  const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
+  let principal = headerPrincipal !== undefined && headerPrincipal !== '' ? headerPrincipal : ''
+  if (principal === '') {
+    // Direct-kernel fallback: the body principal (intake adopt only).
+    const bodyObj = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
+    const p = bodyObj.principal as Record<string, unknown> | undefined
+    if (typeof p === 'object' && p !== null && !Array.isArray(p) && typeof p.principal_id === 'string') principal = p.principal_id
+  }
+  if (principal === '') {
+    send(res, 422, { error: errorEnvelope('principal_required', `${action} requires an authenticated principal (x-principal-id or principal.principal_id); anonymous or actor-only requests are rejected`) })
+    return false
+  }
+  if (headerPrincipal !== undefined && headerPrincipal !== '') {
+    const member = kernel.listProjectMembers(projectId).find(m => m.principal_id === principal)
+    if (member === undefined) {
+      send(res, 404, { error: errorEnvelope('project_not_found', 'project not found or access denied') })
+      return false
+    }
+    if (member.role !== 'pi' && member.role !== 'operator') {
+      send(res, 403, { error: errorEnvelope('role_forbidden', `${action} is a PI/operator-only decision; role '${member.role}' is not permitted`) })
+      return false
+    }
+  }
+  return true
+}
+
+/**
  * PTY-01 (hardening §5 P0-2): every pty operation (session read, control,
  * frames) is fail-closed on the authenticated principal AND the session
  * OWNER — a missing x-principal-id is 422 principal_required (GOV-01
@@ -1116,6 +1181,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
                 }
                 if (method === 'POST' && action === 'adopt') {
                   if (!requireIntakePrincipal(body, res, 'intake adoption')) return
+                  // GOV-01/ONBOARD-01 (hardening §5 P1): the kernel's OWN
+                  // PI/operator gate — when the BFF-injected x-principal-id is
+                  // present, the acting principal's role is resolved from the
+                  // kernel's project_members table (researcher/viewer/auditor
+                  // → 403, unknown → 404); never a single BFF layer.
+                  if (!requirePiOnly(kernel, req, res, id, body, 'intake adoption')) return
                   const input = intakeAdoptSchema.parse(body)
                   ok(res, kernel.adoptIntake({
                     intake_id: subId,
@@ -1149,10 +1220,15 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               return
             }
             if (method === 'POST' && sub === 'archive') {
+              // GOV-01/ONBOARD-01 (hardening §5 P1): kernel-side PI/operator
+              // gate (see requirePiOnly) — archive is a PI-only decision and
+              // the kernel never relies on the BFF's single layer.
+              if (!requirePiOnly(kernel, req, res, id, body, 'project archive')) return
               ok(res, kernel.archiveProject(id))
               return
             }
             if (method === 'POST' && sub === 'unarchive') {
+              if (!requirePiOnly(kernel, req, res, id, body, 'project unarchive')) return
               ok(res, kernel.unarchiveProject(id))
               return
             }
@@ -2190,15 +2266,16 @@ async function handleV2(ctx: {
   const role = typeof req.headers['x-principal-role'] === 'string' ? req.headers['x-principal-role'] : undefined
   const roleOk = role === undefined || role === 'pi' || role === 'researcher' || role === 'operator' || role === 'auditor' || role === 'viewer'
   // Governance writes (API-01): transitions, gate creation/decisions
-  // (incl. gate-requests), budget and the internal approve/accept channels.
+  // (incl. gate-requests), budget and the internal approve/accept channels,
+  // plus intake adopt and project archive/unarchive (GOV-01/ONBOARD-01 §5 P1
+  // — shared explicit capability route table, same table as the BFF).
   // researcher may submit ordinary work but never these.
-  const governanceWrite = /(?:transitions|gate(?:s)?(?:\/|$)|decisions|budget|approve|accept)/.test(url.pathname)
   if (!roleOk) {
     send(res, 403, { error: { code: 'role_required', message: 'invalid x-principal-role; BFF must inject pi|researcher|operator|auditor|viewer' } })
     return
   }
   if (role !== undefined && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-    if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && governanceWrite)) {
+    if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && isPiOnlyWrite(url.pathname))) {
       send(res, 403, { error: { code: 'role_forbidden', message: 'role forbidden for this operation' } })
       return
     }

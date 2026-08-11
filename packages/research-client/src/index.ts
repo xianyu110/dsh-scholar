@@ -447,6 +447,37 @@ export class ResearchClient {
     }
   }
 
+  /**
+   * RUN-REMOTE-01（hardening §5 两行 / acceptance remote-cas-binary-auth）：
+   * **字节流** CAS 拉取——`arrayBuffer()` 原样返回，绝不经过 `text()`/
+   * UTF-8 编解码（随机二进制/PDF/压缩包/NUL 字节往返无损）。404 → null；
+   * 其余非 2xx（含 token-configured kernel 的 401）抛 KernelApiError——
+   * 调用方 fail fast，不把鉴权失败误判为 cas_missing。
+   */
+  async fetchArtifactBytes(projectId: string, sha256OrId: string): Promise<{ content: Buffer; media_type: string | null } | null> {
+    const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
+    let response: Response
+    try {
+      response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
+        headers: { ...this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {} },
+        signal: AbortSignal.timeout(15000),
+      })
+    } catch (error) {
+      throw new KernelUnavailableError(this.endpoint, error)
+    }
+    if (response.status === 404) return null
+    if (!response.ok) {
+      let detail = ''
+      try {
+        const parsed = await response.json() as { error?: { code?: string; message?: string } }
+        detail = parsed.error?.message ?? ''
+      } catch { /* keep empty */ }
+      throw new KernelApiError(response.status, detail || `http_${response.status}`, detail || `request GET artifact ${id} failed`)
+    }
+    const mediaType = response.headers.get('content-type')
+    return { content: Buffer.from(await response.arrayBuffer()), media_type: mediaType }
+  }
+
   /** TeX workspace file content at the given path (TEX-02 runner materialization). */
   async getDocumentFile(documentId: string, path: string): Promise<{ path: string; version: number; content: string } | null> {
     try {

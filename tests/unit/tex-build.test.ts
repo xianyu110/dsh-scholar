@@ -358,10 +358,15 @@ describe('latex-compile chain (TEX-02)', () => {
       ...fenceArgs(kernel, job.job_id),
       status: 'succeeded',
       run_manifest: {
-        run_id: 'run_test1',
+        // §5 RUN-REMOTE-01: secure kinds 的 manifest 必须携带 claim 的 run_id
+        // + metrics_artifact（local runner 对 latex-compile 同样注册 metrics
+        // artifact——kernel verifySecureRunFacts 强制）。
+        run_id: kernel.getJob(job.job_id).run_id!,
         job_id: job.job_id,
         project_id: project.project_id,
         exit_code: 0,
+        metrics_artifact: log.artifact_id,
+        container_digest: `docker:${kernel.getJob(job.job_id).image_digest}`,
         tex_pdf_artifact: pdf.artifact_id,
         tex_log_artifact: log.artifact_id,
         tex_diagnostics: [{ level: 'error', message: 'Undefined control sequence' }],
@@ -393,7 +398,7 @@ describe('latex-compile chain (TEX-02)', () => {
       status: 'failed',
       failure_class: 'code_error',
       error: 'pdflatex halted on error',
-      run_manifest: { run_id: 'run_test2', job_id: job2.job_id, project_id: project.project_id, exit_code: 1, tex_diagnostics: [{ level: 'error', message: 'halted' }] },
+      run_manifest: { run_id: kernel.getJob(job2.job_id).run_id!, job_id: job2.job_id, project_id: project.project_id, exit_code: 1, tex_diagnostics: [{ level: 'error', message: 'halted' }] },
     })
     expect(kernel.texGetBuild(build2.build_id).status).toBe('failed')
     kernel.close()

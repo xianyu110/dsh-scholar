@@ -103,7 +103,12 @@ export interface FleetKernelClient {
   }): Promise<JobRecord>
   heartbeatJob(jobId: string, owner: string, leaseGeneration?: number | null, leaseToken?: string | null): Promise<JobRecord>
   getJob(jobId: string): Promise<JobRecord>
-  fetchArtifact(projectId: string, sha256OrId: string): Promise<string | null>
+  /**
+   * CAS 拉取：**字节流**（Buffer，绝不经过 UTF-8 text 编解码——二进制内容
+   * 往返无损，hardening §5 RUN-REMOTE-01 / acceptance remote-cas-binary-auth）。
+   * null = 404 缺失；其余错误（含 401 等鉴权失败）原样抛出（fail fast）。
+   */
+  fetchArtifactBytes(projectId: string, sha256OrId: string): Promise<{ content: Buffer; media_type: string | null } | null>
   /** frames 上传（owner/token 随请求携带，kernel 精确匹配；与本地 runner 同一路径）。 */
   appendTerminalFrames(
     jobId: string,
@@ -133,7 +138,7 @@ export function createFleetKernelClient(client: ResearchClient): FleetKernelClie
     completeJob: input => client.completeJob(input),
     heartbeatJob: (jobId, owner, gen, token) => client.heartbeatJob(jobId, owner, gen, token),
     getJob: jobId => client.getJob(jobId),
-    fetchArtifact: (projectId, sha) => client.fetchArtifact(projectId, sha),
+    fetchArtifactBytes: (projectId, sha) => client.fetchArtifactBytes(projectId, sha),
     appendTerminalFrames: (jobId, runId, frames, owner, token, maxLogBytes) =>
       appendTerminalFramesWithLease(client, jobId, runId, frames, owner, token, maxLogBytes),
   }
@@ -498,6 +503,10 @@ export class RemoteFleetServer {
   /** POST /v1/agents/{agent_id}/runs/{run_id}/artifacts（stage 分支）。 */
   handleStageArtifact(agentId: string, runId: string, req: RemoteArtifactStageRequest): RemoteArtifactStageResponse {
     const parsed = validateWire<RemoteArtifactStageRequest>(RemoteArtifactStageRequestSchema, req, 'RemoteArtifactStageRequest')
+    if (parsed.run_id !== runId) {
+      throw new FleetServerError(422, 'run_id_mismatch',
+        `stage run_id ${parsed.run_id} does not match the claim's run_id ${runId}`, false)
+    }
     const claim = this.requireOutstanding(agentId, runId)
     if (claim.settled) {
       throw new FleetServerError(409, claim.settled_code ?? 'lease_stale',
@@ -525,6 +534,10 @@ export class RemoteFleetServer {
   /** POST /v1/agents/{agent_id}/runs/{run_id}/artifacts（finalize 分支）。 */
   async handleFinalizeArtifact(agentId: string, runId: string, req: RemoteArtifactFinalizeRequest): Promise<RemoteArtifactFinalizeResponse> {
     const parsed = validateWire<RemoteArtifactFinalizeRequest>(RemoteArtifactFinalizeRequestSchema, req, 'RemoteArtifactFinalizeRequest')
+    if (parsed.run_id !== runId) {
+      throw new FleetServerError(422, 'run_id_mismatch',
+        `finalize run_id ${parsed.run_id} does not match the claim's run_id ${runId}`, false)
+    }
     const claim = this.requireOutstanding(agentId, runId)
     if (claim.settled) {
       throw new FleetServerError(409, claim.settled_code ?? 'lease_stale',
@@ -575,6 +588,11 @@ export class RemoteFleetServer {
    * generation/token 由 kernel 精确匹配）。lease 过期后旧 agent 的 complete
    * 被 kernel 拒绝（409 lease_stale）→ 本方法抛 FleetServerError(409)，
    * 该 claim 置 settled——旧 agent 只能丢弃或保留本地诊断，不能完成 Job。
+   *
+   * **run_id 全链绑定**（hardening §5 两行 / acceptance remote-identity-
+   * fencing-manifest）：complete 顶层 run_id 必须与 claim 的 plan.run_id
+   * 一致（旧 attempt 的 complete → 422 run_id_mismatch）；run_manifest 的
+   * run_id 同样必须一致（kernel 侧再按 runs 行校验）。
    */
   async handleComplete(agentId: string, runId: string, req: RemoteCompleteRequest): Promise<RemoteCompleteResponse> {
     const parsed = validateWire<RemoteCompleteRequest>(RemoteCompleteRequestSchema, req, 'RemoteCompleteRequest')
@@ -582,6 +600,15 @@ export class RemoteFleetServer {
     if (claim.settled) {
       throw new FleetServerError(409, claim.settled_code ?? 'lease_stale',
         `run ${runId} was settled (${claim.settled_code ?? 'lease_stale'}) — a stale agent cannot complete the job`, true)
+    }
+    if (parsed.run_id !== claim.plan.run_id) {
+      throw new FleetServerError(422, 'run_id_mismatch',
+        `complete run_id ${parsed.run_id} does not match the claim's run_id ${claim.plan.run_id} — job/run/manifest run_id chain broken`, false)
+    }
+    const manifestRunId = (parsed.run_manifest as Record<string, unknown> | undefined)?.run_id
+    if (manifestRunId !== undefined && manifestRunId !== claim.plan.run_id) {
+      throw new FleetServerError(422, 'run_id_mismatch',
+        `run manifest run_id ${String(manifestRunId)} does not match the claim's run_id ${claim.plan.run_id} — job/run/manifest run_id chain broken`, false)
     }
     if (parsed.lease.owner !== claim.plan.lease.owner
       || parsed.lease.generation !== claim.plan.lease.generation
@@ -615,7 +642,15 @@ export class RemoteFleetServer {
 
   // ── CAS ──────────────────────────────────────────────────────────────────
 
-  /** GET /v1/agents/{agent_id}/cas/{sha}?project_id= */
+  /**
+   * GET /v1/agents/{agent_id}/cas/{sha}?project_id=
+   * - project binding：agent 必须持有该 project 的 outstanding claim——
+   *   caller 声明 project_id 不能越过 claim 所属项目（acceptance
+   *   remote-cas-binary-auth；未绑定 → 403 cas_project_forbidden）；
+   * - 字节流：CAS 内容以 Buffer 传递（kernel 原生字节 → base64），不经过
+   *   UTF-8 text 编解码——随机二进制/PDF/压缩包/NUL 往返 hash/size 一致；
+   * - kernel 鉴权失败（401）原样抛出（fail fast，不静默当 cas_missing）。
+   */
   async handleCas(agentId: string, sha: string, projectId: string): Promise<CasFetchResponse> {
     if (this.registry.get(agentId) === undefined) {
       throw new FleetServerError(404, 'agent_not_registered', `agent ${agentId} is not registered`, true)
@@ -623,19 +658,29 @@ export class RemoteFleetServer {
     if (projectId === '') {
       throw new FleetServerError(422, 'missing_project_id', 'cas fetch requires ?project_id=', false)
     }
-    let text: string | null
+    // §5 两行 / acceptance remote-cas-binary-auth：caller 声明的 project_id
+    // 必须落在该 agent 的 claim 绑定内（agent 只应拉取自己 claim 的 run 的
+    // 输入；settled 的旧 claim 不再放行）。
+    const byRun = this.outstanding.get(agentId)
+    const bound = byRun !== undefined
+      && [...byRun.values()].some(c => !c.settled && c.plan.project_id === projectId)
+    if (!bound) {
+      throw new FleetServerError(403, 'cas_project_forbidden',
+        `agent ${agentId} has no outstanding claim in project ${projectId} — cas fetch cannot escape the claimed project`, false)
+    }
+    let fetched: { content: Buffer; media_type: string | null } | null
     try {
-      text = await this.client.fetchArtifact(projectId, sha)
+      fetched = await this.client.fetchArtifactBytes(projectId, sha)
     } catch (error) {
       throw mapKernelError(error)
     }
-    if (text === null) {
+    if (fetched === null) {
       throw new FleetServerError(404, 'cas_missing', `artifact ${sha} not found in project ${projectId}`, true)
     }
-    const content = Buffer.from(text, 'utf8')
     return {
-      sha256: createHash('sha256').update(content).digest('hex'),
-      content_base64: content.toString('base64'),
+      sha256: createHash('sha256').update(fetched.content).digest('hex'),
+      content_base64: fetched.content.toString('base64'),
+      ...fetched.media_type !== null && fetched.media_type !== '' ? { media_type: fetched.media_type } : {},
     }
   }
 

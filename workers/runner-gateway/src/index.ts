@@ -13,7 +13,7 @@
  */
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -23,7 +23,16 @@ import type { JobRecord } from '@dsh-scholar/research-schemas'
 import { buildExecutionPlan, computeProfileConfigHash, getRunnerProfile, signExecutionPlan, type ExecutionPlan, type RunnerProfile } from '@dsh-scholar/research-schemas'
 import { LocalDockerAdapter, buildLocalDockerArgs, type DockerExecContext, type RunOutcome } from './execution-target.js'
 import { appendTerminalFramesWithLease } from './kernel-client.js'
+import {
+  extractMetrics,
+  metricsArtifactContent,
+  parseMetricsFile,
+  resolveMetricsFileWithin,
+  validateMetricsFileRecord,
+  type MetricsFileRecord,
+} from './metrics-file.js'
 import { canonicalJson, signManifest, type RunnerSigningKey } from './manifest-signing.js'
+import { buildRunManifest } from './run-manifest.js'
 import { materializeCodeSnapshot, unpackCodeSnapshot } from './snapshot-materialize.js'
 
 const execFileAsync = promisify(execFile)
@@ -59,26 +68,9 @@ function assertSafeTexPath(path: string): void {
 }
 
 /**
- * §4 P0 (RUN-02): resolve the output-contract metrics path to a readable file
- * STRICTLY inside the outputs directory. `../` escapes, absolute paths and
- * symlinks pointing outside outputs return null — a malicious job must never
- * read host files through the metrics path. The caller treats null as a
- * failed output-contract validation.
+ * §4 P0 (RUN-02): resolveMetricsFileWithin 已迁入 ./metrics-file.js
+ * （本地 runner 与远端 Agent 复用同一契约），此处保持 re-export。
  */
-export function resolveMetricsFileWithin(outputsDir: string, metricsPath: string): string | null {
-  const rel = metricsPath.replace(/^\/outputs\/?/, '')
-  const absOutputs = resolve(outputsDir)
-  const target = resolve(absOutputs, rel)
-  if (!target.startsWith(`${absOutputs}${sep}`)) return null
-  try {
-    // realpath re-check: a container-created symlink may resolve outside.
-    const real = realpathSync(target)
-    if (!real.startsWith(`${realpathSync(absOutputs)}${sep}`)) return null
-    return real
-  } catch {
-    return null // missing/unreadable file
-  }
-}
 
 export type RunnerMode = 'subprocess' | 'docker'
 
@@ -155,6 +147,11 @@ export {
   RemoteWireError,
   HttpRemoteFleetTransport,
   defaultSubprocessExecutor,
+  defaultRemoteExecutor,
+  defaultDockerRun,
+  environmentFailureOutcome,
+  probeDockerAvailable,
+  REMOTE_SECURE_KINDS,
   isSpoolableWireError,
   type RemoteRunnerAgent,
   type RemoteFleetTransport,
@@ -163,6 +160,7 @@ export {
   type AgentExecutionContext,
   type AgentRunHandle,
   type RemoteAgentOptions,
+  type RemoteContainerRunFn,
 } from './remote-agent.js'
 export {
   RemoteFleetServer,
@@ -178,27 +176,22 @@ export {
   type RemoteFleetHttpOptions,
 } from './remote-fleet-server.js'
 export { AgentOutboundSpool, type AgentSpoolEntry, type AgentSpoolOverflowGap } from './agent-spool.js'
+export { buildRunManifest, type RunManifestInput } from './run-manifest.js'
 export { InMemoryFleetTransport, FailingFleetTransport } from './in-memory-transport.js'
 
-/** Deterministic metrics extraction from stdout JSON-lines (`{"metric":...,"value":...}`). */
-export function extractMetrics(stdout: string): Array<{ metric: string; value: number; seed?: number }> {
-  const metrics: Array<{ metric: string; value: number; seed?: number }> = []
-  for (const line of stdout.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith('{')) continue
-    try {
-      const parsed = JSON.parse(trimmed) as { metric?: unknown; value?: unknown; seed?: unknown }
-      if (typeof parsed.metric === 'string' && typeof parsed.value === 'number') {
-        metrics.push({
-          metric: parsed.metric,
-          value: parsed.value,
-          ...typeof parsed.seed === 'number' && { seed: parsed.seed },
-        })
-      }
-    } catch { /* not a metrics line */ }
-  }
-  return metrics
-}
+/**
+ * §12.5 (SCH-EXEC-002) — MetricsFileV1 共享实现已迁入 ./metrics-file.js
+ * （本地 runner 与远端 Agent 复用同一契约：hardening-v0.2-status.md §5
+ * RUN-REMOTE-01 两行），此处保持 re-export（公共 API 不变）。
+ */
+export {
+  extractMetrics,
+  parseMetricsFile,
+  resolveMetricsFileWithin,
+  validateMetricsFileRecord,
+  metricsArtifactContent,
+  type MetricsFileRecord,
+} from './metrics-file.js'
 
 /**
  * unpackCodeSnapshot / materializeCodeSnapshot 已迁入 ./snapshot-materialize.js
@@ -357,49 +350,8 @@ exit "$PASS"
  * `{schema_version: 1, run_id, contract_id, seed, metrics: [{name, value, unit}]}`.
  * Returns null when the file is absent or does not match the schema (the
  * caller then falls back to legacy stdout extraction).
+ * （实现已迁入 ./metrics-file.js，此处保留类型 re-export。）
  */
-export interface MetricsFileRecord {
-  schema_version: number
-  run_id?: string
-  contract_id?: string
-  seed?: number
-  metrics: Array<{ name?: string; metric?: string; value: number; unit?: string; seed?: number }>
-}
-
-export function parseMetricsFile(content: string): MetricsFileRecord | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content)
-  } catch {
-    return null
-  }
-  if (typeof parsed !== 'object' || parsed === null) return null
-  const record = parsed as { schema_version?: unknown; run_id?: unknown; contract_id?: unknown; seed?: unknown; metrics?: unknown }
-  if (record.schema_version !== 1 || !Array.isArray(record.metrics)) return null
-  const entries = record.metrics
-    .map((m): { name?: string; metric?: string; value: number; unit?: string; seed?: number } | null => {
-      if (typeof m !== 'object' || m === null) return null
-      const entry = m as { name?: unknown; metric?: unknown; value?: unknown; unit?: unknown; seed?: unknown }
-      if (typeof entry.value !== 'number') return null
-      const name = typeof entry.name === 'string' ? entry.name : typeof entry.metric === 'string' ? entry.metric : undefined
-      if (name === undefined) return null
-      return {
-        name,
-        value: entry.value,
-        ...typeof entry.unit === 'string' && { unit: entry.unit },
-        ...typeof entry.seed === 'number' && { seed: entry.seed },
-      }
-    })
-    .filter((e): e is NonNullable<typeof e> => e !== null)
-  if (entries.length === 0) return null
-  return {
-    schema_version: 1,
-    ...typeof record.run_id === 'string' && { run_id: record.run_id },
-    ...typeof record.contract_id === 'string' && { contract_id: record.contract_id },
-    ...typeof record.seed === 'number' && { seed: record.seed },
-    metrics: entries,
-  }
-}
 
 /** Failure classification per design §4.6.2 (deterministic rules). */
 export function classifyFailure(outcome: RunOutcome): { failure_class: JobRecord['failure_class']; error: string } {
@@ -952,24 +904,24 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
   }
 
   try {
-    const manifest: Record<string, unknown> = {
+    // RUN-REMOTE-01（§5 两行）：local 与 remote 复用唯一 manifest builder
+    // （run-manifest.ts）——container_digest/data_hash/code snapshot/seed/
+    // metrics facts 同源，kernel 对 secure kinds 校验 required facts。
+    const manifest: Record<string, unknown> = buildRunManifest({
       run_id: run.run_id,
       project_id: job.project_id,
-      // §12.7: contract_id is verified when present — a contract-less job must
-      // NOT carry a null contract_id (the kernel treats a present null as a
-      // mismatch), so it is emitted only for contract-bound jobs.
-      ...job.contract_id !== null && { contract_id: job.contract_id },
+      contract_id: job.contract_id,
       job_id: job.job_id,
-      code_commit: job.payload.code_commit ?? '',
-      code_snapshot_id: codeSnapshotId,
-      container_digest: mode === 'docker' ? `docker:${image}` : '',
-      data_hash: job.payload.data_hash ?? '',
       command: job.command,
-      resources: { gpu: 0, cpu: 1, memory_gb: 1 },
+      code_commit: typeof job.payload.code_commit === 'string' ? job.payload.code_commit : '',
+      code_snapshot_id: codeSnapshotId ?? null,
+      container_digest: mode === 'docker' ? `docker:${image}` : '',
+      data_hash: typeof job.payload.data_hash === 'string' ? job.payload.data_hash : '',
+      seed: typeof job.payload.seed === 'number' ? job.payload.seed : null,
       started_at: run.started_at,
       finished_at: run.finished_at,
       exit_code: run.exit_code,
-    }
+    })
 
     const logContent = `=== dsh-scholar run ${run.run_id} (job ${job.job_id}, kind ${job.kind}) ===\nstarted: ${run.started_at}\nfinished: ${run.finished_at}\nexit: ${run.exit_code}\n\n--- stdout ---\n${run.stdout}\n\n--- stderr ---\n${run.stderr}\n${run.error !== undefined ? `\n--- error ---\n${run.error}\n` : ''}`
     const logArtifact = await client.registerArtifact({
@@ -1080,34 +1032,15 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     } else if (SECURE_METRICS_KINDS.includes(job.kind)) {
       metricsFileError = 'secure job must declare output_contract.metrics (MetricsFileV1 path)'
     }
-    // P0 §12.5: strict provenance validation of the metrics FILE.
+    // P0 §12.5: strict provenance validation of the metrics FILE（共享实现
+    // metrics-file.ts——远端 Agent 同一校验，hardening §5 RUN-REMOTE-01）。
     if (metricsFromFile !== null && SECURE_METRICS_KINDS.includes(job.kind)) {
-      const problems: string[] = []
-      if (metricsFromFile.run_id !== undefined && metricsFromFile.run_id !== run.run_id) {
-        problems.push(`run_id mismatch: file '${metricsFromFile.run_id}' != execution '${run.run_id}'`)
-      }
-      if (job.contract_id !== null && metricsFromFile.contract_id !== undefined && metricsFromFile.contract_id !== job.contract_id) {
-        problems.push(`contract_id mismatch: file '${metricsFromFile.contract_id}' != job '${job.contract_id}'`)
-      }
-      if (metricsFromFile.seed === undefined || !Number.isFinite(metricsFromFile.seed)) {
-        problems.push('seed missing or not a finite number')
-      } else if (runEnv.DSH_SEED !== '' && metricsFromFile.seed !== Number(runEnv.DSH_SEED)) {
-        problems.push(`seed mismatch: file ${metricsFromFile.seed} != job seed ${runEnv.DSH_SEED}`)
-      }
-      for (const m of metricsFromFile.metrics) {
-        if (m.value === undefined || !Number.isFinite(m.value)) {
-          problems.push(`non-finite metric value for '${m.name ?? m.metric ?? '?'}'`)
-        }
-      }
-      const names = metricsFromFile.metrics.map(m => m.name ?? m.metric ?? '')
-      const dupes = names.filter((n, i) => names.indexOf(n) !== i)
-      if (dupes.length > 0) problems.push(`duplicate metric name(s): ${[...new Set(dupes)].join(', ')}`)
-      const contractMetrics = (job.payload as Record<string, unknown>).contract_metrics
-      if (Array.isArray(contractMetrics)) {
-        const allowed = new Set(contractMetrics.filter((x): x is string => typeof x === 'string'))
-        const foreign = names.filter(n => n !== '' && !allowed.has(n))
-        if (foreign.length > 0) problems.push(`metric(s) not in contract: ${foreign.join(', ')}`)
-      }
+      const problems = validateMetricsFileRecord(metricsFromFile, {
+        run_id: run.run_id,
+        contract_id: job.contract_id,
+        seed: typeof job.payload.seed === 'number' ? job.payload.seed : null,
+        contract_metrics: job.payload.contract_metrics,
+      })
       if (problems.length > 0) metricsFileError = `MetricsFileV1 validation failed: ${problems.join('; ')}`
     }
     if (metricsFromFile !== null) {
@@ -1122,22 +1055,12 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       metrics = extractMetrics(run.stdout)
     }
     if (metrics.length > 0 || run.exit_code === 0) {
-      const metricsContent = metricsFromFile !== null
-        ? JSON.stringify({
-            schema_version: 1,
-            run_id: metricsFromFile.run_id ?? run.run_id,
-            job_id: job.job_id,
-            contract_id: metricsFromFile.contract_id ?? job.contract_id ?? undefined,
-            seed: metricsFromFile.seed,
-            metrics: metricsFromFile.metrics.map(m => ({
-              name: m.name ?? m.metric ?? '',
-              value: m.value,
-              unit: m.unit ?? '',
-              seed: m.seed ?? metricsFromFile!.seed,
-            })),
-            source: 'metrics-file',
-          }, null, 2)
-        : JSON.stringify({ run_id: run.run_id, job_id: job.job_id, metrics }, null, 2)
+      const metricsContent = metricsArtifactContent(metricsFromFile, {
+        run_id: run.run_id,
+        job_id: job.job_id,
+        contract_id: job.contract_id,
+        metrics,
+      })
       const metricsArtifact = await client.registerArtifact({
         project_id: job.project_id,
         kind: 'analysis',

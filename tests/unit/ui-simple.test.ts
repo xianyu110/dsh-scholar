@@ -25,7 +25,8 @@ import {
 } from '../../packages/dsh-research-ui/src/client/i18n/index'
 import {
   ALL_TAB_KEYS, MORE_TAB_KEYS, PRIMARY_TAB_KEYS, START_ACTION_CODES,
-  isTabKey, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups,
+  filterProjects, isTabKey, navOrder, navShortcutIndex, parseDeepLink,
+  pickProject, startActions, startScreenVisible, tabGroups,
 } from '../../packages/dsh-research-ui/src/client/nav'
 import { SETTINGS_SECTION_IDS, settingsKey, settingsSections } from '../../packages/dsh-research-ui/src/client/settings-model'
 
@@ -70,6 +71,35 @@ describe('UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start)', () => {
       expect(zh[i]!.label).not.toBe(en[i]!.label)
       expect(zh[i]!.description).not.toBe(en[i]!.description)
     }
+  })
+})
+
+describe('UI-SIMPLE-01 Start 三入口选择逻辑 (§5 P1 ONBOARD-01 — 显式 Init/Resume/导入)', () => {
+  const projects = [
+    { project_id: 'rsp_1', name: 'shift-localization', status: 'DRAFT' },
+    { project_id: 'rsp_2', name: 'baseline-repro', status: 'SCOPED' },
+    { project_id: 'rsp_3', name: 'shift-localization', status: 'DRAFT' },
+  ]
+
+  it('startScreenVisible(): 未选中项目时恒显示 Start 屏(有项目也不自动跳 projects[0])', () => {
+    expect(startScreenVisible(undefined)).toBe(true)
+    expect(startScreenVisible('')).toBe(true)
+    expect(startScreenVisible('rsp_1')).toBe(false)
+  })
+
+  it('filterProjects(): 名称/id 子串过滤,空 query 返回全量', () => {
+    expect(filterProjects(projects, '')).toHaveLength(3)
+    expect(filterProjects(projects, 'baseline')).toHaveLength(1)
+    expect(filterProjects(projects, 'rsp_')).toHaveLength(3)
+    expect(filterProjects(projects, 'nope')).toHaveLength(0)
+  })
+
+  it('pickProject(): 显式选择 — 精确 id 优先,唯一 name 次之,歧义/缺失返回 null', () => {
+    expect(pickProject(projects, 'rsp_2')).toBe('rsp_2')
+    expect(pickProject(projects, 'baseline-repro')).toBe('rsp_2')
+    expect(pickProject(projects, 'shift-localization')).toBeNull()
+    expect(pickProject(projects, '')).toBeNull()
+    expect(pickProject(projects, 'rsp_9')).toBeNull()
   })
 })
 

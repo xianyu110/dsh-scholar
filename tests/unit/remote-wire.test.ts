@@ -28,8 +28,11 @@
  * （docs/acceptance-tests.md §4.2、hardening-v0.2-status.md §3 RUN-REMOTE-01）。
  */
 import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  buildExecutionPlan,
   verifyExecutionPlanSignature,
   type AgentClaimRequest,
   type AgentClaimResponse,
@@ -55,6 +58,7 @@ import {
   FailingFleetTransport,
   HttpRemoteFleetTransport,
   InMemoryAgentRegistry,
+  defaultSubprocessExecutor,
   InMemoryFleetTransport,
   RemoteFleetServer,
   startFleetHttpServer,
@@ -72,6 +76,8 @@ import {
 
 const DIGEST = 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32'
 const OTHER_DIGEST = 'other@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+/** secure kinds 的 output contract（metrics 路径；fake executor 据此写 MetricsFileV1）。 */
+const OUT = { metrics: 'metrics.json' }
 
 function kernelError(status: number, code: string, message: string): Error {
   return Object.assign(new Error(message), { status, code })
@@ -79,6 +85,10 @@ function kernelError(status: number, code: string, message: string): Error {
 
 function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function sha256HexBytes(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
 }
 
 interface RecordedFrame {
@@ -104,6 +114,7 @@ interface RecordedComplete {
   lease_generation: number | null
   lease_token: string | null
   error?: string
+  failure_class?: string | null
 }
 
 /**
@@ -117,12 +128,14 @@ interface RecordedComplete {
 class FakeFleetKernel implements FleetKernelClient {
   now: () => number = Date.now
   readonly jobs = new Map<string, JobRecord & { run_id?: string | null }>()
-  /** artifact id（含 sha256: 前缀/裸 hex）→ {sha256, content}。 */
-  readonly artifacts = new Map<string, { sha256: string; content: string }>()
+  /** artifact id（含 sha256: 前缀/裸 hex）→ {sha256, content}（**字节**，CAS 语义）。 */
+  readonly artifacts = new Map<string, { sha256: string; content: Buffer }>()
   readonly frames: RecordedFrame[] = []
   readonly completes: RecordedComplete[] = []
   /** 已注册的 manifest 验签公钥（§12.7）。 */
   manifestPublicKeyPem: string | null = null
+  /** secure kinds 的 required-facts 校验开关（默认开——镜像 kernel verifySecureRunFacts）。 */
+  enforceSecureFacts = true
 
   seedJob(overrides: Partial<JobRecord> & { job_id: string; project_id: string } & Record<string, unknown>): JobRecord & { run_id?: string | null } {
     const record: JobRecord & { run_id?: string | null } = {
@@ -150,9 +163,10 @@ class FakeFleetKernel implements FleetKernelClient {
     return record
   }
 
-  seedCas(id: string, content: string): string {
-    const sha = sha256Hex(content)
-    this.artifacts.set(id, { sha256: sha, content })
+  seedCas(id: string, content: string | Buffer): string {
+    const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
+    const sha = sha256HexBytes(bytes)
+    this.artifacts.set(id, { sha256: sha, content: bytes })
     return sha
   }
 
@@ -256,8 +270,9 @@ class FakeFleetKernel implements FleetKernelClient {
     media_type?: string
     file_name?: string
   }): Promise<{ artifact_id: string; sha256: string }> {
-    const content = Buffer.from(input.content_base64, 'base64').toString('utf8')
-    const sha = sha256Hex(content)
+    // **字节**哈希（不经过 UTF-8 编解码——二进制 round-trip 依赖此语义）。
+    const content = Buffer.from(input.content_base64, 'base64')
+    const sha = sha256HexBytes(content)
     this.artifacts.set(`sha256:${sha}`, { sha256: sha, content })
     this.artifacts.set(sha, { sha256: sha, content })
     return { artifact_id: `sha256:${sha}`, sha256: sha }
@@ -293,7 +308,12 @@ class FakeFleetKernel implements FleetKernelClient {
     if (input.status === 'succeeded' && input.run_manifest === undefined && job.kind !== 'echo' && job.kind !== 'smoke') {
       throw kernelError(422, 'run_manifest_required', `job ${input.job_id} succeeded without a run manifest`)
     }
-    if (input.run_manifest !== undefined) this.verifyManifest(input.run_manifest)
+    if (input.run_manifest !== undefined) {
+      this.verifyManifest(input.run_manifest)
+      // §5 两行：镜像 kernel verifySecureRunFacts——secure kinds 的 run_id
+      // 全链绑定 + required facts（缺一 422）。
+      this.verifySecureFacts(input.run_manifest, job, input.status === 'succeeded')
+    }
     this.completes.push({
       job_id: input.job_id,
       status: input.status,
@@ -301,6 +321,7 @@ class FakeFleetKernel implements FleetKernelClient {
       lease_generation: input.lease_generation,
       lease_token: input.lease_token,
       error: input.error,
+      failure_class: input.failure_class ?? null,
     })
     const done: JobRecord = { ...job, status: input.status, run_manifest: input.run_manifest ?? null, error: input.error ?? '' }
     this.jobs.set(input.job_id, done)
@@ -322,12 +343,12 @@ class FakeFleetKernel implements FleetKernelClient {
     return job
   }
 
-  async fetchArtifact(_projectId: string, sha256OrId: string): Promise<string | null> {
+  async fetchArtifactBytes(_projectId: string, sha256OrId: string): Promise<{ content: Buffer; media_type: string | null } | null> {
     const direct = this.artifacts.get(sha256OrId)
-    if (direct !== undefined) return direct.content
+    if (direct !== undefined) return { content: direct.content, media_type: null }
     const bare = sha256OrId.startsWith('sha256:') ? sha256OrId.slice('sha256:'.length) : sha256OrId
     const byBare = this.artifacts.get(bare)
-    return byBare?.content ?? null
+    return byBare !== undefined ? { content: byBare.content, media_type: null } : null
   }
 
   /** §12.7：payload_sha256 复算 + Ed25519 验签（镜像 kernel verifyRunManifest）。 */
@@ -348,6 +369,46 @@ class FakeFleetKernel implements FleetKernelClient {
       const publicKey = createPublicKey(this.manifestPublicKeyPem)
       const valid = verify(null, Buffer.from(canonicalJson(signedPayload), 'utf8'), publicKey, Buffer.from(String(signature), 'base64'))
       if (!valid) throw kernelError(422, 'manifest_signature_invalid', 'run manifest signature verification failed')
+    }
+  }
+
+  /**
+   * §5 两行：镜像 kernel verifySecureRunFacts——secure kinds（baseline/pilot/
+   * formal/reproduce/latex-compile）的 run_id 全链绑定 + succeeded required
+   * facts（metrics_artifact/seed/code snapshot/container_digest/data_hash）。
+   */
+  private verifySecureFacts(manifest: Record<string, unknown>, job: JobRecord & { run_id?: string | null }, succeeded: boolean): void {
+    if (!this.enforceSecureFacts) return
+    const SECURE: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
+    if (!SECURE.includes(job.kind)) return
+    if (job.run_id !== undefined && job.run_id !== null && manifest.run_id !== job.run_id) {
+      throw kernelError(422, 'manifest_run_mismatch',
+        `run manifest run_id ${String(manifest.run_id)} does not match the claim's run_id ${job.run_id}`)
+    }
+    if (!succeeded) return
+    if (typeof manifest.metrics_artifact !== 'string' || manifest.metrics_artifact === '') {
+      throw kernelError(422, 'manifest_facts_missing', `run manifest for ${job.kind} job ${job.job_id} lacks metrics_artifact`)
+    }
+    const payload = job.payload as Record<string, unknown>
+    const jobSeed = typeof payload.seed === 'number' && Number.isFinite(payload.seed) ? payload.seed : null
+    if (jobSeed !== null && manifest.seed !== jobSeed) {
+      throw kernelError(422, 'manifest_seed_mismatch',
+        `run manifest seed ${String(manifest.seed)} does not match the job's fixed seed ${jobSeed}`)
+    }
+    if (job.code_snapshot_id !== null && job.code_snapshot_id !== undefined && job.code_snapshot_id !== ''
+      && manifest.code_snapshot_id !== job.code_snapshot_id) {
+      throw kernelError(422, 'manifest_snapshot_mismatch',
+        `run manifest code_snapshot_id ${String(manifest.code_snapshot_id)} does not match the job's code snapshot ${job.code_snapshot_id}`)
+    }
+    const imageDigest = typeof payload.image_digest === 'string' ? payload.image_digest : ''
+    if (imageDigest !== '' && manifest.container_digest !== `docker:${imageDigest}`) {
+      throw kernelError(422, 'manifest_container_mismatch',
+        `run manifest container_digest ${String(manifest.container_digest)} does not match docker:${imageDigest}`)
+    }
+    const jobDataHash = typeof payload.data_hash === 'string' && payload.data_hash !== '' ? payload.data_hash : null
+    if (jobDataHash !== null && manifest.data_hash !== jobDataHash) {
+      throw kernelError(422, 'manifest_data_mismatch',
+        `run manifest data_hash ${String(manifest.data_hash)} does not match the job's data hash ${jobDataHash}`)
     }
   }
 
@@ -398,6 +459,20 @@ function fakeExecutor(chunks: Array<{ channel: 'stdout' | 'stderr'; text: string
     for (const chunk of chunks) {
       ctx.onChunk?.(chunk.channel, chunk.text, offset, Buffer.byteLength(chunk.text, 'utf8'))
       offset += Buffer.byteLength(chunk.text, 'utf8')
+    }
+    // §12.5：模拟容器写回 MetricsFileV1（secure kinds 的 required fact——
+    // 与本地 runner 同契约：file seed 恒有限、run/contract/seed 绑定一致）。
+    if (plan.output_contract.metrics_path !== null && plan.output_contract.metrics_path !== '') {
+      const outputsDir = join(ctx.cwd ?? '', 'outputs')
+      mkdirSync(outputsDir, { recursive: true })
+      const rel = plan.output_contract.metrics_path.replace(/^\/outputs\/?/, '')
+      writeFileSync(join(outputsDir, rel), JSON.stringify({
+        schema_version: 1,
+        run_id: plan.run_id,
+        ...(plan.output_contract.contract_id !== null ? { contract_id: plan.output_contract.contract_id } : {}),
+        seed: plan.output_contract.seed ?? 0,
+        metrics: [{ name: 'm', value: 1, unit: '' }],
+      }))
     }
     return {
       run_id: plan.run_id,
@@ -615,7 +690,7 @@ describe('wire CAS（GET /v1/agents/{id}/cas/{sha}）与 hash 复算', () => {
       job_id: 'job_cas_bad',
       project_id: 'prj_1',
       code_snapshot_id: `sha256:${codeSha}`,
-      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST },
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
     })
 
     // 篡改传输：响应声明的 sha256 与内容不符（模拟链路损坏/服务端撒谎）。
@@ -641,12 +716,12 @@ describe('wire CAS（GET /v1/agents/{id}/cas/{sha}）与 hash 复算', () => {
     // 寻址 hash 不一致：URL 声明的 id 是 64-hex，但内容 hash 与它不同。
     tamperingTransport.tamper = false
     const fakeAddress = 'b'.repeat(64)
-    kernel.artifacts.set(`sha256:${fakeAddress}`, { sha256: sha256Hex('unrelated-bytes'), content: 'unrelated-bytes' })
+    kernel.artifacts.set(`sha256:${fakeAddress}`, { sha256: sha256Hex('unrelated-bytes'), content: Buffer.from('unrelated-bytes', 'utf8') })
     kernel.seedJob({
       job_id: 'job_cas_addr',
       project_id: 'prj_1',
       code_snapshot_id: `sha256:${fakeAddress}`,
-      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST },
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
     })
     const claims2 = await agent.claimOnce(2)
     const addrClaim = claims2.find(c => c.plan.job_id === 'job_cas_addr')
@@ -668,7 +743,7 @@ describe('wire CAS（GET /v1/agents/{id}/cas/{sha}）与 hash 复算', () => {
       job_id: 'job_cas_ok',
       project_id: 'prj_1',
       code_snapshot_id: `sha256:${codeSha}`,
-      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST },
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
     })
     const { agent } = makeAgent(fixture)
     await claimAndRun(agent)
@@ -685,7 +760,7 @@ describe('wire 执行全链路（frames/artifacts/complete，mock 传输）', ()
       job_id: 'job_happy',
       project_id: 'prj_1',
       contract_id: 'expc_1',
-      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, seed: 11 },
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, seed: 11, output_contract: OUT },
     })
     const { agent } = makeAgent(fixture, {
       executor: fakeExecutor([
@@ -782,7 +857,7 @@ describe('wire 执行全链路（frames/artifacts/complete，mock 传输）', ()
 describe('wire 离线 spool（有界保存、恢复重放、gap 不静默丢弃）', () => {
   it('断网期间 frames/stage/finalize/complete 全部 spool；恢复后按序重放并完成 Job', async () => {
     const fixture = makeFleet()
-    fixture.kernel.seedJob({ job_id: 'job_spool', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
+    fixture.kernel.seedJob({ job_id: 'job_spool', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
     const inner = new InMemoryFleetTransport(fixture.fleet)
     const failing = new FailingFleetTransport(inner)
     const agentKey = makeKeypair('agent-spool')
@@ -825,8 +900,8 @@ describe('wire 离线 spool（有界保存、恢复重放、gap 不静默丢弃�
   it('spool 有界：frames 条目可被淘汰并合成 gap（不静默丢弃）；exit_frame/complete 不可淘汰；恢复后 gap 先于幸存帧送达', async () => {
     const fixture = makeFleet()
     const kernel = fixture.kernel
-    kernel.seedJob({ job_id: 'job_gap_r1', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
-    kernel.seedJob({ job_id: 'job_gap_r2', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
+    kernel.seedJob({ job_id: 'job_gap_r1', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
+    kernel.seedJob({ job_id: 'job_gap_r2', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
     const inner = new InMemoryFleetTransport(fixture.fleet)
     const failing = new FailingFleetTransport(inner)
     const agentKey = makeKeypair('agent-gap')
@@ -839,7 +914,10 @@ describe('wire 离线 spool（有界保存、恢复重放、gap 不静默丢弃�
         publicKeyPem: fixture.fleetKey.publicKeyPem,
         signingKey: agentKey.signingKey,
         executor: fakeExecutor(chunks).executor,
-        spool: { maxBytes: 2_800, maxEntries: 16 },
+        // manifest 已含完整 facts（code_commit/code_snapshot_id/container_
+        // digest/data_hash/seed/metrics_artifact）——complete 条目比早期更大，
+        // 字节预算相应上调（仍保证 R2 complete 入队时淘汰两个 run 的 chunks）。
+        spool: { maxBytes: 2_900, maxEntries: 16 },
       },
     ) as RemoteRunnerAgentImpl
     await agent.register()
@@ -896,7 +974,7 @@ describe('wire 离线 spool（有界保存、恢复重放、gap 不静默丢弃�
 
   it('spool 极小（不可淘汰条目挡住）→ push 被拒 → run 本地失败（fail closed，无合成成功）', async () => {
     const fixture = makeFleet()
-    fixture.kernel.seedJob({ job_id: 'job_overflow', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
+    fixture.kernel.seedJob({ job_id: 'job_overflow', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
     const failing2 = new FailingFleetTransport(new InMemoryFleetTransport(fixture.fleet))
     const agentKey2 = makeKeypair('agent-overflow')
     fixture.kernel.manifestPublicKeyPem = agentKey2.publicKeyPem
@@ -925,7 +1003,7 @@ describe('wire lease 过期 fencing（旧 agent 不能完成 Job）', () => {
   it('lease 过期并被新 claim 抢占后，旧 agent 的 complete → 409 lease_stale；claim 置 settled，后续写入全拒', async () => {
     const fixture = makeFleet()
     const kernel = fixture.kernel
-    kernel.seedJob({ job_id: 'job_fence', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
+    kernel.seedJob({ job_id: 'job_fence', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
     const { agent, transport } = makeAgent(fixture)
     await agent.register()
     const claims = await agent.claimOnce(1)
@@ -982,7 +1060,7 @@ describe('wire lease 过期 fencing（旧 agent 不能完成 Job）', () => {
 describe('wire HTTP 面（attachRemoteFleetRoutes + HttpRemoteFleetTransport）', () => {
   it('service token 保护：缺失/错误 token → 403 service_token_required；正确 token 全链路可用', async () => {
     const fixture = makeFleet()
-    fixture.kernel.seedJob({ job_id: 'job_http', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST } })
+    fixture.kernel.seedJob({ job_id: 'job_http', project_id: 'prj_1', payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT } })
     const { server, baseUrl } = await startFleetHttpServer(fixture.fleet, { serviceToken: 'svc-tok-1' })
     try {
       // 错误 token / 无 token → 403。
@@ -1027,6 +1105,229 @@ describe('wire HTTP 面（attachRemoteFleetRoutes + HttpRemoteFleetTransport）'
     } finally {
       server.close()
     }
+  })
+})
+
+
+// ── §5 两行：secure kinds 容器化 / manifest facts / run_id 绑定 / bytes CAS ──
+
+describe('wire §5 修复（secure kinds 容器化 / manifest facts / run_id 绑定 / bytes CAS）', () => {
+  it('secure kind + 远端无 docker → environment 失败 complete（绝不 subprocess 执行）', async () => {
+    const fixture = makeFleet()
+    fixture.kernel.seedJob({
+      job_id: 'job_env', project_id: 'prj_1',
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
+    })
+    const agentKey = makeKeypair('agent-env')
+    fixture.kernel.manifestPublicKeyPem = agentKey.publicKeyPem
+    const agent = createRemoteRunnerAgent(
+      makeRegistration(),
+      new InMemoryFleetTransport(fixture.fleet),
+      {
+        publicKeyPem: fixture.fleetKey.publicKeyPem,
+        signingKey: agentKey.signingKey,
+        dockerProbe: async () => false, // 远端无容器运行时
+      },
+    ) as RemoteRunnerAgentImpl
+    await agent.register()
+    const claims = await agent.claimOnce(1)
+    const outcome = await agent.runClaim(claims[0]!)
+    expect(outcome.exit_code).toBe(-1)
+    expect(outcome.error).toMatch(/environment:/)
+    const job = fixture.kernel.jobs.get('job_env')!
+    expect(job.status).toBe('failed')
+    expect(fixture.kernel.completes[0]!.status).toBe('failed')
+    expect(fixture.kernel.completes[0]!.failure_class).toBe('environment')
+    // 没有任何宿主 subprocess 执行——secure kind 只允许 digest-pinned container。
+    expect(fixture.kernel.framesFor(claims[0]!.plan.run_id).length).toBeGreaterThan(0) // exit frame 仍上报
+    expect(fixture.kernel.completes[0]!.error).toMatch(/environment/)
+  })
+
+  it('secure kind + docker 可用 → digest-pinned container 参数（与本地 docker 路径一致）并成功', async () => {
+    const fixture = makeFleet()
+    fixture.kernel.seedJob({
+      job_id: 'job_dkr', project_id: 'prj_1',
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT, seed: 7 },
+    })
+    const agentKey = makeKeypair('agent-dkr')
+    fixture.kernel.manifestPublicKeyPem = agentKey.publicKeyPem
+    const captured: string[][] = []
+    const agent = createRemoteRunnerAgent(
+      makeRegistration(),
+      new InMemoryFleetTransport(fixture.fleet),
+      {
+        publicKeyPem: fixture.fleetKey.publicKeyPem,
+        signingKey: agentKey.signingKey,
+        dockerProbe: async () => true,
+        containerRun: async (plan, args, ctx) => {
+          captured.push(args)
+          // 模拟容器写回 MetricsFileV1（secure kind 的 required fact）。
+          const outputsDir = join(ctx.cwd ?? '', 'outputs')
+          mkdirSync(outputsDir, { recursive: true })
+          writeFileSync(join(outputsDir, 'metrics.json'), JSON.stringify({
+            schema_version: 1,
+            run_id: plan.run_id,
+            ...(plan.output_contract.contract_id !== null ? { contract_id: plan.output_contract.contract_id } : {}),
+            seed: 7,
+            metrics: [{ name: 'm', value: 1, unit: '' }],
+          }))
+          return {
+            run_id: plan.run_id, exit_code: 0,
+            started_at: '2026-08-11T12:00:01.000Z', finished_at: '2026-08-11T12:00:02.000Z',
+            stdout: '', stderr: '',
+          }
+        },
+      },
+    ) as RemoteRunnerAgentImpl
+    await agent.register()
+    const claims = await agent.claimOnce(1)
+    const plan = claims[0]!.plan
+    await agent.runClaim(claims[0]!)
+    expect(captured).toHaveLength(1)
+    const args = captured[0]!
+    // digest-pinned image + 完整容器基线（与本地 docker 路径逐项一致）。
+    expect(args).toContain(plan.image.digest)
+    expect(args).toContain('--network')
+    expect(args).toContain('none')
+    expect(args).toContain('--read-only')
+    expect(args).toContain('--cap-drop')
+    expect(args).toContain('--security-opt')
+    expect(args).toContain('no-new-privileges')
+    expect(args).toContain('65534:65534')
+    expect(args).toContain('--pids-limit')
+    expect(args.some(a => a.startsWith('DSH_RUN_ID='))).toBe(true)
+    expect(fixture.kernel.jobs.get('job_dkr')?.status).toBe('succeeded')
+    const manifest = fixture.kernel.jobs.get('job_dkr')!.run_manifest as Record<string, unknown>
+    // manifest facts 与 local 同源（唯一 builder）。
+    expect(manifest.run_id).toBe(plan.run_id)
+    expect(manifest.container_digest).toBe(`docker:${DIGEST}`)
+    expect(manifest.seed).toBe(7)
+    expect(manifest.metrics_artifact).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(manifest.code_snapshot_id).toBeNull()
+    expect(manifest.data_hash).toBe('')
+    expect(manifest.job_id).toBe('job_dkr')
+  })
+
+  it('defaultSubprocessExecutor：secure kind / 未标记 trusted_fixture 的 smoke → environment 失败（不 spawn）', async () => {
+    const base: JobRecord = {
+      job_id: 'job_sec', project_id: 'prj_1', contract_id: null, idempotency_key: 'ik',
+      kind: 'formal', command: ['echo', 'host-marker'], payload: {},
+      status: 'queued', failure_class: null, lease_owner: null, lease_expires_at: null,
+      heartbeat_at: null, lease_generation: 0, lease_token: null, attempts: 0, max_attempts: 3,
+      run_manifest: null, error: '', created_at: '2026-08-11T00:00:00.000Z', updated_at: '2026-08-11T00:00:00.000Z',
+    }
+    const opts = {
+      run_id: 'run_sec', lease: { owner: 'o', generation: 0, token: null, expires_at: null },
+      image_digest: DIGEST, timeout_ms: 60000, created_at: '2026-08-11T00:00:00.000Z',
+    }
+    const secure = await defaultSubprocessExecutor(buildExecutionPlan(base, opts), {})
+    expect(secure.exit_code).toBe(-1)
+    expect(secure.error).toMatch(/environment:.*host subprocess is prohibited/)
+
+    const untrustedSmoke = await defaultSubprocessExecutor(
+      buildExecutionPlan({ ...base, kind: 'smoke', command: ['echo', 'marker'] }, opts),
+      {},
+    )
+    expect(untrustedSmoke.exit_code).toBe(-1)
+    expect(untrustedSmoke.error).toMatch(/trusted-smoke-fixture/)
+
+    // 显式 trusted smoke fixture → subprocess 执行成功（唯一豁免）。
+    const trusted = await defaultSubprocessExecutor(
+      buildExecutionPlan(
+        { ...base, kind: 'smoke', command: ['echo', 'trusted-ok'], payload: { trusted_fixture: true } },
+        opts,
+      ),
+      {},
+    )
+    expect(trusted.exit_code).toBe(0)
+    expect(trusted.stdout).toContain('trusted-ok')
+  })
+
+  it('complete 顶层 run_id 与 claim 不一致 → 422 run_id_mismatch（stale attempt 拒绝）；manifest run_id 不一致同样 422', async () => {
+    const fixture = makeFleet()
+    fixture.kernel.seedJob({
+      job_id: 'job_stale', project_id: 'prj_1',
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
+    })
+    const { transport } = makeAgent(fixture)
+    await transport.register(makeRegistration())
+    const claims = await transport.claims('agent-gpu-1', { schema_version: 1, limit: 1 })
+    const runId = claims.claims[0]!.plan.run_id
+    const lease = { owner: 'fleet-owner', generation: 1, token: claims.claims[0]!.plan.lease.token }
+    const staleComplete = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      schema_version: 1,
+      claim_id: claims.claims[0]!.claim_id,
+      run_id: runId,
+      job_id: 'job_stale',
+      status: 'succeeded',
+      run_manifest: { run_id: runId, job_id: 'job_stale', exit_code: 0, metrics_artifact: 'sha256:' + 'a'.repeat(64) },
+      lease,
+      ...overrides,
+    })
+    // 顶层 run_id = 旧 attempt 的 id → 422 run_id_mismatch。
+    await expect(transport.complete('agent-gpu-1', runId, staleComplete({ run_id: 'run_stale_old' }) as never))
+      .rejects.toMatchObject({ status: 422, code: 'run_id_mismatch' })
+    // manifest.run_id = 旧 attempt → 422（fleet 层 run_id_mismatch）。
+    await expect(transport.complete('agent-gpu-1', runId, staleComplete({ run_manifest: { run_id: 'run_stale_old', job_id: 'job_stale', exit_code: 0 } }) as never))
+      .rejects.toMatchObject({ status: 422, code: 'run_id_mismatch' })
+  })
+
+  it('complete 的 manifest 缺 required facts → 422（fleet 层镜像 kernel 校验）', async () => {
+    const fixture = makeFleet()
+    fixture.kernel.seedJob({
+      job_id: 'job_facts', project_id: 'prj_1',
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
+    })
+    const { transport } = makeAgent(fixture)
+    await transport.register(makeRegistration())
+    const claims = await transport.claims('agent-gpu-1', { schema_version: 1, limit: 1 })
+    const runId = claims.claims[0]!.plan.run_id
+    const lease = { owner: 'fleet-owner', generation: 1, token: claims.claims[0]!.plan.lease.token }
+    const completeWith = (manifest: Record<string, unknown>): Promise<unknown> => transport.complete('agent-gpu-1', runId, {
+      schema_version: 1,
+      claim_id: claims.claims[0]!.claim_id,
+      run_id: runId,
+      job_id: 'job_facts',
+      status: 'succeeded',
+      run_manifest: manifest,
+      lease,
+    } as never)
+    // 缺 metrics_artifact → 422 manifest_facts_missing。
+    await expect(completeWith({ run_id: runId, job_id: 'job_facts', exit_code: 0, container_digest: `docker:${DIGEST}` }))
+      .rejects.toMatchObject({ status: 422, code: 'manifest_facts_missing' })
+    // metrics_artifact 空串同样缺失。
+    await expect(completeWith({ run_id: runId, job_id: 'job_facts', exit_code: 0, metrics_artifact: '' }))
+      .rejects.toMatchObject({ status: 422, code: 'manifest_facts_missing' })
+    // container_digest 与 digest-pinned image 不一致 → 422 manifest_container_mismatch。
+    await expect(completeWith({ run_id: runId, job_id: 'job_facts', exit_code: 0, metrics_artifact: 'sha256:' + 'a'.repeat(64), container_digest: 'docker:evil@sha256:' + '0'.repeat(64) }))
+      .rejects.toMatchObject({ status: 422, code: 'manifest_container_mismatch' })
+  })
+
+  it('CAS bytes round-trip：随机二进制（NUL/0xFF）逐字节一致；project binding 拒绝越权 project', async () => {
+    const fixture = makeFleet()
+    const bytes = Buffer.from([0x00, 0xff, 0x10, 0x7f, 0x00, 0x80, 0x01, 0xfe, 0x00, 0x00, 0x41, 0xc3, 0x28])
+    const dataSha = sha256HexBytes(bytes)
+    fixture.kernel.seedCas(`sha256:${dataSha}`, bytes)
+    fixture.kernel.seedJob({
+      job_id: 'job_bin', project_id: 'prj_1',
+      payload: { target_id: 'remote-gpu-1', image_digest: DIGEST, output_contract: OUT },
+      data_artifact_ids: [`sha256:${dataSha}`],
+    })
+    const { agent, transport } = makeAgent(fixture)
+    await agent.register()
+    const claims = await agent.claimOnce(1)
+    // CAS 内容逐字节一致（不经过 text()/UTF-8 round-trip；claim 未 settle 时可拉）。
+    const cas = await transport.fetchCas('agent-gpu-1', `sha256:${dataSha}`, 'prj_1')
+    expect(cas).not.toBeNull()
+    expect(Buffer.from(cas!.content_base64, 'base64')).toEqual(bytes)
+    expect(cas!.sha256).toBe(dataSha)
+    // agent 拉取并复算 hash（字节语义——UTF-8 编解码会损坏 → 拒绝执行）。
+    await agent.runClaim(claims[0]!)
+    expect(fixture.kernel.jobs.get('job_bin')?.status).toBe('succeeded')
+    // caller 声明 project_id 不能越过 claim 所属项目 → 403 cas_project_forbidden
+    // （完成后的 claim 已 settle，也不再放行）。
+    await expect(transport.fetchCas('agent-gpu-1', `sha256:${dataSha}`, 'prj_foreign'))
+      .rejects.toMatchObject({ status: 403, code: 'cas_project_forbidden' })
   })
 })
 

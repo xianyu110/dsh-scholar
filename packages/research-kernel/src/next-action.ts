@@ -26,8 +26,12 @@
  *   gates, budget exhaustion, phase steps); retry/stop overlays are not
  *   blocking.
  *
- * Intake/Grill phase actions are intentionally absent: they only become
- * meaningful once ONBOARD-01 (Init/Resume/Upload + Grill Me) lands.
+ * Intake/Grill overlay actions (ONBOARD-01 landing, 2026-08-11): when the
+ * project has an active intake session the projection also emits
+ * `intake_resume` (any active status) plus one step overlay per session
+ * status (`intake_scan` / `intake_answer` / `intake_propose` /
+ * `intake_adopt`), so the UI can guide the human through begin→stage→
+ * scan→grill→propose→adopt on every step (see intake-flow.ts client model).
  * @module @dsh-scholar/research-kernel/next-action
  */
 
@@ -57,6 +61,23 @@ export interface NextActionJob {
   created_at: string
 }
 
+/** Intake statuses in which an intake is still recoverable/continuable
+ *  (mirrors research-schemas INTAKE_ACTIVE_STATUSES; the projection never
+ *  guides a terminal session). */
+export const INTAKE_ACTIVE_STATUSES: readonly string[] = [
+  'draft', 'uploading', 'scanning', 'needs_input', 'grilling',
+  'proposal_ready', 'awaiting_human',
+]
+
+/** Minimal durable intake view the projection needs (subset of IntakeSession
+ *  + per-session artifact count; the kernel feeds it from listIntakes). */
+export interface NextActionIntake {
+  intake_id: string
+  status: string
+  target_phase: string | null
+  artifact_count: number
+}
+
 /** Authoritative state inputs the projection derives actions from. */
 export interface NextActionContext {
   project: ResearchProject
@@ -69,6 +90,9 @@ export interface NextActionContext {
   evidence: EvidenceItem[]
   claims: Claim[]
   corpus_snapshots: CorpusSnapshot[]
+  /** Active intake sessions of the project (ONBOARD-01 overlay; absent when
+   *  the caller has no intake view — legacy callers stay compatible). */
+  intakes?: NextActionIntake[]
 }
 
 /** UI tab / operation path an action maps to. */
@@ -509,13 +533,106 @@ function jobOverlay(ctx: NextActionContext): BaseActionSpec[] {
 }
 
 /**
+ * Active-intake overlay (ONBOARD-01 landing, 2026-08-11): one `intake_resume`
+ * action per active intake session plus the session-status step overlay —
+ * `intake_scan` once artifacts are staged, `intake_answer` while questions
+ * are open, `intake_propose` when the required answers are in, and
+ * `intake_adopt` (PI capability) once the proposal awaits the human. All are
+ * non-blocking overlays (like job_retry): the phase's own base action stays
+ * authoritative; terminal intakes (accepted/rejected/expired/failed) emit
+ * nothing.
+ */
+function intakeOverlay(ctx: NextActionContext): BaseActionSpec[] {
+  const { project, intakes } = ctx
+  const actions: BaseActionSpec[] = []
+  for (const intake of intakes ?? []) {
+    if (!INTAKE_ACTIVE_STATUSES.includes(intake.status)) continue
+    const refs: NextActionRef[] = [
+      { kind: 'intake', id: intake.intake_id },
+      { kind: 'project', id: project.project_id },
+    ]
+    const target = intake.target_phase === null || intake.target_phase === '' ? '' : ` (${intake.target_phase})`
+    actions.push({
+      code: 'intake_resume',
+      label: `Resume intake ${intake.intake_id}${target}`,
+      reason: `intake ${intake.intake_id} is ${intake.status} — continue uploading, scanning, answering or adopting it`,
+      route: 'overview',
+      state: 'ready',
+      required: true,
+      required_by: 'human',
+      revision: null,
+      refs,
+      blocking: false,
+    })
+    if (intake.status === 'uploading' && intake.artifact_count > 0) {
+      actions.push({
+        code: 'intake_scan',
+        label: 'Scan staged intake files',
+        reason: `${intake.artifact_count} staged file(s) are waiting for the static security scan`,
+        route: 'overview',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: null,
+        refs,
+        blocking: false,
+      })
+    }
+    if (intake.status === 'needs_input' || intake.status === 'grilling') {
+      actions.push({
+        code: 'intake_answer',
+        label: 'Answer intake Grill questions',
+        reason: 'the intake scan is done — required Grill questions still need human answers',
+        route: 'overview',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: null,
+        refs,
+        blocking: false,
+      })
+    }
+    if (intake.status === 'proposal_ready') {
+      actions.push({
+        code: 'intake_propose',
+        label: 'Generate intake phase proposal',
+        reason: 'all required Grill questions are answered — generate the phase proposal for human review',
+        route: 'overview',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: null,
+        refs,
+        blocking: false,
+      })
+    }
+    if (intake.status === 'awaiting_human') {
+      actions.push({
+        code: 'intake_adopt',
+        label: 'Adopt intake proposal (PI)',
+        reason: `the intake proposal awaits a Human PI decision — adopting imports the material into the project`,
+        route: 'overview',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        capability: 'pi',
+        revision: null,
+        refs,
+        blocking: false,
+      })
+    }
+  }
+  return actions
+}
+
+/**
  * GUIDE-01 authoritative projection: deterministic structured actions for
  * the current project state. Pure — no DB, no side effects, never throws.
  * Unknown/future statuses degrade to `code: 'unknown'` (read-only).
  */
 export function nextActionProjection(ctx: NextActionContext): NextAction[] {
   const base = baseActions(ctx)
-  const overlays = [...gateOverlay(ctx), ...jobOverlay(ctx)]
+  const overlays = [...gateOverlay(ctx), ...jobOverlay(ctx), ...intakeOverlay(ctx)]
   return [...base, ...overlays].map(spec => action(ctx.project.project_id, spec))
 }
 

@@ -10,9 +10,9 @@
 import { t, getLocale, subscribeLocale, assertLocaleParity, registerOverlayRebuild } from './i18n/index'
 import { chromeTabGroups, chromeTabs, chromeModelChoices } from './i18n/chrome'
 import { api } from './api'
-import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost, showToast } from './ui'
+import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost, STATUS_META, statusLabel } from './ui'
 import type { ProjectRow, Projection } from './types'
-import { MORE_TAB_KEYS, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups } from './nav'
+import { MORE_TAB_KEYS, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups, filterProjects } from './nav'
 import {
   state, readTheme, writeTheme, radiusValue, textureValue, accentColor,
   tabPinned, tabTogglePin, tabSave, tabLoad, autoRefreshEnabled,
@@ -33,6 +33,7 @@ import { openSettingsModal } from './modals/settings'
 import { openCommandsModal, openShortcutsModal } from './modals/commands'
 import { openNotificationsModal, openSessionSearchModal, openProjectSwitcherModal } from './modals/search'
 import { openNewProjectModal } from './modals/project'
+import { openIntakeModal } from './modals/intake'
 
 export { setStandaloneBridge } from './api'
 /** Kernel reachability (dsh-web offline indicator). */
@@ -802,9 +803,9 @@ export function apply(): void {
 
   // UI-SIMPLE-01 Start 三卡 handlers (acceptance §8 ui-start): the cards
   // are definitions from nav.ts startActions(); the DOM layer maps their
-  // stable route targets to concrete actions. 'import' is honest —
-  // ONBOARD-01/UPLOAD-01 are not implemented, so it surfaces a placeholder
-  // toast instead of fake upload UI (recorded in hardening status §3).
+  // stable route targets to concrete actions. 'import' is the REAL
+  // ONBOARD-01 intake wizard (begin → stage → scan → grill → propose →
+  // adopt, modals/intake.ts) — no placeholder toast.
   const handleStartAction = (route: string): void => {
     if (route === 'new-project') {
       openNewProjectModal(root)
@@ -814,7 +815,7 @@ export function apply(): void {
       openProjectSwitcherModal(root)
       return
     }
-    showToast(rootHost(), t('shell', 'shell.start.importNote'))
+    openIntakeModal(root)
   }
 
   const render = async (): Promise<void> => {
@@ -867,7 +868,10 @@ export function apply(): void {
       banner.appendChild(retry)
       body.prepend(banner)
     }
-    const target = state.projectId ?? projects[0]?.project_id
+    // §5 P1 (ONBOARD-01): NO auto-selection of projects[0] — the Start
+    // screen (Init / Resume / Import) stays until the user EXPLICITLY picks
+    // a project (startScreenVisible in nav.ts is the pure contract).
+    const target = state.projectId
     type LoadedProjection = Projection & { project: NonNullable<Projection['project']> }
     let projection: LoadedProjection | null = null
     if (target !== undefined) {
@@ -883,84 +887,79 @@ export function apply(): void {
     renderSidebar(sidebar, projects, state.projectId, (id) => { state.projectId = id; void render() })
     if (target === undefined) {
       syncTitle(undefined)
-      // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start): the empty first
-      // screen offers exactly three primary actions — 新建研究 / 打开已有
-      // 项目 / 上传·接入 — defined by the pure nav.ts startActions() model
-      // (labels re-evaluate per locale; codes/routes are the stable
-      // contract). 高级设置不可见 (settings stay behind the gear/more).
-      if (projects.length === 0) {
-        const start = el('div', 'welcome start-screen')
-        start.appendChild(el('div', 'welcome-mark', '⌁'))
-        start.appendChild(el('h1', '', t('shell', 'shell.start.title')))
-        start.appendChild(el('div', 'welcome-eyebrow', t('shell', 'shell.start.subtitle')))
-        const cards = el('div', 'start-cards')
-        for (const action of startActions()) {
-          const card = el('button', 'start-card')
-          card.dataset.start = action.code
-          card.dataset.route = action.route
-          card.setAttribute('aria-label', `${action.label} — ${action.description}`)
-          card.append(
-            el('span', 'start-card-label', action.label),
-            el('span', 'start-card-desc', action.description),
-          )
-          card.onclick = () => handleStartAction(action.route)
-          cards.appendChild(card)
-        }
-        start.appendChild(cards)
-        chatDock.hidden = true
-        chatDock.replaceChildren()
-        body.replaceChildren(start)
-        return
+      // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start, §5 P1 ONBOARD-01):
+      // the first screen offers exactly three primary actions — 新建研究 /
+      // 打开已有项目 / 上传·接入 — defined by the pure nav.ts startActions()
+      // model (labels re-evaluate per locale; codes/routes are the stable
+      // contract). The screen shows whenever NO project is selected (even
+      // when projects exist): the open list requires an EXPLICIT pick —
+      // projects[0] is never auto-selected (startScreenVisible contract).
+      const start = el('div', 'welcome start-screen')
+      start.appendChild(el('div', 'welcome-mark', '⌁'))
+      start.appendChild(el('h1', '', t('shell', 'shell.start.title')))
+      start.appendChild(el('div', 'welcome-eyebrow', t('shell', 'shell.start.subtitle')))
+      const cards = el('div', 'start-cards')
+      for (const action of startActions()) {
+        const card = el('button', 'start-card')
+        card.dataset.start = action.code
+        card.dataset.route = action.route
+        card.setAttribute('aria-label', `${action.label} — ${action.description}`)
+        card.append(
+          el('span', 'start-card-label', action.label),
+          el('span', 'start-card-desc', action.description),
+        )
+        card.onclick = () => handleStartAction(action.route)
+        cards.appendChild(card)
       }
-      // dsh-web hero: a guided empty state instead of a bare message (kept
-      // for the case where projects exist but none is selected — the
-      // Welcome/Create path stays intact).
-      const hero = el('div', 'welcome')
-      hero.appendChild(el('div', 'welcome-mark', '⌁'))
-      hero.appendChild(el('h1', '', t('shell', 'shell.welcome.title')))
-      hero.appendChild(el('div', 'welcome-eyebrow', t('shell', 'shell.welcome.eyebrow')))
-      hero.appendChild(el('div', 'welcome-copy', t('shell', 'shell.welcome.copy')))
-      const steps = el('div', 'welcome-steps')
-      let stepIndex = 0
-      const addStep = (t: string): void => {
-        stepIndex += 1
-        const row = el('div', 'welcome-step')
-        row.appendChild(el('span', 'welcome-step-num', String(stepIndex).padStart(2, '0')))
-        row.appendChild(el('span', '', t))
-        steps.appendChild(row)
-      }
-      addStep(t('shell', 'shell.welcome.step1'))
-      addStep(t('shell', 'shell.welcome.step2'))
-      addStep(t('shell', 'shell.welcome.step3'))
-      addStep(t('shell', 'shell.welcome.step4'))
-      hero.appendChild(steps)
-      // dsh-web overview: how many projects live on this kernel.
+      start.appendChild(cards)
+      // Open-project list (Resume): explicit selection or exact id input.
       if (projects.length > 0) {
-        const stat = el('div', 'muted', t('shell', 'shell.welcome.stat', { count: String(projects.length) }))
-        stat.style.cssText = 'font-size:11px;margin-top:10px'
-        hero.appendChild(stat)
-        // dsh-web quick open: the most recently active projects as chips.
-        const chipRow = el('div', 'row')
-        chipRow.style.cssText = 'gap:6px;flex-wrap:wrap;justify-content:center;margin-top:6px'
-        for (const rp of projects.slice(0, 4)) {
-          if (rp.project_id === undefined) continue
-          const chip = el('button', 'hbtn', rp.name ?? rp.project_id)
-          chip.style.cssText = 'padding:4px 12px;font-size:10.5px'
-          chip.onclick = () => {
-            state.projectId = rp.project_id!
-            void render()
+        start.appendChild(el('div', 'section-label', t('shell', 'shell.start.openListTitle')))
+        const pick = el('input', 'picker')
+        pick.type = 'text'
+        pick.placeholder = t('shell', 'shell.start.openListIdPlaceholder')
+        pick.style.cssText = 'width:100%;box-sizing:border-box;margin-bottom:8px'
+        const listBox = el('div')
+        listBox.style.cssText = 'max-height:30vh;overflow-y:auto;text-align:left'
+        const paintList = (): void => {
+          const q = pick.value
+          const matches = filterProjects(projects, q)
+          listBox.replaceChildren()
+          if (matches.length === 0) {
+            listBox.appendChild(el('div', 'empty', t('shell', 'shell.start.openListNoMatch', { query: q.trim() })))
+            return
           }
-          chipRow.appendChild(chip)
+          for (const rp of matches) {
+            if (rp.project_id === undefined) continue
+            const row = el('button', 'ws-item')
+            row.style.cssText = 'width:100%;border:0;background:none;color:var(--text);text-align:left;padding:7px 10px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px'
+            const tone = STATUS_META[rp.status ?? '']?.tone ?? 'slate'
+            const dot = el('span')
+            dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:var(--tone-${tone});flex-shrink:0`
+            const name = el('span', 'grow', rp.name ?? rp.project_id)
+            name.style.cssText = 'font-size:11.5px'
+            const meta = el('span', 'muted mono', `${statusLabel(rp.status)} · ${rp.project_id.slice(0, 14)}`)
+            meta.style.cssText = 'font-size:9.5px'
+            row.append(dot, name, meta)
+            row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
+            row.onmouseleave = () => { row.style.background = 'none' }
+            row.onclick = () => {
+              state.projectId = rp.project_id!
+              void render()
+            }
+            listBox.appendChild(row)
+          }
         }
-        hero.appendChild(chipRow)
+        pick.oninput = paintList
+        start.appendChild(pick)
+        start.appendChild(listBox)
+        paintList()
+      } else {
+        start.appendChild(el('div', 'empty', t('shell', 'shell.start.openListEmpty')))
       }
-      const go = el('button', 'btn primary', t('shell', 'shell.welcome.create'))
-      go.style.cssText = 'padding:9px 20px;margin-top:6px'
-      go.onclick = () => { openNewProjectModal(root) }
-      hero.appendChild(go)
       chatDock.hidden = true
       chatDock.replaceChildren()
-      body.replaceChildren(hero)
+      body.replaceChildren(start)
       return
     }
     if (projection === null) {

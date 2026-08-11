@@ -77,6 +77,12 @@ export const ExecutionOutputContract = z.object({
   seed: z.number().int().nullable().default(null),
   /** 允许的 metric 名（kernel 从 approved Contract 注入 payload.contract_metrics）。 */
   contract_metrics: z.array(z.string()).default([]),
+  /**
+   * smoke 显式 trusted fixture（execution-runtime.md §1）：subprocess 的唯一
+   * 豁免（与本地 runner 的 payload.trusted_fixture 同一语义，固定进 plan 后
+   * 远端 Agent 可判）。其余 kind 一律要求 digest-pinned container。
+   */
+  trusted_fixture: z.boolean().default(false),
 })
 export type ExecutionOutputContract = z.infer<typeof ExecutionOutputContract>
 
@@ -115,6 +121,13 @@ export const ExecutionPlan = z.object({
   command: z.array(z.string()).default([]),
   /** opaque runner profile id（Config/SecretRef 解析在服务端；Job/UI 只见 opaque id）。 */
   profile_id: z.string().min(1),
+  /**
+   * §12.2 data binding hash（Job payload.data_hash 固定进 plan；缺省 ''）。
+   * 远端 manifest 的 data_hash 与本地 runner 同源——target 不得改写。
+   */
+  data_hash: z.string().default(''),
+  /** §12.2 code commit（Job payload.code_commit 固定进 plan；缺省 ''）。 */
+  code_commit: z.string().default(''),
   /**
    * profile 记录本身的 config hash pin（domain-model.md §9.1：Job 固定
    * profile/config hash；target 按注册表复算校验，不一致拒绝执行）。
@@ -274,6 +287,8 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
     profile_id: options.profile_id ?? options.profile?.profile_id ?? LOCAL_DOCKER_TARGET_ID,
     profile_config_hash: options.profile?.config_hash ?? null,
     target_id: options.target_id ?? LOCAL_DOCKER_TARGET_ID,
+    data_hash: typeof payload?.data_hash === 'string' ? payload.data_hash : '',
+    code_commit: typeof payload?.code_commit === 'string' ? payload.code_commit : '',
     lease: {
       owner: options.lease.owner,
       generation: options.lease.generation,
@@ -304,6 +319,7 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
       contract_id: job.contract_id,
       seed,
       contract_metrics: contractMetrics,
+      trusted_fixture: (payload as Record<string, unknown> | undefined)?.trusted_fixture === true,
     },
     signature: null,
     payload_sha256: null,

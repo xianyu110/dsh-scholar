@@ -3805,6 +3805,12 @@ export class ResearchKernel {
     }
     if (input.run_manifest !== undefined) {
       this.verifyRunManifest(input.run_manifest, job)
+      // RUN-REMOTE-01（hardening-v0.2-status.md §5 两行 / acceptance
+      // remote-identity-fencing-manifest）：secure kinds 的 run_id 全链绑定
+      // （manifest.run_id === 本 attempt 的 runs.run_id）+ required facts
+      // （metrics_artifact/seed/code snapshot/container_digest/data_hash
+      // 缺失或不一致 → 422，不再"存在时匹配"）。
+      this.verifySecureRunFacts(input.run_manifest, job, input.status === 'succeeded')
     }
     if (input.status === 'succeeded' && input.run_manifest !== undefined) {
       const refs = collectManifestRefs(input.run_manifest)
@@ -3992,6 +3998,56 @@ export class ResearchKernel {
     const valid = verify(null, Buffer.from(canonicalJson(signedPayload), 'utf8'), publicKey, signatureBytes)
     if (!valid) {
       throw new KernelError(422, 'manifest_signature_invalid', `run manifest signature verification failed for key ${runnerKeyId}`)
+    }
+  }
+
+  /**
+   * RUN-REMOTE-01（hardening-v0.2-status.md §5 两行 / acceptance
+   * remote-identity-fencing-manifest）：secure kinds（baseline/pilot/formal/
+   * reproduce/latex-compile）的 manifest 强制校验——不再"存在时匹配"：
+   *
+   * - **run_id 全链一致**（job/run/lease/manifest）：manifest.run_id 必须等于
+   *   本 attempt 在 claim 时写入 runs 行的 run_id（缺失或旧 attempt 的
+   *   run_id → 422 manifest_run_mismatch）；
+   * - succeeded 时 **required facts 缺一即 422**：metrics_artifact 存在
+   *   （§12.5）、seed 与 job 固定 seed 匹配、code_snapshot_id 与 job 绑定
+   *   快照一致、container_digest === `docker:<digest-pinned image>`、
+   *   data_hash 与 job 声明一致。
+   *
+   * 与本地 runner / 远端 Agent 的 manifest builder（runner-gateway
+   * run-manifest.ts）同源——合法 run 恒通过；残缺/伪造 manifest 拒绝。
+   */
+  private verifySecureRunFacts(manifest: Record<string, unknown>, job: JobSpecBound, succeeded: boolean): void {
+    const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
+    if (!SECURE_KINDS.includes(job.kind)) return
+    const runRow = this.db.prepare('SELECT run_id FROM runs WHERE job_id = ? AND attempt_no = ?')
+      .get(job.job_id, job.attempts) as { run_id?: string } | undefined
+    if (runRow !== undefined && manifest.run_id !== runRow.run_id) {
+      throw new KernelError(422, 'manifest_run_mismatch',
+        `run manifest run_id ${String(manifest.run_id)} does not match the claim's run_id ${runRow.run_id} (job ${job.job_id} attempt ${job.attempts}) — job/run/lease/manifest run_id chain broken`)
+    }
+    if (!succeeded) return
+    if (typeof manifest.metrics_artifact !== 'string' || manifest.metrics_artifact === '') {
+      throw new KernelError(422, 'manifest_facts_missing',
+        `run manifest for ${job.kind} job ${job.job_id} lacks metrics_artifact (required fact, §12.5)`)
+    }
+    const jobSeed = typeof job.payload.seed === 'number' && Number.isFinite(job.payload.seed) ? job.payload.seed : null
+    if (jobSeed !== null && manifest.seed !== jobSeed) {
+      throw new KernelError(422, 'manifest_seed_mismatch',
+        `run manifest seed ${String(manifest.seed)} does not match the job's fixed seed ${jobSeed}`)
+    }
+    if (job.code_snapshot_id !== null && job.code_snapshot_id !== '' && manifest.code_snapshot_id !== job.code_snapshot_id) {
+      throw new KernelError(422, 'manifest_snapshot_mismatch',
+        `run manifest code_snapshot_id ${String(manifest.code_snapshot_id)} does not match the job's code snapshot ${job.code_snapshot_id}`)
+    }
+    if (job.image_digest !== '' && manifest.container_digest !== `docker:${job.image_digest}`) {
+      throw new KernelError(422, 'manifest_container_mismatch',
+        `run manifest container_digest ${String(manifest.container_digest)} does not match the digest-pinned image docker:${job.image_digest}`)
+    }
+    const jobDataHash = typeof job.payload.data_hash === 'string' && job.payload.data_hash !== '' ? job.payload.data_hash : null
+    if (jobDataHash !== null && manifest.data_hash !== jobDataHash) {
+      throw new KernelError(422, 'manifest_data_mismatch',
+        `run manifest data_hash ${String(manifest.data_hash)} does not match the job's data hash ${jobDataHash}`)
     }
   }
 
@@ -5768,6 +5824,14 @@ export class ResearchKernel {
       evidence: this.listEvidence(projectId),
       claims: this.listClaims(projectId),
       corpus_snapshots: this.listCorpusSnapshots(projectId),
+      // ONBOARD-01 intake overlay (GUIDE-01 landing): active intake sessions
+      // project intake_resume/scan/answer/propose/adopt guidance.
+      intakes: this.listIntakes(projectId).map(session => ({
+        intake_id: session.intake_id,
+        status: session.status,
+        target_phase: session.target_phase,
+        artifact_count: Number((this.db.prepare('SELECT COUNT(*) AS n FROM intake_artifacts WHERE intake_id = ?').get(session.intake_id) as { n: number }).n),
+      })),
     })
     const nextActions = legacyNextActionStrings(nextActionsV2)
     return {
