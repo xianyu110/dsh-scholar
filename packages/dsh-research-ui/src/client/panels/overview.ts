@@ -49,6 +49,13 @@ export function nextActionCardNode(model: NextActionCardModel): HTMLElement {
   head.append(badge, title)
   const pill = el('span', `nax-state nax-state-${model.tone}`, model.stateLabel)
   head.appendChild(pill)
+  // required-by chip (USAGE_GUIDE §11): who must perform this action
+  // (kernel `required_by` wire field; no chip when not declared).
+  if (model.requiredBy !== null) {
+    const who = el('span', 'nax-who mono', t('overview', `overview.nextaction.requiredBy.${model.requiredBy}`))
+    who.style.cssText = 'flex:none;font-size:9.5px;color:var(--text-2);border:1px solid var(--border-2);border-radius:99px;padding:1px 8px;margin-left:4px'
+    head.appendChild(who)
+  }
   card.appendChild(head)
   // reason row: kernel wire text, verbatim (data, not chrome).
   if (model.reasonText !== '') {

@@ -142,7 +142,7 @@ describe('trajectory projection (kernel)', () => {
     // All five entries exactly once, in stable order — the seq-2 tie (evt_n2
     // vs evt_p2) is resumed by event_id, nothing dropped.
     expect(all).toEqual([
-      expect.stringMatching(/^evt_[0-9a-f]{32}$/), // project.created (seq 1, hex id)
+      expect.stringMatching(/^evt_[a-z2-7]{16,}$/), // project.created (seq 1, base32 id)
       'evt_n1',
       'evt_n2',
       'evt_p2',
@@ -354,7 +354,7 @@ describe('child topology (kernel)', () => {
     expect(receipt.accepted).toBe(true)
     expect(receipt.read_only).toBe(true)
     expect(receipt.state_unchanged).toBe(true)
-    expect(receipt.message_id).toMatch(/^msg_[0-9a-f]{32}$/)
+    expect(receipt.message_id).toMatch(/^msg_[a-z2-7]{16,}$/)
     expect(kernel.getChildLink('sess_h').state).toBe(before)
     const after = kernel.childHistory('sess_h')
     expect(after.total).toBe(3)

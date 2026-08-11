@@ -122,6 +122,10 @@ export interface NextActionCardModel {
   intakeId: string | null
   /** Project id from the intake action refs (project-scoped routes). */
   intakeProjectId: string | null
+  /** Who must perform the action ('human' | 'agent' | 'runner'); null when
+   *  the kernel did not declare it (USAGE_GUIDE §11 "需要 Human/Agent/
+   *  Runner" chip — rendered by the panel layer). */
+  requiredBy: 'human' | 'agent' | 'runner' | null
 }
 
 /** True when `key` exists in the overview dictionary of `locale` (parity is
@@ -152,6 +156,9 @@ export function nextActionCardModel(action: NextActionV2, locale: Locale = getLo
   const state = action.state ?? 'ready'
   const tone: NextActionCardModel['tone'] = state === 'done' || state === 'blocked' ? state : 'ready'
   const required = Array.isArray(action.required) ? action.required.filter(g => typeof g === 'string' && g !== '') : []
+  const requiredBy = action.required_by === 'human' || action.required_by === 'agent' || action.required_by === 'runner'
+    ? action.required_by
+    : null
   const missingList = required.map(gap => {
     const gapKey = NEXT_ACTION_GAP_KEYS[gap]
     return gapKey !== undefined && hasOverviewKey(gapKey, locale) ? t('overview', gapKey) : gap
@@ -175,6 +182,7 @@ export function nextActionCardModel(action: NextActionV2, locale: Locale = getLo
     isUnknown,
     intakeId,
     intakeProjectId,
+    requiredBy,
   }
 }
 

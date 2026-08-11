@@ -45,6 +45,8 @@
 
 Zod 错误 details 只返回字段路径和安全消息。上游 5xx、文件系统绝对路径、SQL、环境变量和 Token 不得传到浏览器。
 
+> 错误面形状（如实记录）：**BFF 原生错误**按本节约定 envelope（`ok:false` + `error:{code,message}`，code 取自下表/稳定补充码）；**kernel 代理错误**由 BFF 原样透传 kernel 的 wire envelope（`{error:{code,message,request_id,retryable}}`，reconstruction-contracts.md §error envelope），BFF 不改写上游 body——两种形状客户端均已解析稳定 `error.code`。
+
 ## 3. Health 与能力发现
 
 ### GET /v2/health
@@ -300,7 +302,7 @@ POST /v2/projects/{id}/release-bundle-requests 创建 bundle/clean-room Job；GE
 - 默认每 IP 60 请求每分钟，Terminal 长连接单独限制每用户和项目连接数；
 - 浏览器永远看不到 Kernel 内部 Token。
 
-standalone 同源直接暴露 `/v2` 和 `/bff/research`。`/research-api` 与 `/research-ui-api` 不存在，不得作为兼容别名恢复。
+standalone 同源直接暴露 `/v1`、`/v2`（当前 BFF 面；v2 = BFF adapter surface）并代理 kernel；`/bff/research/*` 为 v2 目标路径前缀（§16/§19/§20 中标注"剩余项"的写面落地时使用），当前未注册字面路由。`/research-api` 与 `/research-ui-api` 不存在，不得作为兼容别名恢复。
 
 ## 14. v1 兼容
 
@@ -329,7 +331,7 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 `accept` 只存在于 BFF Human 面；Agent tool schema 不生成该方法。scan/parser/LLM 永远不能直接 mutation Project。单文件 Artifact 上传与 research package intake 是两个明确入口，UI 不得把 internal Runner stage 暴露给用户。状态、映射、错误和幂等见 research-onboarding.md。
 
-**kernel/服务端层已实现（commit 待定，ONBOARD-01）**：v1 项目域路由 `POST/GET /v1/projects/{id}/intake`（begin/list）、`GET .../intake/{iid}`（resume 投影）、`POST .../intake/{iid}/artifacts`（multipart stage，≤32 MiB，隔离 staging CAS）、`DELETE .../intake/{iid}/artifacts/{aid}`、`POST .../intake/{iid}/scan`（静态扫描）、`GET .../intake/{iid}/questions`、`POST .../intake/{iid}/answers`、`POST .../intake/{iid}/propose`、`POST .../intake/{iid}/adopt`（Human Principal 必填；Idempotency-Key）、`POST .../intake/{iid}/reject`。所有路由按路径项目解析（跨项目→404 intake_not_found）；pre-accept 只写 intake_* 表与隔离 staging CAS，业务表与 Outbox 在 adopt 事务边界才动；错误码见 research-onboarding.md §9（intake_not_found/intake_state_conflict/intake_expired/artifact_quarantined/question_required/proposal_stale/project_revision_conflict/idempotency_conflict 等）。v2/BFF accept 面（`/v2/intakes*`、`/bff/research/intakes/{id}/accept`）、分块 intake staged upload（Content-Range）、Agent tool 面与浏览器向导 UI 为剩余项。
+**kernel/服务端层已实现（commit 98243ff，ONBOARD-01）**：v1 项目域路由 `POST/GET /v1/projects/{id}/intake`（begin/list）、`GET .../intake/{iid}`（resume 投影）、`POST .../intake/{iid}/artifacts`（multipart stage，≤32 MiB，隔离 staging CAS）、`DELETE .../intake/{iid}/artifacts/{aid}`、`POST .../intake/{iid}/scan`（静态扫描）、`GET .../intake/{iid}/questions`、`POST .../intake/{iid}/answers`、`POST .../intake/{iid}/propose`、`POST .../intake/{iid}/adopt`（Human Principal 必填；Idempotency-Key）、`POST .../intake/{iid}/reject`。所有路由按路径项目解析（跨项目→404 intake_not_found）；pre-accept 只写 intake_* 表与隔离 staging CAS，业务表与 Outbox 在 adopt 事务边界才动；错误码见 research-onboarding.md §9（intake_not_found/intake_state_conflict/intake_expired/artifact_quarantined/question_required/proposal_stale/project_revision_conflict/idempotency_conflict 等）。v2/BFF accept 面（`/v2/intakes*`、`/bff/research/intakes/{id}/accept`）、分块 intake staged upload（Content-Range）、Agent tool 面与浏览器向导 UI 为剩余项。
 
 ## 17. 通用 Workspace 与 Upload
 
@@ -348,7 +350,7 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 所有 path、ETag、Revision 和 multipart 行为以 reconstruction-contracts.md 为准。TeX Document route 是绑定 manuscript workspace subtree 的领域 facade，不能维护第二套文件存储。
 
-**search 参数契约（POST `/v1/projects/{id}/workspaces/{wid}/search`，commit 待定主代理统一提交）**：同一端点双模式，strict body——
+**search 参数契约（POST `/v1/projects/{id}/workspaces/{wid}/search`，commit 98243ff）**：同一端点双模式，strict body——
 - 路径搜索（legacy，不变）：`{prefix?, glob?}`（至少其一，AND；`*` 不跨 `/`）；响应 `{info, nodes}`；
 - 内容搜索：`{q, mode?: 'content', case_sensitive?: boolean}`（`q` 出现或 `mode='content'` 即内容模式；`mode` 缺省时 `q` 出现即为内容）。响应 `{info, hits: [{path, match_count, matches: [{line, snippet}]}], truncated}`——`line` 为 1-based 行号，`snippet` 为所在行（超 240 字符以 `…` 居中截断），`match_count` 为该文件真实匹配总数，`matches` 最多返回前 20 个，`truncated` 表示 50 文件上限截断。语义：只扫文本节点（`binary=0` 且 media 文本类，NUL magic 硬跳过）；>512 KiB 文件整文件跳过（绝不部分扫描）；大小写不敏感默认；非法 UTF-8 字节按替换符容错（不抛错）。参数校验：空/纯空白 `q` → 422 `invalid_query`；`q` 与 `prefix`/`glob` 混用或 `mode='path'` 携带 `q` → 422 `invalid_search_params`。**无全文索引**——线性扫描，大数据集性能受限（如实记录，索引属后续增强）；并发搜索有简单槽位上限（超限 429 `search_busy`）。内容搜索与路径搜索同受 workspace 钉定与隔离语义约束（跨项目 404、隔离 503）。
 

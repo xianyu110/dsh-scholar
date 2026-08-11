@@ -15,7 +15,7 @@ import {
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, getFixtureProfile, getRunnerProfile, resolveRunnerProfileId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  buildProjectId, getFixtureProfile, getRunnerProfile, randomId, resolveRunnerProfileId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
   type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus, type ImportMapping,
@@ -577,14 +577,16 @@ export class ResearchKernel {
   /**
    * Code-snapshot fixed resource limits (reconstruction-contracts.md §3,
    * STORE-02): the archive walk refuses to grow past these instead of
-   * silently truncating. Static so deployments/tests can override them
-   * (e.g. a unit test temporarily lowers SNAPSHOT_MAX_FILE_BYTES and
+   * silently truncating. Values = the §3 desktop defaults (snapshot files
+   * 20,000 / single file 64 MiB / total 2 GiB; the staged-Artifact total
+   * 512 MiB is a separate row). Static so deployments/tests can override
+   * them (e.g. a unit test temporarily lowers SNAPSHOT_MAX_FILE_BYTES and
    * restores it in `finally`); 超限 → 422 `snapshot_too_large` with the
    * concrete limit and measured value in the message.
    */
-  static SNAPSHOT_MAX_FILES = 10_000
+  static SNAPSHOT_MAX_FILES = 20_000
   static SNAPSHOT_MAX_FILE_BYTES = 64 * 1024 * 1024 // 64 MiB per file
-  static SNAPSHOT_MAX_TOTAL_BYTES = 512 * 1024 * 1024 // 512 MiB total
+  static SNAPSHOT_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024 // 2 GiB total
 
   /**
    * UPLOAD-01: hard cap for ONE multipart-uploaded file (api-contracts.md
@@ -862,7 +864,7 @@ export class ResearchKernel {
         'SELECT COALESCE(MAX(event_seq), 0) + 1 AS next FROM events WHERE aggregate_type IS ? AND aggregate_id IS ?',
       ).get(aggregateType, aggregateId) as { next: number }).next
       const event: KernelEvent = {
-        event_id: `evt_${randomUUID().replaceAll('-', '')}`,
+        event_id: randomId('evt'),
         project_id: projectId,
         kind,
         payload,
@@ -1489,7 +1491,7 @@ export class ResearchKernel {
     }
     return withTransaction(this.db, () => {
       const decision: Decision = {
-        decision_id: `dec_${randomUUID().replaceAll('-', '')}`,
+        decision_id: randomId('dec'),
         gate_id: gate.gate_id,
         project_id: gate.project_id,
         gate_type: gate.type,
@@ -2273,7 +2275,7 @@ export class ResearchKernel {
     }
     const owner: HumanPrincipal = input.owner ?? { principal_id: 'agent', auth_method: 'agent' }
     const now = nowIso()
-    const intakeId = `intk_${randomUUID().replaceAll('-', '').slice(0, 20)}`
+    const intakeId = randomId('intk')
     const session: IntakeSession = {
       intake_id: intakeId,
       project_id: input.project_id ?? null,
@@ -2504,7 +2506,7 @@ export class ResearchKernel {
       else rejected += 1
       for (const observation of observations) {
         insertObservation.run(
-          `obs_${randomUUID().replaceAll('-', '').slice(0, 16)}`, intakeId, artifact.artifact_id,
+          randomId('obs'), intakeId, artifact.artifact_id,
           observation.locator, observation.detector, observation.detector_version, observation.value,
           JSON.stringify(observation.warnings), 'observed_unverified', nowIso(),
         )
@@ -2796,7 +2798,7 @@ export class ResearchKernel {
           this.db.prepare(
             'INSERT INTO intake_observations (observation_id, intake_id, artifact_id, locator, detector, detector_version, value, warnings, trust, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           ).run(
-            `obs_${randomUUID().replaceAll('-', '').slice(0, 16)}`, input.intake_id, artifact.artifact_id,
+            randomId('obs'), input.intake_id, artifact.artifact_id,
             artifact.file_name, 'imported_run', '1',
             `imported run observation from ${artifact.file_name} — imported logs never become TerminalLog rows`,
             '[]', 'observed_unverified', now,
@@ -2837,7 +2839,7 @@ export class ResearchKernel {
         pendingGateRefs.push(gate.gate_id)
       }
       const receipt: AdoptionReceipt = {
-        adoption_id: `adopt_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
+        adoption_id: randomId('adopt'),
         intake_id: input.intake_id,
         project_id: session.project_id!,
         proposal_revision: proposal.revision,
@@ -3430,7 +3432,7 @@ export class ResearchKernel {
       }
     }
     const snapshot: CorpusSnapshot = {
-      snapshot_id: `corpus_snap_${randomUUID().slice(0, 8)}`,
+      snapshot_id: randomId('corpus_snap'),
       project_id: input.project_id,
       // v2 shape (domain-model.md §5): explicit payload schema version +
       // per-source retrieval status (defaults keep legacy readers intact).
@@ -3685,7 +3687,7 @@ export class ResearchKernel {
       metadata: { kind: 'code-snapshot-manifest', files: Object.keys(files).length },
     })
     const snapshot: CodeSnapshot = {
-      snapshot_id: `code_snap_${randomUUID().slice(0, 8)}`,
+      snapshot_id: randomId('code_snap'),
       project_id: projectId,
       // Display placeholder only — never the host path (STORE-02).
       path: rootPlaceholder,
@@ -4003,7 +4005,7 @@ export class ResearchKernel {
       ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
     }
     const job: JobSpecBound = {
-      job_id: `job_${randomUUID().slice(0, 12)}`,
+      job_id: randomId('job'),
       project_id: input.project_id,
       contract_id: input.contract_id ?? null,
       idempotency_key: input.idempotency_key,
@@ -4130,7 +4132,7 @@ export class ResearchKernel {
         // from the job's code_snapshot_id ('' → NULL when the job has none).
         // P0: the run_id is generated HERE and returned on the claimed job so
         // the runner never mints a parallel run identity.
-        const runId = `run_${randomUUID().replaceAll('-', '').slice(0, 12)}`
+        const runId = randomId('run')
         this.db.prepare(
           `INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, signature_status, started_at)
            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
@@ -5587,7 +5589,7 @@ export class ResearchKernel {
     // path that sets 'accepted'. Kernel-level callers are trusted internal
     // surfaces.
     const item = {
-      evidence_id: `evidence_${randomUUID().slice(0, 12)}`,
+      evidence_id: randomId('evidence'),
       project_id: input.project_id,
       source_type: input.source_type,
       run_ids: input.run_ids,
@@ -6207,7 +6209,7 @@ export class ResearchKernel {
       content: text,
       metadata: { manuscript_format: format, claims_used: supported.length },
     })
-    const manuscriptId = `manuscript_${randomUUID().slice(0, 8)}`
+    const manuscriptId = randomId('manuscript')
     this.db.prepare('INSERT INTO manuscripts (manuscript_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
       .run(manuscriptId, projectId, JSON.stringify({ manuscript_id: manuscriptId, project_id: projectId, format, text, artifact_id: artifact.artifact_id, created_at: nowIso() }), nowIso())
     this.emit(projectId, 'manuscript.built', { manuscript_id: manuscriptId, artifact_id: artifact.artifact_id })
@@ -6281,7 +6283,7 @@ export class ResearchKernel {
     const evidence = this.listEvidence(projectId)
     const snapshots = this.listCorpusSnapshots(projectId)
     const bundle = {
-      bundle_id: `bundle_${randomUUID().slice(0, 8)}`,
+      bundle_id: randomId('bundle'),
       project: { project_id: project.project_id, name: project.name, status: project.status, mode: project.mode },
       integrity: project.integrity,
       contracts,

@@ -35,9 +35,10 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { randomId } from '@dsh-scholar/research-schemas'
 import type {
   PtyControlFrame, PtyControlRequest, PtyOpenRequest, PtyOutputFrame, PtySession, PtySignal,
 } from '@dsh-scholar/research-schemas'
@@ -333,7 +334,7 @@ export class PtySessionStore {
     // kept in kernel memory (legacy `lease_token` column stays NULL).
     const leaseToken = `lease_${randomBytes(16).toString('hex')}`
     const session: PtySession = {
-      pty_session_id: `pty_${randomUUID().replaceAll('-', '').slice(0, 12)}`,
+      pty_session_id: randomId('pty'),
       principal_id: principal.principal_id,
       tenant_id: principal.tenant_id ?? '',
       project_id: request.project_id,

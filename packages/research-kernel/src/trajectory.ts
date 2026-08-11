@@ -30,7 +30,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
+import { randomId } from '@dsh-scholar/research-schemas'
 import type {
   ChildDetail, ChildHistoryPage, ChildLink, ChildLinkInput, ChildMode, ChildState,
   FollowupReceipt, KernelEvent, KernelEventKind, TopologyChildren, TopologyNode,
@@ -390,7 +391,7 @@ export class TrajectoryStore {
     const next = (this.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM child_history WHERE child_id = ?').get(childId) as { next: number }).next
     this.db.prepare(
       'INSERT INTO child_history (child_id, seq, event_id, event_type, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run(childId, next, `hist_${randomUUID().replaceAll('-', '')}`, eventType, JSON.stringify(payload), new Date().toISOString())
+    ).run(childId, next, randomId('hist'), eventType, JSON.stringify(payload), new Date().toISOString())
   }
 
   private static clampLimit(limit: number | undefined): number {
@@ -631,7 +632,7 @@ export class TrajectoryStore {
    * Execution with exact live-parent validation requires the DSH host. */
   childFollowup(childId: string, message: string, requestId?: string): FollowupReceipt {
     const row = this.assertChild(childId)
-    const messageId = `msg_${randomUUID().replaceAll('-', '')}`
+    const messageId = randomId('msg')
     const redacted = redactTrajectorySummary(message)
     const hash = createHash('sha256').update(message).digest('hex')
     this.db.prepare(

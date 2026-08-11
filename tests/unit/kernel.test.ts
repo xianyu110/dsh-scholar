@@ -1796,6 +1796,12 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
     kernel.close()
   })
 
+  it('snapshot limits equal the §3 desktop defaults (20,000 files / 64 MiB single / 2 GiB total)', () => {
+    expect(ResearchKernel.SNAPSHOT_MAX_FILES).toBe(20_000)
+    expect(ResearchKernel.SNAPSHOT_MAX_FILE_BYTES).toBe(64 * 1024 * 1024)
+    expect(ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES).toBe(2 * 1024 * 1024 * 1024)
+  })
+
   it('rejects archives beyond max_files / max_total_bytes with measured values (422 snapshot_too_large)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
@@ -1938,7 +1944,7 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
     expect(claimed).toBeDefined()
     // RUN-01 (P0): claimJobs MUST return the durable runs.run_id written for
     // this attempt — the runner uses it for manifest/terminal/evidence.
-    expect(claimed!.run_id).toMatch(/^run_[0-9a-f]{12}$/)
+    expect(claimed!.run_id).toMatch(/^run_[a-z2-7]{16,}$/)
     expect(kernel.getJob(job.job_id).run_id).toBe(claimed!.run_id)
     let runs = kernel.listRuns(project.project_id)
     expect(runs.length).toBe(1)
@@ -1957,7 +1963,7 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
     expect(runs[0]!.signature_status).toBe('unsigned')
     expect(runs[0]!.finished_at).not.toBeNull()
     expect((runs[0]!.manifest_json as Record<string, unknown> | null)?.run_id).toBe('run_x')
-    expect(runs[0]!.run_id).toMatch(/^run_[0-9a-f]{12}$/)
+    expect(runs[0]!.run_id).toMatch(/^run_[a-z2-7]{16,}$/)
     kernel.close()
   })
 
@@ -2072,7 +2078,7 @@ describe('RUN-01 runs ledger: snapshot resolution + HTTP routes', () => {
       expect(runs).toHaveLength(1)
       expect(runs[0]!.attempt_no).toBe(1)
       expect(runs[0]!.snapshot_sha256).toBeNull()
-      expect(runs[0]!.run_id).toMatch(/^run_[0-9a-f]{12}$/)
+      expect(runs[0]!.run_id).toMatch(/^run_[a-z2-7]{16,}$/)
       const one = await fetch(`${base}/v1/projects/${project.project_id}/runs/${runs[0]!.run_id}`)
       expect(one.status).toBe(200)
       expect((await one.json() as { job_id: string }).job_id).toBe(runs[0]!.job_id)

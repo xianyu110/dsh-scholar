@@ -278,3 +278,37 @@ describe('resolveNextActionInput: v2 preferred, legacy fallback', () => {
     expect(input).toEqual({ kind: 'legacy', labels: ['a'] })
   })
 })
+
+describe('nextActionCardModel: required_by chip (USAGE_GUIDE §11)', () => {
+  it('human/agent/runner required_by resolve to the wire value', () => {
+    expect(nextActionCardModel(action({ required_by: 'human' })).requiredBy).toBe('human')
+    expect(nextActionCardModel(action({ required_by: 'agent' })).requiredBy).toBe('agent')
+    expect(nextActionCardModel(action({ required_by: 'runner' })).requiredBy).toBe('runner')
+  })
+
+  it('missing or unknown required_by degrades to null (no chip)', () => {
+    expect(nextActionCardModel(action({ required_by: undefined })).requiredBy).toBeNull()
+    expect(nextActionCardModel(action({ required_by: 'gpt' as never })).requiredBy).toBeNull()
+  })
+
+  it('required_by labels exist in both zh and en dictionaries', () => {
+    for (const who of ['human', 'agent', 'runner'] as const) {
+      const key = `overview.nextaction.requiredBy.${who}`
+      expect(overviewZh[key]).toBeTruthy()
+      expect(overviewEn[key]).toBeTruthy()
+    }
+    setLocale('zh')
+    expect(nextActionCardModel(action({ required_by: 'human' })).requiredBy).toBe('human')
+    setLocale('en')
+    expect(nextActionCardModel(action({ required_by: 'runner' })).requiredBy).toBe('runner')
+  })
+
+  it('rendering key resolves without missing-key warnings', () => {
+    setLocale('zh')
+    const zh = nextActionCardModel(action({ required_by: 'human' }))
+    expect(zh.requiredBy).toBe('human')
+    setLocale('en')
+    nextActionCardModel(action({ required_by: 'agent' }))
+    expect(missing.filter(r => r.key.startsWith('overview.nextaction.requiredBy'))).toEqual([])
+  })
+})

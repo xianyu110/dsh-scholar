@@ -5,14 +5,14 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { z } from 'zod'
 import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from './kernel.js'
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, type PtySession } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, type PtySession } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -291,15 +291,31 @@ const budgetSchema = z.object({
   storage_bytes: z.number().int().nonnegative().optional(),
 })
 
-function readJson(req: IncomingMessage): Promise<unknown> {
+/**
+ * reconstruction-contracts.md §10: POST /v1/jobs/{id}/terminal-frames accepts
+ * {frames: TerminalFrame[]} with 1–256 frames and TOTAL JSON <= 1 MiB. All
+ * other JSON routes keep the general 32 MiB cap (the browser-facing BFF
+ * additionally enforces its own 16 MiB default, security-baseline.md §3).
+ */
+function requestBodyCap(method: string, version: string | undefined, resource: string | undefined, id: string | undefined, sub: string | undefined): number {
+  if (method === 'POST' && version === 'v1' && resource === 'jobs' && id !== undefined && sub === 'terminal-frames') {
+    return 1024 * 1024
+  }
+  return 32 * 1024 * 1024
+}
+
+function readJson(req: IncomingMessage, maxBytes = 32 * 1024 * 1024): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
-      if (size > 32 * 1024 * 1024) {
-        reject(new KernelError(413, 'payload_too_large', 'request body exceeds 32 MiB'))
-        req.destroy()
+      if (size > maxBytes) {
+        // Respond with an explicit 413 (the dispatcher's .catch sends the
+        // envelope) instead of an implicit connection reset; the remainder
+        // of the stream is drained so the response can flush.
+        req.resume()
+        reject(new KernelError(413, 'payload_too_large', `request body exceeds ${Math.floor(maxBytes / 1024 / 1024)} MiB`))
         return
       }
       chunks.push(chunk)
@@ -952,7 +968,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     return
   }
   if (version === 'v2') {
-    void readJson(req).then(async (body) => {
+    void readJson(req, requestBodyCap(method, version, resource, id, sub)).then(async (body) => {
       try {
         await handleV2({ req, res, method, url, id, sub, subId, body, kernel, configPin })
       } catch (error) {
@@ -962,11 +978,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           send(res, 500, { error: { code: 'internal_error', message: 'internal error' } })
         }
       }
-    })
+    }).catch((error: unknown) => fail(res, error))
     return
   }
 
-  void readJson(req).then(async (body) => {
+  void readJson(req, requestBodyCap(method, version, resource, id, sub)).then(async (body) => {
     try {
       switch (resource) {
         case 'health': {
@@ -1325,7 +1341,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             // contract gate decision route instead (GOV-02 atomic freeze).
             if (sub === 'contracts' && subId !== undefined && method === 'POST' && url.pathname.endsWith('/approve')) {
               const input = z.object({ actor: z.string().min(1) }).parse(body)
-              ok(res, kernel.approveContract(subId, `dec_${randomUUID().slice(0, 12)}`, input.actor))
+              ok(res, kernel.approveContract(subId, randomId('dec'), input.actor))
               return
             }
             if (sub === 'members' && method === 'GET') {

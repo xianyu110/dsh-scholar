@@ -367,7 +367,7 @@ Canonical Tool registry：
 | research_gate_request | action=create/list；gate-requests/gates |
 | research_budget | action=read/record；budget projection/usage request |
 | research_status | project projection |
-| research_onboarding | action=create/stage/scan/grill/propose/status；只输出 observation/proposal，不提供 accept/Decision |
+| research_onboarding | action=create/stage/scan/grill/propose/status；只输出 observation/proposal，不提供 accept/Decision。注册名以 research_intake_ 前缀实现（research_intake_begin/stage/scan/answers/propose，research-onboarding.md §2）；不接受 adopt |
 | literature_search | Connector search，不写 Kernel |
 | paper_resolve | Connector resolve |
 | corpus_snapshot | Connector search + create corpus snapshot |

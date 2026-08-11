@@ -340,6 +340,18 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload))
 }
 
+/**
+ * BFF-native error body (api-contracts.md §2 envelope): stable machine
+ * `code` + safe English `message`, `ok:false` at the surface. Kernel-proxied
+ * responses keep their own wire envelope (`{error:{code,message,...}}` per
+ * reconstruction-contracts.md) — the BFF never rewrites upstream bodies.
+ * Message texts are preserved so surface consumers (and the security test
+ * suite's substring assertions) see the same copy as before.
+ */
+export function bffError(code: string, message: string): { ok: false; error: { code: string; message: string } } {
+  return { ok: false, error: { code, message } }
+}
+
 const BOOTSTRAP_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -840,7 +852,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
       // running object can be correlated with the config that produced it.
       res.setHeader('x-config-pin', configPin)
       if (!limiter.allow(req.socket.remoteAddress ?? 'unknown')) {
-        sendJson(res, 429, { ok: false, error: 'rate limited' })
+        sendJson(res, 429, bffError('rate_limited', 'rate limited'))
         return
       }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
@@ -869,7 +881,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
       if (method === 'POST' && url.pathname === '/api/token-check') {
         const { body, tooLarge } = await readBody(req)
         if (tooLarge) {
-          sendJson(res, 413, { ok: false, error: 'payload too large' })
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
           return
         }
         if (options.token === null) {
@@ -885,7 +897,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         if (tokenMatches(presented, options.token)) {
           sendJson(res, 200, { ok: true })
         } else {
-          sendJson(res, 401, { ok: false, error: 'invalid token' })
+          sendJson(res, 401, bffError('unauthorized', 'invalid token'))
         }
         return
       }
@@ -898,7 +910,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const auth = req.headers.authorization
           const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
           if (!tokenMatches(match?.[1], options.token)) {
-            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
             return
           }
         }
@@ -918,7 +930,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         url.pathname !== '/v1/health' &&
         url.pathname !== '/v2/health'
       ) {
-        sendJson(res, 401, { ok: false, error: 'principal required' })
+        sendJson(res, 401, bffError('principal_required', 'principal required'))
         return
       }
 
@@ -932,7 +944,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const auth = req.headers.authorization
           const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
           if (!tokenMatches(match?.[1], options.token)) {
-            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
             return
           }
         }
@@ -948,22 +960,22 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const auth = req.headers.authorization
           const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
           if (!tokenMatches(match?.[1], options.token)) {
-            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
             return
           }
         }
         // SEC-UI-01: session CSRF token required on /api writes.
         if (!verifyCsrfToken(csrfHeader(req), csrfToken)) {
-          sendJson(res, 403, { ok: false, error: 'missing or invalid csrf token' })
+          sendJson(res, 403, bffError('csrf_rejected', 'missing or invalid csrf token'))
           return
         }
         if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
-          sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
+          sendJson(res, 403, bffError('csrf_rejected', 'cross-origin write rejected'))
           return
         }
         const { body, tooLarge } = await readBody(req)
         if (tooLarge) {
-          sendJson(res, 413, { ok: false, error: 'payload too large' })
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
           return
         }
         let model = ''
@@ -971,18 +983,18 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const parsed = JSON.parse(body) as { model?: unknown }
           model = typeof parsed.model === 'string' ? parsed.model.trim() : ''
         } catch {
-          sendJson(res, 400, { ok: false, error: 'bad request' })
+          sendJson(res, 400, bffError('invalid_json', 'bad request'))
           return
         }
         if (model !== '' && model !== 'auto' && !MODEL_CATALOG.includes(model)) {
-          sendJson(res, 422, { ok: false, error: `unknown model '${model}'` })
+          sendJson(res, 422, bffError('validation_error', `unknown model '${model}'`))
           return
         }
         try {
           writeModelPreference(options.dataDir, model === 'auto' ? '' : model)
           sendJson(res, 200, { ok: true, model: model === 'auto' ? '' : model })
         } catch {
-          sendJson(res, 500, { ok: false, error: 'model preference write failed' })
+          sendJson(res, 500, bffError('internal_error', 'model preference write failed'))
         }
         return
       }
@@ -996,17 +1008,17 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const auth = req.headers.authorization
           const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
           if (!tokenMatches(match?.[1], options.token)) {
-            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
             return
           }
         }
         // SEC-UI-01: session CSRF token required on /api writes.
         if (!verifyCsrfToken(csrfHeader(req), csrfToken)) {
-          sendJson(res, 403, { ok: false, error: 'missing or invalid csrf token' })
+          sendJson(res, 403, bffError('csrf_rejected', 'missing or invalid csrf token'))
           return
         }
         if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
-          sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
+          sendJson(res, 403, bffError('csrf_rejected', 'cross-origin write rejected'))
           return
         }
         const { body } = await readBody(req)
@@ -1017,18 +1029,18 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           projectId = typeof parsed.project_id === 'string' ? parsed.project_id : ''
           query = typeof parsed.query === 'string' ? parsed.query : ''
         } catch {
-          sendJson(res, 400, { ok: false, error: 'bad request' })
+          sendJson(res, 400, bffError('invalid_json', 'bad request'))
           return
         }
         if (projectId === '' || query === '') {
-          sendJson(res, 400, { ok: false, error: 'project_id and query required' })
+          sendJson(res, 400, bffError('project_required', 'project_id and query required'))
           return
         }
         // SEC-UI-01 fail-closed: with a loopback operator principal, membership
         // is enforced BEFORE the connector runs or the corpus is written —
         // unknown/foreign project -> 404, no side effects.
         if (options.principal !== null && !(await isProjectMember(projectId))) {
-          sendJson(res, 404, { ok: false, error: 'project not found or access denied' })
+          sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
           return
         }
         try {
@@ -1042,7 +1054,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             }),
           })
           if (!snapshotResponse.ok) {
-            sendJson(res, 502, { ok: false, error: 'corpus snapshot failed' })
+            sendJson(res, 502, bffError('kernel_unreachable', 'corpus snapshot failed'))
             return
           }
           const snapshot = (await snapshotResponse.json()) as { snapshot_id?: string; papers?: unknown[] }
@@ -1054,7 +1066,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             top: result.hits.slice(0, 5).map(h => ({ paper_id: h.paper.paper_id, title: h.paper.title, year: h.paper.year })),
           })
       } catch {
-        sendJson(res, 502, { ok: false, error: 'survey connector unavailable' })
+        sendJson(res, 502, bffError('connector_unavailable', 'survey connector unavailable'))
         }
         return
       }
@@ -1066,14 +1078,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const auth = req.headers.authorization
           const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
           if (!tokenMatches(match?.[1], options.token)) {
-            sendJson(res, 401, { ok: false, error: 'unauthorized' })
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
             return
           }
         }
         // CSRF: state-changing same-origin writes.
         if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
           if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
-            sendJson(res, 403, { ok: false, error: 'cross-origin write rejected' })
+            sendJson(res, 403, bffError('csrf_rejected', 'cross-origin write rejected'))
             return
           }
         }
@@ -1130,7 +1142,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           if (url.pathname === '/v1/projects' && method === 'GET') {
             const upstreamList = await fetch(`${endpoint}/v1/projects`, { headers: { accept: 'application/json', ...upstreamAuthHeaders } })
             if (!upstreamList.ok) {
-              sendJson(res, 502, { ok: false, error: 'research kernel unavailable' })
+              sendJson(res, 502, bffError('kernel_unreachable', 'research kernel unavailable'))
               return
             }
             const all = (await upstreamList.json()) as Array<{ project_id: string }>
@@ -1157,7 +1169,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
               const projectDelete = isProjectDelete(method, url.pathname)
               if (role === 'viewer' || role === 'auditor' || (role === 'operator' && projectDelete)
                 || (role === 'researcher' && (isPiOnlyWrite(url.pathname) || projectDelete))) {
-                sendJson(res, 403, { ok: false, error: 'role forbidden' })
+                sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
                 return
               }
             }
@@ -1178,14 +1190,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           if (isMultipart) {
             const read = await readBodyBytes(req, UPLOAD_MAX_BODY_BYTES)
             if (read.tooLarge) {
-              sendJson(res, 413, { ok: false, error: 'payload too large' })
+              sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
               return
             }
             body = read.buffer
           } else {
             const read = await readBody(req)
             if (read.tooLarge) {
-              sendJson(res, 413, { ok: false, error: 'payload too large' })
+              sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
               return
             }
             body = read.body
@@ -1275,7 +1287,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
               } catch { /* invalid JSON → the kernel answers 422 validation_error */ }
             }
             if (ptyProjectId === null) {
-              sendJson(res, 422, { ok: false, error: 'project_id required' })
+              sendJson(res, 422, bffError('project_required', 'project_id required'))
               return
             }
             if (!(await isProjectMember(ptyProjectId))) {
@@ -1284,7 +1296,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             }
             const ptyRole = await projectRole(ptyProjectId)
             if (ptyRole === 'viewer' || ptyRole === 'auditor') {
-              sendJson(res, 403, { ok: false, error: 'role forbidden' })
+              sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
               return
             }
           }
@@ -1311,7 +1323,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             }
             const artifactRole = await projectRole(artifactProjectIdBody)
             if (artifactRole === 'viewer' || artifactRole === 'auditor') {
-              sendJson(res, 403, { ok: false, error: 'role forbidden' })
+              sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
               return
             }
           }
@@ -1407,9 +1419,9 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
-      sendJson(res, 404, { ok: false, error: 'not found' })
+      sendJson(res, 404, bffError('not_found', 'not found'))
     } catch {
-      sendJson(res, 502, { ok: false, error: 'research kernel unavailable' })
+      sendJson(res, 502, bffError('kernel_unreachable', 'research kernel unavailable'))
     }
   })
 

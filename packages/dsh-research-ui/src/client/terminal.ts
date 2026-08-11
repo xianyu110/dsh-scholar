@@ -46,6 +46,33 @@ export function terminalDisconnect(): void {
   state.terminalStreamEl = null
 }
 
+/**
+ * PURE exit-frame facts (USAGE_GUIDE §6: exit code/signal are the visible
+ * terminal states; timed-out and cancelled are separate authoritative
+ * terminal fates carried by the kernel's exit payload). No DOM — unit-tested.
+ */
+export function terminalExitFragments(payload: Record<string, unknown>): {
+  exitCode: number | null
+  exitSignal: string | null
+  timedOut: boolean
+  cancelled: boolean
+  truncated: boolean
+  totalBytes: number
+  droppedBytes: number
+} {
+  const exitCode = payload.exit_code !== null && payload.exit_code !== undefined ? Number(payload.exit_code) : null
+  const exitSignal = typeof payload.signal === 'string' && payload.signal !== '' ? payload.signal : null
+  return {
+    exitCode: Number.isFinite(exitCode as number) ? exitCode : null,
+    exitSignal,
+    timedOut: payload.timed_out === true,
+    cancelled: payload.cancelled === true,
+    truncated: payload.truncated === true,
+    totalBytes: Number(payload.total_bytes ?? 0),
+    droppedBytes: Number(payload.dropped_bytes ?? 0),
+  }
+}
+
 /** Strip/whitelist ANSI SGR codes; output via text nodes only. */
 export function terminalAppendText(target: HTMLElement, text: string): void {
   const re = /\x1b\[([0-9;]*)m/g
@@ -152,10 +179,14 @@ export function terminalHandleData(event: string, payload: Record<string, unknow
     }
     void runId
   } else if (event === 'exit') {
+    // USAGE_GUIDE §6: exit code/signal, timeout and cancelled are distinct
+    // authoritative terminal fates — the kernel exit payload carries
+    // timed_out/cancelled flags; the exit line renders them explicitly.
+    const facts = terminalExitFragments(payload)
     state.terminalStatus = 'exited'
-    state.terminalExitCode = payload.exit_code !== null && payload.exit_code !== undefined ? Number(payload.exit_code) : null
-    state.terminalExitSignal = typeof payload.signal === 'string' && payload.signal !== '' ? payload.signal : null
-    state.terminalTruncated = payload.truncated === true
+    state.terminalExitCode = facts.exitCode
+    state.terminalExitSignal = facts.exitSignal
+    state.terminalTruncated = facts.truncated
     state.terminalTotalBytes = Number(payload.total_bytes ?? state.terminalTotalBytes)
     state.terminalDroppedBytes = Number(payload.dropped_bytes ?? state.terminalDroppedBytes)
     state.terminalLastSeq = Math.max(state.terminalLastSeq, seq)
@@ -166,11 +197,14 @@ export function terminalHandleData(event: string, payload: Record<string, unknow
     if (state.terminalStreamEl !== null && state.terminalSearch === '') {
       const end = el('div', 'term-exit')
       end.style.cssText = 'color:var(--text-3);white-space:pre;font-weight:700'
+      const fate = facts.timedOut
+        ? t('terminal', 'terminal.exit.timedOut')
+        : facts.cancelled ? t('terminal', 'terminal.exit.cancelled') : ''
       const code = state.terminalExitCode !== null ? t('terminal', 'terminal.exit.code', { code: String(state.terminalExitCode) }) : ''
       const signal = state.terminalExitSignal !== null ? t('terminal', 'terminal.exit.signal', { signal: state.terminalExitSignal }) : ''
       const truncated = state.terminalTruncated ? t('terminal', 'terminal.meta.truncated') : ''
       const dropped = state.terminalDroppedBytes > 0 ? t('terminal', 'terminal.meta.dropped', { count: String(state.terminalDroppedBytes) }) : ''
-      end.textContent = t('terminal', 'terminal.exitLine', { code, signal, truncated, bytes: String(state.terminalTotalBytes), dropped })
+      end.textContent = t('terminal', 'terminal.exitLine', { fate, code, signal, truncated, bytes: String(state.terminalTotalBytes), dropped })
       state.terminalStreamEl.appendChild(end)
       state.terminalStreamEl.scrollTop = state.terminalStreamEl.scrollHeight
     }

@@ -18,7 +18,7 @@ export const zh = {
   'terminal.selectRun': '选择运行',
   'terminal.empty': '暂无运行——任务出现后会实时显示输出。',
   'terminal.gapWarning': '— 缺口:已丢弃 {dropped} 字节;保留自 seq {retained} —',
-  'terminal.exitLine': '— 退出{code}{signal}{truncated} · {bytes} 字节{dropped} —',
+  'terminal.exitLine': '— 退出{fate}{code}{signal}{truncated} · {bytes} 字节{dropped} —',
   'terminal.lines': '{shown}/{max} 行',
   'terminal.meta': 'seq {seq} · {lines} · {bytes} 字节{dropped}{truncated}{exit}',
   // meta/exit fragments (passed as params to terminal.meta / terminal.exitLine)
@@ -27,6 +27,8 @@ export const zh = {
   'terminal.meta.exit': ' · 退出 {code}',
   'terminal.exit.code': ' 代码 {code}',
   'terminal.exit.signal': ' ({signal})',
+  'terminal.exit.timedOut': ' (超时)',
+  'terminal.exit.cancelled': ' (已取消)',
   'terminal.streamAria': '运行终端输出',
   'terminal.jumpLatestTitle': '跳到最新输出',
 } as const
@@ -49,7 +51,7 @@ export const en: Record<TerminalKey, string> = {
   'terminal.selectRun': 'select run',
   'terminal.empty': 'No runs yet — jobs appear here with their live output.',
   'terminal.gapWarning': '— gap: {dropped} byte(s) dropped; retained from seq {retained} —',
-  'terminal.exitLine': '— exit{code}{signal}{truncated} · {bytes} byte(s){dropped} —',
+  'terminal.exitLine': '— exit{fate}{code}{signal}{truncated} · {bytes} byte(s){dropped} —',
   'terminal.lines': '{shown}/{max} lines',
   'terminal.meta': 'seq {seq} · {lines} · {bytes} byte(s){dropped}{truncated}{exit}',
   // meta/exit fragments (passed as params to terminal.meta / terminal.exitLine)
@@ -58,6 +60,8 @@ export const en: Record<TerminalKey, string> = {
   'terminal.meta.exit': ' · exit {code}',
   'terminal.exit.code': ' code {code}',
   'terminal.exit.signal': ' ({signal})',
+  'terminal.exit.timedOut': ' (timed out)',
+  'terminal.exit.cancelled': ' (cancelled)',
   'terminal.streamAria': 'run terminal output',
   'terminal.jumpLatestTitle': 'jump to the newest output',
 }

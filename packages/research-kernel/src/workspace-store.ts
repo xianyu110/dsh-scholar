@@ -93,10 +93,10 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { workspaceEtag, type WorkspaceInfo, type WorkspaceKind, type WorkspaceNode, type WorkspaceOp, type WorkspaceRevision } from '@dsh-scholar/research-schemas'
+import { randomId, workspaceEtag, type WorkspaceInfo, type WorkspaceKind, type WorkspaceNode, type WorkspaceOp, type WorkspaceRevision } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { mkdirMode } from './fs-modes.js'
 import { UPLOAD_MAX_FILE_BYTES } from './upload-limits.js'
@@ -712,7 +712,7 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }
     const at = nowIso()
     const info: WorkspaceInfo = {
-      workspace_id: `ws_${randomUUID().slice(0, 12)}`,
+      workspace_id: randomId('ws'),
       project_id: projectId,
       kind,
       name,

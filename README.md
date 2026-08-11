@@ -61,14 +61,19 @@ bash scripts/start-standalone-ui.sh
 在独立 UI 的 Chat 中通过 `/research` 推进研究流程：
 
 ```text
+/research help
 /research new <name> [brief-json]
-/research status
+/research list
+/research status [project_id]
 /research survey <query>
 /research ideas
+/research gates [project_id]
+/research jobs [project_id]
 /research reproduce [json]
 /research contract <json>
 /research run <kind> <json>
 /research evidence <json>
+/research claims [project_id]
 /research write
 /research review
 /research export

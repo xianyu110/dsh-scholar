@@ -396,3 +396,64 @@ describe('terminal SSE endpoint', () => {
     }
   })
 })
+
+describe('terminal-frames body cap (reconstruction-contracts.md §10)', () => {
+  it('rejects a terminal-frames batch whose total JSON exceeds 1 MiB with 413 payload_too_large', async () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k-cap', kind: 'echo' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      // 300 frames * ~4 KiB text = ~1.2 MiB JSON: over the 1 MiB wire cap.
+      const frames = Array.from({ length: 300 }, (_, i) => ({
+        seq: i + 1,
+        stream_seq: i + 1,
+        channel: 'stdout',
+        text: 'x'.repeat(4096),
+        byte_offset: i * 4096,
+        byte_length: 4096,
+        frame_kind: 'chunk',
+        lease_generation: 0,
+      }))
+      const response = await fetch(`http://127.0.0.1:${port}/v1/jobs/${job.job_id}/terminal-frames`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ run_id: 'run_cap', frames }),
+      })
+      expect(response.status).toBe(413)
+      const envelope = await response.json() as { error?: { code?: string } }
+      expect(envelope.error?.code).toBe('payload_too_large')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('still accepts a terminal-frames batch within the 1 MiB wire cap', async () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k-cap2', kind: 'echo' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const frames = Array.from({ length: 100 }, (_, i) => ({
+        seq: i + 1,
+        stream_seq: i + 1,
+        channel: 'stdout',
+        text: `line${i}\n`,
+        byte_offset: i * 8,
+        byte_length: 8,
+        frame_kind: 'chunk',
+        lease_generation: 0,
+      }))
+      const response = await fetch(`http://127.0.0.1:${port}/v1/jobs/${job.job_id}/terminal-frames`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ run_id: 'run_cap_ok', frames }),
+      })
+      expect(response.status).toBe(200)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+})

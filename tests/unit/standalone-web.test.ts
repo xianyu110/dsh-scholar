@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadOptions } from '../../packages/dsh-research-ui/lib/standalone/server.js'
+import { loadOptions, bffError } from '../../packages/dsh-research-ui/lib/standalone/server.js'
 // @ts-expect-error re-export surface
 
 describe('standalone web application', () => {
@@ -97,5 +97,21 @@ describe('standalone web application', () => {
     expect(typeof mod.loadOptions).toBe('function')
     void mkdirSync
     void writeFileSync
+  })
+
+  it('BFF-native errors carry the api-contracts §2 envelope (ok:false + stable code)', () => {
+    // Every BFF-native error body must expose the stable machine code the
+    // client maps copy from (api-contracts.md §2 / §13): plain-string error
+    // bodies degraded to client 'http_error'. Representative codes across
+    // the documented HTTP→code table are pinned here.
+    expect(bffError('rate_limited', 'rate limited')).toEqual({ ok: false, error: { code: 'rate_limited', message: 'rate limited' } })
+    expect(bffError('csrf_rejected', 'cross-origin write rejected')).toEqual({ ok: false, error: { code: 'csrf_rejected', message: 'cross-origin write rejected' } })
+    expect(bffError('payload_too_large', 'payload too large')).toEqual({ ok: false, error: { code: 'payload_too_large', message: 'payload too large' } })
+    expect(bffError('unauthorized', 'unauthorized')).toEqual({ ok: false, error: { code: 'unauthorized', message: 'unauthorized' } })
+    expect(bffError('role_forbidden', 'role forbidden')).toEqual({ ok: false, error: { code: 'role_forbidden', message: 'role forbidden' } })
+    expect(bffError('project_not_found', 'project not found or access denied')).toEqual({ ok: false, error: { code: 'project_not_found', message: 'project not found or access denied' } })
+    expect(bffError('kernel_unreachable', 'research kernel unavailable')).toEqual({ ok: false, error: { code: 'kernel_unreachable', message: 'research kernel unavailable' } })
+    expect(bffError('connector_unavailable', 'survey connector unavailable')).toEqual({ ok: false, error: { code: 'connector_unavailable', message: 'survey connector unavailable' } })
+    expect(bffError('invalid_json', 'bad request')).toEqual({ ok: false, error: { code: 'invalid_json', message: 'bad request' } })
   })
 })

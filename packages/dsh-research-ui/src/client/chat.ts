@@ -31,6 +31,19 @@ export function chatJsonArg(rest: string): Record<string, unknown> | null {
 }
 
 /**
+ * USAGE_GUIDE §5/§6: the subcommand kind may be a positional word before
+ * the JSON (`/research run formal {...}`) or the JSON `kind` field
+ * (`/research run {"kind":"echo",...}`). PURE — unit-tested.
+ */
+export function chatRunKind(rest: string, json: Record<string, unknown> | null, fallback: string): string {
+  const start = rest.indexOf('{')
+  const positional = (start < 0 ? rest : rest.slice(0, start)).trim()
+  if (positional !== '') return positional.split(/\s+/)[0] ?? fallback
+  const kind = json?.kind
+  return typeof kind === 'string' && kind !== '' ? kind : fallback
+}
+
+/**
  * Execute one chat line: either a /research subcommand or a bare word that
  * maps to one. Returns the assistant answer text.
  */
@@ -164,19 +177,49 @@ export async function executeChatCommand(line: string, activeProjectId: string |
       if (c === null || c.contract_id === undefined) return 'contract registration failed'
       return `Contract **${c.contract_id}** registered — approve it in Execution → Approvals (human).`
     }
-    case 'run': {
+    case 'reproduce': {
       if (activeProjectId === undefined) return 'No project selected'
       const json = chatJsonArg(rest)
-      if (json === null || !Array.isArray(json.command)) return 'usage: /research run {"kind":"echo","command":["echo","hi"]}'
-      const kind = String(json.kind ?? 'echo')
+      const start = rest.indexOf('{')
+      const positional = (start < 0 ? rest : rest.slice(0, start)).trim()
+      const command = Array.isArray(json?.command) ? json.command.map(String)
+        : positional !== '' ? positional.split(/\s+/)
+          : []
       const job = await api<{ job_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/jobs`, {
         method: 'POST',
         body: JSON.stringify({
-          idempotency_key: String(json.idempotency_key ?? `chat-${Date.now()}`),
+          idempotency_key: String(json?.idempotency_key ?? `baseline-${Date.now()}`),
+          kind: 'baseline',
+          command,
+          payload: {
+            message: '/research reproduce',
+            repo: typeof json?.repo === 'string' ? json.repo : undefined,
+            commit: typeof json?.commit === 'string' ? json.commit : undefined,
+            expected_metrics: json?.expected_metrics,
+            tolerance: json?.tolerance,
+            ...(json ?? {}),
+          },
+          contract_id: typeof json?.contract_id === 'string' ? json.contract_id : null,
+        }),
+      })
+      if (job === null || job.job_id === undefined) return 'baseline reproduction submission failed'
+      return `Baseline reproduction job **${job.job_id}** submitted (${job.status}). Watch it in the Runs tab.`
+    }
+    case 'run': {
+      if (activeProjectId === undefined) return 'No project selected'
+      const json = chatJsonArg(rest)
+      // USAGE_GUIDE §6: `/research run <kind> <json>` — the kind may be a
+      // positional word before the JSON or the `kind` field of the JSON.
+      const kind = chatRunKind(rest, json, 'echo')
+      const job = await api<{ job_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/jobs`, {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotency_key: String(json?.idempotency_key ?? `chat-${Date.now()}`),
           kind,
-          command: json.command.map(String),
-          payload: { message: `chat /research run ${kind}` },
-          contract_id: typeof json.contract_id === 'string' ? json.contract_id : null,
+          command: Array.isArray(json?.command) ? json.command.map(String) : [],
+          payload: { message: `chat /research run ${kind}`, ...(json ?? {}) },
+          contract_id: typeof json?.contract_id === 'string' ? json.contract_id : null,
+          code_snapshot_id: typeof json?.code_snapshot_id === 'string' ? json.code_snapshot_id : null,
         }),
       })
       if (job === null || job.job_id === undefined) return 'job submission failed'
