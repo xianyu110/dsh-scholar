@@ -44,11 +44,12 @@
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { Readable } from 'node:stream'
 import type { PtySignal } from '@dsh-scholar/research-schemas'
 import type { PtyAdapter, PtySpawnPlan } from './pty-session.js'
+import { mkdirMode } from './fs-modes.js'
 
 /** One output/exit frame the adapter pushes into the session store. */
 export interface PtyOutputInput {
@@ -426,9 +427,12 @@ export class LocalPtyAdapter implements PtyAdapter {
     this.python3Path = probe.error === undefined && probe.status === 0 ? python3 : null
     this.python3 = this.python3Path ?? python3
     const runtimeDir = options.runtimeDir ?? join(this.workspaceRootValue, '.dsh-pty-runtime')
-    mkdirSync(runtimeDir, { recursive: true })
+    // Private runtime dir (0600 bridge script): explicit 0700, umask-
+    // independent (WORK-01 §5).
+    mkdirMode(runtimeDir, 0o700)
     this.bridgePath = join(runtimeDir, 'pty-bridge.py')
     writeFileSync(this.bridgePath, PYTHON_BRIDGE, { mode: 0o600 })
+    chmodSync(this.bridgePath, 0o600)
     if (this.python3Path === null) {
       this.log(`LocalPtyAdapter: ${python3} not available — every spawn will fail (pty_adapter_failed)`)
     }
@@ -510,13 +514,15 @@ export class LocalPtyAdapter implements PtyAdapter {
       throw new Error(`pty cwd must not contain '..' segments: ${cwd}`)
     }
     const base = join(this.workspaceRootValue, plan.workspace_id)
-    mkdirSync(base, { recursive: true })
+    // PTY workspace sandbox: explicit 0750 chain, umask-independent
+    // (WORK-01 §5 — mirrors the generic workspace tree contract).
+    mkdirMode(base, 0o750)
     const abs = resolve(join(base, cwd))
     const prefix = base.endsWith(sep) ? base : base + sep
     if (abs !== base && !abs.startsWith(prefix)) {
       throw new Error(`pty cwd escapes the workspace root: ${cwd}`)
     }
-    mkdirSync(abs, { recursive: true })
+    mkdirMode(abs, 0o750)
     return abs
   }
 

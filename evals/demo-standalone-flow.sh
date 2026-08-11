@@ -19,6 +19,10 @@ say() { printf '\033[1;34m\n== %s ==\033[0m\n' "$*"; }
 # (runners inherit the env var and authenticate their own internal calls).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+# shellcheck source=code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
 
 # ── 0. 环境:连接测试实例 kernel(web sidecar 已起 17412),另起独立 runner ──
 say "0. 环境准备"
@@ -119,7 +123,10 @@ S5=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process
 
 # ── 6. Baseline 真实容器复现(代码归档→物化→执行)────────────────────────
 say "6. Baseline 复现(代码快照归档 + 容器执行)"
-CODE=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/repo\",\"description\":\"fixture train.js\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
+# P0-4 (SNAPSHOT-01/API-01): seed the fixture into an approved project workspace
+# and archive via workspace_id + root_relative_path (server-side root).
+DEMO_WS=$(code_snapshot_seed_workspace "$KPORT" "$PROJ" "repo" "$WORK/repo")
+CODE=$(code_snapshot_api "$KPORT" "$PROJ" "$DEMO_WS" "" "fixture train.js" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
 api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
 # P0 (acceptance-tests.md §4): baseline jobs MUST bind an APPROVED contract —
 # register + freeze it BEFORE submission via the internal approval route (the

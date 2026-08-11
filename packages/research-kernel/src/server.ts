@@ -12,7 +12,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, type PtySession } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -201,10 +201,16 @@ const jobSchema = z.object({
   created_by_principal_id: z.string().nullable().optional(),
 })
 
+// P0-4 (hardening-v0.2-status.md §5 SNAPSHOT-01/API-01): the code-snapshot
+// API accepts ONLY a project workspace + root-relative path — never a caller
+// supplied host path. `.strict()` rejects the deprecated `{path: …}` shape
+// (and any unknown field) with 422 validation_error: the old shape is
+// documented as deprecated and refused, not silently re-interpreted.
 const codeSnapshotSchema = z.object({
-  path: z.string().min(1),
+  workspace_id: z.string().min(1),
+  root_relative_path: z.string().optional(),
   description: z.string().optional(),
-})
+}).strict()
 
 const jobCompleteSchema = z.object({
   owner: z.string().min(1),
@@ -715,6 +721,42 @@ function requireProjectMember(kernel: ResearchKernel, req: IncomingMessage, res:
   return principalId
 }
 
+/**
+ * PTY-01 (hardening §5 P0-2): every pty operation (session read, control,
+ * frames) is fail-closed on the authenticated principal AND the session
+ * OWNER — a missing x-principal-id is 422 principal_required (GOV-01
+ * pattern), a session owned by another principal is 403
+ * pty_principal_mismatch (consistent with the pre-existing control check).
+ * `requireLease` (control) additionally demands the session lease
+ * (x-pty-lease): missing → 403 lease_required, wrong → 403 lease_invalid.
+ * Frames/reads accept an OPTIONAL lease — when present it must be valid.
+ * "Header missing = pass" is never accepted. Unknown session ids still
+ * answer 404 pty_session_not_found via kernel.ptyGet.
+ */
+function requirePtyOwner(kernel: ResearchKernel, req: IncomingMessage, res: ServerResponse, sessionId: string, opts: { requireLease: boolean }): PtySession | null {
+  const principalId = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== '' ? req.headers['x-principal-id'] : ''
+  if (principalId === '') {
+    send(res, 422, { error: errorEnvelope('principal_required', 'pty access requires an authenticated principal (x-principal-id); the BFF injects it from the operator session') })
+    return null
+  }
+  const session = kernel.ptyGet(sessionId) // unknown → 404 pty_session_not_found
+  if (session.principal_id !== principalId) {
+    send(res, 403, { error: errorEnvelope('pty_principal_mismatch', 'the authenticated principal does not own this pty session') })
+    return null
+  }
+  const leaseHeader = req.headers['x-pty-lease']
+  const lease = typeof leaseHeader === 'string' && leaseHeader !== '' ? leaseHeader : ''
+  if (opts.requireLease && lease === '') {
+    send(res, 403, { error: errorEnvelope('lease_required', 'pty control requires the session lease (x-pty-lease); a missing header is never a pass') })
+    return null
+  }
+  if (lease !== '' && !kernel.ptyVerifyLease(sessionId, lease)) {
+    send(res, 403, { error: errorEnvelope('lease_invalid', 'the provided pty lease does not match the session') })
+    return null
+  }
+  return session
+}
+
 function parseSeqParam(raw: string | null): number | undefined {
   if (raw === null || raw === '') return undefined
   const n = Number(raw)
@@ -739,18 +781,6 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   // objects can be correlated with the config that produced them. The header
   // is set before any writeHead and therefore lands on every answer.
   if (configPin !== undefined && configPin !== '') res.setHeader('x-config-pin', configPin)
-  if (token !== undefined) {
-    const provided = req.headers.authorization
-    if (provided !== `Bearer ${token}`) {
-      send(res, 401, { error: { code: 'unauthorized', message: 'missing or invalid bearer token' } })
-      return
-    }
-  }
-  // OBS-01 (reconstruction-contracts.md §18): GET /internal/metrics — JSON
-  // snapshot, loopback only, no service token required (same public surface
-  // as /v1/health, or exposed per deployment config). Routed BEFORE the
-  // v1/v2 version gate because the path carries no API version prefix.
-  if (handleInternalMetrics(req, res, kernel, boundHost)) return
   let url: URL
   try {
     url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -758,6 +788,33 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     send(res, 400, { error: { code: 'invalid_url', message: 'malformed request url' } })
     return
   }
+  // §5 P0-1 (hardening API-01/SIDE-01): when the kernel was configured with a
+  // bearer token (--token / DSH_SCHOLAR_KERNEL_TOKEN — the sidecars ALWAYS
+  // inject one via the 0600 <dataDir>/kernel-token file), every non-health
+  // route demands `Authorization: Bearer <token>`: missing or wrong bearer →
+  // 401 unauthorized, no exception. /v1/health and /v2/health stay exempt so
+  // liveness probes (sidecar handshake, operators, orchestrators) never lock
+  // themselves out. A kernel WITHOUT a token skips the whole check — that is
+  // the explicit bare-kernel dev mode only (unit tests spawn bare kernels);
+  // sidecar-spawned kernels always carry a token. The service-token layer
+  // (x-service-token on internal routes, below) is independent: a bearer
+  // never unlocks an internal route and x-service-token never substitutes
+  // for the bearer on the public surface.
+  if (token !== undefined) {
+    const isHealth = url.pathname === '/v1/health' || url.pathname === '/v2/health'
+    if (!isHealth) {
+      const provided = req.headers.authorization
+      if (provided !== `Bearer ${token}`) {
+        send(res, 401, { error: { code: 'unauthorized', message: 'missing or invalid bearer token' } })
+        return
+      }
+    }
+  }
+  // OBS-01 (reconstruction-contracts.md §18): GET /internal/metrics — JSON
+  // snapshot, loopback only, no service token required (same public surface
+  // as /v1/health, or exposed per deployment config). Routed BEFORE the
+  // v1/v2 version gate because the path carries no API version prefix.
+  if (handleInternalMetrics(req, res, kernel, boundHost)) return
   // pathname is percent-encoded; decode segments so ids like sha256:<hex>
   // survive (encodeURIComponent on the client side). A malformed escape
   // (e.g. %zz) must answer JSON 400 — never crash the server (§19.2).
@@ -1194,10 +1251,34 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.computeAnalysis(id, input.contract_id, input.metric))
               return
             }
+            if (method === 'GET' && sub === 'manuscript-drafts') {
+              // P0-3 (TEX-01): READ-ONLY open — return the existing
+              // workspace without creating a document row or writing any
+              // byte. 404 manuscript_not_found when nothing exists yet; the
+              // UI then POSTs to create it (the ONLY write path for opening).
+              const workspace = kernel.manuscriptWorkspace(id)
+              if (workspace === null) {
+                throw new KernelError(404, 'manuscript_not_found',
+                  `no manuscript workspace for project ${id} — POST manuscript-drafts to create it`)
+              }
+              ok(res, workspace)
+              return
+            }
             if (method === 'POST' && sub === 'manuscript-drafts') {
-              // gui-plugin-plan §11: generate a versioned TeX workspace.
-              const input = z.object({ root_file: z.string().optional() }).parse(body)
-              ok(res, kernel.generateTexWorkspace(id, input.root_file))
+              // gui-plugin-plan §11 + P0-3 (TEX-01): create-or-ensure the
+              // versioned TeX workspace. Default (ensure): generation
+              // happens ONLY on first creation — an existing workspace with
+              // files is returned unchanged (never rewritten by a render).
+              // regenerate=true: EXPLICIT regeneration — the current content
+              // is frozen as a revision-scoped snapshot BEFORE the rewrite,
+              // so the previous bytes stay revertable (GET snapshot-files).
+              const input = z.object({
+                root_file: z.string().optional(),
+                regenerate: z.boolean().optional(),
+              }).parse(body)
+              ok(res, input.regenerate === true
+                ? kernel.regenerateTexWorkspace(id, input.root_file)
+                : kernel.ensureManuscriptWorkspace(id, input.root_file))
               return
             }
             if (method === 'GET' && sub === 'events') {
@@ -1285,10 +1366,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               return
             }
             if (method === 'POST' && sub === 'code-snapshots') {
-              // §11.3 (SCH-EXEC-002): archive ACTUAL directory contents into
+              // §11.3 (SCH-EXEC-002): archive ACTUAL workspace contents into
               // a content-addressed `code` artifact (+ manifest artifact).
+              // P0-4 (SNAPSHOT-01/API-01): the root is resolved server-side
+              // from the approved project workspace (workspace_id +
+              // root_relative_path); the deprecated host-`path` shape is
+              // refused by the strict schema (422) — see codeSnapshotSchema.
               const input = codeSnapshotSchema.parse(body)
-              const snapshot = kernel.snapshotCodeArchive(id, input.path, input.description ?? '')
+              const snapshot = kernel.snapshotCodeArchive(id, input.workspace_id, input.root_relative_path ?? '', input.description ?? '')
               send(res, 201, snapshot)
               return
             }
@@ -1838,38 +1923,40 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
             if (sub !== undefined && subId === undefined && method === 'GET') {
               // Session state + lease summary (api-contracts.md §18 GET).
+              // PTY-01 (hardening §5 P0-2): fail-closed principal + OWNER —
+              // knowing a session id is not enough to read it; a foreign
+              // session (even inside a member project) is 403, a missing
+              // principal 422. No lease required for the read itself.
+              if (requirePtyOwner(kernel, req, res, sub, { requireLease: false }) === null) return
               ok(res, kernel.ptyGet(sub))
               return
             }
             if (sub !== undefined && subId === 'control' && method === 'POST') {
               // Control with client_seq idempotency: 422 on schema failure,
               // 404 on unknown session, 409 on reorder/closed, 200 with
-              // delivered=false while no adapter is attached. When the BFF
-              // forwarded an operator identity it must be the session owner
-              // (defense in depth — the wire is authorized at open).
+              // delivered=false while no adapter is attached. PTY-01
+              // (hardening §5 P0-2): principal + OWNER + LEASE are ALL
+              // mandatory — a missing x-principal-id is 422
+              // principal_required, a non-owner 403 pty_principal_mismatch,
+              // a missing x-pty-lease 403 lease_required, a wrong lease 403
+              // lease_invalid. "Header missing = pass" is never accepted.
               const input = PtyControlRequest.parse(body)
-              const ownerCheck = req.headers['x-principal-id']
-              if (typeof ownerCheck === 'string' && ownerCheck !== '') {
-                const session = kernel.ptyGet(sub)
-                if (session.principal_id !== ownerCheck) {
-                  send(res, 403, {
-                    error: errorEnvelope('pty_principal_mismatch',
-                      'the authenticated principal does not own this pty session'),
-                  })
-                  return
-                }
-              }
+              if (requirePtyOwner(kernel, req, res, sub, { requireLease: true }) === null) return
               const result = kernel.ptyControl(sub, input)
               ok(res, result)
               return
             }
             if (sub !== undefined && subId === 'frames' && method === 'GET') {
-              // Output replay with server seq / gap / retention.
+              // Output replay with server seq / gap / retention. PTY-01
+              // (hardening §5 P0-2): same fail-closed principal + owner as
+              // the session read; the lease is OPTIONAL here but when
+              // present it must be valid (never "wrong lease = pass").
               const raw = url.searchParams.get('after_seq')
               const afterSeq = raw === null ? 0 : Number(raw)
               if (!Number.isInteger(afterSeq) || afterSeq < 0) {
                 throw new KernelError(422, 'pty_after_seq_invalid', 'after_seq must be a non-negative integer')
               }
+              if (requirePtyOwner(kernel, req, res, sub, { requireLease: false }) === null) return
               ok(res, kernel.ptyFrames(sub, afterSeq))
               return
             }

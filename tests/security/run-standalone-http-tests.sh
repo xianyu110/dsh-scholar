@@ -114,6 +114,42 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "htt
 R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/projects")
 [ "$R" = "200" ] && ok "SEC: /v1/projects good bearer -> 200" || fail "SEC: good bearer -> $R"
 
+# ── §5 P0-1 (hardening API-01/SIDE-01): kernel bearer on the sidecar port ──
+# The standalone sidecar always generates/REUSES a 0600 <dataDir>/kernel-token
+# (random 32 hex) and injects it into the kernel via DSH_SCHOLAR_KERNEL_TOKEN.
+# Direct access to the sidecar kernel port (bypassing the BFF) must be locked:
+# missing/wrong bearer -> 401 on reads AND writes; health exempt; the service
+# token (x-service-token, internal routes) is a separate layer and never
+# substitutes for the ordinary bearer on public routes.
+KTOKEN=$(tr -d '\n' < "$DATA/kernel-token" 2>/dev/null || true)
+STOKEN=$(tr -d '\n' < "$DATA/service-token" 2>/dev/null || true)
+KMODE=$(stat -c %a "$DATA/kernel-token" 2>/dev/null || echo "?")
+[ "$KMODE" = "600" ] && ok "KERNEL-AUTH: kernel-token file 0600 (got $KMODE)" || fail "KERNEL-AUTH: kernel-token mode $KMODE"
+[ -L "$DATA/kernel-token" ] && fail "KERNEL-AUTH: kernel-token is a symlink" || ok "KERNEL-AUTH: kernel-token not a symlink"
+if printf '%s' "$KTOKEN" | grep -qE '^[0-9a-f]{32}$'; then
+  ok "KERNEL-AUTH: kernel-token is a random 32-hex token"
+else
+  fail "KERNEL-AUTH: kernel-token malformed -> '$KTOKEN'"
+fi
+R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$KERNEL_PORT/v1/projects")
+[ "$R" = "401" ] && ok "KERNEL-AUTH: direct kernel READ without bearer -> 401" || fail "KERNEL-AUTH: direct read no bearer -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$KERNEL_PORT/v1/projects" -H 'content-type: application/json' -d '{"name":"x","workspace":"/w"}')
+[ "$R" = "401" ] && ok "KERNEL-AUTH: direct kernel WRITE without bearer -> 401" || fail "KERNEL-AUTH: direct write no bearer -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "http://127.0.0.1:$KERNEL_PORT/v1/projects")
+[ "$R" = "401" ] && ok "KERNEL-AUTH: wrong bearer -> 401" || fail "KERNEL-AUTH: wrong bearer -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KTOKEN" "http://127.0.0.1:$KERNEL_PORT/v1/projects")
+[ "$R" = "200" ] && ok "KERNEL-AUTH: direct kernel read with the kernel-token bearer -> 200" || fail "KERNEL-AUTH: kernel-token bearer -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -H "x-service-token: $STOKEN" "http://127.0.0.1:$KERNEL_PORT/v1/projects")
+[ "$R" = "401" ] && ok "KERNEL-AUTH: x-service-token alone cannot unlock public routes -> 401" || fail "KERNEL-AUTH: service token on public route -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$KERNEL_PORT/v1/health")
+[ "$R" = "200" ] && ok "KERNEL-AUTH: health without bearer -> 200 (exempt)" || fail "KERNEL-AUTH: health -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$KERNEL_PORT/v1/jobs-claim/run" \
+  -H 'content-type: application/json' -H "Authorization: Bearer $KTOKEN" -d '{"owner":"neg","limit":1}')
+[ "$R" = "403" ] && ok "KERNEL-AUTH: internal route with bearer only -> 403 service_token_required" || fail "KERNEL-AUTH: internal bearer only -> $R"
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$KERNEL_PORT/v1/jobs-claim/run" \
+  -H 'content-type: application/json' -H "Authorization: Bearer $KTOKEN" -H "x-service-token: $STOKEN" -d '{"owner":"ok","limit":1}')
+[ "$R" = "200" ] && ok "KERNEL-AUTH: internal route with bearer + service token -> 200" || fail "KERNEL-AUTH: internal both -> $R"
+
 # ── SEC-UI-01: cross-origin writes rejected, same-127/8 allowed ───────────
 # (Origin stays a SECOND layer on top of the CSRF token.)
 R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WEB_PORT/api/chat/survey" \
@@ -237,13 +273,16 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
   [ -n "$MEMCSRF" ] && ok "SEC: BFF issues its own csrf token for survey" || fail "SEC: BFF csrf fetch"
   # Project B exists on the kernel but ops-1 is NOT a member (foreign PI).
-  PB=$(curl -s -H 'content-type: application/json' -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
+  # Direct kernel calls authenticate with the MEM kernel's own token file
+  # (§5 P0-1: sidecar-spawned kernels always demand the bearer).
+  MEMKTOKEN=$(tr -d '\n' < "$MEM_DATA/kernel-token" 2>/dev/null || true)
+  PB=$(curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
     -d '{"name":"foreign-b","workspace":"/w/foreign-b","mode":"gate-only","creator_principal_id":"ops-other","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
   [ -n "$PB" ] && ok "SEC: foreign project B created on kernel ($PB)" || fail "SEC: foreign project B create"
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$PB")
   [ "$R" = "404" ] && ok "SEC: ops-1 cannot read foreign project B -> 404" || fail "SEC: B read -> $R"
-  count_json() { curl -s "http://127.0.0.1:$MEM_KERNEL/v1/projects/$1/$2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(Array.isArray(a)?a.length:'ERR')}catch(e){console.log('ERR')}})"; }
+  count_json() { curl -s -H "Authorization: Bearer $MEMKTOKEN" "http://127.0.0.1:$MEM_KERNEL/v1/projects/$1/$2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(Array.isArray(a)?a.length:'ERR')}catch(e){console.log('ERR')}})"; }
   B_SNAP_BEFORE=$(count_json "$PB" corpus-snapshots)
   B_EVT_BEFORE=$(count_json "$PB" events)
   A_SNAP_BEFORE=$(count_json "$MP" corpus-snapshots)
@@ -299,6 +338,7 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
     MID=${ROLE_MEMBER%%:*}
     MROLE=${ROLE_MEMBER##*:}
     R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+      -H "Authorization: Bearer $MEMKTOKEN" \
       -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$MP/members" \
       -d "{\"principal_id\":\"$MID\",\"role\":\"$MROLE\",\"actor\":\"ops-1\"}")
     [ "$R" = "200" ] && ok "API-01: kernel member $MID/$MROLE added" || fail "API-01: add member $MID -> $R"
@@ -389,6 +429,133 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
       ok "API-01: role-forbidden body has no '$NEEDLE'"
     fi
   done
+fi
+
+# ── hardening §5 P0-2 (API-01/PTY-01): global-id routes are project-resolved
+# before forwarding (artifact/document/pty/events) + immediate revocation ────
+# A member BFF (ops-1) must answer 404 for artifacts/documents/pty sessions/
+# events of a FOREIGN project (no enumeration), 200 for its own, and 404 for
+# guessed ids. The pty lease passes through the proxy and the KERNEL enforces
+# it (control without the lease -> 403 lease_required). Removing a member
+# revokes access on the NEXT request (membership is never cached).
+if [ "$memready" = 1 ] && [ -n "$MP" ]; then
+  echo "== P0-2: global-id project resolution (artifact/document/pty/events) + revocation =="
+  MEMKTOKEN=$(tr -d '\n' < "$MEM_DATA/kernel-token" 2>/dev/null || true)
+  KAPI() { curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" "$@"; }
+  BAPI() { curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "$@"; }
+  # Foreign project owned by p0-2-foreign (kernel direct) — ops-1 is NOT a member.
+  FB=$(KAPI -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
+    -d '{"name":"p02-foreign","workspace":"/w/p02f","mode":"gate-only","creator_principal_id":"p0-2-foreign","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+  [ -n "$FB" ] && ok "P0-2: foreign project created on kernel ($FB)" || fail "P0-2: foreign project create"
+  # Artifacts: one in the foreign project, one in the member project.
+  ART_FB=$(KAPI -X POST "http://127.0.0.1:$MEM_KERNEL/v1/artifacts" \
+    -d "{\"project_id\":\"$FB\",\"kind\":\"data\",\"content_base64\":\"$(printf 'foreign' | base64 -w0)\"}" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.artifact_id||'')})")
+  ART_MP=$(BAPI -X POST "http://127.0.0.1:$MEM_WEB/v1/artifacts" \
+    -d "{\"project_id\":\"$MP\",\"kind\":\"data\",\"content_base64\":\"$(printf 'member' | base64 -w0)\"}" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.artifact_id||'')})")
+  [ -n "$ART_FB" ] && ok "P0-2: foreign artifact registered ($ART_FB)" || fail "P0-2: foreign artifact register"
+  [ -n "$ART_MP" ] && ok "P0-2: member artifact registered via BFF ($ART_MP)" || fail "P0-2: member artifact register"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/artifacts/$ART_FB")
+  [ "$R" = "404" ] && ok "P0-2: non-member artifact GET -> 404" || fail "P0-2: non-member artifact -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/artifacts/$ART_FB?project_id=$FB")
+  [ "$R" = "404" ] && ok "P0-2: non-member artifact GET with foreign project_id -> 404" || fail "P0-2: foreign artifact query -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/artifacts/$ART_MP")
+  [ "$R" = "200" ] && ok "P0-2: member artifact GET -> 200" || fail "P0-2: member artifact -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/artifacts/art_does_not_exist")
+  [ "$R" = "404" ] && ok "P0-2: guessed artifact id -> 404" || fail "P0-2: guessed artifact -> $R"
+  # Registering an artifact INTO a foreign project through the BFF must 404
+  # (body project is checked like the pty-open rule) — no cross-project write.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$MEM_WEB/v1/artifacts" \
+    -d "{\"project_id\":\"$FB\",\"kind\":\"data\",\"content_base64\":\"$(printf 'x' | base64 -w0)\"}")
+  [ "$R" = "404" ] && ok "P0-2: artifact register into foreign project via BFF -> 404" || fail "P0-2: artifact register foreign -> $R"
+  # Documents (TeX): manuscript-drafts generates a document; the BFF resolves
+  # /v1/documents/{id}/* through the kernel and enforces membership.
+  DOC_FB=$(KAPI -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$FB/manuscript-drafts" -d '{}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.document_id||'')})")
+  DOC_MP=$(BAPI -X POST "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/manuscript-drafts" -d '{}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.document_id||'')})")
+  [ -n "$DOC_FB" ] && ok "P0-2: foreign document created ($DOC_FB)" || fail "P0-2: foreign document create"
+  [ -n "$DOC_MP" ] && ok "P0-2: member document created via BFF ($DOC_MP)" || fail "P0-2: member document create"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/documents/$DOC_FB/tree")
+  [ "$R" = "404" ] && ok "P0-2: non-member document tree -> 404" || fail "P0-2: non-member doc tree -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X PUT "http://127.0.0.1:$MEM_WEB/v1/documents/$DOC_FB/file?path=paper.tex" -d '{"path":"paper.tex","content":"x"}')
+  [ "$R" = "404" ] && ok "P0-2: non-member document write -> 404" || fail "P0-2: non-member doc write -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/documents/$DOC_MP/tree")
+  [ "$R" = "200" ] && ok "P0-2: member document tree -> 200" || fail "P0-2: member doc tree -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/documents/doc_does_not_exist/tree")
+  [ "$R" = "404" ] && ok "P0-2: guessed document id -> 404" || fail "P0-2: guessed doc -> $R"
+  # PTY sessions: foreign session must 404 at the BFF; the member session is
+  # readable and controllable (the BFF injects the operator principal; the
+  # client's x-pty-lease passes through and the KERNEL enforces it).
+  FBWS=$(KAPI -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$FB/workspaces" -d '{"kind":"scratch","name":"s"}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.workspace_id||'')})")
+  PTY_FB=$(curl -s -X POST "http://127.0.0.1:$MEM_KERNEL/v1/pty/sessions" -H 'content-type: application/json' \
+    -H "Authorization: Bearer $MEMKTOKEN" -H 'x-principal-id: p0-2-foreign' \
+    -d "{\"project_id\":\"$FB\",\"workspace_id\":\"$FBWS\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.pty_session_id||'')})")
+  MPWS=$(BAPI -X POST "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/workspaces" -d '{"kind":"scratch","name":"s"}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.workspace_id||'')})")
+  PTY_OPEN_MP=$(curl -s -X POST "http://127.0.0.1:$MEM_WEB/v1/pty/sessions" -H 'content-type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"project_id\":\"$MP\",\"workspace_id\":\"$MPWS\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}")
+  PTY_MP=$(printf '%s' "$PTY_OPEN_MP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.pty_session_id||'')})")
+  PTY_LEASE_MP=$(printf '%s' "$PTY_OPEN_MP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.lease_token||'')})")
+  [ -n "$PTY_FB" ] && ok "P0-2: foreign pty session opened on kernel ($PTY_FB)" || fail "P0-2: foreign pty open"
+  [ -n "$PTY_MP" ] && [ -n "$PTY_LEASE_MP" ] && ok "P0-2: member pty session opened via BFF ($PTY_MP)" || fail "P0-2: member pty open ($(printf '%s' "$PTY_OPEN_MP" | head -c 160))"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/pty/sessions/$PTY_FB")
+  [ "$R" = "404" ] && ok "P0-2: non-member pty session read -> 404" || fail "P0-2: non-member pty read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/pty/sessions/$PTY_MP")
+  [ "$R" = "200" ] && ok "P0-2: member pty session read -> 200" || fail "P0-2: member pty read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/pty/sessions/pty_does_not_exist")
+  [ "$R" = "404" ] && ok "P0-2: guessed pty session id -> 404" || fail "P0-2: guessed pty -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -H "x-pty-lease: $PTY_LEASE_MP" \
+    -X POST "http://127.0.0.1:$MEM_WEB/v1/pty/sessions/$PTY_MP/control" \
+    -d '{"client_seq":1,"type":"bytes","payload":{"text":"ls\n","byte_length":3}}')
+  [ "$R" = "200" ] && ok "P0-2: member pty control with lease through BFF -> 200" || fail "P0-2: member pty control -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$MEM_WEB/v1/pty/sessions/$PTY_MP/control" \
+    -d '{"client_seq":2,"type":"bytes","payload":{"text":"x","byte_length":1}}')
+  [ "$R" = "403" ] && ok "P0-2: pty control without lease via BFF -> 403 (kernel lease_required)" || fail "P0-2: pty control no-lease -> $R"
+  # Global events: project-scoped through the BFF; no scope -> 404 fail-closed.
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/events?project_id=$FB")
+  [ "$R" = "404" ] && ok "P0-2: foreign project events -> 404" || fail "P0-2: foreign events -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/events?project_id=$MP")
+  [ "$R" = "200" ] && ok "P0-2: member project events -> 200" || fail "P0-2: member events -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/events")
+  [ "$R" = "404" ] && ok "P0-2: unscoped global events -> 404 fail-closed" || fail "P0-2: unscoped events -> $R"
+  # Revocation is IMMEDIATE: a fresh member BFF reads the project + its
+  # documents, then the member is removed on the kernel and the SAME BFF
+  # answers 404 on the next request (membership is never cached).
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$MP/members" \
+    -d '{"principal_id":"p0-2-role","role":"researcher","actor":"ops-1"}')
+  [ "$R" = "200" ] && ok "P0-2: p0-2-role member added" || fail "P0-2: add member p0-2-role -> $R"
+  REV_WEB=$((MEM_WEB + 6))
+  node "$SERVER_BIN" --host 127.0.0.1 --port "$REV_WEB" --kernel-port "$MEM_KERNEL" \
+    --data-dir "$MEM_DATA" --token "$TOKEN" --principal p0-2-role > "$WORK/revoke.log" 2>&1 &
+  REV_PID=$!
+  for _ in $(seq 1 60); do
+    if curl -sf -m 2 -X POST "http://127.0.0.1:$REV_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then break; fi
+    sleep 0.5
+  done
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$REV_WEB/v1/projects/$MP")
+  [ "$R" = "200" ] && ok "P0-2: member p0-2-role reads project -> 200" || fail "P0-2: p0-2-role read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$REV_WEB/v1/documents/$DOC_MP/tree")
+  [ "$R" = "200" ] && ok "P0-2: member p0-2-role reads project document -> 200" || fail "P0-2: p0-2-role doc -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
+    -X DELETE "http://127.0.0.1:$MEM_KERNEL/v1/projects/$MP/members/p0-2-role" -d '{"actor":"ops-1"}')
+  [ "$R" = "200" ] && ok "P0-2: p0-2-role member removed on kernel" || fail "P0-2: remove member -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$REV_WEB/v1/projects/$MP")
+  [ "$R" = "404" ] && ok "P0-2: revoked member read -> 404 on the very next request (no stale cache)" || fail "P0-2: revoked read -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$REV_WEB/v1/documents/$DOC_MP/tree")
+  [ "$R" = "404" ] && ok "P0-2: revoked member document read -> 404 (global-id route too)" || fail "P0-2: revoked doc -> $R"
+  kill "$REV_PID" 2>/dev/null || true
+  ok "P0-2: revocation BFF cleaned up"
 fi
 
 kill ${VROLE_PID:-} ${RROLE_PID:-} ${AROLE_PID:-} "$MEM_PID" "$MEM2_PID" 2>/dev/null || true

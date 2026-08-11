@@ -25,8 +25,8 @@ jobs:
         run: pnpm run verify:docs
       - name: DOC-02 change-aware docs sync (src/eval diffs must move the hardening ledger)
         run: node scripts/verify-docs.mjs --diff-check origin/main
-      - name: Unit tests (standalone; DSH-host integration is out of scope per user decision — no GitHub Actions fixture)
-        run: pnpm exec vitest run --exclude tests/unit/security.test.ts
+      - name: Unit tests (security.test.ts included — never excluded; DSH-host integration is out of scope per user decision — no GitHub Actions fixture)
+        run: pnpm exec vitest run
 
   security-blocking:
     needs: unit-and-build

@@ -285,6 +285,16 @@ export class TexWorkspaceStore {
     this.db.close()
   }
 
+  /**
+   * P0-3 (TEX-01): read-only document lookup — the caller can decide
+   * whether first-generation is needed WITHOUT creating a document row.
+   * null when the project has no TeX document yet.
+   */
+  findDocument(projectId: string): TexDocumentInfo | null {
+    const row = this.db.prepare('SELECT * FROM tex_documents WHERE project_id = ?').get(projectId) as TexDocumentInfo | undefined
+    return row ?? null
+  }
+
   ensureDocument(projectId: string, rootFile = 'paper.tex'): TexDocumentInfo {
     const row = this.db.prepare('SELECT * FROM tex_documents WHERE project_id = ?').get(projectId) as TexDocumentInfo | undefined
     if (row !== undefined) return row

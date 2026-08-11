@@ -6,8 +6,8 @@
  */
 
 import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join, relative, resolve, sep, dirname } from 'node:path'
+import { chmodSync, lstatSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join, relative, sep, dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
@@ -21,9 +21,10 @@ import {
   type IntakeStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
+import { mkdirMode } from './fs-modes.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { openPtySessionStore, NullPtyAdapter, PtyError, type PtyAdapter, type PtyAppendResult, type PtyControlResult, type PtySessionStore } from './pty-session.js'
-import { openWorkspaceStore, WorkspaceError, type WorkspaceExpected, type WorkspaceStore } from './workspace-store.js'
+import { normalizeWorkspacePath, openWorkspaceStore, WorkspaceError, type WorkspaceExpected, type WorkspaceStore } from './workspace-store.js'
 import { TexWorkspaceFacade, texInfoToWorkspaceInfo } from './tex-facade.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
@@ -514,6 +515,37 @@ export function withTransaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
+/**
+ * P0-4 (SNAPSHOT-01): secret-file name matcher for the code-snapshot walk.
+ * Files matching these patterns are NEVER archived — the snapshot is
+ * rejected with 422 `snapshot_secret_file` naming every match (fail closed;
+ * no skip-and-record, so a secret can never silently slip into a snapshot).
+ * The patterns are deliberately conservative (basename-level, case-
+ * insensitive): dot-env files, token/secret/password/credential file names,
+ * private keys (`id_rsa`/`id_ed25519`/…), `*.key`/`*.pem`, `.aws/
+ * credentials`, the service identities (`service-token`/`kernel-token`) and
+ * well-known credential stores (`.npmrc`/`.pypirc`/`.netrc`/`.htpasswd`).
+ */
+function isSecretSnapshotFile(rel: string): boolean {
+  const lower = rel.toLowerCase()
+  const base = lower.slice(lower.lastIndexOf('/') + 1)
+  // `.env`, `.env.local`, `.env.production`…
+  if (base === '.env' || base.startsWith('.env.')) return true
+  // SSH/GPG private key basenames (`.pub` public halves are allowed).
+  if (base === 'id_rsa' || base === 'id_ecdsa' || base === 'id_ed25519' || base === 'id_dsa') return true
+  // Generic key material: `server.key`, `credentials.pem`, `auth.key.pem`…
+  if (base.endsWith('.key') || base.endsWith('.pem')) return true
+  // Service identities used by this deployment.
+  if (base === 'service-token' || base === 'service_token' || base === 'kernel-token' || base === 'kernel_token') return true
+  // `*_token`, `*-token`, `app.secret`, `credentials.json`… — a token/
+  // secret/password/credential file name separated by `_`/`-`/`.`.
+  if (/(^|[._-])(token|secret|password|passwd|credential|credentials)([._-]|$)/.test(base)) return true
+  // Well-known per-user credential stores.
+  if (lower === '.aws/credentials' || lower.startsWith('.aws/credentials.')) return true
+  if (base === '.npmrc' || base === '.pypirc' || base === '.netrc' || base === '.htpasswd') return true
+  return false
+}
+
 export class ResearchKernel {
   /**
    * Code-snapshot fixed resource limits (reconstruction-contracts.md §3,
@@ -667,11 +699,13 @@ export class ResearchKernel {
     this.db = openDatabase(options.dbPath ?? ':memory:', undefined, casRoot)
     this.cas = new ArtifactCas(casRoot)
     this.stagedUploadsRoot = join(this.cas.root, 'staged-uploads')
-    mkdirSync(this.stagedUploadsRoot, { recursive: true })
+    // WORK-01 §5: staging dirs carry an explicit 0700 (private staging for
+    // 0600 stage files) — mkdir(mode) alone is umask-dependent.
+    mkdirMode(this.stagedUploadsRoot, 0o700)
     // ONBOARD-01: isolated intake staging area (sibling dir — the upload
     // staging root and cleanupStagedUploads stay untouched by intake).
     this.intakeStagedRoot = join(this.cas.root, 'intake-staged')
-    mkdirSync(this.intakeStagedRoot, { recursive: true })
+    mkdirMode(this.intakeStagedRoot, 0o700)
     this.tex = openTexWorkspace(options.dbPath ?? ':memory:')
     this.pty = openPtySessionStore(options.dbPath ?? ':memory:')
     this.workspaces = openWorkspaceStore(options.dbPath ?? ':memory:', options.casRoot ?? join(process.cwd(), '.research-cas'),
@@ -1758,9 +1792,12 @@ export class ResearchKernel {
     const partPath = this.stagedPartPath(stageId)
     const metaPath = this.stagedMetaPath(stageId)
     try {
-      // mkdirSync is a no-op once the staging root exists (constructor).
-      mkdirSync(this.stagedUploadsRoot, { recursive: true })
+      // mkdirMode is a no-op once the staging root exists (constructor);
+      // the explicit 0700 calibration keeps the private staging contract
+      // independent of the process umask.
+      mkdirMode(this.stagedUploadsRoot, 0o700)
       writeFileSync(partPath, bytes, { mode: 0o600 })
+      chmodSync(partPath, 0o600)
       writeFileSync(metaPath, JSON.stringify({
         schema_version: 1,
         stage_id: stageId,
@@ -1772,6 +1809,7 @@ export class ResearchKernel {
         size_bytes: bytes.byteLength,
         created_at: nowIso(),
       }), { mode: 0o600 })
+      chmodSync(metaPath, 0o600)
     } catch (error) {
       // Rollback: never leave a half-written stage behind.
       try { unlinkSync(partPath) } catch { /* absent */ }
@@ -2149,8 +2187,11 @@ export class ResearchKernel {
     }
     const partPath = this.intakeStagedPath(intakeId, sha256)
     try {
-      mkdirSync(join(this.intakeStagedRoot, intakeId), { recursive: true })
+      // Per-session intake staging dir: explicit 0700 (0600 stage files),
+      // umask-independent (WORK-01 §5).
+      mkdirMode(join(this.intakeStagedRoot, intakeId), 0o700)
       writeFileSync(partPath, bytes, { mode: 0o600 })
+      chmodSync(partPath, 0o600)
     } catch (error) {
       throw new KernelError(500, 'stage_write_failed', `intake staged write failed: ${(error as Error).message}`)
     }
@@ -2929,35 +2970,95 @@ export class ResearchKernel {
   // ── code snapshot archive (design §11.3, SCH-EXEC-002) ───────────────────
 
   /**
-   * Archive a directory's ACTUAL file contents into a content-addressed
-   * `code` artifact (JSON `{schema_version, project_id, description, files:
-   * {rel: {sha256, content_base64}}, excludes}`) plus a lightweight `manifest`
-   * artifact (file list + hashes, no content). The Runner materializes the
-   * code snapshot ONLY from the Artifact Store — never from agent host dirs.
+   * Archive a project workspace's ACTUAL file contents into a content-
+   * addressed `code` artifact (JSON `{schema_version, project_id,
+   * description, files: {rel: {sha256, content_base64}}, excludes}`) plus a
+   * lightweight `manifest` artifact (file list + hashes, no content). The
+   * Runner materializes the code snapshot ONLY from the Artifact Store —
+   * never from agent host dirs.
    *
-   * Safety (path escape / symlink protection): the walk rejects any file whose
-   * relative path escapes the root, and any symbolic link whose realpath
-   * resolves OUTSIDE the real root (422 `snapshot_path_escape`); directories
-   * `.git`, `node_modules` and `.research-cas` are excluded.
+   * P0-4 (hardening-v0.2-status.md §5 SNAPSHOT-01/API-01): the archived
+   * root is ALWAYS a workspace of the given project, resolved server-side
+   * from the workspace store (`dataDir/workspaces/{project_id}/
+   * {workspace_id}/`) — the API never accepts a caller-supplied host path.
+   * `relativePath` is root-relative POSIX ('' = the whole workspace):
+   * absolute paths, `..`/`.` segments, NUL bytes, backslashes and Windows
+   * drive prefixes are rejected (422-shaped `invalid_path` via
+   * normalizeWorkspacePath, the same guard the workspace routes use).
+   *
+   * Safety (path escape / symlink protection): the resolved root must live
+   * INSIDE the kernel's workspaces area (realpath containment — a symlinked
+   * workspace dir cannot redirect the archive outside it), and the walk
+   * rejects any symbolic link whose realpath resolves OUTSIDE the archived
+   * root (422 `snapshot_path_escape`); directories `.git`, `node_modules`
+   * and `.research-cas` are excluded.
+   *
+   * P0-4 secret-file policy: files matching known secret patterns (`.env`,
+   * `*_token`, `*.key`/`*.pem`, `id_rsa`/`id_ed25519`/…, `.aws/credentials`,
+   * `service-token`, `kernel-token`, `.npmrc`/`.pypirc`/`.netrc`/…) are
+   * NEVER archived — the walk collects every match and the whole snapshot is
+   * rejected with 422 `snapshot_secret_file` naming the files (fail closed:
+   * zero CAS/artifact/manifest writes on rejection).
    */
-  snapshotCodeArchive(projectId: string, rootPath: string, description = ''): CodeSnapshot {
+  snapshotCodeArchive(projectId: string, workspaceId: string, relativePath = '', description = ''): CodeSnapshot {
     this.getProject(projectId)
-    const absRoot = resolve(rootPath)
+    // P0-4 (API-01): the workspace must belong to THIS project. A workspace
+    // that does not exist or belongs to another project is indistinguishable
+    // (404-shaped `workspace_not_found` — no cross-project enumeration).
+    let info: import('@dsh-scholar/research-schemas').WorkspaceInfo
+    try {
+      info = this.workspaces.get(workspaceId)
+    } catch (error) {
+      if (error instanceof WorkspaceError && error.code === 'workspace_not_found') {
+        throw new WorkspaceError('workspace_not_found', `code snapshot: workspace ${workspaceId} not found`)
+      }
+      throw error
+    }
+    if (info.project_id !== projectId) {
+      throw new WorkspaceError('workspace_not_found', `code snapshot: workspace ${workspaceId} not found`)
+    }
+    // P0-4: root-relative path normalization. '' (or './') means the whole
+    // workspace; otherwise reuse the workspace-store path guard (absolute
+    // paths, Windows drive prefixes, `..`/`.` segments, NUL bytes,
+    // backslashes and empty segments are all rejected).
+    let cleanRel = relativePath.replace(/\/+$/, '')
+    if (cleanRel === '' || cleanRel === '.') cleanRel = ''
+    else cleanRel = normalizeWorkspacePath(cleanRel)
+    const workspaceRoot = this.workspaces.workspaceRoot(workspaceId)
+    const absRoot = cleanRel === '' ? workspaceRoot : join(workspaceRoot, ...cleanRel.split('/'))
+    // Belt-and-braces: the normalized segments must stay inside the
+    // workspace root (a prefix escape here is a bug, not a caller input).
+    if (absRoot !== workspaceRoot && !absRoot.startsWith(`${workspaceRoot}${sep}`)) {
+      throw new KernelError(422, 'snapshot_path_escape', `code snapshot: root escapes the workspace: ${absRoot}`)
+    }
     let rootInfo
     try {
       rootInfo = statSync(absRoot)
     } catch {
-      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root not readable: ${rootPath}`)
+      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root not readable: ${absRoot}`)
     }
     if (!rootInfo.isDirectory()) {
-      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root is not a directory: ${rootPath}`)
+      throw new KernelError(422, 'snapshot_root_missing', `code snapshot root is not a directory: ${absRoot}`)
     }
+    // P0-4 (SNAPSHOT-01): the RESOLVED root (realpath — symlinks on the path
+    // resolved) must stay inside the kernel's approved workspaces area. A
+    // workspace directory replaced by a symlink (or a symlinked sub-root)
+    // can never redirect the archive outside `dataDir/workspaces/`.
     const realRoot = realpathSync(absRoot)
+    const workspacesReal = realpathSync(this.workspaces.workspacesRoot)
+    if (realRoot !== workspacesReal && !realRoot.startsWith(`${workspacesReal}${sep}`)) {
+      throw new KernelError(422, 'snapshot_path_escape',
+        `code snapshot: resolved root escapes the workspaces area: ${absRoot} -> ${realRoot}`)
+    }
     // Directories that are never part of a code snapshot (build/vendor/state).
     const EXCLUDED_DIRS = new Set(['.git', 'node_modules', '.research-cas'])
     const files: Record<string, { sha256: string; content_base64: string; size_bytes: number }> = {}
     let totalBytes = 0
     let fileCount = 0
+    // P0-4: secret files found during the walk are collected (never read
+    // into the archive) and reject the WHOLE snapshot after the walk — the
+    // error lists every offending file so the caller can fix them in one go.
+    const secretFiles: string[] = []
     const walk = (dir: string): void => {
       let entries: string[]
       try {
@@ -3000,6 +3101,12 @@ export class ResearchKernel {
           if (rel.startsWith('..') || rel.startsWith(sep)) {
             throw new KernelError(422, 'snapshot_path_escape', `code snapshot: path escapes the archived root: ${full}`)
           }
+          // P0-4 (SNAPSHOT-01): secret material never enters a code
+          // snapshot — collect and reject after the walk (full list).
+          if (isSecretSnapshotFile(rel)) {
+            secretFiles.push(rel)
+            continue
+          }
           // STORE-02 (§3 fixed resource limits): single-file and file-count
           // caps are enforced BEFORE reading the content (a giant file is
           // rejected on its stat, never buffered in full).
@@ -3032,6 +3139,12 @@ export class ResearchKernel {
       }
     }
     walk(absRoot)
+    // P0-4: reject AFTER the walk so the error lists every secret file. No
+    // artifact/manifest/CAS write has happened yet — rejection is a no-op.
+    if (secretFiles.length > 0) {
+      throw new KernelError(422, 'snapshot_secret_file',
+        `code snapshot contains secret files (rejected): ${secretFiles.join(', ')}`)
+    }
 
     // STORE-02 host-path hygiene: the archive's `root` field is a display
     // placeholder, never the host path — the Runner materializes code ONLY
@@ -3087,11 +3200,13 @@ export class ResearchKernel {
     }
     // STORE-02: record the snapshot in the authoritative code_snapshots
     // registry (snapshot_id -> archive/manifest artifacts + integrity).
+    // P0-4: the registry also records the workspace binding (workspace_id +
+    // root_relative_path) — provenance without ever exposing the host path.
     this.db.prepare(`INSERT INTO code_snapshots
         (snapshot_id, project_id, archive_artifact_id, manifest_artifact_id, source_json, sha256, file_count, size_bytes, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(snapshot.snapshot_id, projectId, archiveRecord.artifact_id, manifestRecord.artifact_id,
-        JSON.stringify({ description, root: rootPlaceholder, excludes: [...EXCLUDED_DIRS] }),
+        JSON.stringify({ description, root: rootPlaceholder, excludes: [...EXCLUDED_DIRS], workspace_id: workspaceId, root_relative_path: cleanRel }),
         archiveRecord.sha256, Object.keys(files).length, totalBytes, snapshot.created_at)
     // Both artifacts already emit artifact.registered events (outbox).
     return snapshot
@@ -3103,7 +3218,7 @@ export class ResearchKernel {
     project_id: string
     archive_artifact_id: string
     manifest_artifact_id: string
-    source: { description?: string; root?: string; excludes?: string[] }
+    source: { description?: string; root?: string; excludes?: string[]; workspace_id?: string; root_relative_path?: string }
     sha256: string
     file_count: number
     size_bytes: number
@@ -3119,7 +3234,7 @@ export class ResearchKernel {
       project_id: row.project_id,
       archive_artifact_id: row.archive_artifact_id,
       manifest_artifact_id: row.manifest_artifact_id,
-      source: JSON.parse(row.source_json) as { description?: string; root?: string; excludes?: string[] },
+      source: JSON.parse(row.source_json) as { description?: string; root?: string; excludes?: string[]; workspace_id?: string; root_relative_path?: string },
       sha256: row.sha256,
       file_count: row.file_count,
       size_bytes: row.size_bytes,
@@ -4440,6 +4555,80 @@ export class ResearchKernel {
   }
 
   /**
+   * P0-3 (TEX-01): READ-ONLY manuscript workspace lookup — the "open/ensure
+   * manuscript" path must never rewrite user content. Returns the existing
+   * generated workspace without creating a document row and without writing
+   * any byte, or null when there is nothing to open yet (no document, or a
+   * bare document row with zero files). ANY existing file set counts as
+   * user content (even a deliberately emptied paper.tex stays untouched —
+   * regeneration is explicit only). The UI calls GET first and POSTs only
+   * when this returns null.
+   */
+  manuscriptWorkspace(projectId: string, rootFile = 'paper.tex'): {
+    document_id: string
+    revision: number
+    files: string[]
+    created: boolean
+    regenerated: boolean
+  } | null {
+    this.getProject(projectId)
+    void rootFile
+    const document = this.tex.findDocument(projectId)
+    if (document === null) return null
+    const tree = this.tex.tree(document.document_id)
+    if (tree.files.length === 0) return null
+    return {
+      document_id: document.document_id,
+      revision: tree.document.revision,
+      files: tree.files.map(f => f.path),
+      created: false,
+      regenerated: false,
+    }
+  }
+
+  /**
+   * P0-3 (TEX-01): ensure semantics for POST manuscript-drafts — generate
+   * ONLY on first creation (no document, or a document with no files).
+   * When the workspace already exists it is returned unchanged (created:
+   * false, zero writes, zero revision bumps) so a render/rerender can never
+   * clobber saved content. Explicit regeneration is `regenerateTexWorkspace`.
+   */
+  ensureManuscriptWorkspace(projectId: string, rootFile = 'paper.tex'): {
+    document_id: string
+    revision: number
+    files: string[]
+    created: boolean
+    regenerated: boolean
+  } {
+    const existing = this.manuscriptWorkspace(projectId, rootFile)
+    if (existing !== null) return existing
+    const generated = this.generateTexWorkspace(projectId, rootFile)
+    return { ...generated, created: true, regenerated: false }
+  }
+
+  /**
+   * P0-3 (TEX-01): explicit regeneration (regenerate=true). The CURRENT
+   * content is frozen into the revision-scoped snapshot store BEFORE the
+   * rewrite — the rewrite itself bumps the document revision (generation is
+   * a new revision), so the pre-regeneration bytes stay revertable via
+   * GET /v1/documents/{id}/snapshot-files?revision=<old>&path=<file>.
+   */
+  regenerateTexWorkspace(projectId: string, rootFile = 'paper.tex'): {
+    document_id: string
+    revision: number
+    files: string[]
+    created: boolean
+    regenerated: boolean
+  } {
+    const document = this.texEnsure(projectId, rootFile)
+    if (this.tex.tree(document.document_id).files.length > 0) {
+      this.tex.snapshot(document.document_id)
+    }
+    const generated = this.generateTexWorkspace(projectId, rootFile)
+    return { ...generated, created: false, regenerated: true }
+  }
+
+  /**
    * Generate a versioned TeX workspace from the ledger (gui-plugin-plan
    * §11): paper.tex with title/abstract/methods/results/limitations and a
    * main.bib from the frozen corpus. Creates the document if absent; every
@@ -4606,6 +4795,14 @@ export class ResearchKernel {
    * seqs the client missed (pty-reconnect-seq / retention-gap). */
   ptyFrames(sessionId: string, afterSeq: number): ReturnType<PtySessionStore['frames']> {
     return this.pty.frames(sessionId, afterSeq)
+  }
+
+  /** PTY-01 (hardening §5 P0-2): constant-time lease verification for
+   * read/control/frames — the opaque token pinned at open must be echoed on
+   * control; a missing or wrong lease is never a pass (the HTTP layer
+   * answers 403 lease_required / lease_invalid). */
+  ptyVerifyLease(sessionId: string, token: string): boolean {
+    return this.pty.verifyLease(sessionId, token)
   }
 
   /** Idle TTL sweep — closes every session idle longer than its

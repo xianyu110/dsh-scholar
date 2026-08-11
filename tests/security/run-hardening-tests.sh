@@ -80,6 +80,67 @@ CT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"hardening-eval"}' > /dev/null
 ok "contract $CT registered + approved (P0 binding)"
 
+# ── P0-4 (hardening §5 SNAPSHOT-01/API-01): code-snapshot-approved-workspace-only ──
+
+echo "== P0-4 code-snapshot-approved-workspace-only (SNAPSHOT-01/API-01) =="
+# The archive root is resolved server-side from an approved project
+# workspace — workspace_id + root_relative_path ('' = the whole workspace).
+WS=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces" -d '{"kind":"code","name":"snap-root"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).workspace_id))")
+[[ "$WS" == ws_* ]] && ok "snapshot workspace $WS created (kind=code)" || bad "workspace creation failed: $WS"
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/nodes" -d '{"path":"main.js","content":"console.log(1)\n"}' > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/nodes" -d '{"path":"lib/util.js","content":"export const u=1\n"}' > /dev/null
+SNAP_OK=$(curl -s -o "$WORK/snap-ok.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -H 'content-type: application/json' -d "{\"workspace_id\":\"$WS\",\"root_relative_path\":\"\",\"description\":\"hardening P0-4\"}")
+SNAP_ART=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).archive_artifact_id)}catch(e){console.log('')}})" < "$WORK/snap-ok.json")
+if [[ "$SNAP_OK" == "201" && "$SNAP_ART" == sha256:* ]]; then
+  ok "POST code-snapshots {workspace_id, root_relative_path:''} -> 201 archive $SNAP_ART (whole workspace)"
+else
+  bad "workspace-root snapshot: expected 201 sha256 archive, got HTTP $SNAP_OK artifact='$SNAP_ART'"
+fi
+# root-relative SUBDIRECTORY snapshot (keys relative to that root).
+SUB_OK=$(curl -s -o "$WORK/snap-sub.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -H 'content-type: application/json' -d "{\"workspace_id\":\"$WS\",\"root_relative_path\":\"lib\"}")
+SUB_FILES=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).files)}catch(e){console.log('')}})" < "$WORK/snap-sub.json")
+if [[ "$SUB_OK" == "201" && "$SUB_FILES" == "1" ]]; then
+  ok "root-relative subdirectory snapshot (lib/) -> 201, 1 file archived"
+else
+  bad "subdirectory snapshot: expected 201 + 1 file, got HTTP $SUB_OK files='$SUB_FILES'"
+fi
+# The deprecated host-`path` shape is refused (422 validation_error).
+OLD_SHAPE=$(curl -s -o "$WORK/snap-old.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -H 'content-type: application/json' -d '{"path":"/tmp/whatever","description":"old shape"}')
+if [[ "$OLD_SHAPE" == "422" ]]; then
+  ok "deprecated host-path body -> HTTP 422 (refused, not re-interpreted)"
+else
+  bad "old shape: expected 422, got HTTP $OLD_SHAPE"
+fi
+# Absolute / `..` / drive-prefix root_relative_path are rejected (invalid_path).
+for BAD_REL in '/home/user' '../outside' 'C:evil'; do
+  BAD_CODE=$(curl -s -o "$WORK/snap-bad.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -H 'content-type: application/json' -d "{\"workspace_id\":\"$WS\",\"root_relative_path\":\"$BAD_REL\"}")
+  BAD_ERR=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).error?.code??'')}catch(e){console.log('')}})" < "$WORK/snap-bad.json")
+  if [[ "$BAD_CODE" == "422" && "$BAD_ERR" == "invalid_path" ]]; then
+    ok "root_relative_path '$BAD_REL' -> 422 invalid_path"
+  else
+    bad "root_relative_path '$BAD_REL': expected 422 invalid_path, got HTTP $BAD_CODE error=$BAD_ERR"
+  fi
+done
+# Cross-project workspace is indistinguishable from a missing one (404).
+P_FOREIGN=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-foreign\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+FOREIGN_CODE=$(curl -s -o "$WORK/snap-foreign.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$P_FOREIGN/code-snapshots" -H 'content-type: application/json' -d "{\"workspace_id\":\"$WS\"}")
+if [[ "$FOREIGN_CODE" == "404" ]]; then
+  ok "workspace of ANOTHER project -> HTTP 404 workspace_not_found (no cross-project enumeration)"
+else
+  bad "cross-project workspace: expected 404, got HTTP $FOREIGN_CODE"
+fi
+# Secret files are NEVER archived: 422 snapshot_secret_file, zero artifacts.
+WS_SEC=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces" -d '{"kind":"code","name":"snap-secret"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).workspace_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS_SEC/nodes" -d '{"path":".env","content":"DSH_SERVICE_TOKEN=x"}' > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS_SEC/nodes" -d '{"path":"train.js","content":"console.log(1)\n"}' > /dev/null
+SEC_CODE=$(curl -s -o "$WORK/snap-sec.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -H 'content-type: application/json' -d "{\"workspace_id\":\"$WS_SEC\"}")
+SEC_ERR=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const e=JSON.parse(d).error;console.log((e?.code??'')+'|'+(e?.message??''))}catch(e){console.log('')}})" < "$WORK/snap-sec.json")
+if [[ "$SEC_CODE" == "422" && "$SEC_ERR" == snapshot_secret_file* && "$SEC_ERR" == *".env"* ]]; then
+  ok "secret file (.env) in workspace -> 422 snapshot_secret_file listing the file: ${SEC_ERR#*|}"
+else
+  bad "secret-file snapshot: expected 422 snapshot_secret_file naming .env, got HTTP $SEC_CODE ($SEC_ERR)"
+fi
+
 echo "== kernel-submit-rejects-subprocess =="
 P2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-sub\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$P2/jobs" -H 'content-type: application/json' -d "{\"idempotency_key\":\"f1\",\"kind\":\"formal\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}")
@@ -211,6 +272,80 @@ FINAL=$(api "http://127.0.0.1:$PORT2/v1/jobs/$JL" | node -e "let d='';process.st
 [[ "$FINAL" == "cancelled" ]] && ok "subprocess job stays cancelled after runner teardown" || bad "job status after cancel: $FINAL"
 
 kill "$RUNNER2_PID" "$KERNEL2_PID" 2>/dev/null || true
+
+# ── P0-2 (hardening §5 API-01/PTY-01): direct-Kernel PTY fencing ───────────
+# The pty wire demands the authenticated principal + session OWNER on every
+# operation and the session lease on control: header missing is NEVER a pass.
+# (The kernel answers 422 principal_required / 403 pty_principal_mismatch /
+# 403 lease_required / 403 lease_invalid; unknown sessions stay 404.)
+echo "== direct-kernel pty fencing (principal + owner + lease) =="
+PTYP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"pty-fence\",\"workspace\":\"/w/pty\",\"creator_principal_id\":\"pty-owner\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+[[ -n "$PTYP" ]] && ok "pty-fence project created ($PTYP)" || bad "pty-fence project create"
+PTYWS=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PTYP/workspaces" -d '{"kind":"scratch","name":"s"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).workspace_id||''))")
+[[ -n "$PTYWS" ]] && ok "pty-fence workspace created ($PTYWS)" || bad "pty-fence workspace create"
+PTY_OPEN=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/pty/sessions" -H 'content-type: application/json' -H 'x-principal-id: pty-owner' \
+  -d "{\"project_id\":\"$PTYP\",\"workspace_id\":\"$PTYWS\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}")
+PTY_ID=$(printf '%s' "$PTY_OPEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).pty_session_id||''))")
+PTY_LEASE=$(printf '%s' "$PTY_OPEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).lease_token||''))")
+if [[ -n "$PTY_ID" && -n "$PTY_LEASE" ]]; then
+  ok "pty session opened via kernel ($PTY_ID, lease pinned at open)"
+else
+  bad "pty open via kernel (got: $(printf '%s' "$PTY_OPEN" | head -c 160))"
+fi
+
+code_of() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).error?.code||'')}catch(e){console.log('')}})"; }
+# GET session / frames / control without principal -> 422 principal_required.
+for PTY_URL in "$PORT/v1/pty/sessions/$PTY_ID" "$PORT/v1/pty/sessions/$PTY_ID/frames?after_seq=0"; do
+  OUT=$(curl -s -w '\n%{http_code}' "http://127.0.0.1:$PTY_URL")
+  R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+  [[ "$R" == "422" && "$C" == "principal_required" ]] && ok "GET $PTY_URL without principal -> 422 principal_required" || bad "no-principal GET expected 422 principal_required, got HTTP $R ($C)"
+done
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -d '{"client_seq":1,"type":"bytes","payload":{"text":"x","byte_length":1}}' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID/control")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "422" && "$C" == "principal_required" ]] && ok "control without principal -> 422 principal_required" || bad "no-principal control expected 422, got HTTP $R ($C)"
+# Wrong owner -> 403 pty_principal_mismatch on GET / frames / control.
+for PTY_URL in "$PORT/v1/pty/sessions/$PTY_ID" "$PORT/v1/pty/sessions/$PTY_ID/frames?after_seq=0"; do
+  OUT=$(curl -s -w '\n%{http_code}' -H 'x-principal-id: evil' "http://127.0.0.1:$PTY_URL")
+  R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+  [[ "$R" == "403" && "$C" == "pty_principal_mismatch" ]] && ok "GET $PTY_URL as non-owner -> 403 pty_principal_mismatch" || bad "non-owner GET expected 403, got HTTP $R ($C)"
+done
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H 'x-principal-id: evil' -H "x-pty-lease: $PTY_LEASE" -d '{"client_seq":1,"type":"bytes","payload":{"text":"x","byte_length":1}}' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID/control")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "403" && "$C" == "pty_principal_mismatch" ]] && ok "control as non-owner -> 403 pty_principal_mismatch" || bad "non-owner control expected 403, got HTTP $R ($C)"
+# Control without lease -> 403 lease_required; with wrong lease -> 403 lease_invalid.
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H 'x-principal-id: pty-owner' -d '{"client_seq":1,"type":"bytes","payload":{"text":"x","byte_length":1}}' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID/control")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "403" && "$C" == "lease_required" ]] && ok "control without lease -> 403 lease_required" || bad "no-lease control expected 403 lease_required, got HTTP $R ($C)"
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H 'x-principal-id: pty-owner' -H 'x-pty-lease: lease_wrong' -d '{"client_seq":1,"type":"bytes","payload":{"text":"x","byte_length":1}}' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID/control")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "403" && "$C" == "lease_invalid" ]] && ok "control with wrong lease -> 403 lease_invalid" || bad "wrong-lease control expected 403 lease_invalid, got HTTP $R ($C)"
+# Frames: lease optional, but a wrong lease is 403 lease_invalid.
+OUT=$(curl -s -w '\n%{http_code}' -H 'x-principal-id: pty-owner' -H 'x-pty-lease: lease_wrong' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID/frames?after_seq=0")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "403" && "$C" == "lease_invalid" ]] && ok "frames with wrong lease -> 403 lease_invalid" || bad "wrong-lease frames expected 403 lease_invalid, got HTTP $R ($C)"
+# Cross-project control: a session of ANOTHER project (owned by pty-owner2)
+# is 403 for pty-owner — ownership is pinned at open, not project membership.
+PTYP2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"pty-fence-2\",\"workspace\":\"/w/pty2\",\"creator_principal_id\":\"pty-owner2\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+PTYWS2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PTYP2/workspaces" -d '{"kind":"scratch","name":"s"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).workspace_id||''))")
+PTY_OPEN2=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/pty/sessions" -H 'content-type: application/json' -H 'x-principal-id: pty-owner2' \
+  -d "{\"project_id\":\"$PTYP2\",\"workspace_id\":\"$PTYWS2\",\"profile\":\"p\",\"target\":\"t\",\"preset\":\"sh\",\"cwd\":\".\"}")
+PTY_ID2=$(printf '%s' "$PTY_OPEN2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).pty_session_id||''))")
+PTY_LEASE2=$(printf '%s' "$PTY_OPEN2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).lease_token||''))")
+if [[ -n "$PTY_ID2" ]]; then
+  OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H 'x-principal-id: pty-owner' -H "x-pty-lease: $PTY_LEASE2" -d '{"client_seq":1,"type":"bytes","payload":{"text":"x","byte_length":1}}' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID2/control")
+  R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+  [[ "$R" == "403" && "$C" == "pty_principal_mismatch" ]] && ok "cross-project control (other owner) -> 403 pty_principal_mismatch" || bad "cross-project control expected 403, got HTTP $R ($C)"
+else
+  bad "second pty session open for cross-project test"
+fi
+# Unknown session id with a valid principal -> 404 (no enumeration).
+OUT=$(curl -s -w '\n%{http_code}' -H 'x-principal-id: pty-owner' "http://127.0.0.1:$PORT/v1/pty/sessions/pty_nope")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "404" && "$C" == "pty_session_not_found" ]] && ok "unknown pty session id -> 404 pty_session_not_found" || bad "unknown session expected 404, got HTTP $R ($C)"
+# Owner + correct lease still controls the session (positive control).
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H 'x-principal-id: pty-owner' -H "x-pty-lease: $PTY_LEASE" -d '{"client_seq":1,"type":"bytes","payload":{"text":"ok","byte_length":2}}' "http://127.0.0.1:$PORT/v1/pty/sessions/$PTY_ID/control")
+R=$(printf '%s' "$OUT" | tail -1)
+[[ "$R" == "200" ]] && ok "owner + correct lease control -> 200" || bad "owner control expected 200, got HTTP $R"
 
 kill "$RUNNER_PID" "$KERNEL_PID" 2>/dev/null || true
 rm -rf "$WORK"

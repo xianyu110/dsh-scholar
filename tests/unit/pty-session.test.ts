@@ -425,46 +425,145 @@ describe('pty session (PTY-01 interface layer)', () => {
       expect(openResp.status).toBe(501)
       expect(((await openResp.json()) as { error: { code: string } }).error.code).toBe('pty_adapter_not_implemented')
 
-      // Control/frames against an unknown session → 404 (fail-closed).
-      const control404 = await fetch(`${url}/v1/pty/sessions/pty_nope/control`, body({ client_seq: 1, type: 'bytes', payload: { text: 'x', byte_length: 1 } }))
+      // Control/frames against an unknown session: principal/lease are
+      // checked BEFORE the session lookup (fail-closed) — a request without
+      // the authenticated principal is 422 principal_required even for a
+      // bogus id (no oracle), and with a valid principal the unknown session
+      // is 404 pty_session_not_found.
+      const controlNoPrincipal = await fetch(`${url}/v1/pty/sessions/pty_nope/control`, body({ client_seq: 1, type: 'bytes', payload: { text: 'x', byte_length: 1 } }))
+      expect(controlNoPrincipal.status).toBe(422)
+      expect(((await controlNoPrincipal.json()) as { error: { code: string } }).error.code).toBe('principal_required')
+      const control404 = await fetch(`${url}/v1/pty/sessions/pty_nope/control`, {
+        ...body({ client_seq: 1, type: 'bytes', payload: { text: 'x', byte_length: 1 } }),
+        headers: { 'content-type': 'application/json', 'x-principal-id': 'pi' },
+      })
       expect(control404.status).toBe(404)
       expect(((await control404.json()) as { error: { code: string } }).error.code).toBe('pty_session_not_found')
-      // Control schema validation → 422.
+      // Control schema validation → 422 (schema parse precedes authz).
       const control422 = await fetch(`${url}/v1/pty/sessions/pty_nope/control`, body({ client_seq: -1, type: 'bytes', payload: { text: 'x', byte_length: 1 } }))
       expect(control422.status).toBe(422)
-      // Frames: bad after_seq → 422; unknown session → 404.
+      // Frames: bad after_seq → 422; unknown session → 404 with principal.
       const frames422 = await fetch(`${url}/v1/pty/sessions/pty_nope/frames?after_seq=abc`)
       expect(frames422.status).toBe(422)
       expect(((await frames422.json()) as { error: { code: string } }).error.code).toBe('pty_after_seq_invalid')
-      const frames404 = await fetch(`${url}/v1/pty/sessions/pty_nope/frames?after_seq=0`)
+      const framesNoPrincipal = await fetch(`${url}/v1/pty/sessions/pty_nope/frames?after_seq=0`)
+      expect(framesNoPrincipal.status).toBe(422)
+      expect(((await framesNoPrincipal.json()) as { error: { code: string } }).error.code).toBe('principal_required')
+      const frames404 = await fetch(`${url}/v1/pty/sessions/pty_nope/frames?after_seq=0`, { headers: { 'x-principal-id': 'pi' } })
       expect(frames404.status).toBe(404)
 
       // A session created through the kernel API (the adapter injection point)
       // is drivable over HTTP: control applies with delivered=false, frames
-      // replay, and the session record is readable.
+      // replay, and the session record is readable. PTY-01 (hardening §5
+      // P0-2): the wire demands the session owner principal on EVERY
+      // operation and the session lease on control (headers below mirror the
+      // BFF injection: x-principal-id from the operator session, x-pty-lease
+      // = the token pinned at open).
       const session = kernel.ptyOpen({ project_id: project.project_id, workspace_id: ws.workspace_id, profile: 'p', target: 't', preset: 'sh', cwd: '.' }, {
         principal: { principal_id: 'pi' },
       })
-      const getResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}`)
+      const ownerHeaders = { 'x-principal-id': 'pi' }
+      const leaseHeaders = { ...ownerHeaders, 'x-pty-lease': session.lease_token ?? '' }
+      const getResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}`, { headers: ownerHeaders })
       expect(getResp.status).toBe(200)
       expect(((await getResp.json()) as { state: string }).state).toBe('open')
-      const ctlResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, body({ client_seq: 1, type: 'bytes', payload: { text: 'ls\n', byte_length: 3 } }))
+      const ctlResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, { ...body({ client_seq: 1, type: 'bytes', payload: { text: 'ls\n', byte_length: 3 } }), headers: leaseHeaders })
       expect(ctlResp.status).toBe(200)
       const ctl = (await ctlResp.json()) as { idempotent: boolean; delivered: boolean }
       expect(ctl.idempotent).toBe(false)
       expect(ctl.delivered).toBe(false) // honest: no real tty behind the session
-      const dupResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, body({ client_seq: 1, type: 'bytes', payload: { text: 'ls\n', byte_length: 3 } }))
+      const dupResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, { ...body({ client_seq: 1, type: 'bytes', payload: { text: 'ls\n', byte_length: 3 } }), headers: leaseHeaders })
       expect(((await dupResp.json()) as { idempotent: boolean }).idempotent).toBe(true)
-      const framesResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/frames?after_seq=0`)
+      const framesResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/frames?after_seq=0`, { headers: ownerHeaders })
       expect(framesResp.status).toBe(200)
       const page = (await framesResp.json()) as { pty_session_id: string; gap: boolean; frames: unknown[] }
       expect(page.pty_session_id).toBe(session.pty_session_id)
       expect(page.gap).toBe(false)
       expect(page.frames).toHaveLength(0) // control frames never leak into output
-      // Close via HTTP control.
-      const closeResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, body({ client_seq: 2, type: 'close', payload: {} }))
+      // Close via HTTP control (owner + lease).
+      const closeResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, { ...body({ client_seq: 2, type: 'close', payload: {} }), headers: leaseHeaders })
       expect(closeResp.status).toBe(200)
-      expect((await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}`)).status).toBe(200)
+      expect((await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}`, { headers: ownerHeaders })).status).toBe(200)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      kernel.close()
+    }
+  })
+
+  it('HTTP /v1/pty/*: principal/owner/lease are mandatory (P0-2 direct-kernel fencing)', async () => {
+    const kernel = freshKernel()
+    const { server, url } = await startKernelServer({ kernel, host: '127.0.0.1', port: 0 })
+    try {
+      const projResp = await fetch(`${url}/v1/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 't', workspace: '/w', brief: makeBrief() }),
+      })
+      expect(projResp.status).toBe(201)
+      const project = (await projResp.json()) as { project_id: string }
+      const ws = kernel.workspaceEnsure(project.project_id, 'scratch', 's')
+      const json = (o: Record<string, unknown>) => ({ 'content-type': 'application/json', ...o })
+      const session = kernel.ptyOpen({ project_id: project.project_id, workspace_id: ws.workspace_id, profile: 'p', target: 't', preset: 'sh', cwd: '.' }, {
+        principal: { principal_id: 'pi-owner' },
+      })
+      const id = session.pty_session_id
+      const lease = session.lease_token ?? ''
+      expect(lease).not.toBe('')
+      const ctl = (clientSeq: number) => JSON.stringify({ client_seq: clientSeq, type: 'bytes', payload: { text: 'x', byte_length: 1 } })
+
+      // Principal required on every operation — missing header is NEVER a pass.
+      for (const [desc, r] of [
+        ['GET session without principal', await fetch(`${url}/v1/pty/sessions/${id}`)],
+        ['frames without principal', await fetch(`${url}/v1/pty/sessions/${id}/frames?after_seq=0`)],
+        ['control without principal', await fetch(`${url}/v1/pty/sessions/${id}/control`, { method: 'POST', headers: json({}), body: ctl(1) })],
+      ] as Array<[string, Response]>) {
+        expect(r.status, desc).toBe(422)
+        expect(((await r.json()) as { error: { code: string } }).error.code, desc).toBe('principal_required')
+      }
+
+      // Owner mismatch → 403 pty_principal_mismatch on GET/frames/control.
+      for (const [desc, r] of [
+        ['GET session as non-owner', await fetch(`${url}/v1/pty/sessions/${id}`, { headers: { 'x-principal-id': 'evil' } })],
+        ['frames as non-owner', await fetch(`${url}/v1/pty/sessions/${id}/frames?after_seq=0`, { headers: { 'x-principal-id': 'evil' } })],
+        ['control as non-owner', await fetch(`${url}/v1/pty/sessions/${id}/control`, { method: 'POST', headers: json({ 'x-principal-id': 'evil', 'x-pty-lease': lease }), body: ctl(1) })],
+      ] as Array<[string, Response]>) {
+        expect(r.status, desc).toBe(403)
+        expect(((await r.json()) as { error: { code: string } }).error.code, desc).toBe('pty_principal_mismatch')
+      }
+
+      // Lease is mandatory on control: missing → 403 lease_required, wrong →
+      // 403 lease_invalid (a guessed/absent token never controls the tty).
+      const noLease = await fetch(`${url}/v1/pty/sessions/${id}/control`, { method: 'POST', headers: json({ 'x-principal-id': 'pi-owner' }), body: ctl(1) })
+      expect(noLease.status).toBe(403)
+      expect(((await noLease.json()) as { error: { code: string } }).error.code).toBe('lease_required')
+      const wrongLease = await fetch(`${url}/v1/pty/sessions/${id}/control`, { method: 'POST', headers: json({ 'x-principal-id': 'pi-owner', 'x-pty-lease': 'lease_wrong' }), body: ctl(1) })
+      expect(wrongLease.status).toBe(403)
+      expect(((await wrongLease.json()) as { error: { code: string } }).error.code).toBe('lease_invalid')
+
+      // Frames: lease is OPTIONAL but when present must be valid.
+      const framesWrongLease = await fetch(`${url}/v1/pty/sessions/${id}/frames?after_seq=0`, { headers: { 'x-principal-id': 'pi-owner', 'x-pty-lease': 'lease_wrong' } })
+      expect(framesWrongLease.status).toBe(403)
+      expect(((await framesWrongLease.json()) as { error: { code: string } }).error.code).toBe('lease_invalid')
+      const framesOkLease = await fetch(`${url}/v1/pty/sessions/${id}/frames?after_seq=0`, { headers: { 'x-principal-id': 'pi-owner', 'x-pty-lease': lease } })
+      expect(framesOkLease.status).toBe(200)
+
+      // The OWNER with the correct lease still controls the session.
+      const ctlOk = await fetch(`${url}/v1/pty/sessions/${id}/control`, { method: 'POST', headers: json({ 'x-principal-id': 'pi-owner', 'x-pty-lease': lease }), body: ctl(1) })
+      expect(ctlOk.status).toBe(200)
+
+      // Cross-project: a session of another project is owned by another
+      // principal — the kernel answers 403, never 200, regardless of which
+      // projects the caller belongs to (ownership is pinned at open).
+      const foreignSession = kernel.ptyOpen({ project_id: project.project_id, workspace_id: ws.workspace_id, profile: 'p', target: 't', preset: 'sh', cwd: '.' }, {
+        principal: { principal_id: 'pi-other' },
+      })
+      const crossControl = await fetch(`${url}/v1/pty/sessions/${foreignSession.pty_session_id}/control`, {
+        method: 'POST',
+        headers: json({ 'x-principal-id': 'pi-owner', 'x-pty-lease': foreignSession.lease_token ?? '' }),
+        body: ctl(1),
+      })
+      expect(crossControl.status).toBe(403)
+      expect(((await crossControl.json()) as { error: { code: string } }).error.code).toBe('pty_principal_mismatch')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
       kernel.close()

@@ -22,7 +22,7 @@ import { describe, expect, it, afterEach } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -311,6 +311,123 @@ describe('UiKernelSidecar (research-ui standalone) — SIDE-01 parity', () => {
       expect((await fetch(`http://127.0.0.1:${port}/v1/health`)).ok).toBe(true)
     } finally {
       await sidecarA.stop()
+    }
+  })
+})
+
+describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kernel-token file + enforced Bearer on the spawned kernel', () => {
+  const tokenFile = (dataDir: string) => join(dataDir, 'kernel-token')
+  const hex32 = /^[0-9a-f]{32}$/
+
+  async function request(port: number, path: string, method = 'GET', headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; code: string }> {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const envelope = await res.json().catch(() => ({})) as { error?: { code?: string } }
+    return { status: res.status, code: envelope.error?.code ?? '' }
+  }
+
+  it('KernelSidecar: creates a 0600 kernel-token file (random 32 hex), reuses it, injects it into the kernel, and the kernel enforces the bearer', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-kt-'))
+    tempDirs.push(dataDir)
+    const port = await freePort()
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    await sidecar.start()
+    const pid = readEndpoint(dataDir).pid as number
+    allPids.push(pid)
+    try {
+      // token file: regular file, 0600, 32 hex, non-empty, not a symlink.
+      const file = tokenFile(dataDir)
+      const token = readFileSync(file, 'utf8').trim()
+      expect(token).toMatch(hex32)
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(lstatSync(file).isSymbolicLink()).toBe(false)
+      // the sidecar's getter agrees with the file.
+      expect(sidecar.kernelToken).toBe(token)
+      // direct read without the bearer -> 401 (the local-process hole is closed).
+      const noAuth = await request(port, '/v1/projects')
+      expect(noAuth.status).toBe(401)
+      expect(noAuth.code).toBe('unauthorized')
+      // wrong bearer -> 401.
+      expect((await request(port, '/v1/projects', 'GET', { authorization: 'Bearer wrong' })).status).toBe(401)
+      // write without the bearer -> 401.
+      const write = await request(port, '/v1/projects', 'POST', {}, { name: 'x', workspace: '/w' })
+      expect(write.status).toBe(401)
+      // the file token authenticates (read + write).
+      expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
+      // health stays exempt (sidecar handshake without a token still works).
+      expect((await request(port, '/v1/health')).status).toBe(200)
+    } finally {
+      await sidecar.stop()
+    }
+  })
+
+  it('KernelSidecar: the token is reused across instances on the same dataDir and survives stop(); an explicit token option seeds the file', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-kt-reuse-'))
+    tempDirs.push(dataDir)
+    const port = await freePort()
+    const sidecarA = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    await sidecarA.start()
+    const pid = readEndpoint(dataDir).pid as number
+    allPids.push(pid)
+    const token = readFileSync(tokenFile(dataDir), 'utf8').trim()
+    await sidecarA.stop()
+    // stop() removes the endpoint.json but NOT the kernel-token file.
+    expect(existsSync(tokenFile(dataDir))).toBe(true)
+    expect(existsSync(join(dataDir, 'runtime', 'endpoint.json'))).toBe(false)
+    // a fresh sidecar on the same dataDir reuses the same token.
+    const sidecarB = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    await sidecarB.start()
+    allPids.push(readEndpoint(dataDir).pid as number)
+    try {
+      expect(sidecarB.kernelToken).toBe(token)
+      // the respawned kernel demands the SAME token.
+      expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
+      expect((await request(port, '/v1/projects')).status).toBe(401)
+    } finally {
+      await sidecarB.stop()
+    }
+    // an explicit token option seeds a fresh dataDir's kernel-token file.
+    const seedDir = mkdtempSync(join(tmpdir(), 'sidecar-kt-seed-'))
+    tempDirs.push(seedDir)
+    const seedPort = await freePort()
+    const seeded = new KernelSidecar({ host: '127.0.0.1', port: seedPort, dataDir: seedDir, token: 'explicit-seed-token', log: () => undefined })
+    await seeded.start()
+    allPids.push(readEndpoint(seedDir).pid as number)
+    try {
+      expect(readFileSync(tokenFile(seedDir), 'utf8').trim()).toBe('explicit-seed-token')
+      expect(seeded.kernelToken).toBe('explicit-seed-token')
+      expect((await request(seedPort, '/v1/projects', 'GET', { authorization: 'Bearer explicit-seed-token' })).status).toBe(200)
+      expect((await request(seedPort, '/v1/projects')).status).toBe(401)
+    } finally {
+      await seeded.stop()
+    }
+  })
+
+  it('UiKernelSidecar: same kernel-token contract — 0600 file, injected token, bearer enforced, health exempt', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-ui-kt-'))
+    tempDirs.push(dataDir)
+    const port = await freePort()
+    const sidecar = new UiKernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    await sidecar.start()
+    const pid = readEndpoint(dataDir).pid as number
+    allPids.push(pid)
+    try {
+      const token = readFileSync(tokenFile(dataDir), 'utf8').trim()
+      expect(token).toMatch(hex32)
+      expect(statSync(tokenFile(dataDir)).mode & 0o777).toBe(0o600)
+      expect(sidecar.kernelToken).toBe(token)
+      expect((await request(port, '/v1/projects')).status).toBe(401)
+      expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
+      expect((await request(port, '/v1/projects', 'POST', {}, { name: 'x', workspace: '/w' })).status).toBe(401)
+      expect((await request(port, '/v1/health')).status).toBe(200)
+      // service-token file is still written independently (two layers).
+      expect(existsSync(join(dataDir, 'service-token'))).toBe(true)
+      expect(readFileSync(join(dataDir, 'service-token'), 'utf8').trim()).not.toBe(token)
+    } finally {
+      await sidecar.stop()
     }
   })
 })

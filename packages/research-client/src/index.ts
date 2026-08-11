@@ -208,11 +208,14 @@ export class ResearchClient {
   }
 
   /**
-   * §11.3 (SCH-EXEC-002): archive a directory's ACTUAL file contents into a
-   * content-addressed `code` artifact (+ `manifest` artifact). The Runner
-   * materializes jobs from this snapshot — never from agent host dirs.
+   * §11.3 (SCH-EXEC-002): archive a project workspace's ACTUAL file contents
+   * into a content-addressed `code` artifact (+ `manifest` artifact). The
+   * Runner materializes jobs from this snapshot — never from agent host dirs.
+   * P0-4 (SNAPSHOT-01/API-01): only `workspace_id` + a root-relative path are
+   * accepted; `rootRelativePath` '' (default) archives the whole workspace.
+   * The deprecated host-`path` shape is refused by the server (422).
    */
-  snapshotCodeArchive(projectId: string, path: string, description?: string): Promise<{
+  snapshotCodeArchive(projectId: string, workspaceId: string, rootRelativePath = '', description?: string): Promise<{
     snapshot_id: string
     project_id: string
     path: string
@@ -226,7 +229,7 @@ export class ResearchClient {
     sha256: string
     created_at: string
   }> {
-    return this.request('POST', `/v1/projects/${projectId}/code-snapshots`, { path, description })
+    return this.request('POST', `/v1/projects/${projectId}/code-snapshots`, { workspace_id: workspaceId, root_relative_path: rootRelativePath, description })
   }
 
   // ── jobs ─────────────────────────────────────────────────────────────────
@@ -430,7 +433,13 @@ export class ResearchClient {
   async fetchArtifact(projectId: string, sha256OrId: string): Promise<string | null> {
     const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
     try {
-      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { signal: AbortSignal.timeout(10000) })
+      const response = await fetch(`${this.endpoint}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
+        // §5 P0-1 (hardening API-01/SIDE-01): token-configured kernels reject
+        // bearer-less requests with 401 — the client must authenticate here
+        // exactly like the typed request() path above.
+        headers: { ...this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {} },
+        signal: AbortSignal.timeout(10000),
+      })
       if (!response.ok) return null
       return await response.text()
     } catch {

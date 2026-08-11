@@ -21,9 +21,10 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { ArtifactCas } from './cas.js'
+import { mkdirMode } from './fs-modes.js'
 
 export interface StartupBackupResult {
   backup_path: string
@@ -56,7 +57,9 @@ export function createStartupBackup(opts: {
   }
   const dataDir = resolve(dirname(dbPath))
   const backupsDir = join(dataDir, 'backups')
-  mkdirSync(backupsDir, { recursive: true })
+  // Backup dir holds 0600 files — explicit 0700, umask-independent
+  // (WORK-01 §5: mkdir(mode) alone is umask-dependent).
+  mkdirMode(backupsDir, 0o700)
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const backupPath = join(backupsDir, `kernel-${ts}.db`)
 

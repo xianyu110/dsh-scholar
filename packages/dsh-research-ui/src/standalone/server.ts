@@ -562,6 +562,18 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   // runner-keys, recover, verified/accept, approve) keep working through the
   // proxy while the browser never sees or supplies the credential.
   const serviceToken = sidecar.serviceToken
+  // §5 P0-1 (hardening API-01/SIDE-01): the kernel's PUBLIC bearer token
+  // (0600 <dataDir>/kernel-token, same file the sidecar injected into the
+  // kernel). EVERY upstream request — proxy and internal lookups alike —
+  // carries `Authorization: Bearer <kernelToken>`; the browser never sees
+  // or supplies it (the browser authenticates to the BFF with its own token).
+  const kernelToken = sidecar.kernelToken
+  /** Headers shared by every upstream kernel request: the BFF's own service
+   * identity + public bearer. Never forwarded from the client. */
+  const upstreamAuthHeaders: Record<string, string> = {
+    authorization: `Bearer ${kernelToken}`,
+    'x-service-token': serviceToken,
+  }
 
   // The client bundle ships from this package's lib/client.js.
   const bundlePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
@@ -582,20 +594,16 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   // 映射为单一 pi"). Project-scoped routes first resolve membership via the
   // kernel's authoritative project_members table; missing project AND
   // insufficient membership both answer 404 (no enumeration, api-contracts §1).
-  const memberCache = new Map<string, Promise<Array<{ principal_id: string; role: string }> | null>>()
+  // GOV-01/P0-2 (hardening §5): membership is queried FRESH on every request —
+  // no Promise/result cache (a revoked member must lose access on the very
+  // next request; acceptance-tests.md §21 membership-revocation-no-stale-cache).
   async function projectMembers(projectId: string): Promise<Array<{ principal_id: string; role: string }> | null> {
-    const key = `p:${projectId}`
-    let hit = memberCache.get(key)
-    if (hit === undefined) {
-      hit = fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/members`, {
-        headers: { accept: 'application/json' },
-      }).then(async (r) => {
-        if (!r.ok) return null
-        return (await r.json()) as Array<{ principal_id: string; role: string }>
-      }).catch(() => null)
-      memberCache.set(key, hit)
-    }
-    return hit
+    return fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/members`, {
+      headers: { accept: 'application/json', ...upstreamAuthHeaders },
+    }).then(async (r) => {
+      if (!r.ok) return null
+      return (await r.json()) as Array<{ principal_id: string; role: string }>
+    }).catch(() => null)
   }
   async function isProjectMember(projectId: string): Promise<boolean> {
     if (options.principal === null) return true
@@ -621,7 +629,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     let hit = jobProjectCache.get(key)
     if (hit === undefined) {
       hit = fetch(`${endpoint}/v1/jobs/${encodeURIComponent(jobId)}`, {
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...upstreamAuthHeaders },
       }).then(async (r) => {
         if (!r.ok) return null
         const j = await r.json() as { project_id?: string }
@@ -647,7 +655,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     let hit = childProjectCache.get(key)
     if (hit === undefined) {
       hit = fetch(`${endpoint}/v1/topology/${encodeURIComponent(childId)}`, {
-        headers: { accept: 'application/json', ...options.principal !== null ? { 'x-principal-id': options.principal } : {} },
+        headers: { accept: 'application/json', ...upstreamAuthHeaders, ...options.principal !== null ? { 'x-principal-id': options.principal } : {} },
       }).then(async (r) => {
         if (!r.ok) return null
         const detail = await r.json() as { project_id?: string }
@@ -669,6 +677,101 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     // below), never misread as projects.
     if (parts.length >= 3 && (parts[0] === 'v1' || parts[0] === 'v2') && parts[1] === 'projects') return parts[2] ?? null
     return null
+  }
+  // API-01/PTY-01 (hardening §5 P0-2): global-id routes — Artifact,
+  // Document/TeX, PTY session and global events carry a resource id (or a
+  // query project) instead of a path project. Each class resolves the
+  // OWNING project through the kernel BEFORE forwarding (one authoritative
+  // resolver per class); unknown ids, resolution failures and foreign
+  // projects all answer 404 at the BFF (no enumeration, fail-closed) and
+  // the kernel re-validates the actual read/write. Resolution results are
+  // NOT cached: the resource→project mapping is immutable, but keeping the
+  // round-trip per request keeps revocation semantics identical to the
+  // uncached membership lookup above (simple, authoritative).
+  /** Artifact: /v1/artifacts/{id} (GET/HEAD). Prefers an explicit
+   * ?project_id= (kernel project-scoped lookup, membership checked here);
+   * otherwise HEAD the kernel route and read the authoritative
+   * x-project-id response header (no body bytes are transferred). A 409
+   * ambiguous blob (multiple projects, no query) resolves to null → 404. */
+  async function artifactProjectId(artifactId: string, projectQuery: string | null): Promise<string | null> {
+    if (projectQuery !== null && projectQuery !== '') return projectQuery
+    return fetch(`${endpoint}/v1/artifacts/${encodeURIComponent(artifactId)}`, {
+      method: 'HEAD',
+      headers: { accept: 'application/json', ...upstreamAuthHeaders },
+    }).then(async (r) => {
+      if (!r.ok) return null
+      const header = r.headers.get('x-project-id')
+      return typeof header === 'string' && header !== '' ? header : null
+    }).catch(() => null)
+  }
+  /** Document/TeX: /v1/documents/{id}/* resolves via the kernel's own
+   * document projection (GET …/tree → document.project_id). Unknown or
+   * malformed document ids resolve to null → 404. */
+  async function documentProjectId(documentId: string): Promise<string | null> {
+    return fetch(`${endpoint}/v1/documents/${encodeURIComponent(documentId)}/tree`, {
+      headers: { accept: 'application/json', ...upstreamAuthHeaders },
+    }).then(async (r) => {
+      if (!r.ok) return null
+      const tree = await r.json() as { document?: { project_id?: unknown } }
+      return typeof tree.document?.project_id === 'string' && tree.document.project_id !== '' ? tree.document.project_id : null
+    }).catch(() => null)
+  }
+  /** PTY session: /v1/pty/sessions/{id}* resolves via the kernel session
+   * read (project_id is pinned at open). The kernel demands the
+   * authenticated principal on the read (fail-closed) and hides foreign
+   * sessions (403) — both resolve to null here → 404, so a non-owner
+   * member never learns the session's project either. */
+  async function ptySessionProjectId(sessionId: string): Promise<string | null> {
+    return fetch(`${endpoint}/v1/pty/sessions/${encodeURIComponent(sessionId)}`, {
+      headers: { accept: 'application/json', ...upstreamAuthHeaders, ...options.principal !== null ? { 'x-principal-id': options.principal } : {} },
+    }).then(async (r) => {
+      if (!r.ok) return null
+      const session = await r.json() as { project_id?: unknown }
+      return typeof session.project_id === 'string' && session.project_id !== '' ? session.project_id : null
+    }).catch(() => null)
+  }
+  /** Global events: /v1/events requires an explicit ?project_id= (the
+   * kernel's listEvents is otherwise cross-project); absent scope → null →
+   * 404 fail-closed. */
+  async function eventsProjectId(search: URLSearchParams): Promise<string | null> {
+    const projectId = search.get('project_id')
+    return projectId !== null && projectId !== '' ? projectId : null
+  }
+  /** Dispatch one global-id route class to its authoritative resolver. */
+  async function globalResourceProject(pathname: string, search: URLSearchParams, method: string): Promise<string | null> {
+    const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    if (parts.length >= 1 && parts[0] === 'v1') {
+      if (parts[1] === 'events' && parts.length === 2) {
+        return eventsProjectId(search)
+      }
+      if (parts.length >= 3) {
+        if (parts[1] === 'artifacts' && (method === 'GET' || method === 'HEAD')) {
+          return artifactProjectId(parts[2] ?? '', search.get('project_id'))
+        }
+        if (parts[1] === 'documents' && parts[2] !== undefined && parts[2] !== '') {
+          return documentProjectId(parts[2]!)
+        }
+        if (parts[1] === 'pty' && parts[2] === 'sessions' && parts[3] !== undefined && parts[3] !== '') {
+          return ptySessionProjectId(parts[3]!)
+        }
+      }
+    }
+    return null
+  }
+  /** True when the path is one of the global-id classes the BFF resolves
+   * (mirrors globalResourceProject's match conditions) — used to answer 404
+   * for unresolvable ids instead of forwarding. */
+  function isGlobalIdRoute(pathname: string, method: string): boolean {
+    const parts = pathname.split('/').filter(Boolean)
+    if (parts.length >= 1 && parts[0] === 'v1') {
+      if (parts[1] === 'events' && parts.length === 2) return true
+      if (parts.length >= 3) {
+        if (parts[1] === 'artifacts' && (method === 'GET' || method === 'HEAD')) return true
+        if (parts[1] === 'documents' && parts[2] !== undefined && parts[2] !== '') return true
+        if (parts[1] === 'pty' && parts[2] === 'sessions' && parts[3] !== undefined && parts[3] !== '') return true
+      }
+    }
+    return false
   }
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
@@ -871,7 +974,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const result = await multiSourceSearch(query, { limit: 20 })
           const snapshotResponse = await fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/corpus`, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            headers: { 'content-type': 'application/json', accept: 'application/json', ...upstreamAuthHeaders },
             body: JSON.stringify({
               queries: result.queries,
               papers: result.hits.map(h => h.paper),
@@ -935,9 +1038,27 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             // NOT a project id; treating it as one caused false 404s).
             const gateId = url.pathname.split('/').filter(Boolean)[2] ?? ''
             if (gateId !== '') {
-              memberProjectId = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}`, { headers: { accept: 'application/json' } })
+              memberProjectId = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}`, { headers: { accept: 'application/json', ...upstreamAuthHeaders } })
                 .then(async r => (r.ok ? (await r.json() as { project_id?: string }).project_id ?? null : null))
                 .catch(() => null)
+            }
+          }
+          if (memberProjectId === null) {
+            // API-01/PTY-01 (hardening §5 P0-2): global-id routes — artifact,
+            // document/TeX, pty session and global events ids carry no path
+            // project; the BFF resolves the owning project through the kernel
+            // (per-class authoritative resolver above) and answers 404 for
+            // unknown ids AND foreign projects BEFORE forwarding — no
+            // enumeration, same fail-closed contract as project-scoped routes.
+            memberProjectId = await globalResourceProject(url.pathname, url.searchParams, method)
+            if (memberProjectId === null && isGlobalIdRoute(url.pathname, method)) {
+              // Unresolvable global-id route → 404, never forwarded: the
+              // kernel's GET /v1/events WITHOUT ?project_id= is a CROSS-PROJECT
+              // dump, unknown document ids would answer kernel 422, and an
+              // ambiguous artifact (409) leaks nothing. Unknown id and foreign
+              // project are the same 404 at this surface.
+              sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
+              return
             }
           }
           if (memberProjectId !== null && !(await isProjectMember(memberProjectId))) {
@@ -946,7 +1067,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           }
           // The projects LIST is filtered to the operator's memberships.
           if (url.pathname === '/v1/projects' && method === 'GET') {
-            const upstreamList = await fetch(`${endpoint}/v1/projects`, { headers: { accept: 'application/json' } })
+            const upstreamList = await fetch(`${endpoint}/v1/projects`, { headers: { accept: 'application/json', ...upstreamAuthHeaders } })
             if (!upstreamList.ok) {
               sendJson(res, 502, { ok: false, error: 'research kernel unavailable' })
               return
@@ -1024,12 +1145,22 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         const proxyHeaders: Record<string, string> = isMultipart
           ? { 'content-type': incomingContentType, accept: 'application/json' }
           : { 'content-type': 'application/json', accept: 'application/json' }
+        // §5 P0-1 (hardening API-01/SIDE-01): the BFF's OWN kernel bearer
+        // (0600 dataDir/kernel-token) — the kernel demands it on every
+        // non-health route. The browser's token never reaches the kernel;
+        // the BFF substitutes its service credential here.
+        proxyHeaders['authorization'] = `Bearer ${kernelToken}`
         // §4 P0 (API-01/EVID-01): internal routes demand the service token.
         // The BFF injects its OWN credential (server-derived, 0600 file) and
         // never forwards a client-supplied x-service-token; the kernel
         // ignores the header on non-internal routes.
         proxyHeaders['x-service-token'] = serviceToken
-        for (const name of ['idempotency-key', 'x-request-id']) {
+        // PTY-01 (hardening §5 P0-2): x-pty-lease (the opaque session lease
+        // pinned at open) passes through so control/frames can present it —
+        // the KERNEL validates it against the session owner; the BFF never
+        // reads or mints it. Idempotency-Key/X-Request-Id keep passing
+        // through per api-contracts.md §1.
+        for (const name of ['idempotency-key', 'x-request-id', 'x-pty-lease']) {
           const value = req.headers[name]
           if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
         }
@@ -1058,37 +1189,68 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         if (options.principal !== null && method === 'POST' && /^\/v1\/projects\/[^/]+\/jobs$/.test(url.pathname)) {
           proxyHeaders['x-principal-id'] = options.principal
         }
-        // PTY-01 (execution-runtime.md §6.1): the kernel demands the
-        // authenticated principal on pty open (x-principal-id, fail-closed)
-        // and pins it on the session row. The BFF resolves BOTH here:
-        // membership of the operator in the body's project is enforced
-        // BEFORE forwarding (unknown/foreign project → 404, no session row,
-        // no tty spawned) and the identity header is derived server-side
-        // from the operator session — a client-supplied value is never
-        // trusted. viewer/auditor are read-only surfaces → 403 (same role
-        // policy as project-scoped v2 writes).
-        if (options.principal !== null && method === 'POST' && url.pathname === '/v1/pty/sessions') {
-          let ptyProjectId: string | null = null
+        // PTY-01 (execution-runtime.md §6.1, hardening §5 P0-2): the kernel
+        // demands the authenticated principal on EVERY pty operation — open,
+        // session read, control and frames (fail-closed: 422
+        // principal_required without it; 403 for a non-owner; control
+        // additionally demands the session lease). The BFF injects the
+        // loopback operator identity on ALL /v1/pty/sessions/* forwards
+        // (server-derived, never a client-supplied value) and passes the
+        // client's x-pty-lease through (the kernel validates it). At OPEN
+        // the BFF additionally resolves the body's project and enforces
+        // membership BEFORE forwarding (unknown/foreign project → 404, no
+        // session row, no tty spawned); viewer/auditor are read-only
+        // surfaces → 403 (same role policy as project-scoped v2 writes).
+        if (options.principal !== null && url.pathname.startsWith('/v1/pty/sessions')) {
+          if (method === 'POST' && url.pathname === '/v1/pty/sessions') {
+            let ptyProjectId: string | null = null
+            if (typeof body === 'string' && body !== '') {
+              try {
+                const parsed = JSON.parse(body) as { project_id?: unknown }
+                if (typeof parsed.project_id === 'string' && parsed.project_id !== '') ptyProjectId = parsed.project_id
+              } catch { /* invalid JSON → the kernel answers 422 validation_error */ }
+            }
+            if (ptyProjectId === null) {
+              sendJson(res, 422, { ok: false, error: 'project_id required' })
+              return
+            }
+            if (!(await isProjectMember(ptyProjectId))) {
+              sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
+              return
+            }
+            const ptyRole = await projectRole(ptyProjectId)
+            if (ptyRole === 'viewer' || ptyRole === 'auditor') {
+              sendJson(res, 403, { ok: false, error: 'role forbidden' })
+              return
+            }
+          }
+          proxyHeaders['x-principal-id'] = options.principal
+        }
+        // API-01/PTY-01 (hardening §5 P0-2): POST /v1/artifacts is a
+        // global-id WRITE — the target project lives in the body, not the
+        // path. Mirror the pty-open rule: membership of the operator in the
+        // body's project is enforced BEFORE forwarding (unknown/foreign
+        // project → 404, no artifact row, no CAS bytes) and viewer/auditor
+        // cannot register artifacts (403, same role policy).
+        if (options.principal !== null && method === 'POST' && url.pathname === '/v1/artifacts') {
+          let artifactProjectIdBody: string | null = null
           if (typeof body === 'string' && body !== '') {
             try {
               const parsed = JSON.parse(body) as { project_id?: unknown }
-              if (typeof parsed.project_id === 'string' && parsed.project_id !== '') ptyProjectId = parsed.project_id
+              if (typeof parsed.project_id === 'string' && parsed.project_id !== '') artifactProjectIdBody = parsed.project_id
             } catch { /* invalid JSON → the kernel answers 422 validation_error */ }
           }
-          if (ptyProjectId === null) {
-            sendJson(res, 422, { ok: false, error: 'project_id required' })
-            return
+          if (artifactProjectIdBody !== null) {
+            if (!(await isProjectMember(artifactProjectIdBody))) {
+              sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
+              return
+            }
+            const artifactRole = await projectRole(artifactProjectIdBody)
+            if (artifactRole === 'viewer' || artifactRole === 'auditor') {
+              sendJson(res, 403, { ok: false, error: 'role forbidden' })
+              return
+            }
           }
-          if (!(await isProjectMember(ptyProjectId))) {
-            sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
-            return
-          }
-          const ptyRole = await projectRole(ptyProjectId)
-          if (ptyRole === 'viewer' || ptyRole === 'auditor') {
-            sendJson(res, 403, { ok: false, error: 'role forbidden' })
-            return
-          }
-          proxyHeaders['x-principal-id'] = options.principal
         }
         // SUBAGENT-01 (trajectory-subagents.md §7): the kernel demands the
         // authenticated principal on /v1/topology/* (fail-closed) — the BFF

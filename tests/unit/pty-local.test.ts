@@ -463,7 +463,7 @@ describe('LocalPtyAdapter (PTY-01 real pseudo-terminal)', () => {
       // Member opens a REAL session → 201, pinned principal, adapter id.
       const openResp = await fetch(`${url}/v1/pty/sessions`, body(openBody, { 'x-principal-id': 'pi-1' }))
       expect(openResp.status).toBe(201)
-      const session = (await openResp.json()) as { pty_session_id: string; principal_id: string; adapter_id: string; state: string }
+      const session = (await openResp.json()) as { pty_session_id: string; principal_id: string; adapter_id: string; state: string; lease_token: string | null }
       expect(session.principal_id).toBe('pi-1')
       expect(session.adapter_id).toBe('local-pty')
       // Control with a DIFFERENT authenticated principal → 403.
@@ -473,18 +473,24 @@ describe('LocalPtyAdapter (PTY-01 real pseudo-terminal)', () => {
       ))
       expect(wrongOwner.status).toBe(403)
       expect(((await wrongOwner.json()) as { error: { code: string } }).error.code).toBe('pty_principal_mismatch')
-      // Owner drives the real tty over HTTP and replays frames.
+      // Owner drives the real tty over HTTP and replays frames. PTY-01
+      // (hardening §5 P0-2): control is fail-closed on principal + owner +
+      // lease — the owner sends the lease pinned at open.
+      const ownerLease = { 'x-principal-id': 'pi-1', 'x-pty-lease': session.lease_token ?? '' }
       const ctlText = `echo "HTTP-PTY-OK=$(printf ok)"\n`
       const ctl = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, body(
         { client_seq: 1, type: 'bytes', payload: { text: ctlText, byte_length: Buffer.byteLength(ctlText) } },
-        { 'x-principal-id': 'pi-1' },
+        ownerLease,
       ))
       expect(ctl.status).toBe(200)
       expect(((await ctl.json()) as { delivered: boolean }).delivered).toBe(true)
       const deadline = Date.now() + 10_000
       let text = ''
       while (Date.now() < deadline) {
-        const page = (await (await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/frames?after_seq=0`)).json()) as {
+        // Frames replay: principal + owner required (lease optional).
+        const page = (await (await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/frames?after_seq=0`, {
+          headers: { 'x-principal-id': 'pi-1' },
+        })).json()) as {
           frames: Array<{ type: string; payload: { text?: string } }>
         }
         text = page.frames.filter(f => f.type === 'output').map(f => f.payload.text ?? '').join('')
@@ -495,10 +501,12 @@ describe('LocalPtyAdapter (PTY-01 real pseudo-terminal)', () => {
       // Close via HTTP control → closed + the real tty is gone.
       const closeResp = await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}/control`, body(
         { client_seq: 2, type: 'close', payload: {} },
-        { 'x-principal-id': 'pi-1' },
+        ownerLease,
       ))
       expect(closeResp.status).toBe(200)
-      const afterClose = (await (await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}`)).json()) as { state: string }
+      const afterClose = (await (await fetch(`${url}/v1/pty/sessions/${session.pty_session_id}`, {
+        headers: { 'x-principal-id': 'pi-1' },
+      })).json()) as { state: string }
       expect(afterClose.state).toBe('closed')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))

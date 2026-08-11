@@ -1,0 +1,102 @@
+/**
+ * P0-3 (TEX-01/TEX-03) manuscript open/preview flow — PURE client logic
+ * (no DOM, no fetch, no module state) so the read-only open decision and
+ * the live-preview panel model are unit-testable without a browser.
+ *
+ *  - resolveOpenDocument: GET-first-then-create — a render/rerender never
+ *    writes: the existing workspace is returned as-is and create() runs
+ *    ONLY when the read-only GET found nothing.
+ *  - previewPanelModel: maps the server preview projection
+ *    ({ pending, builds[] } from GET /v1/documents/{id}/preview-builds)
+ *    onto the minimal UI model: headline status text, stale flag and
+ *    whether the newest succeeded preview has a downloadable PDF.
+ */
+import type { ManuscriptBuild } from './types'
+
+export interface OpenDocumentResult { document_id: string }
+
+/**
+ * P0-3 (TEX-03): fire the save-success preview hook EXACTLY ONCE per
+ * successful save. The kernel owns the debounce timer (default 800ms) and
+ * coalesces rapid saves — the client never schedules its own timer and
+ * never fires more than once per save. Best-effort: a failed hook call
+ * returns false but must NOT fail the save (the write already committed).
+ */
+export async function triggerPreviewAfterSave(
+  documentId: string,
+  postPreview: (documentId: string) => Promise<unknown>,
+): Promise<boolean> {
+  if (documentId === '') return false
+  return (await postPreview(documentId)) !== null
+}
+
+/**
+ * P0-3 (TEX-01): open a manuscript read-only first; create only when
+ * nothing exists yet. `getExisting` must be the strictly read-only GET
+ * (server 404s when absent — never creates), `create` the POST that
+ * generates on first use. A failed creation degrades to the caller's
+ * "workspace unavailable" marker ('' — same contract as the previous
+ * always-POST flow).
+ */
+export async function resolveOpenDocument(
+  getExisting: () => Promise<OpenDocumentResult | null>,
+  create: () => Promise<OpenDocumentResult | null>,
+): Promise<OpenDocumentResult> {
+  const existing = await getExisting()
+  if (existing !== null) return existing
+  return (await create()) ?? { document_id: '' }
+}
+
+export type PreviewHeadline =
+  | 'manuscript.preview.pending'
+  | 'manuscript.preview.queued'
+  | 'manuscript.preview.running'
+  | 'manuscript.preview.succeeded'
+  | 'manuscript.preview.failed'
+  | 'manuscript.preview.cancelled'
+  | 'manuscript.preview.superseded'
+  | 'manuscript.preview.none'
+  | 'manuscript.preview.unknown'
+
+export interface PreviewPanelModel {
+  /** i18n key for the headline status text. */
+  headline: PreviewHeadline
+  /** Raw server status ('pending' | build status | 'none' | 'unknown'). */
+  status: string
+  /** Newest preview build is older than the document revision → stale PDF. */
+  stale: boolean
+  /** Newest preview build succeeded with a pdf_artifact → PDF link shown. */
+  hasPdf: boolean
+}
+
+const KNOWN_BUILD_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancelled', 'superseded'] as const
+
+/**
+ * P0-3 (TEX-03): minimal viable preview panel model from the server
+ * projection. A durable pending debounce request headlines 'pending' (the
+ * kernel owns the timer — UI reconnect/kernel restart re-project it).
+ * Otherwise the NEWEST preview build's status drives the headline; stale
+ * (build.revision < document.revision) and PDF availability come from it.
+ * Unknown statuses fall back to a safe 'unknown' headline (never a raw
+ * missing i18n key).
+ */
+export function previewPanelModel(
+  pending: { revision: number } | null,
+  builds: ManuscriptBuild[],
+  documentRevision: number,
+): PreviewPanelModel {
+  if (pending !== null) {
+    return { headline: 'manuscript.preview.pending', status: 'pending', stale: false, hasPdf: false }
+  }
+  const latest = builds[0]
+  if (latest === undefined) {
+    return { headline: 'manuscript.preview.none', status: 'none', stale: false, hasPdf: false }
+  }
+  const known = (KNOWN_BUILD_STATUSES as readonly string[]).includes(latest.status)
+  return {
+    headline: known ? `manuscript.preview.${latest.status}` as PreviewHeadline : 'manuscript.preview.unknown',
+    status: latest.status,
+    stale: latest.revision < documentRevision,
+    hasPdf: latest.status === 'succeeded' && latest.pdf_artifact !== null,
+  }
+}

@@ -8,10 +8,14 @@
  * valid name/description frontmatter, and the standalone unlock page is
  * bilingual through data-i18n keys backed by the zh/en locale dictionaries.
  * Full host-boot assertions belong to the pending DSH fixture job (CI-01).
+ *
+ * CI-01 / hardening §5: every pnpm invocation goes through `resolvePnpm()`
+ * (npm_execpath → PATH probe → explicit install hint), so the suite is
+ * reproducible even when pnpm is not on PATH.
  */
 import { describe, expect, it, beforeAll } from 'vitest'
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, realpathSync, lstatSync, statSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, realpathSync, lstatSync, statSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +39,66 @@ function run(cmd: string, args: string[], cwd: string): string {
   return execFileSync(cmd, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
+/**
+ * Resolve the pnpm executable (CI-01 / hardening-v0.2-status.md §5:
+ * "package manager 版本与调用入口固定；当前 commit 证据可复现").
+ *
+ * 1. `process.env.npm_execpath` — when this process was started by pnpm (a
+ *    `pnpm test`/lifecycle script, or any caller that exports it), npm sets
+ *    it to the ACTUAL pnpm CLI entry (e.g. `.../pnpm.cjs`/`pnpm.mjs`). Using
+ *    it first makes the suite work even when pnpm is NOT on PATH.
+ * 2. PATH probe (`pnpm --version`) — covers `pnpm exec`-style invocations
+ *    where npm_execpath is unset but pnpm is on PATH.
+ * 3. Otherwise THROW an explicit install hint — never a bare ENOENT.
+ */
+let resolvedPnpm: string | null = null
+function resolvePnpm(): string {
+  if (resolvedPnpm !== null) return resolvedPnpm
+  const fromNpm = process.env.npm_execpath
+  if (fromNpm !== undefined && fromNpm !== '' && /[\\/]pnpm(?:\.cjs|\.js|\.mjs|\.cmd|\.exe)?$/i.test(fromNpm)) {
+    resolvedPnpm = fromNpm
+    return fromNpm
+  }
+  const probe = spawnSync('pnpm', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  if (probe.error === undefined && probe.status === 0) {
+    resolvedPnpm = 'pnpm'
+    return 'pnpm'
+  }
+  throw new Error(
+    'pnpm executable not found: run the tests through pnpm (`pnpm test`) so npm_execpath points at ' +
+    'the pnpm CLI, or add pnpm to PATH (install with: npm i -g pnpm). ' +
+    `(probe: pnpm --version ${probe.error !== undefined ? probe.error.message : `exited ${probe.status}`})`,
+  )
+}
+
+/**
+ * Child env for every spawned pnpm: when the resolver used `npm_execpath`
+ * (the pnpm CLI lives OUTSIDE PATH), prepend a shim dir containing a `pnpm`
+ * executable so nested lifecycle `pnpm` calls (e.g. the root `prepare` →
+ * `pnpm run build:plugin`) resolve the SAME CLI — pnpm's own run-script
+ * PATH injection only re-adds `node_modules/.bin`, not the pnpm bin dir.
+ * When pnpm is on PATH this is a plain inherited env.
+ */
+let pnpmShimDir: string | null = null
+function pnpmChildEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  const resolved = resolvePnpm()
+  if (resolved === 'pnpm') return env
+  if (pnpmShimDir === null) {
+    pnpmShimDir = mkdtempSync(join(tmpdir(), 'dsh-pnpm-shim-'))
+    const shim = join(pnpmShimDir, 'pnpm')
+    writeFileSync(shim, `#!/bin/sh\nexec node "${resolved}" "$@"\n`)
+    chmodSync(shim, 0o755)
+  }
+  env.PATH = `${pnpmShimDir}${env.PATH !== undefined ? `:${env.PATH}` : ''}`
+  return env
+}
+
+/** Run pnpm through the resolved executable (see resolvePnpm). */
+function runPnpm(args: string[], cwd: string): string {
+  return execFileSync(resolvePnpm(), args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: pnpmChildEnv() })
+}
+
 interface Packed {
   dir: string
   tarballs: Record<string, string> // npm name -> tgz path
@@ -53,7 +117,7 @@ async function packAll(): Promise<Packed> {
     [join(REPO, 'workers/analysis-worker'), 'analysis-worker'],
   ]
   for (const [cwd, name] of targets) {
-    run('pnpm', ['pack', '--pack-destination', dir], cwd)
+    runPnpm(['pack', '--pack-destination', dir], cwd)
   }
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.tgz')) continue
@@ -92,7 +156,7 @@ function writeConsumerProject(consumer: string, packed: Packed): void {
 
 /** pnpm install in the consumer; returns the combined install log. */
 function installConsumer(consumer: string): string {
-  const r = spawnSync('pnpm', ['install'], { cwd: consumer, encoding: 'utf8' })
+  const r = spawnSync(resolvePnpm(), ['install'], { cwd: consumer, encoding: 'utf8', env: pnpmChildEnv() })
   const log = `${r.stdout ?? ''}\n${r.stderr ?? ''}`
   if (r.status !== 0) throw new Error(`consumer pnpm install failed (exit ${r.status ?? 'null'}):\n${log}`)
   return log
@@ -337,10 +401,10 @@ describe('standalone unlock page i18n (UI-03)', () => {
     const uiLib = join(uiPkg, 'lib', 'standalone', 'server.js')
     const kernelBin = join(REPO, 'packages', 'research-kernel', 'lib', 'bin', 'kernel.js')
     if (!existsSync(uiLib) || statSync(uiLib).mtimeMs < statSync(uiSrc).mtimeMs) {
-      run('pnpm', ['--filter', '@dsh-scholar/research-ui', 'build'], REPO)
+      runPnpm(['--filter', '@dsh-scholar/research-ui', 'build'], REPO)
     }
     if (!existsSync(kernelBin)) {
-      run('pnpm', ['--filter', '@dsh-scholar/research-kernel', 'build'], REPO)
+      runPnpm(['--filter', '@dsh-scholar/research-kernel', 'build'], REPO)
     }
     const webPort = await freePort()
     const kernelPort = await freePort()

@@ -145,9 +145,25 @@ Contract approval 只能由 Gate 事务发生，没有独立 approve 路由。
 
 返回字节流，保留 Content-Type、Content-Length、Content-Disposition、ETag。支持 Range。artifact_id 不能脱离 project_id 读取；不提供模糊的全局 artifact GET。
 
-### Snapshot
+### POST /v1/projects/{id}/code-snapshots（P0-4 SNAPSHOT-01/API-01）
 
-POST /v2/projects/{id}/code-snapshots 和 POST /v2/projects/{id}/tex-snapshots 接受已登记 workspace/document、排除规则和 expected revision；不能接受 Runner 将读取的任意宿主绝对路径。响应包含 snapshot、archive_artifact、manifest_artifact、file_count、size 和 sha256。
+> v2 契约演进目标：POST /v2/projects/{id}/code-snapshots 与 /v2/projects/{id}/tex-snapshots 接受已登记 workspace/document、排除规则与 expected revision。当前实现（v1）已满足本行第一项：**不能接受 Runner 将读取的任意宿主绝对路径**——归档根由服务端从批准的项目 workspace 解析。
+
+请求为 JSON（strict schema——任何未知字段 422 `validation_error`，旧 `{path: <host 绝对路径>}` 形状**已废弃并直接拒绝**，不做静默重解释）：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `workspace_id` | 是 | 该项目已登记的磁盘 workspace（`POST /v1/projects/{id}/workspaces` 创建，kind=code/scratch）；跨项目或未知 → 404 `workspace_not_found`（与缺失不可区分，无跨项目枚举） |
+| `root_relative_path` | 否 | 相对 workspace 根的 POSIX 路径，缺省/`''` = 整个 workspace；拒绝绝对路径、`..`/`.` 段、NUL、盘符、反斜杠与空段 → 422 `invalid_path`（复用 `normalizeWorkspacePath`）；尾斜杠裁剪后接受 |
+| `description` | 否 | 归档描述 |
+
+语义与约束：
+
+- **根解析**：服务端从批准的项目 workspace 解析实际根（`dataDir/workspaces/{project_id}/{workspace_id}/`），并对解析结果做 realpath 容器校验——workspace 目录或子根被 symlink 替换指向 workspaces 区外 → 422 `snapshot_path_escape`；
+- **walk 安全**：拒绝任何逃逸出归档根的 symlink（422 `snapshot_path_escape`，根内 symlink 跟随）；`.git`/`node_modules`/`.research-cas` 目录排除；
+- **资源上限**：`SNAPSHOT_MAX_FILES`/`SNAPSHOT_MAX_FILE_BYTES`/`SNAPSHOT_MAX_TOTAL_BYTES` 保留（单文件超限在 stat 即拒、累计超限提前失败，均 422 `snapshot_too_large`）；
+- **secret 文件不可快照**：匹配已知 secret 模式（`.env`/`.env.*`、`*_token`/`*-token`/`*.secret`/`*.password`/`*.credential*`、`*.key`/`*.pem`、`id_rsa`/`id_ecdsa`/`id_ed25519`/`id_dsa`、`.aws/credentials`、`service-token`/`kernel-token`、`.npmrc`/`.pypirc`/`.netrc`/`.htpasswd`）的文件**拒绝整个快照**并列出全部文件名（422 `snapshot_secret_file`）——fail closed，CAS/Artifact/manifest 零写；
+- **溯源与泄漏**：响应 201 为 CodeSnapshot（`snapshot_id`、`archive_artifact_id`、`manifest_artifact_id`、`files`、`total_bytes`、`sha256`…），`path`/archive/manifest `root` 恒为显示占位符 `~`；宿主路径零泄漏；registry `code_snapshots.source_json` 记录 `workspace_id` + `root_relative_path` 溯源。
 
 Runner/Worker 输出不能走浏览器上传。内部 artifact stage、分块上传、finalize 和 abort 的精确四步接口见 reconstruction-contracts.md；finalize 后才能把 Artifact ref 交给 complete。
 
@@ -237,7 +253,8 @@ data: {"kind":"exit","job_id":"job_x","run_id":"run_x","seq":99,"exit_code":0,"s
 | GET | /v2/builds/{id} | 状态、diagnostics、Artifact refs、freshness、preview/stale/superseded 字段 |
 | POST | /v1/documents/{id}/preview-builds | 保存成功后调用：server 端 debounce（默认 800ms，body debounce_ms 可配置）创建 preview build（TEX-03，§12.1） |
 | GET | /v1/documents/{id}/preview-builds | preview 投影：`{ pending, builds }`（pending=待处理 debounce，builds 每条 preview=true + stale + superseded_by/at） |
-| POST | /v2/projects/{id}/manuscript-drafts | 从 Ledger 生成新的 TeX workspace revision |
+| GET | /v1/projects/{id}/manuscript-drafts | 只读打开（P0-3 TEX-01）：返回现有 workspace `{document_id, revision, files, created, regenerated}`；无内容时 404 `manuscript_not_found`，绝不建行/写字节 |
+| POST | /v1/projects/{id}/manuscript-drafts | 创建/确保（P0-3）：默认只在首次创建时生成（文档已有文件即原样返回 created=false，不重写字节、revision 不变）；body `regenerate: true` 显式重写且生成前把当前内容冻结为历史 revision（旧字节 `GET snapshot-files?revision=&path=` 可回退）。目标 v2 面同语义（当前实现 /v1，与 snapshot-files 同款注记） |
 | GET | /v2/projects/{id}/manuscript-review | 确定性检查 |
 
 path 使用编码后的根相对 POSIX 路径，逐段 decode 后校验。保存冲突返回 409 document_version_conflict，不自动 last-write-wins。文本默认 UTF-8，保留原换行风格或在 metadata 中明确规范化。

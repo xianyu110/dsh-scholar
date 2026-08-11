@@ -58,6 +58,10 @@ bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL + 1)); }
 # (runners inherit the env var and authenticate their own internal calls).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+# shellcheck source=code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 
 RUNNER_PID=""
@@ -97,7 +101,10 @@ ok "contract $CONTRACT frozen (approval recorded)"
 say "baseline jobs (kind=baseline, seeds 1/2, matched-seed design §13.6)"
 mkdir -p "$WORK/fixture"
 printf '#!/bin/sh\necho "release-bundle fixture"\n' > "$WORK/fixture/run.sh"
-SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/fixture\",\"description\":\"release-bundle fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
+# P0-4 (SNAPSHOT-01/API-01): seed the fixture into an approved project workspace
+# and archive via workspace_id + root_relative_path (server-side root).
+REL_WS=$(code_snapshot_seed_workspace "$PORT" "$PROJ" "fixture" "$WORK/fixture")
+SNAP=$(code_snapshot_api "$PORT" "$PROJ" "$REL_WS" "" "release-bundle fixture" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
 [ -n "$SNAP" ] || { echo "failed to create code snapshot"; exit 1; }
 # §12.5 (P0): baseline jobs MUST produce a MetricsFileV1 at the output
 # contract path — the command writes it from the runner-injected run identity.

@@ -69,4 +69,20 @@ export interface NotifEntry { text: string; time: string; ts?: number; count?: n
 
 export interface ManuscriptFile { path: string; version: number; content_hash: string; content?: string }
 
-export interface ManuscriptBuild { build_id: string; revision: number; root_file: string; job_id: string | null; status: string; diagnostics: string; pdf_artifact: string | null; log_artifact: string | null }
+export interface ManuscriptBuild {
+  build_id: string
+  revision: number
+  root_file: string
+  job_id: string | null
+  status: string
+  diagnostics: string
+  pdf_artifact: string | null
+  log_artifact: string | null
+  /** TEX-03 (P0-3): preview builds are marked preview=true on every build
+   *  surface (GET builds / GET builds/{id} / GET preview-builds). */
+  preview?: boolean
+  /** TEX-03: build.revision < document.revision → stale (server-computed). */
+  stale?: boolean
+  superseded_by?: string | null
+  superseded_at?: string | null
+}

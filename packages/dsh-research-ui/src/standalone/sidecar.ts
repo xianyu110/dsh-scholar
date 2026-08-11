@@ -60,6 +60,7 @@ const ENDPOINT_PROTOCOL = 'http'
 const ENDPOINT_SCHEMA = 'v1'
 const DB_FILE_NAME = 'kernel.db'
 const SERVICE_TOKEN_FILE = 'service-token'
+const KERNEL_TOKEN_FILE = 'kernel-token'
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 function sleep(ms: number): Promise<void> {
@@ -74,6 +75,8 @@ export class UiKernelSidecar {
   private resolvedPort: number | null = null
   /** Cached value of <dataDir>/service-token (lazy, see ensureServiceToken). */
   private serviceTokenValue: string | undefined
+  /** Cached value of <dataDir>/kernel-token (lazy, see ensureKernelToken). */
+  private kernelTokenValue: string | undefined
   private readonly require = createRequire(import.meta.url)
   readonly host: string
   /** Configured port; 0 means "ephemeral — resolve from runtime/endpoint.json". */
@@ -86,6 +89,57 @@ export class UiKernelSidecar {
     this.port = options.port ?? 7412
     this.dataDir = resolve(options.dataDir ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh-scholar-standalone'), 'research-ui-standalone'))
     this.log = options.log ?? (() => undefined)
+  }
+
+  /**
+   * §5 P0-1 (hardening API-01/SIDE-01): the kernel's PUBLIC bearer token —
+   * the user/BFF face of the v1/v2 API. The 0600 `<dataDir>/kernel-token`
+   * file is created on first use (random 32 hex) and reused afterwards, so
+   * every process of this instance — kernel, BFF proxy, runner,
+   * orchestrator — authenticates with the SAME token. The token is only
+   * ever passed via env, never argv.
+   */
+  get kernelToken(): string {
+    return this.ensureKernelToken()
+  }
+
+  private ensureKernelToken(): string {
+    if (this.kernelTokenValue !== undefined) return this.kernelTokenValue
+    const file = join(this.dataDir, KERNEL_TOKEN_FILE)
+    let existing = false
+    try {
+      const stat = lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error(`kernel token path must be a regular file: ${file}`)
+      }
+      existing = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let token = ''
+    if (existing) {
+      token = readFileSync(file, 'utf8').trim()
+      chmodSync(file, 0o600)
+    }
+    if (token === '') {
+      mkdirSync(this.dataDir, { recursive: true })
+      token = randomBytes(16).toString('hex')
+      try {
+        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
+      } catch {
+        // Lost a race with a concurrent sidecar on the same dataDir — the
+        // existing file is authoritative (both spawn the same kernel token).
+        token = readFileSync(file, 'utf8').trim()
+      }
+      chmodSync(file, 0o600)
+    }
+    if (token === '') {
+      // Fail-closed: an empty token would lock the whole public API behind
+      // an unusable credential.
+      throw new Error(`kernel token file must not be empty: ${file}`)
+    }
+    this.kernelTokenValue = token
+    return token
   }
 
   /**
@@ -161,7 +215,13 @@ export class UiKernelSidecar {
 
   private async health(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.endpoint}/v1/health`, { signal: AbortSignal.timeout(1500) })
+      const response = await fetch(`${this.endpoint}/v1/health`, {
+        // The correct bearer is sent even though /v1/health is exempt — it
+        // keeps the handshake honest against older/external kernels and is
+        // harmless on tokenless dev kernels.
+        headers: { authorization: `Bearer ${this.kernelToken}` },
+        signal: AbortSignal.timeout(1500),
+      })
       return response.ok
     } catch {
       return false
@@ -339,12 +399,17 @@ export class UiKernelSidecar {
       '--endpoint-file', this.endpointFilePath(),
     ]
     this.log(`[research-ui] spawning research kernel: node ${args.join(' ')}`)
+    // §5 P0-1 (hardening API-01/SIDE-01): the kernel's PUBLIC bearer token is
+    // ALWAYS injected via env (0600 file, never argv / process listings) — a
+    // sidecar-spawned kernel is never a bare tokenless dev kernel. The BFF
+    // reads the same token back from the file for its upstream requests.
     // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity
     // travels via env only (0600 file, never argv / process listings).
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        DSH_SCHOLAR_KERNEL_TOKEN: this.kernelToken,
         DSH_SCHOLAR_SERVICE_TOKEN: this.serviceToken,
       },
     })

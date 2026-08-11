@@ -28,7 +28,11 @@ export interface KernelSidecarOptions {
   port?: number
   /** Directory for kernel.db and the CAS. Defaults to $DSH_HOME/research-kernel. */
   dataDir?: string
-  /** Optional bearer token for loopback auth. */
+  /**
+   * Explicit bearer token for loopback auth. When set, it seeds the 0600
+   * `<dataDir>/kernel-token` file on first creation; the file is then
+   * authoritative (reused by every process of this instance).
+   */
   token?: string
   log?: (line: string) => void
 }
@@ -65,6 +69,7 @@ const ENDPOINT_PROTOCOL = 'http'
 const ENDPOINT_SCHEMA = 'v1'
 const DB_FILE_NAME = 'kernel.db'
 const SERVICE_TOKEN_FILE = 'service-token'
+const KERNEL_TOKEN_FILE = 'kernel-token'
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 function sleep(ms: number): Promise<void> {
@@ -84,6 +89,8 @@ export class KernelSidecar {
   private resolvedPort: number | null = null
   /** Cached value of <dataDir>/service-token (lazy, see ensureServiceToken). */
   private serviceTokenValue: string | undefined
+  /** Cached value of <dataDir>/kernel-token (lazy, see ensureKernelToken). */
+  private kernelTokenValue: string | undefined
   private readonly require = createRequire(import.meta.url)
   readonly host: string
   /** Configured port; 0 means "ephemeral — resolve from runtime/endpoint.json". */
@@ -98,6 +105,58 @@ export class KernelSidecar {
     this.dataDir = resolve(options.dataDir ?? join(resolveDshHome(), 'research-kernel'))
     this.token = options.token
     this.log = options.log ?? (() => undefined)
+  }
+
+  /**
+   * §5 P0-1 (hardening API-01/SIDE-01): the kernel's PUBLIC bearer token —
+   * the user/BFF face of the v1/v2 API. The 0600 `<dataDir>/kernel-token`
+   * file is created on first use (random 32 hex) and reused afterwards, so
+   * every process of this instance — kernel, BFF/plugin client, runner,
+   * orchestrator — authenticates with the SAME token. The token is only
+   * ever passed via env, never argv. An explicitly configured `token`
+   * option seeds the file on first creation (the file stays authoritative).
+   */
+  get kernelToken(): string {
+    return this.ensureKernelToken()
+  }
+
+  private ensureKernelToken(): string {
+    if (this.kernelTokenValue !== undefined) return this.kernelTokenValue
+    const file = join(this.dataDir, KERNEL_TOKEN_FILE)
+    let existing = false
+    try {
+      const stat = lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error(`kernel token path must be a regular file: ${file}`)
+      }
+      existing = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let token = ''
+    if (existing) {
+      token = readFileSync(file, 'utf8').trim()
+      chmodSync(file, 0o600)
+    }
+    if (token === '') {
+      mkdirSync(this.dataDir, { recursive: true })
+      token = this.token ?? randomBytes(16).toString('hex')
+      try {
+        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
+      } catch {
+        // Lost a race with a concurrent sidecar on the same dataDir — the
+        // existing file is authoritative (both spawn the same kernel token).
+        token = readFileSync(file, 'utf8').trim()
+      }
+      chmodSync(file, 0o600)
+    }
+    if (token === '') {
+      // Fail-closed: an empty token would lock the whole public API behind
+      // an unusable credential.
+      throw new Error(`kernel token file must not be empty: ${file}`)
+    }
+    this.kernelTokenValue = token
+    return token
   }
 
   /**
@@ -175,7 +234,10 @@ export class KernelSidecar {
   private async health(): Promise<boolean> {
     try {
       const response = await fetch(`${this.endpoint}/v1/health`, {
-        headers: this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {},
+        // The correct bearer is sent even though /v1/health is exempt — it
+        // keeps the handshake honest against older/external kernels and is
+        // harmless on tokenless dev kernels.
+        headers: { authorization: `Bearer ${this.kernelToken}` },
         signal: AbortSignal.timeout(1500),
       })
       return response.ok
@@ -356,8 +418,13 @@ export class KernelSidecar {
     ]
     this.log(`[research-plugin] spawning research kernel: node ${args.join(' ')}`)
     const childEnv = { ...process.env }
+    // §5 P0-1 (hardening API-01/SIDE-01): the kernel's PUBLIC bearer token is
+    // ALWAYS injected via env (0600 file, never argv / process listings) —
+    // a sidecar-spawned kernel is never a bare tokenless dev kernel. The
+    // parent env is scrubbed first so a stale DSH_SCHOLAR_KERNEL_TOKEN never
+    // leaks into a kernel that should authenticate with THIS instance's token.
     delete childEnv.DSH_SCHOLAR_KERNEL_TOKEN
-    if (this.token !== undefined) childEnv.DSH_SCHOLAR_KERNEL_TOKEN = this.token
+    childEnv.DSH_SCHOLAR_KERNEL_TOKEN = this.kernelToken
     // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity
     // travels via env only (0600 file, never argv / process listings).
     childEnv.DSH_SCHOLAR_SERVICE_TOKEN = this.serviceToken

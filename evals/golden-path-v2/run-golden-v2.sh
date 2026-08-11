@@ -10,8 +10,10 @@
 # `--mode docker` path:
 #
 #   1. fixture-repo -> POST /v1/projects/{id}/code-snapshots: the Kernel
-#      archives the ACTUAL file contents into a content-addressed code
-#      artifact (archive_artifact_id) + manifest artifact (§11.3);
+#      archives the ACTUAL file contents of the project's approved workspace
+#      (workspace_id + root_relative_path, P0-4 SNAPSHOT-01/API-01 — the old
+#      host-`path` shape is refused) into a content-addressed code artifact
+#      (archive_artifact_id) + manifest artifact (§11.3);
 #   2. baseline job  (kind=baseline, seed 0) — bound to the code snapshot
 #      (§12.2 code_snapshot_id), materialized from CAS into /work, executed
 #      by real node in docker;
@@ -59,6 +61,10 @@ bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL+1)); }
 # (runners inherit the env var and authenticate their own internal calls).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+# shellcheck source=../../evals/code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
 
 RUNNER_PID=
 KERNEL_PID=
@@ -103,7 +109,12 @@ api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CT/approve" -d 
 [[ "$CT" == expc_* ]] && ok "contract $CT registered + frozen (P0 binding)" || bad "contract id '$CT'"
 
 echo "== fixture-repo -> code snapshot archive (actual contents into CAS, §11.3) =="
-SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$FIXTURE\",\"description\":\"golden-path-v2 fixture\"}")
+# P0-4 (SNAPSHOT-01/API-01): the fixture is seeded into an approved project
+# workspace and archived via workspace_id + root_relative_path ('' = whole
+# workspace) — the kernel resolves the root server-side.
+FIXTURE_WS=$(code_snapshot_seed_workspace "$PORT" "$PROJ" "fixture" "$FIXTURE")
+[[ "$FIXTURE_WS" == ws_* ]] && ok "fixture workspace $FIXTURE_WS seeded from $FIXTURE" || bad "fixture workspace seeding failed: $FIXTURE_WS"
+SNAP=$(code_snapshot_api "$PORT" "$PROJ" "$FIXTURE_WS" "" "golden-path-v2 fixture")
 CODE_ART=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
 MAN_ART=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).manifest_artifact_id))")
 SNAP_FILES=$(printf '%s' "$SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).files))")
@@ -365,7 +376,9 @@ if grep -q '0.02 \* seed + 0.15 \* weightedSum' "$PATCHED/train.js"; then
 else
   bad "patch application failed"
 fi
-PAT_SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$PATCHED\",\"description\":\"golden-path-v2 patched fixture\"}")
+PATCHED_WS=$(code_snapshot_seed_workspace "$PORT" "$PROJ" "fixture-patched" "$PATCHED")
+[[ "$PATCHED_WS" == ws_* ]] && ok "patched fixture workspace $PATCHED_WS seeded" || bad "patched fixture workspace seeding failed: $PATCHED_WS"
+PAT_SNAP=$(code_snapshot_api "$PORT" "$PROJ" "$PATCHED_WS" "" "golden-path-v2 patched fixture")
 PAT_ART=$(printf '%s' "$PAT_SNAP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
 if [[ "$PAT_ART" == sha256:* ]] && [[ "$PAT_ART" != "$CODE_ART" ]]; then
   ok "patched snapshot archived: $PAT_ART (new content -> new CAS address)"

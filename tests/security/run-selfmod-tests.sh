@@ -23,6 +23,9 @@
 # There are no SKIP branches: assertions that need the external DSH host
 # fixture are deliberately NOT written here (the aggregator treats SKIP as
 # FAIL), and the script exits non-zero on the first failed assertion group.
+# The `pnpm pack` step resolves pnpm through resolve_pnpm() (npm_execpath →
+# PATH probe → explicit install hint), so a missing pnpm fails with a clear
+# error instead of a bare ENOENT (CI-01 / hardening §5).
 #
 # Usage: bash tests/security/run-selfmod-tests.sh
 set -eu
@@ -34,6 +37,36 @@ FAIL=0
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '  ok: %s\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL + 1)); }
+
+# Resolve the pnpm executable (CI-01 / hardening §5: "package manager 版本与
+# 调用入口固定"): prefer the pnpm CLI entry npm exports for lifecycle runs
+# (npm_execpath, e.g. .../pnpm.cjs|pnpm.mjs), then a PATH probe, else print an
+# explicit install hint and fail — never a bare ENOENT. On the npm_execpath
+# path a shim dir is created at $WORK/pnpm-shim (a `pnpm` executable)
+# prepended to the child PATH by the caller, because pnpm's own run-script
+# PATH injection only re-adds node_modules/.bin — nested lifecycle `pnpm`
+# calls (root `prepare` → `pnpm run build:plugin`) resolve pnpm through PATH,
+# not npm_execpath. NOTE: this function runs inside `$( )` command
+# substitution, so it can only have filesystem side effects — the caller
+# recomputes the shim path from npm_execpath itself.
+resolve_pnpm() {
+  if [ -n "${npm_execpath:-}" ] && [ "${npm_execpath##*/pnpm*}" = "" ]; then
+    mkdir -p "$WORK/pnpm-shim"
+    {
+      printf '#!/bin/sh\n'
+      printf 'exec node "%s" "$@"\n' "$npm_execpath"
+    } > "$WORK/pnpm-shim/pnpm"
+    chmod +x "$WORK/pnpm-shim/pnpm"
+    printf '%s\n' "$WORK/pnpm-shim/pnpm"
+    return 0
+  fi
+  if command -v pnpm >/dev/null 2>&1; then
+    printf '%s\n' "$(command -v pnpm)"
+    return 0
+  fi
+  echo "selfmod: pnpm not found — run this script through pnpm (npm_execpath points at the pnpm CLI) or add pnpm to PATH (install: npm i -g pnpm)" >&2
+  return 1
+}
 
 # tool-cordis registers cordis_inspect / cordis_mount / cordis_unmount in the
 # external harness; dump-config is the harness CLI surface. None of these may
@@ -51,29 +84,40 @@ fi
 
 # ── 1. published tarball static negation ───────────────────────────────────
 say "production tarball static negation"
-TGZ=""
-if (cd "$REPO" && pnpm pack --pack-destination "$WORK" >/dev/null 2>&1); then
-  TGZ=$(ls "$WORK"/*.tgz 2>/dev/null | head -n 1 || true)
-fi
-if [ -n "$TGZ" ]; then
-  BAD_FILES=""
-  for f in $(tar -tzf "$TGZ" | grep -E '^package/lib/.+\.(js|d\.ts|js\.map)$|^package/cordis\.patch\.yml$' || true); do
-    if tar -xOzf "$TGZ" "$f" | grep -qE "$SELF_TOOL_STRINGS"; then
-      BAD_FILES="$BAD_FILES $f"
-    fi
-  done
-  if [ -z "$BAD_FILES" ]; then
-    ok "research-plugin tarball lib/ + patch contain no self-mod tool strings"
-  else
-    bad "self-mod strings found in tarball:$BAD_FILES"
-  fi
-  if tar -xOzf "$TGZ" package/cordis.patch.yml | grep -q 'tool-cordis'; then
-    bad "tarball cordis.patch.yml must not mount tool-cordis"
-  else
-    ok "tarball cordis.patch.yml does not mount tool-cordis"
-  fi
+PNPM_BIN=""
+if ! PNPM_BIN=$(resolve_pnpm); then
+  bad "pnpm not resolvable — tarball negation not assertable: $PNPM_BIN"
 else
-  bad "pnpm pack produced no research-plugin tarball — tarball negation not assertable"
+  TGZ=""
+  # The npm_execpath path creates a `pnpm` shim (see resolve_pnpm); the
+  # variable cannot escape the $( ) substitution, so recompute the dir here.
+  PNPM_EXTRA_PATH=""
+  if [ -n "${npm_execpath:-}" ] && [ "${npm_execpath##*/pnpm*}" = "" ]; then
+    PNPM_EXTRA_PATH="$WORK/pnpm-shim"
+  fi
+  if (cd "$REPO" && PATH="$PNPM_EXTRA_PATH${PATH:+:$PATH}" "$PNPM_BIN" pack --pack-destination "$WORK" >/dev/null 2>&1); then
+    TGZ=$(ls "$WORK"/*.tgz 2>/dev/null | head -n 1 || true)
+  fi
+  if [ -n "$TGZ" ]; then
+    BAD_FILES=""
+    for f in $(tar -tzf "$TGZ" | grep -E '^package/lib/.+\.(js|d\.ts|js\.map)$|^package/cordis\.patch\.yml$' || true); do
+      if tar -xOzf "$TGZ" "$f" | grep -qE "$SELF_TOOL_STRINGS"; then
+        BAD_FILES="$BAD_FILES $f"
+      fi
+    done
+    if [ -z "$BAD_FILES" ]; then
+      ok "research-plugin tarball lib/ + patch contain no self-mod tool strings"
+    else
+      bad "self-mod strings found in tarball:$BAD_FILES"
+    fi
+    if tar -xOzf "$TGZ" package/cordis.patch.yml | grep -q 'tool-cordis'; then
+      bad "tarball cordis.patch.yml must not mount tool-cordis"
+    else
+      ok "tarball cordis.patch.yml does not mount tool-cordis"
+    fi
+  else
+    bad "pnpm pack produced no research-plugin tarball — tarball negation not assertable"
+  fi
 fi
 
 # ── 2. built lib + source tree negation ────────────────────────────────────

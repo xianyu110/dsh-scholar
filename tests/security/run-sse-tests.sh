@@ -117,8 +117,9 @@ start_kernel() {
 }
 
 # start_bff -> the standalone BFF (with its own kernel sidecar) is ready.
-# Sets BPORT/BFF_KPORT/BTOKEN; auth for /v1/* is Bearer $BTOKEN; the
-# loopback operator principal is "alice".
+# Sets BPORT/BFF_KPORT/BTOKEN/BFF_DATA; auth for /v1/* is Bearer $BTOKEN; the
+# loopback operator principal is "alice". BFF_DATA is the BFF's dataDir — it
+# holds the sidecar's 0600 kernel-token for direct-kernel calls (§5 P0-1).
 start_bff() {
   local bport kport attempt
   for attempt in 1 2; do
@@ -126,9 +127,10 @@ start_bff() {
     kport=$((bport + 1))
     BPORT=$bport
     BFF_KPORT=$kport
+    BFF_DATA="$WORK/bff$attempt"
     BTOKEN="sse-test-token-$$-$attempt"
     nohup node "$SERVER_BIN" --host 127.0.0.1 --port "$bport" --kernel-port "$kport" \
-      --data-dir "$WORK/bff$attempt" --token "$BTOKEN" --principal alice > "$WORK/bff.log" 2>&1 &
+      --data-dir "$BFF_DATA" --token "$BTOKEN" --principal alice > "$WORK/bff.log" 2>&1 &
     BFF_PID=$!
     for _ in $(seq 1 100); do
       if ! kill -0 "$BFF_PID" 2>/dev/null; then break; fi
@@ -342,10 +344,13 @@ fi
 
 say "Test 7: bff-sse-cross-project — non-member job terminal -> 404 before streaming"
 # Foreign project owned by bob, created directly on the BFF's kernel; the BFF
-# (principal alice) must answer 404 WITHOUT proxying any SSE bytes.
-FP=$(curl -sf -H 'content-type: application/json' -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects" \
+# (principal alice) must answer 404 WITHOUT proxying any SSE bytes. Direct
+# kernel calls carry the sidecar's kernel-token bearer (§5 P0-1 — the
+# sidecar-spawned kernel demands it).
+BFFKTOKEN=$(tr -d '\n' < "$BFF_DATA/kernel-token" 2>/dev/null || true)
+FP=$(curl -sf -H 'content-type: application/json' -H "Authorization: Bearer $BFFKTOKEN" -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects" \
   -d "{\"name\":\"sse-foreign-b\",\"workspace\":\"/w\",\"creator_principal_id\":\"bob\",\"brief\":$BRIEF}" | jfield '.project_id')
-FJ=$(curl -sf -H 'content-type: application/json' -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects/$FP/jobs" \
+FJ=$(curl -sf -H 'content-type: application/json' -H "Authorization: Bearer $BFFKTOKEN" -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects/$FP/jobs" \
   -d '{"idempotency_key":"sse-bff-foreign","kind":"echo","payload":{"message":"x"}}' | jfield '.job_id')
 if [[ -n "$FP" && -n "$FJ" ]]; then
   ok "foreign job created on the BFF kernel (owner bob) -> $FJ"

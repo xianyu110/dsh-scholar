@@ -167,7 +167,11 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   // fixed port the kernel is verified healthy on it (SIDE-01 identity gate).
   const client = new ResearchClient({
     endpoint: sidecar.endpoint,
-    token: config.kernel?.token,
+    // §5 P0-1 (hardening API-01/SIDE-01): the plugin client authenticates to
+    // the kernel's PUBLIC v1/v2 API with the same bearer token the sidecar
+    // handed the kernel (0600 <dataDir>/kernel-token; seeded by
+    // config.kernel.token on first creation, file stays authoritative).
+    token: sidecar.kernelToken,
     // §4 P0 (API-01/EVID-01): the plugin's client authenticates to the
     // kernel's INTERNAL routes with the same service identity the sidecar
     // handed the kernel (0600 <dataDir>/service-token).

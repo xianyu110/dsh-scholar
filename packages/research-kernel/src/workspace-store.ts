@@ -67,6 +67,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { dirname, join } from 'node:path'
 import { workspaceEtag, type WorkspaceInfo, type WorkspaceKind, type WorkspaceNode, type WorkspaceOp, type WorkspaceRevision } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
+import { mkdirMode } from './fs-modes.js'
 import { UPLOAD_MAX_FILE_BYTES } from './upload-limits.js'
 
 /** sha256 of the empty string — carried by synthesized `dir` nodes where a
@@ -277,7 +278,9 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     this.db.exec(WORKSPACE_DDL)
     this.cas = new ArtifactCas(casRoot)
     this.workspacesRoot = workspacesRoot
-    mkdirSync(workspacesRoot, { recursive: true, mode: 0o750 })
+    // WORK-01 §5: mkdir(mode) is umask-dependent — calibrate the created
+    // chain explicitly (0750) so the contract holds under any umask.
+    mkdirMode(workspacesRoot, 0o750)
   }
 
   close(): void {
@@ -351,12 +354,16 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     }
   }
 
-  /** Atomic byte write: temp file in the target directory + rename. */
+  /** Atomic byte write: temp file in the target directory + rename. The
+   * directory chain is created with an explicit 0750 calibration and the
+   * file gets a chmod 0640 兜底 (writeFileSync mode is also umask-masked,
+   * e.g. 0640 → 0600 under umask 0077). */
   private writeBytesAtomic(target: string, bytes: Uint8Array): void {
     const dir = dirname(target)
-    mkdirSync(dir, { recursive: true, mode: 0o750 })
+    mkdirMode(dir, 0o750)
     const tmp = join(dir, `${target.split('/').at(-1) ?? 'file'}.ws-tmp-${randomBytes(4).toString('hex')}`)
     writeFileSync(tmp, bytes, { mode: 0o640 })
+    chmodSync(tmp, 0o640)
     try {
       renameSync(tmp, target)
     } catch (error) {
@@ -457,10 +464,9 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     this.db.prepare('INSERT INTO workspaces (workspace_id, project_id, kind, name, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(info.workspace_id, info.project_id, info.kind, info.name, info.revision, info.created_at, info.updated_at)
     const root = this.workspaceRoot(info.workspace_id)
-    mkdirSync(root, { recursive: true, mode: 0o750 })
-    try {
-      chmodSync(root, 0o750)
-    } catch { /* best-effort (some filesystems ignore modes) */ }
+    // WORK-01 §5: create the project/workspace root chain with an explicit
+    // 0750 calibration (mkdir(mode) alone is umask-dependent).
+    mkdirMode(root, 0o750)
     return info
   }
 
@@ -651,7 +657,7 @@ export class WorkspaceStore implements WorkspaceStoreLike {
     this.keepHistory(workspaceId, from, source.version)
     const fromAbs = this.absPath(workspaceId, from)
     const toAbs = this.absPath(workspaceId, to)
-    mkdirSync(dirname(toAbs), { recursive: true, mode: 0o750 })
+    mkdirMode(dirname(toAbs), 0o750)
     renameSync(fromAbs, toAbs)
     const at = nowIso()
     this.db.prepare(`INSERT INTO workspace_nodes (workspace_id, path, version, binary, media, size_bytes, content, blob_sha256, content_hash, created_at, updated_at)

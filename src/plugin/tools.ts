@@ -586,25 +586,36 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
 
   ctx.tools.register(researchTool({
     name: 'workspace_snapshot',
-    description: 'Snapshot the project workspace. archive=true (default, §11.3 SCH-EXEC-002): the Kernel archives the ACTUAL file contents into a content-addressed code artifact (+ manifest artifact); jobs bound to it are materialized by the Runner from CAS — never from live host paths. archive=false: legacy manifest (file list + hashes only, no content).',
+    description: 'Snapshot the project workspace. archive=true (default, §11.3 SCH-EXEC-002): the Kernel archives the ACTUAL file contents of the project workspace (workspace_id + root-relative path, P0-4 SNAPSHOT-01/API-01) into a content-addressed code artifact (+ manifest artifact); jobs bound to it are materialized by the Runner from CAS — never from live host paths. root_relative_path defaults to "" (the whole workspace). archive=false: legacy manifest (file list + hashes only, no content) — deprecated host-dir walk, path is required there.',
     parameters: {
       project_id: OPT_STRING,
-      path: { type: 'string', required: true },
+      workspace_id: { type: 'string', required: true },
+      root_relative_path: { type: 'string' },
       description: OPT_STRING,
       archive: { type: 'boolean' },
+      // Deprecated (P0-4): host `path` is refused for archive=true and only
+      // honored by the legacy archive=false manifest walk.
+      path: { type: 'string' },
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       if (args.archive !== false) {
-        // §11.3: real content archive (kernel-side walk, escape/symlink protected).
-        const snapshot = await client.snapshotCodeArchive(projectId, args.path, args.description ?? '')
+        // §11.3: real content archive (kernel-side walk, workspace-bound +
+        // escape/symlink/secret protected). P0-4: only workspace_id +
+        // root_relative_path are accepted; host `path` is deprecated.
+        if (args.path !== undefined) {
+          throw new Error('workspace_snapshot archive=true no longer accepts a host `path` (P0-4 SNAPSHOT-01/API-01): use workspace_id + root_relative_path; the deprecated shape is refused with 422 by the API')
+        }
+        const snapshot = await client.snapshotCodeArchive(projectId, args.workspace_id, args.root_relative_path ?? '', args.description ?? '')
         return {
           ok: true,
           snapshot: {
             snapshot_id: snapshot.snapshot_id,
             project_id: snapshot.project_id,
+            workspace_id: args.workspace_id,
+            root_relative_path: args.root_relative_path ?? '',
             archive_artifact_id: snapshot.archive_artifact_id,
             manifest_artifact_id: snapshot.manifest_artifact_id,
             files: snapshot.files,
@@ -615,6 +626,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
           },
         }
       }
+      // Deprecated legacy branch (archive=false): host-dir manifest walk.
+      if (args.path === undefined) throw new Error('workspace_snapshot archive=false (legacy manifest) requires the deprecated `path` parameter')
       const snapshot = await snapshotWorkspace(args.path, args.description ?? '', projectId)
       const artifact = await client.registerArtifact({
         project_id: projectId,

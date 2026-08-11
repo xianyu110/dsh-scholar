@@ -5,6 +5,7 @@ import { el } from '../ui'
 import { state, tabSave } from '../state'
 import { terminalLoadSeq } from '../terminal'
 import { isEditorDirty } from '../manuscript-dirty'
+import { resolveOpenDocument, previewPanelModel, triggerPreviewAfterSave } from '../manuscript-flow'
 /* ─────────────────────────── Manuscript Workbench ─────────────────────────── */
 
 /**
@@ -26,17 +27,33 @@ export let msConflict: string | null = null
 export let msBuilds: ManuscriptBuild[] = []
 export let msBuildPoll: number | undefined
 export let msPdfUrl: string | null = null
+// TEX-03 (P0-3): live-preview projection (GET /v1/documents/{id}/preview-builds).
+export let msPreviews: ManuscriptBuild[] = []
+export let msPreviewPending: { document_id: string; revision: number; debounce_ms: number } | null = null
+export let msPreviewPoll: number | undefined
+export let msPreviewPdfUrl: string | null = null
+export let msPreviewPdfBuildId: string | null = null
 
 export function msCleanup(): void {
   if (msBuildPoll !== undefined) { window.clearInterval(msBuildPoll); msBuildPoll = undefined }
+  if (msPreviewPoll !== undefined) { window.clearInterval(msPreviewPoll); msPreviewPoll = undefined }
   if (msPdfUrl !== null) { URL.revokeObjectURL(msPdfUrl); msPdfUrl = null }
+  if (msPreviewPdfUrl !== null) { URL.revokeObjectURL(msPreviewPdfUrl); msPreviewPdfUrl = null }
+  msPreviewPdfBuildId = null
 }
 
-export function msLoadDocument(projectId: string): Promise<{ document_id: string }> {
-  return api<{ document_id: string }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  }).then(r => r ?? { document_id: '' })
+export async function msLoadDocument(projectId: string): Promise<{ document_id: string }> {
+  // P0-3 (TEX-01): opening a manuscript is READ-ONLY — GET the existing
+  // workspace first; only when nothing exists yet do we POST to create it.
+  // A render/rerender therefore never writes: no regeneration, no revision
+  // bump, no overwrite of saved content.
+  return resolveOpenDocument(
+    () => api<{ document_id: string }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`),
+    () => api<{ document_id: string }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  )
 }
 
 export async function msLoadTree(): Promise<void> {
@@ -84,6 +101,15 @@ export async function msSaveFile(): Promise<void> {
   msDirty = false
   msConflict = null
   await msLoadTree()
+  // P0-3 (TEX-03): save success triggers the live-preview hook ONCE. The
+  // kernel owns the debounce (default 800ms) and coalesces rapid saves —
+  // the client never schedules its own timer. Best-effort: a failed hook
+  // call never fails the already-committed save.
+  await triggerPreviewAfterSave(msDocId, id => api(`/v1/documents/${encodeURIComponent(id)}/preview-builds`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }))
+  await msPollPreviews()
   state.rerender()
 }
 
@@ -160,6 +186,76 @@ export async function msPollBuilds(): Promise<void> {
   if (before !== JSON.stringify(msBuilds) || pdfNow) state.rerender()
 }
 
+/** TEX-03 (P0-3): poll the live-preview projection (pending debounce +
+ * preview builds). The PDF of the newest SUCCEEDED preview is loaded once
+ * per build id; a newer succeeded build replaces it. Same hot-loop guard
+ * as msPollBuilds: rerender only on visible change. */
+export async function msPollPreviews(): Promise<void> {
+  if (msDocId === null) return
+  const before = JSON.stringify({ p: msPreviewPending, b: msPreviews })
+  const status = await api<{ pending: { document_id: string; revision: number; debounce_ms: number } | null; builds: ManuscriptBuild[] }>(`/v1/documents/${encodeURIComponent(msDocId)}/preview-builds`)
+  if (status !== null) {
+    msPreviewPending = status.pending
+    msPreviews = status.builds
+  }
+  const busy = msPreviewPending !== null || msPreviews.some(b => b.status === 'queued' || b.status === 'running')
+  if (busy) {
+    if (msPreviewPoll === undefined) {
+      msPreviewPoll = window.setInterval(() => { void msPollPreviews() }, 2000)
+    }
+  } else {
+    if (msPreviewPoll !== undefined) { window.clearInterval(msPreviewPoll); msPreviewPoll = undefined }
+  }
+  let pdfNow = false
+  const ok = msPreviews.find(b => b.status === 'succeeded' && b.pdf_artifact !== null)
+  if (ok !== undefined && ok.pdf_artifact !== null && msPreviewPdfBuildId !== ok.build_id) {
+    const projectId = document.querySelector('#dsh-scholar-ui')?.getAttribute('data-project') ?? ''
+    const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(ok.pdf_artifact)}?project_id=${encodeURIComponent(projectId)}`, {
+      headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
+    })
+    if (response.ok) {
+      const blob = await response.blob()
+      if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
+      msPreviewPdfUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+      msPreviewPdfBuildId = ok.build_id
+      pdfNow = true
+    }
+  }
+  if (before !== JSON.stringify({ p: msPreviewPending, b: msPreviews }) || pdfNow) state.rerender()
+}
+
+/** P0-3 (TEX-01): explicit regeneration — confirmed by the user, never
+ * triggered by a render. The server freezes the CURRENT content as a
+ * revision-scoped snapshot BEFORE rewriting, so the old bytes stay
+ * revertable (GET /v1/documents/{id}/snapshot-files?revision=&path=). */
+export async function msRegenerate(projectId: string): Promise<void> {
+  if (!window.confirm(t('manuscript', 'manuscript.regenerate.confirm'))) return
+  const result = await api<{ document_id: string; revision: number }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`, {
+    method: 'POST',
+    body: JSON.stringify({ regenerate: true }),
+  })
+  if (result === null) {
+    window.alert(t('manuscript', 'manuscript.regenerate.failed'))
+    return
+  }
+  // The workspace changed under the editor: adopt the new document, reload
+  // the tree and reopen the current file at the new bytes. The old preview
+  // PDF belongs to the pre-regeneration revision — drop it (the next
+  // preview poll shows the fresh projection).
+  if (msPreviewPdfUrl !== null) { URL.revokeObjectURL(msPreviewPdfUrl); msPreviewPdfUrl = null }
+  msPreviewPdfBuildId = null
+  msDocId = result.document_id
+  await msLoadTree()
+  if (msOpenPath !== null) {
+    await msOpenFile(msOpenPath)
+  } else {
+    const root = msFiles.find(f => f.path === 'paper.tex') ?? msFiles[0]
+    if (root !== undefined) await msOpenFile(root.path)
+  }
+  await msPollPreviews()
+  state.rerender()
+}
+
 /** dsh-web Manuscript page: tree | editor | diagnostics+PDF. */
 export async function renderManuscript(body: HTMLElement, _p: Projection, projectId: string): Promise<void> {
   msCleanup()
@@ -198,7 +294,12 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   const refreshBtn = el('button', 'hbtn', '⟳')
   refreshBtn.title = t('manuscript', 'manuscript.action.refresh')
   refreshBtn.onclick = () => { void msLoadTree().then(() => state.rerender()) }
-  actions.append(saveBtn, compileBtn, refreshBtn)
+  // P0-3 (TEX-01): regeneration is EXPLICIT and confirmed — rendering,
+  // saving and polling never rewrite the workspace.
+  const regenBtn = el('button', 'hbtn', t('manuscript', 'manuscript.action.regenerate'))
+  regenBtn.title = t('manuscript', 'manuscript.action.regenerate')
+  regenBtn.onclick = () => { void msRegenerate(projectId) }
+  actions.append(saveBtn, compileBtn, refreshBtn, regenBtn)
   header.appendChild(actions)
   body.appendChild(header)
 
@@ -284,6 +385,45 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   // Diagnostics + PDF preview.
   const rightCol = el('div')
   rightCol.style.cssText = 'width:360px;flex-shrink:0;border:1px solid var(--border);border-radius:10px;padding:8px;overflow-y:auto;max-height:640px'
+  // TEX-03 (P0-3): live preview — save success triggers the debounced
+  // preview-builds hook; this section shows the projected status
+  // (pending/queued/running/succeeded/failed/cancelled/superseded + stale)
+  // and the newest succeeded preview's PDF. Browser-visual acceptance of
+  // the auto-refresh chain stays NOT_RUN_MANUAL_PENDING (no Playwright).
+  rightCol.appendChild(el('div', 'section-label', t('manuscript', 'manuscript.preview.title')))
+  const previewModel = previewPanelModel(msPreviewPending, msPreviews, msRevision)
+  const previewLine = el('div', 'muted')
+  previewLine.style.cssText = 'font-size:10.5px;margin:2px 0 6px'
+  previewLine.textContent = t('manuscript', previewModel.headline)
+  rightCol.appendChild(previewLine)
+  // The embed shows the last SUCCEEDED preview PDF; it is stale whenever the
+  // newest preview moved past it (newer queued/running/succeeded revision or
+  // the document revision itself advanced past the PDF's build).
+  const pdfStale = previewModel.stale || (msPreviewPdfUrl !== null && previewModel.status !== 'succeeded')
+  if (pdfStale) {
+    const stale = el('span', 'muted')
+    stale.style.cssText = 'color:var(--tone-amber);font-size:10px;font-weight:700'
+    stale.textContent = t('manuscript', 'manuscript.preview.stale')
+    rightCol.appendChild(stale)
+  }
+  if (msPreviewPdfUrl !== null) {
+    const embed = document.createElement('embed')
+    embed.src = msPreviewPdfUrl
+    embed.type = 'application/pdf'
+    embed.style.cssText = 'width:100%;height:280px;border:1px solid var(--border);border-radius:8px'
+    rightCol.appendChild(embed)
+    const dl = el('button', 'hbtn', t('manuscript', 'manuscript.preview.download'))
+    dl.style.cssText = 'margin:6px 0 10px'
+    dl.onclick = () => {
+      const a = el('a', 'dl', t('common', 'common.action.download'))
+      a.href = msPreviewPdfUrl ?? ''
+      a.download = 'paper.preview.pdf'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    }
+    rightCol.appendChild(dl)
+  }
   rightCol.appendChild(el('div', 'section-label', t('manuscript', 'manuscript.builds')))
   if (msBuilds.length === 0) {
     rightCol.appendChild(el('div', 'muted', t('manuscript', 'manuscript.builds.none')))
@@ -364,5 +504,6 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   body.appendChild(rightCol)
 
   void msPollBuilds()
+  void msPollPreviews()
 }
 

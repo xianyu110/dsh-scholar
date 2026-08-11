@@ -16,10 +16,10 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { ResearchKernel } from '@dsh-scholar/research-kernel'
 import { workspaceEtag, WorkspaceNode, WorkspaceWriteRequest, WorkspaceMoveRequest } from '@dsh-scholar/research-schemas'
 import {
@@ -512,5 +512,59 @@ describe('generic workspace store (WORK-01 disk adapter)', () => {
     expect(existsSync(join(meta, 'same.txt@1'))).toBe(true)
     expect(lstatSync(join(meta, 'same.txt@1')).isFile()).toBe(true)
     kernel.close()
+  })
+
+  it('umask 0077: the full 0750 directory chain and 0640 files survive any umask; pre-existing dirs are not re-chmodded', () => {
+    // WORK-01 §5 (hardening-v0.2-status.md): mkdir(mode=0750) is masked by
+    // the umask (0750 → 0700 under umask 0077) and writeFileSync(mode=0640)
+    // likewise (0640 → 0600). The adapter must explicitly calibrate exactly
+    // the directories/files it creates. The umask is restored in `finally`
+    // so the rest of the suite is unaffected.
+    const previous = process.umask(0o077)
+    try {
+      const kernel = freshKernel()
+      const project = kernel.createProject({ name: 'p', workspace: '/w', brief: makeBrief() })
+      const ws = kernel.workspaceEnsure(project.project_id, 'code', 'main')
+      // Nested dirs (writeBytesAtomic chain) + an overwrite so a history
+      // copy lands under .ws-meta through the same atomic writer.
+      kernel.workspaceWrite(ws.workspace_id, 'src/deep/file.ts', 'x')
+      kernel.workspaceWrite(ws.workspace_id, 'same.txt', 'v1')
+      kernel.workspaceWrite(ws.workspace_id, 'same.txt', 'v2', { version: 1 })
+      const root = kernel.workspaces.workspaceRoot(ws.workspace_id)
+      // The complete 0750 chain: workspaces root, project dir, workspace
+      // root, every nested adapter-created dir and the history dir.
+      const chain = [
+        kernel.workspaces.workspacesRoot,
+        dirname(root),
+        root,
+        join(root, 'src'),
+        join(root, 'src', 'deep'),
+        join(kernel.workspaces.workspacesRoot, '.ws-meta', ws.workspace_id, 'history'),
+      ]
+      for (const dir of chain) {
+        expect(statSync(dir).mode & 0o777, `0750 chain member ${dir}`).toBe(0o750)
+      }
+      // Files are 0640 (tree bytes + history copies).
+      for (const file of [join(root, 'src', 'deep', 'file.ts'), join(root, 'same.txt')]) {
+        expect(statSync(file).mode & 0o777, `0640 file ${file}`).toBe(0o640)
+      }
+      const meta = join(kernel.workspaces.workspacesRoot, '.ws-meta', ws.workspace_id, 'history')
+      expect(statSync(join(meta, 'same.txt@1')).mode & 0o777).toBe(0o640)
+      // Pre-existing directories are NOT re-chmodded: an operator-set 0700
+      // dir stays 0700 when the adapter writes into it (chmod only applies
+      // to directories this adapter created).
+      const preexisting = join(root, 'preexisting')
+      mkdirSync(preexisting, { recursive: true, mode: 0o700 })
+      chmodSync(preexisting, 0o700)
+      kernel.workspaceWrite(ws.workspace_id, 'preexisting/f.txt', 'y')
+      expect(statSync(preexisting).mode & 0o777).toBe(0o700)
+      // …while the file written into it still follows the 0640 contract.
+      expect(statSync(join(preexisting, 'f.txt')).mode & 0o777).toBe(0o640)
+      // Atomic temp+rename leaves no tmp/partial files.
+      for (const f of listFiles(root)) expect(f).not.toMatch(/\.ws-tmp-/)
+      kernel.close()
+    } finally {
+      process.umask(previous)
+    }
   })
 })

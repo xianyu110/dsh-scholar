@@ -25,6 +25,11 @@ api() {
   cat "$body"
   rm -f "$body"
 }
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
+# shellcheck source=code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
 
 # ── 0. 环境:连接测试实例 kernel(web sidecar 已起 17412),另起独立 runner ──
 say "0. 环境准备"
@@ -89,7 +94,10 @@ S5=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process
 
 # ── 6. Baseline 真实容器复现(代码归档→物化→执行)────────────────────────
 say "6. Baseline 复现(代码快照归档 + 容器执行)"
-CODE=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/repo\",\"description\":\"fixture train.js\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
+# P0-4 (SNAPSHOT-01/API-01): seed the fixture into an approved project workspace
+# and archive via workspace_id + root_relative_path (server-side root).
+DEMO_WS=$(code_snapshot_seed_workspace "$KPORT" "$PROJ" "repo" "$WORK/repo")
+CODE=$(code_snapshot_api "$KPORT" "$PROJ" "$DEMO_WS" "" "fixture train.js" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
 api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
 B_JOB=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo\",\"kind\":\"baseline\",\"code_snapshot_id\":\"$CODE\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"0\",\"--data\",\"/work/data.json\"],\"payload\":{}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 for _ in $(seq 1 60); do BS=$(api "http://127.0.0.1:$KPORT/v1/jobs/$B_JOB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))"); [[ "$BS" == "succeeded" ]] && break; sleep 0.5; done

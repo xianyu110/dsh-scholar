@@ -20,6 +20,14 @@ bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL+1)); }
 # (runners inherit the env var and authenticate their own internal calls).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+# shellcheck source=code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+# shellcheck source=code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
 
 say() { printf '\033[1;34m== %s ==\033[0m\n' "$*"; }
 
@@ -42,7 +50,10 @@ ok "fresh project $PROJ created in clean room"
 # Baseline jobs are SECURE_KINDS: they bind a materialized code snapshot.
 mkdir -p "$WORK/code"
 printf '#!/bin/sh\necho "deterministic clean-room payload"\n' > "$WORK/code/run.sh"
-SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/code\",\"description\":\"clean-room fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
+# P0-4 (SNAPSHOT-01/API-01): seed the fixture into an approved project workspace
+# and archive via workspace_id + root_relative_path (server-side root).
+CR_WS=$(code_snapshot_seed_workspace "$PORT" "$PROJ" "code" "$WORK/code")
+SNAP=$(code_snapshot_api "$PORT" "$PROJ" "$CR_WS" "" "clean-room fixture" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
 [ -n "$SNAP" ] || { echo "failed to create code snapshot"; exit 1; }
 # P0 (acceptance-tests.md §4): baseline jobs must bind an APPROVED contract —
 # register + freeze one before submission.
@@ -88,7 +99,9 @@ ok "fresh kernel booted (old DB deleted); CAS artifacts still readable"
 
 # 4. Replay the bundle: re-create project + jobs with the SAME payloads.
 PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"clean-room-rerun\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
-SNAP2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/code-snapshots" -d "{\"path\":\"$WORK/code\",\"description\":\"clean-room fixture\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
+# P0-4: the rerun project gets its OWN workspace seeded from the same dir.
+CR_WS2=$(code_snapshot_seed_workspace "$PORT" "$PROJ2" "code" "$WORK/code")
+SNAP2=$(code_snapshot_api "$PORT" "$PROJ2" "$CR_WS2" "" "clean-room fixture" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).snapshot_id||JSON.parse(d).code_snapshot_id||''))")
 [ -n "$SNAP2" ] || { echo "failed to re-create code snapshot"; exit 1; }
 CT2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/contracts" -d '{"idea_id":"idea_clean_room","data":{"dataset_id":"clean-room"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"f1"},"seeds":[11,23],"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":2,"stop_on_data_leakage":true}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/contracts/$CT2/approve" -d '{"actor":"clean-room-eval"}' > /dev/null

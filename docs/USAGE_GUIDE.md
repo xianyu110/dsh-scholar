@@ -92,7 +92,7 @@ runner CLI（`node workers/runner-gateway/lib/bin/runner.js`）已接线三个�
 
 ## 8. TeX Manuscript Workbench
 
-> 当前已有 TeX 文件树、textarea 编辑、expected_version 保存、构建轮询、诊断列表和 PDF embed。dirty 判断已修复（以文件 GET/最近保存内容为基线，清空非空文件会正确显示未保存）；编译冻结可物化字节（快照按 revision 保存文件内容，Runner 编译输入不会被编译期间的编辑改变）；保存冲突（409）会立即终止编译且不创建 Job；构建卡片显示输入 revision 与 stale 标识，可跳转到同一 Job 的实时 Terminal。仍缺（UI 浏览器层，Playwright 类环境不可用、未验收）：Manuscript 页内嵌实时 Build Terminal DOM、PDF freshness 的浏览器验收、完整 history/move/assets。以下步骤描述目标 v2，TEX-01/TEX-02 未“已验收”前不得把编辑或编译结果当成正式稿件证据。
+> 当前已有 TeX 文件树、textarea 编辑、expected_version 保存、构建轮询、诊断列表和 PDF embed。dirty 判断已修复（以文件 GET/最近保存内容为基线，清空非空文件会正确显示未保存）；编译冻结可物化字节（快照按 revision 保存文件内容，Runner 编译输入不会被编译期间的编辑改变）；保存冲突（409）会立即终止编译且不创建 Job；构建卡片显示输入 revision 与 stale 标识，可跳转到同一 Job 的实时 Terminal。**打开/ensure 只读或首次创建（P0-3，2026-08-11 修复）**：进入 Manuscript 页先 GET（只读），工作区不存在才 POST 首次生成；render、轮询、locale 切换、保存后 rerender 都不会改写 `paper.tex`/`main.bib` 或推进 revision；显式“♻ 重新生成”按钮需确认，重写前把当前内容冻结为历史 revision（可回退）。**保存触发实时预览（P0-3）**：保存成功后自动调用 preview-builds hook（服务端 debounce），右侧“实时预览”区展示 pending/queued/running/succeeded/failed/cancelled/superseded 状态、stale 标识与最新预览 PDF。仍缺（UI 浏览器层，Playwright 类环境不可用、未验收，记 NOT_RUN_MANUAL_PENDING）：Manuscript 页内嵌实时 Build Terminal DOM、预览链与 regenerate 对话框的浏览器视觉验收、完整 history/move/assets。以下步骤描述目标 v2，TEX-01/TEX-02 未“已验收”前不得把编辑或编译结果当成正式稿件证据。
 
 ### 8.1 生成稿件
 
@@ -114,11 +114,11 @@ runner CLI（`node workers/runner-gateway/lib/bin/runner.js`）已接线三个�
 
 ### 8.3 编译与实时预览
 
-目标行为是：每次成功保存后自动 debounce preview，右侧实时显示 pdflatex/bibtex 输出、诊断并刷新 PDF；继续编辑会立即把旧 PDF 标 Stale。点击 Compile 会先保存全部脏文件，冻结 manifest，再创建权威 latex-compile Job。当前 UI 只轮询 build 状态，没有实时 Build Terminal/Preview；保存失败或 409 时必须人工确认没有创建构建 Job。
+保存成功后 UI 自动调用一次 `POST /v1/documents/{id}/preview-builds`（服务端 debounce，默认 800ms，快速连续保存合并为一次 preview）；右侧“实时预览”区轮询 `GET preview-builds` 投影，展示 pending/queued/running/succeeded/failed/cancelled/superseded 状态文本、stale 标识（预览 revision 落后于当前文档）与最新成功预览的 PDF embed/下载。点击 Compile 会先保存全部脏文件，冻结 manifest，再创建权威 latex-compile Job（创建即 supersede 全部非终态 preview；preview 不产 Evidence、不参与权威 manifest 链）。保存失败或 409 时不触发 preview/compile（冲突分支直接返回，不会创建构建 Job）。
 
 Diagnostics 将错误整理为 file:line；点击可跳到编辑器。TeX 原始消息保持原文，按钮与诊断类别按页面 locale 翻译。成功后 Preview 显示 PDF。继续编辑源文件时旧 PDF 标记 Stale，直到下一次成功编译。
 
-可以下载 PDF、完整 compile log、sources 和 aux Artifact。HTML 不作为稿件预览。
+可以下载 PDF、完整 compile log、sources 和 aux Artifact。HTML 不作为稿件预览。预览/编译状态与 PDF 的同页视觉链（浏览器验收）未执行，记 NOT_RUN_MANUAL_PENDING。
 
 ## 9. Trajectory 与 Subagent 拓扑
 
@@ -158,6 +158,7 @@ Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步
 | Claim inconclusive | Evidence 未 accepted 或缺统计字段 |
 | PDF stale | 源文件 revision 晚于 build input，重新 Compile |
 | Kernel unreachable | 检查 instance health、dataDir、port 和 sidecar ownership |
+| 直接访问 kernel 端口 401 | sidecar 启动的 Kernel（默认 127.0.0.1:17413）受 0600 `<dataDir>/kernel-token` 随机 bearer 保护（env 注入、不出 argv）；除 `/v1|v2/health` 外缺失/错误 token 一律 401。浏览器/BFF 无需关心——BFF 自动带上该 token；仅脚本或 orchestrator 直接访问时需要（`--token` / `--token-file` / `DSH_SCHOLAR_KERNEL_TOKEN`）。`x-service-token` 是内部路由专用层，不能替代普通 bearer |
 | 页面部分未翻译 | 缺失 key 会显示 key；这是缺陷，应按 docs 规则补资源和测试 |
 | intake/proposal stale | 上传接入期间项目或提案已变化，刷新并重新生成 Proposal |
 | target offline | 远端 Runner 不可用；等待/修复或显式创建新 attempt，不会自动本地降级 |

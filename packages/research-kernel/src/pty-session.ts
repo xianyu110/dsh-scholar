@@ -35,7 +35,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
@@ -585,6 +585,30 @@ export class PtySessionStore {
         .run(total, serverSeq, at, sessionId)
     }
     return { frames: out, dropped_bytes: dropped, evicted_up_to_seq: evictedUpTo }
+  }
+
+  /**
+   * PTY-01 (hardening §5 P0-2): constant-time lease verification for
+   * read/control/frames. New sessions persist ONLY the sha256 of the opaque
+   * token (STORE-06 lease_token_hash); legacy pre-0014 rows fall back to the
+   * plaintext lease_token column. A row with NO verifiable lease material
+   * (hash '' and plaintext null) fails closed — a missing credential is
+   * never a pass. The token is compared via sha256+timingSafeEqual so the
+   * comparison never leaks timing information about the stored value.
+   */
+  verifyLease(sessionId: string, token: string): boolean {
+    const row = this.getRow(sessionId)
+    if (row.lease_token_hash !== '') {
+      const expected = Buffer.from(row.lease_token_hash, 'hex')
+      const provided = createHash('sha256').update(token).digest()
+      return expected.length === provided.length && timingSafeEqual(expected, provided)
+    }
+    if (row.lease_token !== null) {
+      const a = createHash('sha256').update(token).digest()
+      const b = createHash('sha256').update(row.lease_token).digest()
+      return timingSafeEqual(a, b)
+    }
+    return false
   }
 
   /** Touch activity (e.g. an attach heartbeats the idle TTL). */

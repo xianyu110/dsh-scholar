@@ -32,21 +32,30 @@ import { ActionStore, type Action, type ActionLike } from './actions.js'
 const DEFAULT_LEASE_SECONDS = 60
 
 /**
- * Read the Kernel bearer token from --token-file (0600 file, §15). Fails fast
- * when the file was requested but is missing/unreadable — a wrongly configured
- * orchestrator must not silently run without kernel auth.
+ * Read the Kernel bearer token: --token-file (0600 file, §15) wins; without
+ * it, the process env `DSH_SCHOLAR_KERNEL_TOKEN` is inherited (a sidecar
+ * spawned orchestrator carries it — §5 P0-1). Fails fast when the file was
+ * requested but is missing/unreadable — a wrongly configured orchestrator
+ * must not silently run without kernel auth.
  */
 function readTokenFile(tokenFile: string | undefined, log: (message: string) => void): string | null {
-  if (tokenFile === undefined || tokenFile === '') return null
-  if (!existsSync(tokenFile)) {
-    throw new Error(`--token-file ${tokenFile} does not exist (kernel bearer token required)`)
+  if (tokenFile !== undefined && tokenFile !== '') {
+    if (!existsSync(tokenFile)) {
+      throw new Error(`--token-file ${tokenFile} does not exist (kernel bearer token required)`)
+    }
+    const token = readFileSync(tokenFile, 'utf8').trim()
+    if (token === '') {
+      throw new Error(`--token-file ${tokenFile} is empty`)
+    }
+    log(`using kernel bearer token from ${tokenFile}`)
+    return token
   }
-  const token = readFileSync(tokenFile, 'utf8').trim()
-  if (token === '') {
-    throw new Error(`--token-file ${tokenFile} is empty`)
+  const envToken = process.env.DSH_SCHOLAR_KERNEL_TOKEN
+  if (envToken !== undefined && envToken !== '') {
+    log('using kernel bearer token from DSH_SCHOLAR_KERNEL_TOKEN')
+    return envToken
   }
-  log(`using kernel bearer token from ${tokenFile}`)
-  return token
+  return null
 }
 
 /**

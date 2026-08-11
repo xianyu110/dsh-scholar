@@ -43,6 +43,19 @@ function codeArtifact(kernel: ResearchKernel, projectId: string): import('@dsh-s
   })
 }
 
+/**
+ * P0-4 (SNAPSHOT-01/API-01): create a disk-backed `code` workspace for the
+ * project and write the given files into it — the only sanctioned snapshot
+ * root. Returns the workspace_id.
+ */
+function seedWorkspace(kernel: ResearchKernel, projectId: string, files: Record<string, string>): string {
+  const info = kernel.workspaceEnsure(projectId, 'code', 'fixture')
+  for (const [rel, content] of Object.entries(files)) {
+    kernel.workspaceWrite(info.workspace_id, rel, content)
+  }
+  return info.workspace_id
+}
+
 function makeBrief(overrides: Record<string, unknown> = {}) {
   return {
     problem: 'p', scope: 's', questions: [], primary_metrics: ['m'],
@@ -1163,16 +1176,16 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
   it('archives ACTUAL file contents into a code artifact + manifest artifact', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-'))
-    mkdirSync(join(dir, 'data'), { recursive: true })
-    mkdirSync(join(dir, 'node_modules'), { recursive: true })
-    mkdirSync(join(dir, '.git', 'objects'), { recursive: true })
-    writeFileSync(join(dir, 'train.js'), 'console.log("real code")\n')
-    writeFileSync(join(dir, 'data', 'seed.json'), '{"baseline":[1,2]}')
-    writeFileSync(join(dir, 'node_modules', 'junk.js'), 'ignored')
-    writeFileSync(join(dir, '.git', 'objects', 'pack'), 'ignored')
+    // P0-4: the archive root is a project workspace (workspace_id +
+    // root_relative_path '' = the whole workspace), never a host path.
+    const ws = seedWorkspace(kernel, project.project_id, {
+      'train.js': 'console.log("real code")\n',
+      'data/seed.json': '{"baseline":[1,2]}',
+      'node_modules/junk.js': 'ignored',
+      '.git/objects/pack': 'ignored',
+    })
 
-    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'unit test snapshot')
+    const snap = kernel.snapshotCodeArchive(project.project_id, ws, '', 'unit test snapshot')
     expect(snap.files).toBe(2)
     expect(snap.total_bytes).toBe(Buffer.byteLength('console.log("real code")\n') + Buffer.byteLength('{"baseline":[1,2]}'))
     expect(snap.archive_artifact_id.startsWith('sha256:')).toBe(true)
@@ -1203,13 +1216,16 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
     expect(bound.code_snapshot_id).toBe(snap.archive_artifact_id)
     expect(bound.code_snapshot_id).not.toBe(snap.snapshot_id)
 
-    // STORE-02: the authoritative registry row exists and matches.
+    // STORE-02: the authoritative registry row exists and matches. P0-4: the
+    // source records the workspace binding, never a host path.
     const snapRow = kernel.getCodeSnapshot(snap.snapshot_id)
     expect(snapRow.archive_artifact_id).toBe(snap.archive_artifact_id)
     expect(snapRow.manifest_artifact_id).toBe(snap.manifest_artifact_id)
     expect(snapRow.sha256).toBe(snap.sha256)
     expect(snapRow.file_count).toBe(2)
     expect(snapRow.source.description).toBe('unit test snapshot')
+    expect(snapRow.source.workspace_id).toBe(ws)
+    expect(snapRow.source.root_relative_path).toBe('')
     expect(archive.files['node_modules/junk.js']).toBeUndefined()
     expect(archive.files['.git/objects/pack']).toBeUndefined()
 
@@ -1230,20 +1246,19 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
   it('rejects symlinks escaping the archived root (path escape protection)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const root = mkdtempSync(join(tmpdir(), 'dsh-snap-root-'))
+    const ws = seedWorkspace(kernel, project.project_id, { 'ok.js': 'fine' })
     const outside = mkdtempSync(join(tmpdir(), 'dsh-snap-outside-'))
-    writeFileSync(join(root, 'ok.js'), 'fine')
     writeFileSync(join(outside, 'secret.txt'), 'secret')
-    symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt'))
+    symlinkSync(join(outside, 'secret.txt'), join(kernel.workspaces.workspaceRoot(ws), 'leak.txt'))
     expectKernelError(
-      () => kernel.snapshotCodeArchive(project.project_id, root, 'escape test'),
+      () => kernel.snapshotCodeArchive(project.project_id, ws, '', 'escape test'),
       422, 'snapshot_path_escape',
     )
     // A symlink INSIDE the root is followed and archived (after the escaping
     // symlink is removed).
-    rmSync(join(root, 'leak.txt'))
-    symlinkSync(join(root, 'ok.js'), join(root, 'alias.js'))
-    const snap = kernel.snapshotCodeArchive(project.project_id, root, 'escape test')
+    rmSync(join(kernel.workspaces.workspaceRoot(ws), 'leak.txt'))
+    symlinkSync(join(kernel.workspaces.workspaceRoot(ws), 'ok.js'), join(kernel.workspaces.workspaceRoot(ws), 'alias.js'))
+    const snap = kernel.snapshotCodeArchive(project.project_id, ws, '', 'escape test')
     expect(snap.files).toBe(2)
     kernel.close()
   })
@@ -1251,8 +1266,11 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
   it('rejects a missing root with 422 snapshot_root_missing', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const ws = seedWorkspace(kernel, project.project_id, {})
+    // P0-4: the root is workspace-relative — a relative subdirectory that
+    // does not exist is the new "missing root" case.
     expectKernelError(
-      () => kernel.snapshotCodeArchive(project.project_id, join(tmpdir(), 'does-not-exist-' + Date.now())),
+      () => kernel.snapshotCodeArchive(project.project_id, ws, 'does-not-exist'),
       422, 'snapshot_root_missing',
     )
     kernel.close()
@@ -1414,11 +1432,11 @@ describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
   it('unpackCodeSnapshot round-trips an archived snapshot and rejects tampering', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-unpack-'))
-    mkdirSync(join(dir, 'lib'), { recursive: true })
-    writeFileSync(join(dir, 'train.js'), '#!/usr/bin/env node\nconsole.log("hi")\n')
-    writeFileSync(join(dir, 'lib', 'util.js'), 'export const f = 1\n')
-    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'unpack test')
+    const ws = seedWorkspace(kernel, project.project_id, {
+      'train.js': '#!/usr/bin/env node\nconsole.log("hi")\n',
+      'lib/util.js': 'export const f = 1\n',
+    })
+    const snap = kernel.snapshotCodeArchive(project.project_id, ws, '', 'unpack test')
 
     const archiveText = kernel.cas.read(snap.sha256).toString('utf8')
     const files = unpackCodeSnapshot(archiveText)
@@ -1576,12 +1594,11 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
   it('rejects a single oversized file without buffering it (422 snapshot_too_large)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-file-limit-'))
-    writeFileSync(join(dir, 'big.js'), 'x'.repeat(8))
+    const ws = seedWorkspace(kernel, project.project_id, { 'big.js': 'x'.repeat(8) })
     const saved = ResearchKernel.SNAPSHOT_MAX_FILE_BYTES
     try {
       ResearchKernel.SNAPSHOT_MAX_FILE_BYTES = 4 // tiny cap for the test
-      const err = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, dir, 'limit test'))
+      const err = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, ws, '', 'limit test'))
       expect(err.status).toBe(422)
       expect(err.code).toBe('snapshot_too_large')
       expect(err.message).toContain('max_file_bytes=4')
@@ -1595,15 +1612,12 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
   it('rejects archives beyond max_files / max_total_bytes with measured values (422 snapshot_too_large)', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-count-limit-'))
-    writeFileSync(join(dir, 'a.js'), 'a')
-    writeFileSync(join(dir, 'b.js'), 'b')
-    writeFileSync(join(dir, 'c.js'), 'c')
+    const ws = seedWorkspace(kernel, project.project_id, { 'a.js': 'a', 'b.js': 'b', 'c.js': 'c' })
     const savedFiles = ResearchKernel.SNAPSHOT_MAX_FILES
     const savedTotal = ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES
     try {
       ResearchKernel.SNAPSHOT_MAX_FILES = 2
-      const err = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, dir, 'limit test'))
+      const err = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, ws, '', 'limit test'))
       expect(err.status).toBe(422)
       expect(err.code).toBe('snapshot_too_large')
       expect(err.message).toContain('max_files=2')
@@ -1611,10 +1625,10 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
       ResearchKernel.SNAPSHOT_MAX_FILES = savedFiles
       ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES = 3
       // Files are 2 bytes each → total 6 > 3 must fail with the measured total.
-      writeFileSync(join(dir, 'a.js'), 'aa')
-      writeFileSync(join(dir, 'b.js'), 'bb')
-      writeFileSync(join(dir, 'c.js'), 'cc')
-      const err2 = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, dir, 'limit test'))
+      kernel.workspaceWrite(ws, 'a.js', 'aa')
+      kernel.workspaceWrite(ws, 'b.js', 'bb')
+      kernel.workspaceWrite(ws, 'c.js', 'cc')
+      const err2 = captureKernelError(() => kernel.snapshotCodeArchive(project.project_id, ws, '', 'limit test'))
       expect(err2.status).toBe(422)
       expect(err2.code).toBe('snapshot_too_large')
       expect(err2.message).toContain('max_total_bytes=3')
@@ -1628,9 +1642,9 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
   it('never exposes the host path: archive/manifest/registry/snapshot use a display root', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-leak-'))
-    writeFileSync(join(dir, 'a.js'), 'a')
-    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'leak test')
+    const ws = seedWorkspace(kernel, project.project_id, { 'a.js': 'a' })
+    const dir = kernel.workspaces.workspaceRoot(ws)
+    const snap = kernel.snapshotCodeArchive(project.project_id, ws, '', 'leak test')
 
     const archive = JSON.parse(kernel.cas.read(snap.sha256).toString('utf8')) as { root?: unknown }
     const manifest = JSON.parse(kernel.cas.read(snap.manifest_artifact_id!.replace('sha256:', '')).toString('utf8')) as { root?: unknown }
@@ -1813,9 +1827,8 @@ describe('RUN-01 runs ledger: snapshot resolution + HTTP routes', () => {
     // Registry-id job: submitJob binds code_snap_ → archive artifact id; force
     // the raw registry id back onto the job to exercise the claim-time
     // code_snap_ resolution path (legacy rows written before binding).
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-snap-run-'))
-    writeFileSync(join(dir, 'train.js'), 'console.log("x")\n')
-    const snap = kernel.snapshotCodeArchive(project.project_id, dir, 'registry run')
+    const ws = seedWorkspace(kernel, project.project_id, { 'train.js': 'console.log("x")\n' })
+    const snap = kernel.snapshotCodeArchive(project.project_id, ws, '', 'registry run')
     const regJob = kernel.submitJob({
       project_id: project.project_id, idempotency_key: 'snap-runs-reg', kind: 'baseline',
       contract_id: contract, code_snapshot_id: snap.snapshot_id, image_digest: NODE_IMAGE_DIGEST,
@@ -2591,6 +2604,130 @@ describe('service token auth on internal routes (hardening §4 P0 API-01/EVID-01
       await expect(bearerOnly.claimJobs('svc-unit', 1)).rejects.toBeInstanceOf(KernelApiError)
       await expect(bearerOnly.claimJobs('svc-unit', 1)).rejects.toMatchObject({ status: 403 })
       await expect(bearerOnly.claimJobs('svc-unit', 1)).rejects.toThrow(/x-service-token/)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+})
+
+describe('§5 P0-1 bearer enforcement on token-configured kernels (hardening API-01/SIDE-01)', () => {
+  const KERNEL_TOKEN = 'unit-test-kernel-token-0001'
+  const SERVICE_TOKEN = 'unit-test-service-token-0002'
+
+  function bearerKernel(serviceToken: string | undefined): ResearchKernel {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-bearer-'))
+    return new ResearchKernel({
+      dbPath: join(dir, 'kernel.db'),
+      casRoot: join(dir, 'cas'),
+      requireSignedManifest: false,
+      serviceToken,
+    })
+  }
+
+  async function request(port: number, path: string, method = 'GET', headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; code: string }> {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const envelope = await res.json().catch(() => ({})) as { error?: { code?: string } }
+    return { status: res.status, code: envelope.error?.code ?? '' }
+  }
+
+  it('server: with a configured token every non-health route demands the bearer — missing/wrong → 401 unauthorized, correct → 200; health is exempt', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = bearerKernel(SERVICE_TOKEN)
+    const { server, port } = await startKernelServer({ kernel, port: 0, token: KERNEL_TOKEN })
+    try {
+      // Read without bearer → 401.
+      const noAuth = await request(port, '/v1/projects')
+      expect(noAuth.status).toBe(401)
+      expect(noAuth.code).toBe('unauthorized')
+      // Wrong bearer → 401 (same code — no oracle).
+      const wrong = await request(port, '/v1/projects', 'GET', { authorization: 'Bearer wrong-token' })
+      expect(wrong.status).toBe(401)
+      expect(wrong.code).toBe('unauthorized')
+      // Correct bearer → 200.
+      const right = await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${KERNEL_TOKEN}` })
+      expect(right.status).toBe(200)
+      // Write without bearer → 401 (a local process cannot mutate anything).
+      const write = await request(port, '/v1/projects', 'POST', {}, { name: 'x', workspace: '/w', brief: makeBrief() })
+      expect(write.status).toBe(401)
+      expect(write.code).toBe('unauthorized')
+      // Health is exempt on both version surfaces (sidecar handshake, probes).
+      expect((await request(port, '/v1/health')).status).toBe(200)
+      expect((await request(port, '/v2/health')).status).toBe(200)
+      // /internal/metrics stays behind the bearer (loopback is not enough
+      // when a token is configured).
+      expect((await request(port, '/internal/metrics')).status).toBe(401)
+      expect((await request(port, '/internal/metrics', 'GET', { authorization: `Bearer ${KERNEL_TOKEN}` })).status).toBe(200)
+      // Wrong bearer on health is still accepted (exempt surface).
+      expect((await request(port, '/v1/health', 'GET', { authorization: 'Bearer wrong' })).status).toBe(200)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('server: bearer and x-service-token are two independent layers — bearer never unlocks internal routes, x-service-token never substitutes for the bearer on public routes', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = bearerKernel(SERVICE_TOKEN)
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bearer-1', kind: 'echo', payload: { message: 'x' } })
+    const { server, port } = await startKernelServer({ kernel, port: 0, token: KERNEL_TOKEN })
+    try {
+      // 1. Internal route with ONLY the correct bearer → 403 service_token_required.
+      const bearerOnly = await request(port, '/v1/jobs-claim/run', 'POST', { authorization: `Bearer ${KERNEL_TOKEN}` }, { owner: 'svc-neg', limit: 1 })
+      expect(bearerOnly.status).toBe(403)
+      expect(bearerOnly.code).toBe('service_token_required')
+      // 2. Internal route with bearer AND x-service-token → 200 (both layers).
+      const both = await request(port, '/v1/jobs-claim/run', 'POST', { authorization: `Bearer ${KERNEL_TOKEN}`, 'x-service-token': SERVICE_TOKEN }, { owner: 'svc-ok', limit: 1 })
+      expect(both.status).toBe(200)
+      // 3. Public route with ONLY x-service-token → 401 unauthorized (the
+      // service identity is not a browser credential).
+      const serviceOnly = await request(port, '/v1/projects', 'GET', { 'x-service-token': SERVICE_TOKEN })
+      expect(serviceOnly.status).toBe(401)
+      expect(serviceOnly.code).toBe('unauthorized')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('server: a kernel WITHOUT a token skips the bearer check entirely (explicit bare-kernel dev mode)', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const res = await request(port, '/v1/projects')
+      expect(res.status).toBe(200)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('ResearchClient with token authenticates to a token-configured kernel; without it the kernel answers 401', async () => {
+    const { ResearchClient, KernelApiError } = await import('@dsh-scholar/research-client')
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = bearerKernel(undefined)
+    kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const { server, port } = await startKernelServer({ kernel, port: 0, token: KERNEL_TOKEN })
+    const endpoint = `http://127.0.0.1:${port}`
+    try {
+      // Without the token the public API is locked: 401 unauthorized.
+      const anonymous = new ResearchClient({ endpoint })
+      await expect(anonymous.listProjects()).rejects.toBeInstanceOf(KernelApiError)
+      await expect(anonymous.listProjects()).rejects.toMatchObject({ status: 401 })
+      await expect(anonymous.listProjects()).rejects.toThrow(/missing or invalid bearer token/)
+      // fetchArtifact (direct fetch path) also 401s without the token → null.
+      await expect(anonymous.fetchArtifact('rsp_x', 'sha256:' + 'a'.repeat(64))).resolves.toBeNull()
+      // With the token every call works.
+      const authed = new ResearchClient({ endpoint, token: KERNEL_TOKEN })
+      expect(await authed.listProjects()).toHaveLength(1)
+      // health() goes through the exempt surface even without the token.
+      expect((await anonymous.health()).ok).toBe(true)
     } finally {
       server.close()
       kernel.close()

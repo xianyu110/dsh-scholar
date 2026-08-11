@@ -73,7 +73,13 @@ const cancelPollMs = (cli['runner.cancel_poll_ms'] as number | undefined) ?? 500
 const keyFile = cli['runner.key_file'] as string | undefined
 const owner = (cli['runner.owner'] as string | undefined) ?? `runner-${randomUUID().slice(0, 8)}`
 const serviceToken = (cli['runner.service_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
-const token = cli['runner.token'] as string | undefined
+// §5 P0-1 (hardening API-01/SIDE-01): the runner's kernel bearer token.
+// Explicit --token wins; otherwise the process env is inherited — a runner
+// spawned by a sidecar-orchestrated host (plugin/BFF process tree) carries
+// DSH_SCHOLAR_KERNEL_TOKEN and authenticates to the kernel automatically.
+// A bare kernel (no token configured) simply skips the check, so a runner
+// without any token still works against a dev kernel.
+const token = (cli['runner.token'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
 
 // CONFIG-01: the runner's effective config is validated through the
 // canonical Config Registry before any claim cycle (unknown keys / invalid

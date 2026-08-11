@@ -57,10 +57,16 @@
 当前队列直接引用 [acceptance-tests.md §21](./acceptance-tests.md#21-2026-08-11-当前复审强制回归场景)：
 
 1. 浏览器：Init/Resume/Upload/Grill、Workspace、Interactive Terminal、TeX live preview、Trajectory/Subagent Topology、Settings/i18n；
+   - Manuscript P0-3（TEX-01/TEX-03，hardening §5 行）视觉项：打开/rerender/tab 往返零写入；保存→debounce→preview 状态（pending/queued/running/succeeded/failed/cancelled/superseded）与 stale 标识同页实时更新、PDF 自动刷新/下载；Regenerate 确认对话框与旧版本回退；权威 Compile 与 preview 面板分离；窄屏布局——全部记 `NOT_RUN_MANUAL_PENDING`（Playwright 类环境不可用），对应 acceptance-tests.md §21 `manuscript-open-never-regenerates` / `tex-save-live-preview`；
 2. DSH：Agent plugin、subagent follow-up、Cordis self-mod 隔离与 lifecycle；
 3. Remote：容器隔离、mTLS、fencing、binary CAS、断线恢复、Remote PTY；
 4. Reproduction：真实 Docker/TeX、Golden Path、Release Bundle、clean-room；
-5. Recovery/Security：撤权即时生效、多进程、kill/restart、长期 retention 与跨项目负向。
+   - Code Snapshot P0-4（SNAPSHOT-01/API-01，hardening §5 行）端到端项：真实 golden-path Docker 全链（fixture 经项目 workspace 归档 → CAS 物化 → 容器执行）；浏览器/DSH 侧经 `workspace_snapshot` 工具以 workspace_id + root_relative_path 归档；旧 `{path}` 形状调用被 422 拒绝的实测记录；secret 文件（.env/token/key）混入工作区时快照被拒并列出文件名的实测记录——对应 acceptance-tests.md §21 `code-snapshot-approved-workspace-only`，记 `NOT_RUN_MANUAL_PENDING`（Docker/golden 环境可用时先跑 `evals/golden-path-v2/run-golden-v2.sh`）；
+5. Recovery/Security：sidecar-kernel-bearer-required（真实 sidecar 实例上直接访问 kernel 端口的读写 401 负向、health 豁免、BFF/Runner/Orchestrator 用 token 全链）、撤权即时生效、多进程、kill/restart、长期 retention 与跨项目负向。
+   - P0-2（API-01/PTY-01，hardening §5 行）已在代码实现阶段自动验证的部分（不再进入人工队列）：BFF global-id 解析（artifact/document/pty/events 跨项目 404、成员 200、猜 ID 404、无 scope events 404）、kernel PTY principal+owner+lease 强制（direct-kernel 负向矩阵）、membership 实时撤权（同一 BFF 移除成员后下一请求 404）——证据 run-standalone-http-tests.sh P0-2 段、run-hardening-tests.sh direct-kernel PTY 段、tests/unit/pty-session.test.ts 14/14；
+   - 剩余人工项（记 `NOT_RUN_MANUAL_PENDING`）：浏览器 Interactive Terminal 真实 stdin/resize/INT/TERM/KILL/detach-reconnect/after_seq-gap 全链（acceptance-tests.md §21 `interactive-terminal-browser`）、多人/多进程真实撤权观感（`membership-revocation-no-stale-cache` 的浏览器侧）、Remote PTY 共用同一权限 wire 的跨机验证（`pty-owner-fencing-all-operations` 剩余）。
+
+本地可复现项不进入人工队列（§1）：`workspace-permission-under-umask` 与 `ci-current-evidence-no-exclusion`（acceptance-tests.md §21）已在代码实现阶段自动验证并标记“已实现未验收”（hardening §5 WORK-01/CI-01 行），剩余仅 CI job 绑定；不记 `NOT_RUN_MANUAL_PENDING`。
 
 ## 5. 结果回写规则
 

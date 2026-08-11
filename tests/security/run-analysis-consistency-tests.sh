@@ -64,6 +64,10 @@ bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
 # the env var and authenticate their claim/runner-keys/recover calls themselves).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
+# into a project workspace and POST workspace_id + root_relative_path.
+# shellcheck source=../../evals/code-snapshot-lib.sh
+source "$REPO/evals/code-snapshot-lib.sh"
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 
@@ -139,7 +143,11 @@ if grep -q '0.02 \* seed + 0.1 \* weightedSum' "$WORK/fixture/train.js" && grep 
 else
   bad "snapshot source preparation failed (train.js patch not applied)"
 fi
-SNAP=$(api -X POST "$BASE/v1/projects/$PROJ/code-snapshots" -d "{\"path\":\"$WORK/fixture\",\"description\":\"analysis-consistency fixture\"}")
+# P0-4 (SNAPSHOT-01/API-01): seed the fixture into an approved project
+# workspace and archive via workspace_id + root_relative_path (server-
+# side root resolution — the old host-`path` shape is refused with 422).
+AN_WS=$(code_snapshot_seed_workspace "$PORT" "$PROJ" "fixture" "$WORK/fixture")
+SNAP=$(code_snapshot_api "$PORT" "$PROJ" "$AN_WS" "" "analysis-consistency fixture")
 CODE_ART=$(printf '%s' "$SNAP" | jfield '.archive_artifact_id')
 if [[ "$CODE_ART" == sha256:* ]]; then
   ok "code snapshot archived from CAS: $CODE_ART"
