@@ -48,6 +48,12 @@ link_one() { # <package.json path>
       link_path="$nm/$name"
       ;;
   esac
+  # DSH occasionally reorganizes workspace package directories. A dangling
+  # development symlink must be replaced instead of making this helper fail
+  # with `File exists`; live links and real installed packages stay untouched.
+  if [[ -L "$link_path" && ! -e "$link_path" ]]; then
+    rm -- "$link_path"
+  fi
   if [[ ! -e "$link_path" ]]; then
     ln -s "$dir" "$link_path"
     linked=$((linked + 1))
@@ -64,7 +70,7 @@ done
 for pkg in "$root"/vendor/*/package.json; do
   name=$(node -e "console.log(require('$pkg').name || '')" 2>/dev/null || true)
   case "$name" in
-    @cordisjs/* | cosmokit) link_one "$pkg" ;;
+    @deepseek-ai/cordis | cordis | @cordisjs/* | cosmokit) link_one "$pkg" ;;
   esac
 done
 

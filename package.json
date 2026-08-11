@@ -45,7 +45,7 @@
     "zod": "^3.24.0"
   },
   "peerDependencies": {
-    "cordis": ">=4.0.0-rc.7",
+    "@deepseek-ai/cordis": ">=4.0.0-rc.7",
     "schemastery": ">=3.18.0",
     "@deepseek-ai/dsh-commands": "0.0.1",
     "@deepseek-ai/dsh-llm": "0.0.1",

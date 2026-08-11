@@ -1,7 +1,7 @@
 # DSH Scholar 重建规范
 
-> 规范版本：2.4
-> 更新日期：2026-08-11
+> 规范版本：2.5
+> 更新日期：2026-08-12
 > 目标成熟度：Security Alpha，默认 gate-only
 > 用途：仅依赖本目录 Markdown，即可重新实现、测试和部署 DSH Scholar。
 
@@ -11,7 +11,7 @@
 
 1. 本文件中的全局规则；
 2. product-spec.md、design-notes.md 和 domain-model.md 中的产品、架构与不变量；
-3. research-onboarding.md、trajectory-subagents.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
+3. research-onboarding.md、init-grill-upload-models.md、reproduction-contracts.md、trajectory-subagents.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
 4. repository-blueprint.md 与 acceptance-tests.md 中的工程结构和验收规则；
 5. test-instance-plan.md 与 USAGE_GUIDE.md 中的运行说明；
 6. hardening-v0.2-status.md 中的当前实现差距，仅用于迁移，不能覆盖目标规范；
@@ -33,20 +33,21 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 | 2 | design-notes.md | 模块如何划分，权威状态和信任 seam 在哪里 |
 | 3 | domain-model.md | 对象、状态机、ID、约束和事件是什么 |
 | 4 | research-onboarding.md | 如何从 Init、Upload 和 Grill Me 安全接入任意研究阶段 |
-| 5 | trajectory-subagents.md | 如何移植 Trajectory、展示 subagent 拓扑并进入子会话 |
-| 6 | reconstruction-contracts.md | 固定 ABI、wire 类型、算法、limits 和可生成参数 |
-| 7 | storage-migrations.md | 如何持久化、迁移和恢复 |
-| 8 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
-| 9 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
-| 10 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
-| 11 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
-| 12 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
-| 13 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
-| 14 | acceptance-tests.md | 如何证明生成结果符合规范 |
-| 15 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
-| 16 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
-| 17 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
-| 18 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
+| 5 | init-grill-upload-models.md | name-only Init、Chat 单题 Grill、批量分块上传和 Provider/OCR 如何实现 |
+| 6 | reproduction-contracts.md | 论文复现、实验环境、Chat 附件与 session Terminal 如何形成可追溯闭环 |
+| 7 | trajectory-subagents.md | 如何移植 Trajectory、展示 subagent 拓扑并进入子会话 |
+| 8 | storage-migrations.md | 如何持久化、迁移和恢复 |
+| 9 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
+| 10 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
+| 11 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
+| 12 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
+| 13 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
+| 14 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
+| 15 | acceptance-tests.md | 如何证明生成结果符合规范 |
+| 16 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
+| 17 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
+| 18 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
+| 19 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
 
 ## 4. 生成约束
 
@@ -61,10 +62,14 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 - 浏览器 UI 只支持独立模式，由独立 HTTP host 和同源 BFF 提供；不得发布 `dshClient`、DSH Web slot、`/research-api` 或 `/research-ui-api` 嵌入面；
 - DSH Adapter 只保留 Agent tools、commands、subagents、Skills、Session 和 headless 能力，不托管浏览器 UI；
 - Run Terminal 必须显示可恢复的只读执行账本；Interactive Terminal 必须提供真实 PTY 输入、resize、signal、重连与审计，二者不得混为同一权威语义；
+- Interactive Terminal 必须绑定权威 Research/Chat/Subagent session，并允许每个 context 有多个 PTY 标签；禁止用 project 级单例把输入发送到错误 session；
 - Workspace 必须提供 VS Code 式文件树、标签页、搜索、编辑、版本冲突与二进制预览；Manuscript 必须提供保存后增量 LaTeX 预览、权威编译日志、诊断和 PDF freshness；
 - Runner 必须通过同一 Execution interface 支持本机 Docker 与受控远端 Runner；远端机器不能成为业务权威或绕过 Snapshot、lease、Manifest 和 Artifact 契约；
+- 实验/复现只选择 opaque runner profile/target ID；远端 SSH/mTLS endpoint 与 credential 只在服务端 Settings/SecretRef，离线或能力不匹配不得静默回退本机；
 - 所有可配置行为必须登记到版本化 Config Schema，声明 scope、默认值、约束、来源、secret 属性、热更新/重启规则，并由同一 Schema 生成文件配置、HTTP 校验和 Settings UI；
 - 首次进入必须提供 Init、Resume、Upload 三入口；既有研究先进入隔离 Intake，经 Grill Me 和 Human adoption 后才能写入项目，导入历史不得伪造 Gate、Run、TerminalLog 或 accepted Evidence；
+- Chat 必须支持附件按钮、拖拽和粘贴，附件复用隔离 Intake/分块 scan/OCR；slash command 直接使用 `/new`、`/reproduce` 等一级命令；DSH 不注册聚合 descriptor，standalone 只可在 parser 内兼容旧输入且不展示；
+- 论文复现必须持久化 Spec/Attempt/Report，固定 paper/code/data/environment/Contract/RunManifest，并区分 execution 成功与科学比较 pass；
 - 使用过程中必须由 Kernel 权威投影提供结构化 NextAction，页面给出一项主要下一步与原因/阻断/目标路由，未知动作只读展示，不能由 LLM 或浏览器猜测推进；
 - Trajectory 必须区分 Kernel Research Outbox 与展示性的 DSH Session；subagent 以父子拓扑展示并可进入授权 child 查看，one-shot 只读，continuable follow-up 必须 exact-parent 授权且默认脱敏；
 - 主页面只保留 Start、Overview、Workspace、Runs 和 Manuscript 等高频任务；Approvals、Artifacts、Evidence、Budget、Trajectory/Topology 保持深链可达，所有可调项统一进入默认折叠的 Settings；

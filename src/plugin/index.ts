@@ -8,7 +8,7 @@
  *    is only ACTIVE after apply settles). The kernel sidecar is started
  *    FIRST and awaited; only after `sidecar.start()` resolves are the client,
  *    `ctx.research` (with the RESOLVED endpoint — `port: 0` included), the
- *    research tool surface, the /research command family and the skill packs
+ *    research tool surface, direct slash commands and the skill packs
  *    registered. Nothing is published before the kernel is healthy, so a
  *    `port: 0` endpoint is always the real bound port and no tool/command
  *    ever sees an unresolved endpoint.
@@ -33,7 +33,7 @@
  * @module @dsh-scholar/research-plugin
  */
 
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 // Module augmentations: ctx.tools (ToolRegistry), ctx.commands (CommandService).
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
@@ -212,7 +212,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     return next()
   })
 
-  // /research command family (design 附录 A).
+  // Direct slash commands (design 附录 A).
   registerResearchCommands(ctx, { client, cache, unattended })
 
   // Skill pack mount: methodology plus deterministic domain/venue packs.

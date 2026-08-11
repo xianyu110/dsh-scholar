@@ -1,6 +1,6 @@
 ---
 name: domain-machine-learning
-description: Machine-learning research domain pack for DSH Research OS — dataset/metric/reproducibility conventions for ML projects. Use when a Research Project's domain is machine-learning (the default): survey, idea, baseline, contract, runs and evidence follow these conventions.
+description: "Machine-learning research domain pack for DSH Research OS — dataset/metric/reproducibility conventions for ML projects. Use when a Research Project's domain is machine-learning (the default): survey, idea, baseline, contract, runs and evidence follow these conventions."
 ---
 
 # Domain Pack: Machine Learning

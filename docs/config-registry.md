@@ -150,3 +150,15 @@ sources 客户端镜像一起由 tests/unit/settings-model.test.ts 对真实注�
 - job scope 键（每 Job 策略仍由 runner-profile + Job payload 派生）；
 - SecretRef 存储层（当前 secret 仍以 CLI/env/0600 文件提供，仅 registry 层脱敏与
   pin 提交；客户端只显示掩码，明文永不回显）。
+
+## 7. Model Provider 与 OCR 配置增量
+
+global scope 必须提供 `models.providers.*` 与 `onboarding.ocr.*` descriptor：Provider enable/base-url policy/catalog refresh/timeout、OCR provider/model/language/page/concurrency/retry，以及 `onboarding.upload.chunk_bytes`、`onboarding.upload.intake_total_bytes`。默认 chunk=8 MiB、最大=32 MiB；默认 Intake total=2 GiB、最大=10 GiB。安全字段只能由 instance/global 收紧，项目不能覆盖 endpoint 或 credential。
+
+Provider credential 使用严格 SecretRef 存储层；项目仅保存 provider/model ID binding。Settings 的 Models & OCR 分组由 schema/provider API 生成，所有写入使用 revision CAS。运行中 OCR 固定 provider/model/config revision/hash，不因后续编辑漂移。精确 schema 与 fail-closed 规则见 `init-grill-upload-models.md`。
+
+## 8. Experiment Environment 与 Remote SSH Runner
+
+新增 target scope 和 `runner.targets.*`/`runner.profiles.*` descriptor。Settings 可登记 `local-docker` 或 `remote-ssh-runner` target 的 safe label、capabilities、health、draining、image/resource/network policy，以及 endpoint/known-hosts/SSH/mTLS `SecretRef`；普通 effective/API/浏览器只返回 target ID、label、健康、revision/hash 与 secret available，不返回连接明文。
+
+项目、ExperimentContract、PaperReproductionSpec 与 Job 只选择 opaque profile/target ID。secure Job/PTY/Build 固定 target/profile/effective environment revision/hash；修改只影响新 attempt。远端不可用不自动回退本机。真实 SSH adapter 与 mTLS 未通过人工环境验收前状态只能“已实现未验收”或更低。

@@ -82,4 +82,4 @@ if [ "$kernel_state" != ok ]; then
 fi
 
 echo "verification: curl -s http://127.0.0.1:$KERNEL_PORT/v1/health"
-echo "Use /research commands in DSH; use http://127.0.0.1:18610 for the Scholar UI."
+echo "Use direct slash commands such as /new, /status and /reproduce in DSH; use http://127.0.0.1:18610 for the Scholar UI."

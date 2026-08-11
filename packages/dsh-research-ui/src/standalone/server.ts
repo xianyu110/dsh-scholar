@@ -999,10 +999,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
-      // Chat /research survey: the browser client cannot run the scholar
+      // Chat /survey: the browser client cannot run the scholar
       // connectors (OpenAlex/Crossref/arXiv fetchers), so the standalone
       // server performs the multi-source search + corpus snapshot on its
-      // behalf (same semantics as the DSH Agent /research survey command).
+      // behalf (same semantics as the DSH Agent /survey command).
       if (method === 'POST' && url.pathname === '/api/chat/survey') {
         if (options.token !== null) {
           const auth = req.headers.authorization

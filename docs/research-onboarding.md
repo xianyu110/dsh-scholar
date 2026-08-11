@@ -6,7 +6,7 @@
 
 未选择项目时，首屏只提供三个主入口：
 
-1. **Init**：从研究问题开始，填写最少 Brief 后创建 DRAFT 项目与 Scope Gate；
+1. **Init**：首次只填写项目名，创建 `DRAFT/brief_status=collecting` 项目与 active Init Intake；在项目 Chat 中逐题 Grill，PI 确认完整 Brief 后才创建 Scope Gate；
 2. **Resume**：恢复平台内最近项目，回到其最后路由和权威 `next_actions`；
 3. **Upload / Continue existing research**：上传在其他地方完成的论文、TeX、代码、数据、日志或结果，通过 Grill Me 识别完成阶段和缺口，Human 确认后创建或合并项目。
 
@@ -21,7 +21,7 @@ interface ResearchOnboarding {
   begin(input: BeginIntake, principal: Principal): Promise<IntakeSession>
   stage(input: StageUpload, principal: Principal): Promise<IntakeArtifact>
   scan(intakeId: string, principal: Principal): Promise<IntakeProjection>
-  grill(input: GrillAnswerBatch, principal: Principal): Promise<IntakeProjection>
+  grill(input: GrillAnswer, principal: Principal): Promise<IntakeProjection>
   propose(intakeId: string, principal: Principal): Promise<PhaseProposal>
   accept(input: AcceptProposal, principal: Principal): Promise<AdoptionReceipt>
   resume(intakeId: string, principal: Principal): Promise<IntakeProjection>
@@ -38,6 +38,8 @@ interface ResearchOnboarding {
 - 只有 BFF 解析出的 Human PI Principal 可以 accept；
 - accept 是“采用材料和生成待办”的事务，不是任何 Gate Decision；
 - accept 后若需修改采用结果，创建新 Intake/Proposal，不原地篡改 AdoptionReceipt。
+
+Name-only Init 是此边界的专用事务：创建空壳 Project、membership、Budget 与 Init Intake，但在 PI 确认前不创建 Gate，也不把内部占位 brief 当作 ResearchBrief。完整状态、问题与确认事务见 `init-grill-upload-models.md`。
 
 ## 3. 状态机与对象
 
@@ -65,7 +67,7 @@ draft → uploading → scanning → needs_input ↔ grilling
 
 ### 4.1 上传协议
 
-- 单文件不超过 32 MiB 可走浏览器 multipart；研究包或更大文件走 intake staged upload（当前实现为整文件 multipart stage ≤32 MiB，见 api-contracts.md §16；目标协议支持分块、offset/hash 重试、pause/resume/finalize/abort——分块 Content-Range 上传与 v2/BFF accept 面同属剩余项，未实现，UI 如实不做分块）；
+- 兼容 v1 的单文件不超过 32 MiB multipart 继续保留；独立页面默认使用 v2 批量 intake staged upload：8 MiB chunk、Content-Range、offset/hash 幂等、pause/resume/finalize/abort，单 Intake 默认 2 GiB、instance 可配且硬上限 10 GiB；
 - 默认上限：当前实现（commit 98243ff，§4.2 注记）为单 intake 条目数 ≤1000、解压总字节 ≤512 MiB、单文件 ≤64 MiB、压缩比 >100x（`ResearchKernel.ARCHIVE_MAX_*` 静态可覆写；无嵌套 archive 深度限制——嵌套包按普通条目处理）；文档目标上限（10 GiB / 100,000 entries / 解压后 100 GiB / 嵌套深度 2）作为 instance Config 收紧基准保留，尚未实现；instance Config 可收紧，不能超过 reconstruction-contracts.md 的最大值；
 - stage 绑定 intake、Principal 和过期时间；相同 offset/hash 重传幂等，gap 或不同内容冲突返回 409；
 - finalize 服务端复算 SHA-256 和 size，扫描完成前不能预览或采用；
@@ -88,6 +90,8 @@ Grill Me 是确定性缺口收集器，不是让 LLM 自由判断研究已完成
 - answer 必须记录 Human Principal、时间和 question_revision，provenance 为 `human_assertion`；
 - 必答项未回答时保持 `needs_input`；`unknown` 和部分答案必须保留 unresolved gap 并降低 confidence；
 - 用户陈述不能升级为 verified Evidence 或证明历史 Gate 已通过。
+
+Chat 每轮只展示和提交一个问题；回答、edit、skip 与 unknown 都携带 question_revision。所有必答问题处理后先展示 Brief 预览，只有 Human PI 点击确认才能写 canonical Brief 并创建唯一 Scope Gate。OCR/parser 候选必须显示 source/page/confidence，不能自动代答。Init 的固定问题集与事务边界见 `init-grill-upload-models.md`。
 
 ## 6. 阶段提案与安全采用
 

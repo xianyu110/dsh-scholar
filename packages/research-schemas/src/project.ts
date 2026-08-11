@@ -39,6 +39,7 @@ export const KernelEventKind = z.enum([
   'project.transitioned',
   'project.renamed',
   'project.deleted',
+  'project.brief.confirmed',
   'gate.created',
   'gate.decided',
   'artifact.registered',
@@ -152,6 +153,8 @@ export const ResearchProject = z.object({
   mode: ProjectMode.default('gate-only'),
   status: ProjectStatus.default('DRAFT'),
   revision: z.number().int().nonnegative().default(0),
+  /** Init/Grill lifecycle is orthogonal to the research status machine. */
+  brief_status: z.enum(['collecting', 'confirmed']).optional(),
   brief: ResearchBrief,
   constraints: BudgetConstraints.default({}),
   execution: ExecutionConfig.default({}),

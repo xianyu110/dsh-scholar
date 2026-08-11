@@ -1,6 +1,6 @@
 # DSH Scholar 使用指南
 
-> 目标版本 2.3。浏览器 UI 仅支持 standalone，产品仍在开发中。本指南同时描述目标使用流程和当前限制；任何能力只有在 hardening-v0.2-status.md 标为“已验收”并绑定当前 CI 证据后才能用于正式科研。
+> 目标版本 2.5。浏览器 UI 仅支持 standalone，产品仍在开发中。本指南同时描述目标使用流程和当前限制；任何能力只有在 hardening-v0.2-status.md 标为“已验收”并绑定当前 CI 证据后才能用于正式科研。
 
 ## 1. 启动
 
@@ -14,27 +14,31 @@ bash scripts/start-standalone-ui.sh
 
 未选择项目时页面显示三张启动卡（不会自动选中某个项目）：
 
-- **新建研究（Init）**：填写项目名、研究问题和主指标后创建 DRAFT + Scope Gate（默认 gate-only 模式与 Local Docker 执行策略，创建界面不提供策略确认步骤）；
+- **新建研究（Init）**：只填写项目名，创建 `DRAFT/brief_status=collecting` 空壳并进入项目 Chat；Grill Me 每次只问一个问题，答完后预览 Brief，PI 确认才创建 Scope Gate；
 - **打开已有项目（Resume）**：Start 屏下方列出此内核上的项目，搜索名称或输入完整 project id 后显式选择（不会自动选中某个项目）；选中后进入项目总览（当前不按 status/pending Gate/NextAction 自动跳转页面，tab 恢复只恢复上次使用的面板）；
-- **上传 / 接入（Upload）**：打开真实导入向导（ONBOARD-01）——选择目标项目（或新建）、来源标签与目标阶段（brief/survey/idea/baseline/contract/experiment/evidence/writing/review/release，问题清单按阶段裁剪）→ 上传文件（单文件 ≤32MiB，multipart；已 staged 文件可继续/重传——sha256 幂等，或删除后重传）→ 静态安全扫描（clean/quarantined/rejected 与拒因）→ Grill Me 回答必答问题（答案持久化为 human_assertion）→ 生成阶段提案（plan/risks/pre-accept 清单/置信度）→ PI 采用（AdoptionReceipt）或拒绝。每步从服务端投影恢复：刷新或重开页面后向导回到同一会话同一阶段；Overview 面板的 intake_* NextAction 卡可直接继续接入会话。
+- **上传 / 接入（Upload）**：选择目标项目与阶段，批量加入材料；独立页面默认按 8 MiB 分块，可暂停/刷新/恢复，每个文件显示 hash/scan/OCR 状态，单 Intake 默认总量 2 GiB（管理员最多配置到 10 GiB）。静态扫描与 Grill 后生成 proposal，PI 采用或拒绝；刷新后从服务端投影继续。
 
 Upload 可以创建新项目或选择有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI 已接线(2026-08-11,视觉验收未完成——浏览器拖拽/真实上传交互与断点续接观感待人工环境,记 NOT_RUN_MANUAL_PENDING);分块 offset/hash 恢复上传(服务端整文件 staged ≤32MiB,UI 如实不做分块)仍属后续阶段;**研究包 archive 解包扫描与 TeX/CodeSnapshot 采用物化已实现(commit 98243ff,详见 research-onboarding.md §4.2/§6.1 注记)——scan 生成展开视图(scan_summary.extracted_entries/extracted_bytes),adopt 后 TeX→项目 TeX document、代码→code workspace+可选 CodeSnapshot,receipt.import_mappings 报告 materialized|gap**。**Agent tool 面已实现(commit 98243ff)**——DSH Agent 可经 `research_intake_begin`/`research_intake_stage`(base64 ≤32 MiB)/`research_intake_scan`/`research_intake_answers`/`research_intake_propose` 准备接入(prepare-only,researcher/scholar 角色,错误码稳定文案),但**无 adopt 工具**:research-onboarding.md §2 Agent 无 accept,采用(adopt)只能由 PI 在浏览器/BFF 面完成;v2/BFF accept 面与浏览器向导视觉验收仍属后续(NOT_RUN_MANUAL_PENDING)。不能用普通 Artifact/TeX 上传模拟安全接入。
 
 ## 3. 创建项目与 Scope Gate
 
-在 Chat 使用：
+点击 New Project，只输入项目名。系统进入 Chat，逐题询问研究问题、范围、指标、输出、约束和已有材料；你可以回答、编辑、跳过或标记 unknown。确认 Brief 预览后才出现 Scope Gate。
+
+Chat 使用直接一级 slash command；不要添加聚合前缀：
 
 ~~~text
-/research new shift-localization {"problem":"Does uncertainty weighting improve temporal localization?","scope":"public datasets only","primary_metrics":["mAP@0.5"]}
+/new shift-localization
 ~~~
 
-或点击 New Project。系统创建 DRAFT 项目和 Scope Gate。到 Approvals 检查 target、范围和预算后批准或拒绝。Human UI 不要求填写 actor，身份来自当前登录会话。
+随后直接在 Chat 回答每个问题；Brief 完整后由 PI 输入 `/confirm-brief`。Scope Gate 创建后到 Approvals 检查 target、范围和预算。Human UI 不要求填写 actor，身份来自当前登录会话。
+
+Chat 输入框支持附件按钮、拖拽和粘贴。一次可以给出多篇论文、代码、数据、图片或历史结果；附件先进入当前 active Intake 的分块上传、静态扫描与 OCR 队列，Chat 只保存引用。scan/OCR 和 Human adoption 完成前，它们不是 Project Artifact、Run、TerminalLog 或 accepted Evidence。
 
 ## 4. 调研与 Idea
 
 ~~~text
-/research survey "temporal action localization under domain shift"
-/research ideas
+/survey "temporal action localization under domain shift"
+/ideas
 ~~~
 
 Overview 展示阶段流水线、Brief（问题与主指标）、NextAction 卡、候选 Idea（点击/双击/右键打开详情弹窗，内含 hypothesis、exact delta、falsification、MVE、novelty audit 与评分）、最近 Contract、预算摘要和审计历史（默认最近 10 条，可展开全部）。Corpus 目前只在项目详情弹窗与 Budget 面板以快照计数展示，最近邻（nearest_prior_works）尚未在 UI 展示。调研来源失败在 connector 层以 `source_status` 记录（api-contracts），不会把部分失败伪装成完整覆盖；当前聊天输出只汇总成功去重后的数量，不逐来源列出失败。选择 Idea 后在 Approvals 决定 Idea Gate。
@@ -44,18 +48,18 @@ Overview 展示阶段流水线、Brief（问题与主指标）、NextAction 卡�
 先登记代码和数据快照，再提交 Baseline。正式 Job 必须来自 CAS 内容、固定镜像和容器；空命令或 message-only 不能成功。
 
 ~~~text
-/research reproduce {"repo":"...","commit":"...","expected_metrics":{"mAP@0.5":58.4}}
-/research contract {"idea_id":"...","dataset_id":"...","baseline":"...","treatment":"...","primary_metric":"mAP@0.5","seeds":[11,23,47,89,101]}
+/reproduce {"paper_artifact_id":"...","code_snapshot_id":"...","expected_metrics":{"mAP@0.5":58.4},"runner_profile_id":"...","target_id":"..."}
+/contract {"idea_id":"...","dataset_id":"...","baseline":"...","treatment":"...","primary_metric":"mAP@0.5","seeds":[11,23,47,89,101]}
 ~~~
 
-PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预算和 AnalysisPlan。批准后合同版本冻结。
+`/reproduce` 先创建持久化 PaperReproductionSpec，再产生 Attempt 和 Report；必须固定 paper、代码 commit/snapshot、数据、Contract、runner profile/target 与环境 hash。进程 exit 0 只表示执行完成，只有 Report 按 tolerance 比较指标、表图与 TeX/PDF 后才可判 pass。PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预算和 AnalysisPlan。批准后合同版本冻结。
 
 ## 6. 运行实验与查看终端
 
 > 服务端/SSE 层已完成:Terminal SSE、seq/gap/reconnect、stdout/stderr 分通道与筛选、安全 ANSI 文本渲染、lease fencing 与 job_log_read AuthZ、cancelled/timed_out/exit 权威终态、最终 log Artifact 与截断记账(tests/unit/terminal.test.ts、tests/security/run-terminal-tests.sh)。仍缺(浏览器层,Playwright 类环境不可用,未验收):严格的有界 DOM 渲染、完整日志 Artifact 下载(当前“Download log”只导出浏览器保留窗口,不等同于完整日志 Artifact;长日志和取消/超时结果必须回到 Runs/Artifact 核对)。
 
 ~~~text
-/research run formal {"contract_id":"...","code_snapshot_id":"..."}
+/run formal {"contract_id":"...","code_snapshot_id":"...","runner_profile_id":"...","target_id":"..."}
 ~~~
 
 Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选择一个 Run，点击 Open Terminal 或进入 Terminal Tab：
@@ -76,7 +80,7 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 目标 UI 的 Workspace 像 VS Code：Explorer 打开 code/manuscript/scratch 文件，使用标签、搜索、Problems、查看图片/PDF/JSON、编辑文本、上传/移动/删除/历史并冻结 Snapshot。并发冲突会显示 base/current/local，不自动覆盖。**Workspace tree client 逻辑层已实现(2026-08-11,commit 98243ff)**：More →「工作区」面板(#tab=workspace 深链)——workspace 选择器与工具栏(新建文件/新建目录/上传(≤32 MiB multipart)/刷新/路径搜索框);左侧文件树按目录懒展开(implied 目录由文件路径投影、客户端创建的空目录为虚拟节点、文件行 hover 移动/删除);右侧多标签编辑区——每个 tab 持有 path/version/etag/content/savedContent,dirty 语义与 Manuscript 一致(清空读未保存、恢复已保存读干净),保存带 expected_version/etag CAS(409 冲突 → 横幅提示"重新加载",绝不静默覆盖),二进制节点只读显示 meta + 下载(原始字节 + media type),历史版本列表可回退(旧字节以当前 version/etag 守卫写回);树经 workspace watch SSE 流(`…/workspaces/{wid}/watch/stream?after_revision=`)实时增量刷新,流不可用时回退 listSince 每 5s 轮询(离开该 tab 自动停止)。搜索框为客户端路径过滤,尚未接线服务端查询;**服务端已实现路径搜索(prefix/glob)与内容搜索(commit 98243ff)**——POST search `{q, mode:'content'}` 线性文本扫描(文本节点/二进制跳过/每文件 20 匹配/50 文件上限/512 KiB 跳过/大小写可选/非法 UTF-8 容错,无全文索引,大数据集性能受限如实注明;客户端搜索框接入服务端路径/内容模式属后续轮)。剩余(浏览器层,Playwright 类环境不可用,记 NOT_RUN_MANUAL_PENDING):文件树渲染/拖拽上传/多标签视觉/窄屏/键盘 a11y 验收;Problems 面板与集成 PTY 入口。
 
-点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset 后可以输入命令、使用 TUI、resize、发送 INT/TERM/KILL、detach/reconnect/close。PTY 不是正式 Run，输出不能成为 Evidence。服务端已实现:真实 PTY 会话(LocalPtyAdapter,preset 白名单、env 白名单、detach 不杀进程、idle TTL、client_seq 幂等、输出永不进入 Metrics/Evidence/Gate)与通用 Workspace 磁盘 adapter(节点读写/移动/删除/二进制 asset/历史回退/watch/路径搜索+内容搜索,tex-facade 同一契约)。**PTY TUI client 逻辑层已实现(2026-08-11,commit 98243ff)**：More →「PTY 终端」面板(#tab=pty 深链)——open 表单(workspace 选择/preset/相对 cwd/cols/rows + 钉定 profile/target)、会话工具栏(resize、INT/TERM/KILL、detach/reconnect、close)、纯文本输出区(gap/retention 截断标记、exit 行)、状态行(会话状态/in-out seq/掩码 lease+过期/generation/字节数)、idle TTL/lease 过期/权限撤销关闭提示与 lease 失效(403)重新打开提示;client_seq 单调幂等、失败重试重发同 seq、断线重连按 after_seq 重放;输出经 `…/frames/stream` SSE 实时流消费(commit d01d415),流不可用时回退 after_seq 轮询。剩余(浏览器层,Playwright 类环境不可用,记 NOT_RUN_MANUAL_PENDING):真实终端渲染(ANSI/xterm 类)、键盘输入、resize 拖拽、完整日志下载与窄屏/断线观感。
+点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset 后可以输入命令、使用 TUI、resize、发送 INT/TERM/KILL、detach/reconnect/close。每个 Operator、Research、Chat 或 Subagent session 都有服务端解析的 context；同一 context 可以打开多个 PTY 标签。通过 Chat/Topology 进入终端时必须打开对应 session 的 PTY，不能把命令发送到 project 级共享终端。PTY 不是正式 Run，输出不能成为 Evidence。服务端已实现:真实 PTY 会话(LocalPtyAdapter,preset 白名单、env 白名单、detach 不杀进程、idle TTL、client_seq 幂等、输出永不进入 Metrics/Evidence/Gate)与通用 Workspace 磁盘 adapter(节点读写/移动/删除/二进制 asset/历史回退/watch/路径搜索+内容搜索,tex-facade 同一契约)。**PTY TUI client 逻辑层已实现(2026-08-11,commit 98243ff)**：More →「PTY 终端」面板(#tab=pty 深链)——open 表单(workspace 选择/preset/相对 cwd/cols/rows + 钉定 profile/target)、会话工具栏(resize、INT/TERM/KILL、detach/reconnect、close)、纯文本输出区(gap/retention 截断标记、exit 行)、状态行(会话状态/in-out seq/掩码 lease+过期/generation/字节数)、idle TTL/lease 过期/权限撤销关闭提示与 lease 失效(403)重新打开提示;client_seq 单调幂等、失败重试重发同 seq、断线重连按 after_seq 重放;输出经 `…/frames/stream` SSE 实时流消费(commit d01d415),流不可用时回退 after_seq 轮询。剩余(代码与浏览器层，记 NOT_RUN_MANUAL_PENDING):服务端 session context/multi-PTY 绑定、真实终端渲染(ANSI/xterm 类)、键盘输入、resize 拖拽、完整日志下载与窄屏/断线观感。
 
 ### 6.2 本机与远端执行
 
@@ -97,10 +101,10 @@ runner CLI（`node workers/runner-gateway/lib/bin/runner.js`）已接线三个�
 ### 8.1 生成稿件
 
 ~~~text
-/research write
+/write
 ~~~
 
-系统从 Brief、Corpus 快照、approved Contract、accepted Evidence、Claim 与图表 Artifact 生成 markdown 稿件（含 BibTeX 与图表引用），保存为 paper Artifact 并登记 manuscript 记录；`/research write` 默认产出 markdown（`format='latex'` 的 LaTeX 输出同样可用）。TeX 正式编辑与编译请走 Manuscript 工作台（§8.2）。
+系统从 Brief、Corpus 快照、approved Contract、accepted Evidence、Claim 与图表 Artifact 生成 markdown 稿件（含 BibTeX 与图表引用），保存为 paper Artifact 并登记 manuscript 记录；`/write` 默认产出 markdown（`format='latex'` 的 LaTeX 输出同样可用）。TeX 正式编辑与编译请走 Manuscript 工作台（§8.2）。
 
 ### 8.2 编辑
 
@@ -131,9 +135,9 @@ one-shot child 只读；follow-up 输入框对子项常显（one-shot 只读，�
 > Review/Bundle:REL-01 已关闭(commit 040e796)——build-bundle.sh 生成自包含 Bundle(manifest runtime 段 + TeX workspace 导出),reproduce.sh 在全新空目录以全新 DB/CAS 重放,拒绝指向原 checkout 的 runtime(bundle-only clean-room),并逐字段比较 manifest/metrics/analysis/RunManifest/TeX 输入与 PDF 结构;tests/security/run-release-bundle-tests.sh 已接入聚合器。尚未绑定 CI job 报告前仍不得据此声明正式可复现性。
 
 ~~~text
-/research review
-/research export
-/research release
+/review
+/export
+/release
 ~~~
 
 Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译、负结果、许可和 AI usage。Export 生成私有自包含 Bundle；clean-room 重跑实验、分析和 PDF。release 只创建 Human Release Gate，不自动上传外部平台。

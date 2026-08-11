@@ -39,11 +39,13 @@ export function renderSidebar(
   projects: ProjectRow[],
   activeId: string | undefined,
   onPick: (projectId: string) => void,
+  sidebarToggle?: HTMLElement,
 ): void {
   sidebar.replaceChildren()
 
   const brandRow = el('div', 'sidebar-brand-row')
   brandRow.append(el('span', 'sidebar-wordmark', t('shell', 'shell.sidebar.wordmark')), el('span', 'sidebar-product', t('shell', 'shell.sidebar.product')))
+  if (sidebarToggle !== undefined) brandRow.appendChild(sidebarToggle)
   sidebar.appendChild(brandRow)
 
   const head = el('div', 'sidebar-head')
@@ -55,7 +57,7 @@ export function renderSidebar(
   sortBtn.onclick = () => {
     sidebarSort = sidebarSort === 'recent' ? 'name' : 'recent'
     sidebarSortPersist()
-    renderSidebar(sidebar, projects, activeId, onPick)
+    renderSidebar(sidebar, projects, activeId, onPick, sidebarToggle)
   }
   head.appendChild(sortBtn)
   const newBtn = el('button', 'sidebar-new', '＋')
@@ -96,7 +98,7 @@ export function renderSidebar(
     const chip = el('button', 'sidebar-filter')
     chip.textContent = label
     chip.classList.toggle('active', sidebarGroup === key)
-    chip.onclick = () => { sidebarGroup = key; renderSidebar(sidebar, projects, activeId, onPick) }
+    chip.onclick = () => { sidebarGroup = key; renderSidebar(sidebar, projects, activeId, onPick, sidebarToggle) }
     groupRow.appendChild(chip)
   }
   sidebar.appendChild(groupRow)
@@ -145,7 +147,7 @@ export function renderSidebar(
         event.stopPropagation()
         if (p.project_id === undefined) return
         favProjectToggle(p.project_id)
-        renderSidebar(sidebar, projects, activeId, onPick)
+        renderSidebar(sidebar, projects, activeId, onPick, sidebarToggle)
       }
       item.appendChild(favStar)
       if (p.project_id === activeId) {
@@ -161,7 +163,7 @@ export function renderSidebar(
           if (p.project_id === undefined) return
           if (sidebarSelected.has(p.project_id)) sidebarSelected.delete(p.project_id)
           else sidebarSelected.add(p.project_id)
-          renderSidebar(sidebar, projects, activeId, onPick)
+          renderSidebar(sidebar, projects, activeId, onPick, sidebarToggle)
         }
         item.prepend(box)
       }
@@ -321,7 +323,7 @@ export function renderSidebar(
     selectBtn.onclick = () => {
       sidebarSelecting = true
       sidebarSelected.clear()
-      renderSidebar(sidebar, projects, activeId, onPick)
+      renderSidebar(sidebar, projects, activeId, onPick, sidebarToggle)
     }
     foot.append(footLabel, footStats, selectBtn, settingsBtn)
   } else {
@@ -329,7 +331,7 @@ export function renderSidebar(
     doneBtn.onclick = () => {
       sidebarSelecting = false
       sidebarSelected.clear()
-      renderSidebar(sidebar, projects, activeId, onPick)
+      renderSidebar(sidebar, projects, activeId, onPick, sidebarToggle)
     }
     const countLabel = el('span', '', t('common', 'common.selected', { count: String(sidebarSelected.size) }))
     const archiveSel = el('button', 'hbtn', `🗄 ${t('common', 'common.action.archive')}`)

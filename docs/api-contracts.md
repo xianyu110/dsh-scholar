@@ -59,7 +59,7 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 
 | 方法 | 路径 | 请求/结果 |
 |---|---|---|
-| POST | /v2/projects | ResearchProject create input；Idempotency-Key 必填；事务返回 project、creator PI membership、budget、initial Scope Gate |
+| POST | /v2/projects | 最小请求 `{name}`；Idempotency-Key + Human Principal；事务返回 DRAFT/collecting project、creator PI membership、budget、active Init Intake；不创建 Gate |
 | GET | /v2/projects | 授权项目分页列表 |
 | GET | /v2/projects/{id} | Project |
 | PATCH | /v2/projects/{id} | name 或允许的配置 + expected_revision |
@@ -73,6 +73,9 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 | POST | /v2/projects/{id}/transitions | to、expected_revision、reason；Gate 状态永远 422 |
 | POST | /v2/projects/{id}/session-links | 只绑定调用 Principal 当前 session_id；客户端不能提交任意会话 |
 | GET | /v2/session-links/current | 从调用 Principal 当前 session 返回 project_id |
+| GET | /v2/projects/{id}/grill | 当前单个问题、revision、Brief draft、材料候选和 next action |
+| POST | /v2/projects/{id}/grill/answers | 每次仅一个 `{question_code,question_revision,value}`，Human assertion |
+| POST | /v2/projects/{id}/grill/confirm | PI-only；expected project/intake revisions；写 Brief 并创建唯一 Scope Gate |
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
 
@@ -80,7 +83,7 @@ Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容�
 
 成员接口为 GET/POST/PATCH/DELETE /bff/research/projects/{id}/members；角色和最后一个 PI 约束见 reconstruction-contracts.md。standalone 解锁、SSO、DSH Agent session 关联和 service identity 的 Principal 解析也以该文档为准。
 
-POST /v2/projects 的 Idempotency scope 是 tenant_id + principal_id + route + key；同请求 hash 重放返回同一 project/gate/budget/membership，hash 不同 409。其余 project mutation 使用 project_id + route + key；Gate Decision 和 cancel 的业务对象本身也提供终态幂等。
+POST /v2/projects 的 Idempotency scope 是 tenant_id + principal_id + route + key；同请求 hash 重放返回同一 project/intake/budget/membership，hash 不同 409。Grill confirm 另以 project_id + intake revision + request key 幂等；同一项目最多一个 pending Scope Gate。其余 project mutation 使用 project_id + route + key；Gate Decision 和 cancel 的业务对象本身也提供终态幂等。
 
 ## 5. Gate 与身份
 
@@ -320,18 +323,21 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 | GET | `/v2/intakes` | 当前 Principal 的可见 Intake 分页 |
 | GET | `/v2/intakes/{id}` | 状态、upload/scan、questions、proposal、安全 refs |
 | POST | `/v2/intakes/{id}/artifact-stages` | 创建 intake-scoped staged upload |
+| GET | `/v2/intakes/{id}/artifact-stages` | 列出开放/完成 stage、committed offset、expiry 与文件队列状态 |
 | PUT | `/v2/intake-artifact-stages/{stage}/content` | Content-Range 分块/幂等重传 |
 | POST | `/v2/intake-artifact-stages/{stage}/finalize` | 复算 hash/size，进入 scanning |
 | DELETE | `/v2/intake-artifact-stages/{stage}` | abort，幂等 |
 | POST | `/v2/intakes/{id}/scan` | 启动/重用静态扫描结果 |
-| POST | `/v2/intakes/{id}/grill-answers` | Human assertion + question revision |
+| POST | `/v2/intakes/{id}/grill-answers` | 每次一个 Human assertion + question revision；返回 next question |
+| POST | `/v2/intakes/{id}/ocr-requests` | 显式 provider/model ID 的异步 OCR；Idempotency-Key |
+| GET | `/v2/intakes/{id}/ocr-requests/{request}` | OCR 状态、安全错误、结果 refs 与来源/confidence |
 | POST | `/v2/intakes/{id}/proposals` | 生成确定性阶段/映射 proposal |
 | POST | `/bff/research/intakes/{id}/accept` | PI Human adoption；expected proposal/target revision |
 | POST | `/bff/research/intakes/{id}/reject` | Human reject/cleanup request |
 
 `accept` 只存在于 BFF Human 面；Agent tool schema 不生成该方法。scan/parser/LLM 永远不能直接 mutation Project。单文件 Artifact 上传与 research package intake 是两个明确入口，UI 不得把 internal Runner stage 暴露给用户。状态、映射、错误和幂等见 research-onboarding.md。
 
-**kernel/服务端层已实现（commit 98243ff，ONBOARD-01）**：v1 项目域路由 `POST/GET /v1/projects/{id}/intake`（begin/list）、`GET .../intake/{iid}`（resume 投影）、`POST .../intake/{iid}/artifacts`（multipart stage，≤32 MiB，隔离 staging CAS）、`DELETE .../intake/{iid}/artifacts/{aid}`、`POST .../intake/{iid}/scan`（静态扫描）、`GET .../intake/{iid}/questions`、`POST .../intake/{iid}/answers`、`POST .../intake/{iid}/propose`、`POST .../intake/{iid}/adopt`（Human Principal 必填；Idempotency-Key）、`POST .../intake/{iid}/reject`。所有路由按路径项目解析（跨项目→404 intake_not_found）；pre-accept 只写 intake_* 表与隔离 staging CAS，业务表与 Outbox 在 adopt 事务边界才动；错误码见 research-onboarding.md §9（intake_not_found/intake_state_conflict/intake_expired/artifact_quarantined/question_required/proposal_stale/project_revision_conflict/idempotency_conflict 等）。v2/BFF accept 面（`/v2/intakes*`、`/bff/research/intakes/{id}/accept`）、分块 intake staged upload（Content-Range）、Agent tool 面与浏览器向导 UI 为剩余项。
+兼容基线仍包括 v1 项目域 begin/list/resume、≤32 MiB multipart、scan/questions/answers/propose/adopt/reject。v2 name-only Grill、批量分块 stage、OCR 与 Provider 接口按 `init-grill-upload-models.md` 实现；自动测试通过但真实浏览器/大文件/模型服务未执行时必须标记“已实现未验收”，不能继续沿用“UI 不做分块”的旧状态说明。
 
 ## 17. 通用 Workspace 与 Upload
 
@@ -360,7 +366,7 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/bff/research/projects/{id}/pty-sessions` | open；workspace/profile/preset/cwd/size/config revision |
+| GET/POST | `/bff/research/projects/{id}/pty-sessions` | 按 context 列出/open；workspace/profile/target/preset/cwd/size/config revision；server-derived session binding |
 | GET | `/bff/research/pty-sessions/{id}` | state 和权限摘要 |
 | GET | `/bff/research/pty-sessions/{id}/events?after_seq=N` | SSE fallback：data/gap/state/exit |
 | GET | `/bff/research/pty-sessions/{id}/socket` | authenticated WebSocket 双向 attach |
@@ -368,6 +374,8 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 | POST | `/bff/research/pty-sessions/{id}/resize` | cols/rows + client_seq |
 | POST | `/bff/research/pty-sessions/{id}/signals` | allowlisted INT/TERM/KILL |
 | DELETE | `/bff/research/pty-sessions/{id}` | close，幂等 |
+
+open/list 接受 context_kind 与可验证 context ref，但 BFF/Kernel 必须从当前 Operator/Research/Chat/Subagent 地址解析 project/owner/parent，不能信任任意客户端 child/session ID。attach/detach/input/resize/signal/control 与 SSE subscribed/frame/state 均携带 generation；stale generation、lease expired 或 context 越权 fail closed。一个 context 可有多个 PTY，list 返回可恢复标签集合与 active_hint。
 
 Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY 每个 control 操作执行 Project AuthZ、terminal_write、generation/client_seq 和 target policy；revoke 关闭连接。浏览器不能提交 SSH endpoint/credential、Docker socket、host path 或任意 argv。
 
@@ -383,8 +391,26 @@ Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY �
 | PATCH | `/bff/research/config/{scope}/{scope_id}` | expected revision；secret 只接受 SecretRef |
 | POST | `/bff/research/config/{scope}/{scope_id}/reset` | reset field/section to inherited default |
 | GET | `/bff/research/config/revisions/{id}` | redacted provenance/audit |
+| GET/POST | `/bff/research/model-providers` | global Provider 列表/创建；PI/Operator；SecretRef metadata only |
+| PATCH | `/bff/research/model-providers/{id}` | revision CAS；编辑、启停、能力/模型目录；不接受 secret value |
+| GET/PATCH | `/bff/research/projects/{id}/model-bindings` | 项目只选择 purpose/provider_id/model_id；revision CAS |
 
 Remote Agent internal 面提供 enroll/heartbeat/capability/claim/CAS fetch/stage/complete；全部使用 mTLS service identity 与 ExecutionPlan signature。任何 target/profile/config 修改只影响新动作，不能改变运行中 Job/PTY/Build 的 pinned hash。
+
+Experiment/Job/Reproduction public body 只接受 `runner_profile_id` 与 `target_id`。Target Registry 的 local-docker/remote-ssh-runner endpoint、known-hosts、SSH/mTLS credential 由 Settings + SecretRef 管理；提交时固定 profile/target/environment revision/hash。offline/draining/capability mismatch 返回 blocked/retryable，不做 implicit local fallback。
+
+## 19.1 论文复现
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST/GET | `/v2/projects/{project}/reproduction-specs` | 创建/分页列出 PaperReproductionSpec；Idempotency-Key |
+| GET/PATCH | `/v2/projects/{project}/reproduction-specs/{spec}` | projection/revision CAS 更新 |
+| POST | `/v2/projects/{project}/reproduction-specs/{spec}/attempts` | 固定 Contract/Code/Data/Environment 并提交 attempt |
+| GET | `/v2/projects/{project}/reproduction-attempts/{attempt}` | attempt、Job/Run、pins、NextAction |
+| POST | `/internal/reproduction-attempts/{attempt}/reports` | verifier service identity 写不可变报告 |
+| GET | `/v2/projects/{project}/reproduction-reports/{report}` | 安全报告 metadata/Artifact refs |
+
+精确 schema、metric/table/figure/PDF 比较和错误语义见 `reproduction-contracts.md`。Chat `/reproduce` 是这些接口的 adapter，不直接构造 Evidence/Report。
 
 ## 20. Trajectory 与 Subagent Topology
 

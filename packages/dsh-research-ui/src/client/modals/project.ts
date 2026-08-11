@@ -7,16 +7,20 @@ import { canDeleteArchivedProject, projectDeleteRequest } from '../project-delet
 /* ─────────────────────────── standalone project creator ─────────────────────────── */
 
 /**
- * Standalone web plugin: modal form that creates a project + Scope Gate via
- * the same kernel API the /research new command uses. Rendered with
+ * Standalone web plugin: name-only modal that creates a collecting project
+ * and active Init Intake via the same v2 API as /new. The Scope Gate appears
+ * only after the PI confirms the Grill Brief. Rendered with
  * textContent-only inputs (no HTML sinks, design §15.4).
  */
-export function openNewProjectModal(root: ShadowRoot | null | undefined): void {
+export function openNewProjectModal(root: ShadowRoot | null | undefined, initialName = ''): void {
   if (root == null) return
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
   modal.style.cssText = 'width:520px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-modal', 'true')
+  modal.setAttribute('aria-label', t('budget', 'budget.modal.title'))
 
   const header = el('div', 'modal-header', t('budget', 'budget.modal.title'))
   const closeBtn = el('button', 'hbtn ghost', '×')
@@ -39,9 +43,10 @@ export function openNewProjectModal(root: ShadowRoot | null | undefined): void {
     return input
   }
 
-  const nameInput = field(t('budget', 'budget.modal.fieldName'), t('budget', 'budget.modal.placeholderName'))
-  const problemInput = field(t('budget', 'budget.modal.fieldProblem'), t('budget', 'budget.modal.placeholderProblem'))
-  const metricInput = field(t('budget', 'budget.modal.fieldMetric'), t('budget', 'budget.modal.placeholderMetric'))
+  const nameInput = field(t('budget', 'budget.modal.fieldName'), t('budget', 'budget.modal.placeholderName'), initialName)
+  const hint = el('div', 'muted', t('budget', 'budget.modal.nameOnlyHint'))
+  hint.style.cssText = 'margin-top:8px;font-size:11px;line-height:1.5'
+  modal.appendChild(hint)
 
   const err = el('div', 'error-banner')
   err.style.cssText = 'display:none;margin-top:10px'
@@ -63,39 +68,22 @@ export function openNewProjectModal(root: ShadowRoot | null | undefined): void {
     err.style.display = 'none'
     create.disabled = true
     create.textContent = t('common', 'common.action.creating')
-    const project = await api<{ project_id?: string; status?: string }>('/v1/projects', {
+    const result = await apiResult<{ project?: { project_id?: string; status?: string } }>('/v2/projects', {
       method: 'POST',
-      body: JSON.stringify({
-        name,
-        workspace: `/research/${name}`,
-        brief: {
-          problem: problemInput.value.trim() || 'To be specified in the Scope Gate.',
-          scope: 'To be specified in the Scope Gate.',
-          questions: [],
-          primary_metrics: metricInput.value.trim() !== '' ? [metricInput.value.trim()] : [],
-          resources: '',
-          risks: [],
-          target_outputs: ['conference-paper'],
-          target_venue: null,
-          baseline_repo: null,
-          domain: 'machine-learning',
-        },
-        mode: 'gate-only',
-      }),
+      headers: { 'idempotency-key': `project-init-${crypto.randomUUID()}` },
+      body: JSON.stringify({ name }),
     })
-    if (project === null || project.project_id === undefined) {
-      err.textContent = t('common', 'common.createFailed')
+    const project = result.ok ? result.data.project : undefined
+    if (!result.ok || project?.project_id === undefined) {
+      err.textContent = result.ok ? t('common', 'common.createFailed') : (result.error.message ?? t('common', 'common.createFailed'))
       err.style.display = 'block'
       create.disabled = false
       create.textContent = t('budget', 'budget.modal.create')
       return
     }
-    // Scope Gate, exactly like /research new.
-    await api(`/v1/projects/${encodeURIComponent(project.project_id)}/gates`, {
-      method: 'POST',
-      body: JSON.stringify({ type: 'scope', title: `Scope Gate — ${name}`, summary: 'Approve the research scope, data policy, budget and target venue.' }),
-    })
     state.projectId = project.project_id
+    state.activeTab = 'chat'
+    tabSave()
     overlay.remove()
     state.rerender()
   }
@@ -105,7 +93,7 @@ export function openNewProjectModal(root: ShadowRoot | null | undefined): void {
   overlay.appendChild(modal)
   root.appendChild(overlay)
   // dsh-web i18n §13.4: locale switch re-opens the form in the new locale.
-  registerOverlayRebuild(overlay, () => { overlay.remove(); openNewProjectModal(root) })
+  registerOverlayRebuild(overlay, () => { const draft = nameInput.value; overlay.remove(); openNewProjectModal(root, draft) })
   trapFocus(overlay, nameInput)
   nameInput.focus()
 }

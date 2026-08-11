@@ -799,6 +799,7 @@ describe('FLEET-01 HTTP 传输（startFleetServer 真实 listener + HttpRemoteFl
         registry: new InMemoryAgentRegistry(),
         client: createFleetKernelClient(new ResearchClient({ endpoint })),
         owner: 'fleet-owner',
+        now: () => NOW,
       })
       noToken.handleRegister(makeRegistration())
       await expect(noToken.handleClaims('agent-gpu-1', { schema_version: 1, limit: 1 }))
@@ -810,6 +811,7 @@ describe('FLEET-01 HTTP 传输（startFleetServer 真实 listener + HttpRemoteFl
         registry: new InMemoryAgentRegistry(),
         client: createFleetKernelClient(new ResearchClient({ endpoint, token: 'kt-1' })),
         owner: 'fleet-owner',
+        now: () => NOW,
       })
       withToken.handleRegister(makeRegistration())
       const claims2 = await withToken.handleClaims('agent-gpu-1', { schema_version: 1, limit: 1 })

@@ -2,6 +2,8 @@
 
 > 信息性文档，校准于 2026-08-11，最新审阅基线 `main@fda346b`。本文件描述当前仓库，不覆盖规范性文档。状态必须由源码、当前提交的本地验证，以及后续 CI 或结构化人工验收证据共同决定；历史测试计数、旧 README、零散截图和未绑定提交的日志不能继承为当前证据。
 
+2026-08-12 当前修复：Fleet Bearer/CAS 单测原先以固定历史 `last_seen` 注册 Agent，却遗漏 `RemoteFleetServer.now` 注入，超过 30 秒离线窗口后会在 Kernel 鉴权前稳定返回 409。测试现统一注入固定时钟，保留“stale Agent 先 409、fresh Agent 才进入 Kernel 并验证 401”的既定产品语义；约束场景见 `acceptance-tests.md` 的 `fleet-clock-determinism`。
+
 ## 1. 状态定义与证据规则
 
 状态只允许使用下列值：
@@ -73,7 +75,7 @@
 | STORE-01 | 显式迁移与 schema parity | 已验收 | SCHEMA_VERSION 6→7,迁移 0008_outbox_envelope:events 表增 outbox 列(event_seq/event_version/aggregate_*/request_id/session_id/attempts/last_error/next_attempt_at/dead_lettered_at)+聚合内唯一索引、新增 runs 表(job attempt 行,§3.1 parity)、session_links 增 principal/tenant/issuer;幂等且兼容旧库。证据:tests/unit/migrations.test.ts 全绿(schema 升级后列存在、旧行回填 event_seq);尚未绑定 CI job 报告,待验收验收绑定:commit 6e4d302 + scripts/ci-gate.sh 全量运行(4/4 PASS,142s,零 SKIP,日志 /tmp/ci-gate-full.log)+ 对应 acceptance 场景(阻断脚本 CI=true 零 SKIP)。 |
 | STORE-02 | durable CodeSnapshot | 已验收 | 快照资源上限:SNAPSHOT_MAX_FILES=10000/MAX_FILE_BYTES=64MiB(stat 后先拒再读)/MAX_TOTAL_BYTES=512MiB,超限 422 snapshot_too_large;宿主绝对路径不再写入 archive/metadata(root 占位符);path/traversal/symlink 逃逸保护保留;data_artifact_ids 同项目+hash 可重验(RUN-01 补充:缺失 422 data_artifact_missing、跨项目 422 data_artifact_foreign)。证据:tests/unit/kernel.test.ts 新用例(上限、root 不含绝对路径、data refs 三态);尚未绑定 CI job 报告,待验收验收绑定:commit 6e4d302 + scripts/ci-gate.sh 全量运行(4/4 PASS,142s,零 SKIP,日志 /tmp/ci-gate-full.log)+ 对应 acceptance 场景(阻断脚本 CI=true 零 SKIP)。 |
 | EVENT-01 | 事务 Outbox | 已验收 | events 写入带 event_seq(max+1 单写事务,聚合内单调)+event_version=1+aggregate 身份+request/session 跟踪+attempts/dead-letter 字段;emit 在调用方事务内复用同一事务(node:sqlite 无嵌套 BEGIN 处理);已淘汰 seq 回填。证据:tests/unit/kernel.test.ts 连续 emit 断言 event_seq 单调递增、字段存在;尚未绑定 CI job 报告,待验收验收绑定:commit 6e4d302 + scripts/ci-gate.sh 全量运行(4/4 PASS,142s,零 SKIP,日志 /tmp/ci-gate-full.log)+ 对应 acceptance 场景(阻断脚本 CI=true 零 SKIP)。 |
-| DSH-01 | DSH Agent tools/commands/lifecycle | 部分 | canonical 工具名+deprecation 别名、/research 子命令真实 handler、skill 包根解析+确定性选择、npm pack assets、headless 可用(既有);新增:未知/未注册 Agent 默认 role=none,研究写工具全部 deny(ACL 测试断言);插件 dispose 清理(sidecar.stop/cache)测试。证据:tests/security/run-dsh-plugin-tests.sh 41/41(含 unknown-agent deny 与 disposer 用例);隔离 DSH host fixture 全链仍待 CI-01§4 审阅校准为较低状态:见第 4 节对应阻断项与强制关闭条件。**§4 行 100 P1 阻断项已关闭(commit 64a0649)**:apply 改为 async 且被 Cordis await——`sidecar.start()` 完成后才发布 `ctx.research`/client(endpoint 为 port=0 解析出的真实端口)与工具/命令/skills;所有 register/on/provide/plugin 资源由 Cordis effect 模型随插件 fiber 回收(工具/命令注册经 dsh-scope ScopedLayers→ctx.effect),sidecar disposer 在 apply 开头注册(启动期间 dispose/reload 也停 kernel);工具上下文由模块级 toolContextRef 改为注册时实例闭包,多实例互不串线。证据:run-dsh-plugin-tests.sh 47/47(新增最小 Cordis host fixture 组:真实 cordis Context + 真实 ToolRegistry/CommandService/SkillService,覆盖 port=0 真实 endpoint+client 可用、双实例隔离、cordis update 重载无重复注册、dispose 全回收+端口释放+同 root 重载可用),tests/unit/sidecar.test.ts 8/8;真实 DSH 宿主完整 boot 仍不可用,以最小 cordis host fixture 等效验收并如实记录(见 §4 行 100)。 |
+| DSH-01 | DSH Agent tools/commands/lifecycle | 部分 | canonical 工具名与 deprecation 别名、17 个直接一级 slash command handler、Skill package-root 解析、Cordis lifecycle/实例隔离与 headless 路径已实现；DSH 不注册聚合 command descriptor。当前 checkout 自动证据：`tests/security/run-dsh-plugin-tests.sh` 55/55（direct descriptor、无聚合入口、public Skill list、reload/dispose、npm pack）。固定私有 `@deepseek-ai/*` clean install 与真实 DSH host boot 尚未运行，不能升级为已验收。 |
 | SIDE-01 | sidecar identity/ownership | 部分 | kernel 支持 --endpoint-file(port 0 时上报实际端口);sidecar(插件+standalone)复用前校验 0600 runtime/endpoint.json 的 protocol/schema/database/dataDir,缺失→sidecar_identity_unknown、不匹配→sidecar_identity_mismatch,均拒绝复用且绝不 kill 非本实例进程;spawn 后写自身 endpoint.json,stop 时按 pid 清理。证据:tests/unit/sidecar.test.ts 8/8(同 dataDir 复用、跨 dataDir 拒绝且原 kernel 存活、port=0 实际端口、无文件拒绝);运行中 standalone 的 endpoint.json 已生效(0600);尚未绑定 CI job 报告,待验收§4 审阅校准为较低状态:见第 4 节对应阻断项与强制关闭条件。**§4 行 100 P1 阻断项已关闭(commit 64a0649)**:插件 apply await `sidecar.start()` 完成后才读取 `sidecar.endpoint` 并发布 client/`ctx.research`——port=0 时 endpoint 恒为真实绑定端口;sidecar disposer 在 apply 开头注册,启动期间 dispose/reload 亦停 kernel(owned endpoint.json 按 pid 清理)。证据:run-dsh-plugin-tests.sh 47/47(host fixture port=0 组:endpoint 与 0600 endpoint.json 一致、client 真实 kernel 调用、reload/dispose 后端口释放+进程终止),tests/unit/sidecar.test.ts 8/8。 |
 | SKILL-01 | Skills 安装发现与确定性选择 | 已验收 | provider 从发布包根解析四组 skill（research-core + 2 domain + venue），npm pack 断言 assets 在包内；domain/venue 按 Brief 确定性选择（skills.ts selectSkillPacks）；证据：run-dsh-plugin-tests.sh 36/36；clean install hash 一致性仍待 DSH fixture 验收验收绑定:commit 6e4d302 + scripts/ci-gate.sh 全量运行(4/4 PASS,142s,零 SKIP,日志 /tmp/ci-gate-full.log)+ 对应 acceptance 场景(阻断脚本 CI=true 零 SKIP)。 |
 | PACK-01 | clean remote install | 已验收 | 7 包 tarball 完整;clean consumer install 用 file: 覆盖 + overrides,断言 node_modules 是真实文件非符号链接、无原 checkout/../test-lzszq 路径、@deepseek-ai/* 宿主 peer optional 且无 registry 环境不强制安装;skills frontmatter 校验。证据:tests/unit/packaging.test.ts 10/10;真实 registry 发布仍待(环境无 registry,以 tarball+overrides 等价验收)验收绑定:commit 6e4d302 + scripts/ci-gate.sh 全量运行(4/4 PASS,142s,零 SKIP,日志 /tmp/ci-gate-full.log)+ 对应 acceptance 场景(阻断脚本 CI=true 零 SKIP)。 |
@@ -82,6 +84,8 @@
 | CI-01 | 完整阻断 CI | 已实现未验收(本地网关) | 用户决策不用 GitHub Actions;新增 scripts/ci-gate.sh 本地 CI 网关(一条命令:pnpm test+verify-docs+CI=true 聚合器+plugin typecheck,exit 非零即阻断,--skip-security 可选并注明降级);根 package.json test:ci。证据:bash -n 通过、各步骤单独全绿;DSH host fixture(SELFMOD 动态 overlay、Agent 全链)仍待外部 host 环境 |
 | DOC-01 | Markdown 是生成权威 | 部分 | 2.3 文档集含 research-onboarding 与 trajectory-subagents；verify-docs.mjs 对 18 篇文档的结构/链接/关键 contract/删除面/SELFMOD 违规 fail-closed，`node scripts/verify-docs.mjs` 当前通过 18/18。`--diff-check` 和持续语义一致仍需当前提交/CI 证据，不能把静态验证当功能验收。§4 审阅校准为较低状态:见第 4 节对应阻断项与强制关闭条件。 |
 | DOC-02 | change-aware docs sync | 部分 | --diff-check 覆盖扩展到根 src/、configs/、migrations/、scripts/(除自身)、tests/(unit+security)、docs/、evals/;改动范围必须伴随 ledger 移动;base ref 不可达保持 fail-closed。证据:node scripts/verify-docs.mjs --diff-check origin/main 通过(本会话全量改动已同步);待长期语义一致性持续验证§4 审阅校准为较低状态:见第 4 节对应阻断项与强制关闭条件。 |
+
+> 2026-08-12 CMD-02 校准：上表 DSH-01 中“聚合子命令 handler”属于历史证据，已被 direct-only 契约取代。当前插件注册 17 个直接一级 descriptor 且不注册聚合别名；standalone 只保留隐藏 parser 兼容。更新后的 direct descriptor fixture、固定私有 `@deepseek-ai/*` 包和真实 DSH host 尚未验收，因此 DSH-01 仍为“部分”。当前 DSH 已把 Cordis peer 迁至私有 `@deepseek-ai/cordis`；插件和本地链接脚本已同步，并能回收目录重组后的 dangling symlink。current `dsh-skill-local` 公共 `list()` 暴露了旧 fixture 读取内部 provider collection 与未引用 YAML description 的兼容缺口，代码/Skill 已修；本地 checkout/link 只用于 typecheck，不能替代私有包 clean-install 验收。
 
 ## 4. 2026-08-10 当前代码审阅阻断项
 
@@ -107,7 +111,7 @@
 
 本轮只读验证：`node scripts/verify-docs.mjs` 为 16/16；`bash tests/security/run-fencing-tests.sh` 报 12/12，但包含上述 404 假阳性；`bash tests/security/run-dsh-plugin-tests.sh` 为 37 passed/4 failed，根因为当前环境缺 `pnpm` 导致 `npm pack` prepare 失败后被脚本误诊；`pnpm test` 未运行（`pnpm: command not found`）。这些结果都不能升级状态。
 
-## 5. 2026-08-09 审阅证据
+## 历史 A. 2026-08-09 审阅证据
 
 审阅快照：`main@7adc722`，当时与 `origin/main` 一致且工作区干净。
 
@@ -122,7 +126,7 @@
 
 上表是审阅基线（`main@7adc722`）时点的证据快照，只描述当时观察。基线后本会话的变更与新增证据以 §3 矩阵行（尤其 RUN-01a/b/c、STAT-01a、CI-01a、RUN-02）的“当前阻断与关闭条件”为准；与上表冲突处（如聚合器对 SKIP 的处理、lower-is-better 的启用状态）以后者为准。
 
-## 6. 后续执行硬顺序
+## 历史 B. 后续执行硬顺序
 
 以下不是建议顺序，而是关闭状态的依赖顺序。前一批的阻断场景未通过时，不得把后一批宣称为完成或发布就绪：
 
@@ -136,7 +140,7 @@
 
 任一 P0 为“未实现/部分/已实现未验收”，产品只能保持 Security Alpha，不得用于无人值守正式研究或公开发布。
 
-## 7. 文档与状态更新规则
+## 历史 C. 文档与状态更新规则
 
 每个实现或修复变更必须在同一变更集内：
 
@@ -152,7 +156,7 @@
 
 本次 2.3 规范更新已运行 `node scripts/verify-docs.mjs`（18 documents）与 `git diff --check`；它只证明 Markdown 结构、链接和约束片段一致。PTY、通用 Workspace、实时 Preview、Remote Runner、Config Registry、Onboarding/Upload/Grill/NextAction、Trajectory/Subagent Topology 和简洁 UI 的实现状态仍按 §3 保持“未实现/部分”。
 
-## 8. 最终差距审计轮（2026-08，未绑定 CI job，全部“已实现未验收”）
+## 历史 D. 最终差距审计轮（2026-08，未绑定 CI job，全部“已实现未验收”）
 
 本轮为收尾审计：逐篇对照 docs/ 规范性文档与代码实现，消灭“可实现但未实现”差距。审计报告：/tmp/final-audit-report.md。本轮改动（审计后随附实现轮已关闭剩余两大项 OBS-01 与 STORE-05，见下表对应行，commit 849a788）：
 
@@ -224,3 +228,25 @@ SELFMOD-01 的当前边界保持不变：Cordis self-referential 工具已经以
 | P1 | PROJECT-DELETE-01：已实现未验收 | 代码侧已闭环：migration `0019_project_deletion_tombstone` / SCHEMA_VERSION 17 加 `deleted_at/deleted_by/deletion_reason/deletion_request_id` 与唯一 request index；Kernel archived-only + active-job guard + revision CAS + exact-name/reason + `project.deleted` Outbox + receipt replay，普通 list/get/project paths 404，证据/成员/Outbox/共享 CAS 零物理删除；v1/v2 DELETE 与 standalone BFF 均 PI-only（operator/researcher/viewer/auditor 拒绝），ResearchClient 接口完成；archived row 的紧凑菜单/hover action 打开双语确认框，成功清 active selection 回 Start。自动证据：kernel/migration/delete UI/private harness/i18n 组合回归 152/152（含真实 HTTP v1/v2、全角色/非成员/缺身份负向、删除后写面 404、幂等、共享 sha+GC）、packaging 11/11、相关 build/typecheck 与 docs verifier 19/19 全绿。真实浏览器、重启与长期 GC/retention 场景记 `NOT_RUN_MANUAL_PENDING`。 |
 
 本轮完整 `pnpm test` 的功能结果为 1025/1026：唯一失败是既有 `sse-streams.test.ts` 的 PTY retention live-frame 时序断言在全并行负载下得到 0 frame；同文件隔离复跑 7/7。该抖动不作为 PROJECT-DELETE-01/PACK-01 失败，但测试稳定性仍需后续通过确定性等待/时钟收敛修复，修复前不得把本轮完整回归写成全绿。
+
+## 8. 2026-08-12 Init、批量材料与模型接入增量
+
+| 优先级 | ID / 当前状态 | 关闭条件 |
+|---|---|---|
+| P0 | INIT-GRILL-02：已实现未验收 | v2 name-only 创建 DRAFT/collecting + active Intake、零 Gate；Chat 单题 Grill/恢复/Brief preview；PI confirm 原子写 Brief + 唯一 Scope Gate；collecting NextAction/Orchestrator 不抢跑；zh/en 已实现。自动证据：v2/migration/orchestrator/Chat/i18n 目标集通过；真实浏览器 Grill、权限会话和重连观感仍为 `NOT_RUN_MANUAL_PENDING`。DSH Agent `/new` 仍是 legacy v1 adapter，不能作为 name-only Human Init 的验收入口。 |
+| P0 | UPLOAD-CHUNK-02：未实现 | 多文件队列；8 MiB Content-Range、offset/hash replay/conflict、finalize 重算、暂停恢复/abort/GC；2 GiB 默认/10 GiB hard max 并发预留；隔离 staging 零权威写。 |
+| P0 | MODEL-PROVIDER-01：未实现 | global Provider CRUD + revision CAS；严格 SecretRef、SSRF/redirect/DNS/proxy 防护；项目只选 provider/model ID；Settings Models & OCR 中英界面。 |
+| P0 | OCR-01：未实现 | 显式 provider/model 的异步请求；无静默 fallback；状态恢复与 idempotency；source/page/confidence/config pin provenance；输出仅 observed_unverified。 |
+
+开发约束：先完成代码、schema/migration、unit/contract/typecheck/build/static checks；真实浏览器、2–10 GiB、私有 Provider/OCR endpoint 进入 `manual-acceptance.md §6`，统一 `NOT_RUN_MANUAL_PENDING`。每项自动证据完成后只可升级为“已实现未验收”。
+
+## 9. 2026-08-12 论文复现、Chat 与执行环境增量
+
+| 优先级 | ID / 当前状态 | 关闭条件 |
+|---|---|---|
+| P0 | REPRO-02：未实现 | PaperReproductionSpec/Attempt/Report schema+storage+API；paper/code/data/Contract/environment provenance；本机/远端执行；zero-safe 指标/表图/TeX/PDF 比较；Report 驱动 NextAction/Evidence，exit 0 不等于 pass。 |
+| P0 | CMD-02、CHAT-UPLOAD-01：部分 | 一级 `/new`/`/reproduce`/`/confirm-brief` 为公开入口；DSH direct descriptors 与 standalone Chat 帮助/补全/starter/i18n 已改为直接命令，旧输入仅 standalone parser 隐藏兼容；Chat 附件按钮/拖拽/粘贴仍须接批量 Intake。自动证据：direct DSH fixture `55/55`、相关 unit/packaging `104/104`、UI typecheck、docs `19/19`；固定私有 registry 与真实 host 因未配置凭据记 `NOT_RUN_MANUAL_PENDING`，附件缺口未关闭。 |
+| P0 | EXEC-ENV-02：部分 | typed runner_profile_id/target_id、global Target Registry/SecretRef/Settings write、environment revision/hash pin；local Docker/remote SSH 无静默 fallback。当前仅 profile pin + mock remote fleet，真实 SSH/mTLS/Settings write 未实现。 |
+| P0 | PTY-SESSION-02：未实现 | server-derived Research/Chat/Subagent context→multi PTY；list/open/attach/detach/close；owner+lease expiry+expected generation+exact-parent fencing；UI 多标签/深链/远端一致。当前为 project 级单 model 且 detach/reconnect 仅客户端。 |
+
+自动代码完成后只能标“已实现未验收”；真实环境队列见 `manual-acceptance.md §7`。任何新发现先更新 `reproduction-contracts.md`、acceptance 与本表再修复。

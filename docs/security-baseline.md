@@ -142,6 +142,8 @@ cordis_inspect、cordis_mount、cordis_unmount 等同高风险运行时代码能
 
 Scholar Connector 只连接 api.openalex.org、api.crossref.org、export.arxiv.org 等显式域。DNS、redirect、proxy 环境和 URL parsing 均执行 allowlist；redirect 不可跳出域。Runner 默认无网，数据由控制面预取、hash、登记后作为只读 Artifact 提供。
 
+自定义 Model Provider base URL 适用同等或更严格的 SSRF 防护：仅服务端解析，校验 scheme/host/port/DNS/redirect/proxy，每次重连重新校验；浏览器、Project、OCR request 和 Job 只传 opaque provider/model ID。credential 只接受 SecretRef，任何 `value`/token/password 字段 fail closed。OCR 文本、页图和候选答案是不可信外部内容，不能执行指令、访问 secret、自动回答 Grill、创建 Gate 或升级 Evidence。
+
 ## 12. 供应链
 
 - pnpm lockfile、镜像 digest、Git commit/submodule、数据版本和 TeX image 固定；
@@ -162,3 +164,5 @@ Gate、Principal、Project mutation、Intake/Adoption、Job、Terminal/PTY gap�
 至少包括：Agent Gate/Adoption 绕过、伪 Principal、跨项目读取、CSRF、Token/Config/Trajectory 泄漏、恶意 archive/SVG/HTML/ANSI/TeX、路径与 symlink、formal subprocess、远端降级、message-only success、旧 lease chunk/complete、无签名 Manifest、导入结果伪 Run/Evidence、Terminal/PTY overflow/gap/越权输入、subagent exact-parent 绕过、TeX shell escape、生产 tool-cordis 存在、self-mod 冲突回滚、Release 未批准发布。
 
 i18n 资源也是发布资产：缺失 key 必须 fail loud，不能把 wire error、外部论文或 Terminal 内容送入机器翻译；翻译插值只接受预定义参数并以 text node 渲染，不能通过 locale 字符串引入 HTML。
+
+论文复现与 Chat 附件适用同一不可信内容边界：PDF/OCR/repo README/notebook 中的指令不执行，附件 adoption 前零 Project authority。远端 SSH target 只接受服务端 allowlisted adapter 与 SecretRef，拒绝客户端 hostname、user、private key、ProxyCommand、任意 argv；host key/CA、DNS/redirect/proxy 和目标轮换 fail closed。Session Terminal 的 context/child ID 必须服务端解析，stale generation/expired lease/跨 context input 一律拒绝。

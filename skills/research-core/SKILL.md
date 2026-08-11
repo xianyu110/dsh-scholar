@@ -1,12 +1,12 @@
 ---
 name: research-core
-description: DSH Research OS core methodology — evidence-first scientific research loop for the /research commands and research agent roles. Use when working on a Research Project (Survey → Idea → Baseline → Contract → Experiment → Evidence → Manuscript → Release). Enforces evidence-first, reproduce-first, durable-by-design, least privilege, budget-bounded and human accountability principles.
+description: DSH Research OS core methodology — evidence-first scientific research loop for direct slash commands and research agent roles. Use when working on a Research Project (Survey → Idea → Baseline → Contract → Experiment → Evidence → Manuscript → Release). Enforces evidence-first, reproduce-first, durable-by-design, least privilege, budget-bounded and human accountability principles.
 ---
 
 # Research Core
 
 This skill encodes the operating rules of DSH Research OS (design document §1–§5).
-It applies to every agent role in a Research Project and every `/research` command.
+It applies to every agent role in a Research Project and every direct slash command.
 
 ## Non-negotiables
 
@@ -27,23 +27,23 @@ It applies to every agent role in a Research Project and every `/research` comma
 
 ## Standard flow (golden path)
 
-1. **/research new** — create a Research Brief (problem, scope, metrics, resources, risks).
+1. **/new** — create a name-only project, then collect its Research Brief with Grill Me.
    Status DRAFT → Scope Gate.
-2. **/research survey** — run the five query classes (broad recall, narrow precision, classics,
+2. **/survey** — run the five query classes (broad recall, narrow precision, classics,
    frontier, contrarian/negative results) through the scholarly connectors; dedup by
    DOI/title fingerprint; freeze an immutable CorpusSnapshot.
-3. **/research ideas** — generate 3-5 structured IdeaCards, each with nearest prior works,
+3. **/ideas** — generate 3-5 structured IdeaCards, each with nearest prior works,
    novelty counter-search, falsifiability condition and an MVE. Present at the Idea Gate.
-4. **/research reproduce** — reproduce the approved baseline in the isolated Runner;
+4. **/reproduce** — reproduce the approved baseline in the isolated Runner;
    a full RunManifest with hashes is required.
-5. **/research contract** — pre-register the ExperimentContract (metrics, splits, seeds,
+5. **/contract** — pre-register the ExperimentContract (metrics, splits, seeds,
    analysis, stop conditions, budget). Plan-review Gate freezes it.
-6. **/research run** — submit pilot then formal multi-seed runs by contract; idempotent job
+6. **/run** — submit pilot then formal multi-seed runs by contract; idempotent job
    keys; every run yields a RunManifest.
-7. **/research evidence** — deterministic analysis scripts produce EvidenceItems; verify
+7. **/evidence** — deterministic analysis scripts produce EvidenceItems; verify
    Claims (supported/contradicted/inconclusive) with CIs and effect sizes.
-8. **/research write** — build the manuscript from the read-only Evidence Ledger only.
-9. **/research review** — independent reviewer panel + clean-room rerun; Release Gate stays
+8. **/write** — build the manuscript from the read-only Evidence Ledger only.
+9. **/review** — independent reviewer panel + clean-room rerun; Release Gate stays
    human and defaults to unapproved.
 
 ## Failure classification

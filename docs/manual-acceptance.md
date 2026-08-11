@@ -86,3 +86,24 @@
 - FAIL：先把缺陷和关闭条件写回负责规范、`acceptance-tests.md` 与 hardening，再修改代码；
 - BLOCKED：说明缺失环境或权限，保持 `NOT_RUN_MANUAL_PENDING`，不能计 PASS；
 - 新需求或修复建议：遵守 docs/README.md 的文档先行规则，不得只留在人工测试聊天或截图中。
+
+## 6. 2026-08-12 新增人工队列：Init / Upload / Models
+
+以下场景开发期不接真实环境，统一标记 `NOT_RUN_MANUAL_PENDING`：
+
+1. `MANUAL-INIT-GRILL-I18N`：zh/en 浏览器仅输入 project name 创建；逐题 answer/edit/skip/unknown；中途刷新/换浏览器恢复；确认前零 Gate，PI confirm 后唯一 Gate；语言切换不丢输入，所有下一步/aria 正确。
+2. `MANUAL-UPLOAD-2G`：至少 50 个混合材料与一个跨 8 MiB 边界文件；暂停、断网、刷新、重放同 chunk、gap/错误 hash；完成后 hash/页数一致；在可控环境分别验证 2 GiB 默认拒绝和配置到 10 GiB 的边界，保留服务端/浏览器报告但不上传材料内容。
+3. `MANUAL-PROVIDER-SECRET`：接私有测试 Provider，创建/编辑/禁用与 restart；确认 SecretRef 明文不出浏览器、argv、日志、Trajectory/Bundle；验证非法 URL/redirect/DNS/proxy；项目选择只提交 ID，运行固定 revision/hash。
+4. `MANUAL-OCR-PROVENANCE`：多页 PDF、扫描图片、中英混合、低置信度与 Provider 失败；无显式模型时不发请求、不回退；结果逐项显示 source/page/confidence，Grill 确认前不进入 Brief/Gate/Evidence。
+
+每次 FAIL 先把 error code、重现条件和关闭验收补回 `init-grill-upload-models.md`、`acceptance-tests.md` 与 hardening，再修代码。
+
+## 7. 论文复现、实验环境与 Session Terminal 人工队列
+
+1. `MANUAL-REPRO-PAPER`：用 DOI、arXiv 和扫描 PDF 各建一次 `/reproduce`；上传官方代码/数据并核对 source locator、commit/CodeSnapshot、license、environment pin；在真实本机 Docker 运行，比较论文目标指标/表/图并生成 Report。exit 0 + 指标越界必须显示 fail/inconclusive。
+2. `MANUAL-REPRO-REMOTE-SSH`：Settings 以 SecretRef 登记两台远端 SSH Runner，验证 known-host/credential/health/revision/hash；选择 target A 执行并中途断网/重启；确认同 attempt 不落到本机/B，显式新 attempt 才可改 target。日志/浏览器/argv/Bundle 零 secret。
+3. `MANUAL-CHAT-ATTACH-SLASH`：仅使用 `/new`、`/reproduce`、`/confirm-brief` 等直接命令；help/补全无 `/research`；按钮、拖拽、粘贴混合材料，暂停/刷新/恢复，scan/OCR/引用卡与 zh/en/aria 正确。
+4. `MANUAL-SESSION-MULTI-PTY`：两个 Chat session、一个 Research session、父/子 subagent 各打开两个 PTY；切换/深链/detach/reconnect/resize/signal；确认输入只到对应 terminal。撤权、lease expiry、stale generation、跨 parent/跨项目全部拒绝；远端 PTY 复测同一 fencing。
+5. `MANUAL-REPRO-MANUSCRIPT-CLEANROOM`：新 dataDir/无 checkout 隐式依赖环境重建 TeX/PDF，验证 Bundle preflight/hash、数据自包含、表图/PDF检查、signed RunManifest 与不可变 Report。
+
+以上均为 `NOT_RUN_MANUAL_PENDING`，需要记录 commit、环境、操作者、期望/实际结果、Report/截图/日志引用。

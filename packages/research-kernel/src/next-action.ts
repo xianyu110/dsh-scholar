@@ -168,6 +168,9 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
 
   switch (project.status) {
     case 'DRAFT': {
+      // INIT-GRILL-02: a name-only shell has no Scope Gate yet. Its active
+      // Init Intake overlays below are the only authoritative next actions.
+      if (project.brief_status === 'collecting') return []
       const scopeGate = pendingGateOf('scope')
       return [{
         code: 'scope_gate_submit',

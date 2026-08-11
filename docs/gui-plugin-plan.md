@@ -28,7 +28,7 @@ Header：Kernel 状态、Human Gate 数、命令面板、快捷键、活动通�
 | 分组 | 页面 | 说明 |
 |---|---|---|
 | Start | Init / Resume / Upload | 新研究、恢复平台项目、接入外部研究 |
-| Research | Chat | /research 命令、结果卡、会话与搜索 |
+| Research | Chat | 一级 slash command、附件/结果卡、会话与搜索 |
 | Research | Overview | 唯一主 NextAction、状态、Brief、可折叠轨迹/拓扑 |
 | Research | Workspace | VS Code 式 Explorer、编辑器、搜索、Problems、PTY |
 | Execution | Approvals | Gate 筛选、Human Decision、理由和审计 |
@@ -64,9 +64,9 @@ Tab 可收藏，Alt+1…9 切换。URL 或持久 UI state 保存 active project/
 
 ## 4. Chat
 
-支持会话新建、切换、重命名、固定、复制、归档、搜索、导出 JSON/Markdown 和最多 200 条本地 transcript。模型文本和服务器错误原样显示；UI chrome 翻译。
+支持会话新建、切换、重命名、固定、复制、归档、搜索、导出 JSON/Markdown 和最多 200 条本地 transcript。Chat 同时是 name-only Init 的 Grill Me 主界面：active Init Intake 时，自由文本每次回答当前唯一问题，服务端返回 next question、Brief preview 和下一步。模型文本和服务器 raw error 原样显示；问题 label、CTA、状态、已知错误、aria 等 UI chrome 翻译。
 
-内置命令：help、new、list、status、survey、ideas、gates、jobs、reproduce、contract、run、evidence、claims、write、review、export、release。命令结果使用结构化卡，可跳转到对应页面。Composer 支持命令补全、Shift+Enter 换行、历史、引用和安全 Markdown；不渲染任意 HTML。
+内置命令直接为 `/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`、`/confirm-brief`；不展示聚合前缀。DSH 只注册这些直接 descriptor；standalone 可在不进入帮助/补全的 parser 分支中短期兼容旧输入。命令 descriptor 是 help/补全/执行/i18n 单一来源，description 保存 i18n key 并在渲染/搜索时按当前 locale 求值，禁止在 descriptor 中冻结英文。Composer 还支持附件按钮、拖拽和粘贴，多文件卡显示分块、scan、OCR 与 provenance；不渲染任意 HTML。
 
 Chat 中的“运行中”只代表 HTTP 命令未完成。真正命令执行输出必须链接到 Run/Terminal，不在聊天中伪造流。
 
@@ -127,6 +127,8 @@ Cancel 仅对 queued/running/retryable 可见，要求 reason 并通过 BFF。UI
 ### 8.3 Interactive Terminal
 
 Interactive Terminal 使用 xterm-compatible adapter 连接真实 PTY，必须支持键盘/粘贴输入、TUI、resize、INT/TERM/KILL、detach/reconnect、显式 close、状态/exit、backpressure/gap。连接前选择 Workspace、relative cwd、Runner profile 和受控 shell preset；hostname、SSH credential、Docker socket、host path 和任意启动 argv 不出现在页面。
+
+Terminal 按权威 Research/Chat/Subagent context 分组，每个 context 可有多个 PTY tab。Chat 与 Topology 的“打开终端”携带 server-resolved context，深链为 `#tab=pty&session=<pty_id>`；切换 context 不复用输入目标。所有 input/resize/signal/attach 携带 expected generation，并校验 owner、lease expiry 与 exact-parent capability。
 
 页面持续显示“交互会话不能产出正式 Evidence”。权限撤销、generation stale、idle TTL、target offline 和 parent session failure 都有可恢复状态；关闭浏览器不是成功退出。Run Terminal 不出现输入框，Interactive PTY 不显示为正式 Run 日志。
 
@@ -207,7 +209,9 @@ Compile 先保存所有脏文件，再冻结 workspace manifest 并提交 latex-
 
 ### 12.1 Settings 渐进披露
 
-Settings section 首次全部折叠：Essentials、Execution advanced、Workspace、Terminal、LaTeX、Agent & Trajectory、Security & Secrets、Diagnostics/Config provenance。每项由 Config Schema 生成，显示 effective value、source scope/revision/hash、default/modified、hot/restart、允许范围和 Reset；secret 只显示 SecretRef 与是否可用。
+Settings section 首次全部折叠：Essentials、Models & OCR、Execution advanced、Workspace、Terminal、LaTeX、Agent & Trajectory、Security & Secrets、Diagnostics/Config provenance。每项由 Config Schema 生成，显示 effective value、source scope/revision/hash、default/modified、hot/restart、允许范围和 Reset；secret 只显示 SecretRef 与是否可用。Provider 在 global 组管理 endpoint/capabilities/catalog/SecretRef，项目只选 provider/model ID。
+
+Start 的 New Project modal 只含 project name；创建成功立即进入 Chat Grill。Upload 是多文件队列，支持 8 MiB 分块、暂停/恢复/取消、offset/hash 冲突、扫描和 OCR 状态。配置项收缩在 Settings 折叠组，不在创建流程铺开。切换语言不得清空项目名、当前 Grill answer 或队列。
 
 业务页只显示当前策略摘要和“调整”链接，不常驻展开高级项。运行中 Job/PTY/Build 标注 pinned config hash，修改配置只影响新动作。Patch 使用 revision CAS，409 展示 base/current/local；不支持的 target/capability 不隐藏成默认值。
 

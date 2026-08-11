@@ -4,7 +4,7 @@
 
 ## 1. 包与前置条件
 
-根包名为 @dsh-scholar/research-plugin，ESM，只导出 Cordis Agent 插件。它不导出 `./client`、不声明 `dshClient`、不向 DSH Web 注入 Scholar UI。宿主提供 cordis、schemastery 以及 @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-local 等模块；这些 DeepSeek 包不假设存在于公共 npm registry。
+根包名为 @dsh-scholar/research-plugin，ESM，只导出 Cordis Agent 插件。它不导出 `./client`、不声明 `dshClient`、不向 DSH Web 注入 Scholar UI。宿主提供私有 `@deepseek-ai/cordis`、schemastery 以及 @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-local 等模块；这些 DeepSeek 包不假设存在于公共 npm registry。
 
 开发环境通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。symlink/check-out 验证只用于开发反馈，不能计为宿主兼容性 PASS。
 
@@ -72,11 +72,15 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 
 ## 5. 命令
 
-唯一顶级命令为 /research，子命令：help、init、new、resume、import、grill、list、status、survey、ideas、gates、jobs、reproduce、contract、run、evidence、claims、write、review、export、release。
+命令直接注册为一级 slash command：`/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`。DSH Command Registry 没有 hidden descriptor，因此插件不注册聚合前缀别名；standalone Chat 可以在 parser 内短期兼容旧输入，但帮助、补全、descriptor、文档与新审计 provenance 一律使用直接命令。
 
-`init` 是 new 的引导入口；`import/grill` 只操作 Intake observation/question/proposal。Agent command/tool 不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 只在 standalone Human BFF 完成。
+`/new` 是 name-only Init 引导入口；Grill 回答与 PI `/confirm-brief` 目前属于 authenticated standalone Human Chat/BFF 面，不冒充 Agent command。Agent Intake tool 只操作 observation/question/proposal，不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 与 Brief confirm 只能由 Human PI 完成。
 
 命令只是 ResearchClient adapter，不重复业务逻辑。它使用 invocation.agent.id 解析 session link。错误输出 research: 加稳定错误摘要，不能泄漏内部路径、Token 或上游响应。帮助文本与 i18n 资源生成；宿主命令描述若在注册时固化语言，locale change 时重新注册或保持语言无关。
+
+本地开发可运行 `scripts/link-dsh-deps.sh` 解析当前 DSH checkout；脚本必须链接 `@deepseek-ai/*`（包括当前 DSH 的 `@deepseek-ai/cordis`）与 vendored `@cordisjs/*`/`cosmokit`，并且只替换因 DSH 包目录重组产生的 dangling symlink，不覆盖仍有效的链接或真实安装包。该链接只用于本地 typecheck，不能作为 DSH 兼容性 PASS；发布兼容性仍必须由 `tests/integration/run-dsh-private-registry-tests.sh` 在全新目录和全新 DSH_HOME 中安装固定私有 `@deepseek-ai/*` 包验证。
+
+每个发布 Skill 的 YAML frontmatter 必须能被当前私有 `dsh-skill-local` 严格解析；含 `: ` 等 YAML 指示符的 description 必须引用。兼容测试必须从 `ctx.skills.list()` 公共接口核对四个 Skill，而不能读取已经移除的内部 provider collection。
 
 ## 6. DSH Session 与事件
 

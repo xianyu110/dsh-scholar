@@ -1,14 +1,14 @@
 /**
- * `/research` command surface (design 附录 A). Commands are thin orchestrators
+ * Direct slash-command surface (design 附录 A). Commands are thin orchestrators
  * over the Kernel API; heavy lifting stays in tools and the Kernel. In
  * unattended mode commands never block on questions — they create gates and
  * report BLOCKED_GATE status.
  * @module @dsh-scholar/research-plugin/commands
  */
 
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 // Module augmentation: ctx.commands (CommandService).
-import type {} from '@deepseek-ai/dsh-commands'
+import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
@@ -20,15 +20,8 @@ export interface CommandContext {
   unattended: boolean
 }
 
-function parseSub(rawInput: string): { sub: string; rest: string } {
-  const trimmed = rawInput.trim()
-  const space = trimmed.indexOf(' ')
-  if (space === -1) return { sub: trimmed, rest: '' }
-  return { sub: trimmed.slice(0, space), rest: trimmed.slice(space + 1).trim() }
-}
-
 /** Extract a JSON object literal from anywhere in the remainder: the JSON
- * may be leading (`/research contract {...}`), trailing (`/research new
+ * may be leading (`/contract {...}`), trailing (`/new
  * name {...}`) or absent. Non-JSON words stay in `positional`. */
 function jsonArg(rest: string): { json: string; positional: string } {
   const match = /^([^{]*)(\{.*\})\s*(.*)$/s.exec(rest)
@@ -51,47 +44,63 @@ function fmt(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
-/** §9: every /research subcommand below has a REAL handler — this text is
+/** §9: every direct slash command below has a REAL handler — this text is
  * only the help/documentation payload, never a catch-all for unimplemented
  * subcommands (help|list|status|gates|jobs|claims are all implemented). */
-const RESEARCH_HELP = 'DSH Research OS — /research subcommands:\n'
-  + '  help                  this help text\n'
-  + '  new <name> [json]     create project + Scope Gate\n'
-  + '  list                  list all research projects (kernel data)\n'
-  + '  status [project_id]   phase, gates, jobs, budget, next actions\n'
-  + '  gates [project_id]    pending/decided gates of the project\n'
-  + '  jobs [project_id]     durable runner jobs of the project\n'
-  + '  claims [project_id]   claim ledger state (counts + claim events)\n'
-  + '  survey <query>        multi-source search + frozen CorpusSnapshot\n'
-  + '  ideas                 list IdeaCards (generate via idea_create tool)\n'
-  + '  reproduce [json]      prepare + run Baseline reproduction (isolated)\n'
-  + '  contract <json>       pre-register an ExperimentContract\n'
-  + '  run [kind] [json]     submit a durable runner job\n'
-  + '  evidence <json>       ingest a statistical EvidenceItem\n'
-  + '  write                 build manuscript from the read-only ledger\n'
-  + '  review                deterministic reviewer checks + Release Gate status\n'
-  + '  export                private Release Bundle (not publication)\n'
-  + '  release               create the human Release Gate'
+const RESEARCH_HELP = 'DSH Research OS — direct slash commands:\n'
+  + '  /help                  this help text\n'
+  + '  /new <name> [json]     create project + Scope Gate\n'
+  + '  /list                  list all research projects (kernel data)\n'
+  + '  /status [project_id]   phase, gates, jobs, budget, next actions\n'
+  + '  /gates [project_id]    pending/decided gates of the project\n'
+  + '  /jobs [project_id]     durable runner jobs of the project\n'
+  + '  /claims [project_id]   claim ledger state (counts + claim events)\n'
+  + '  /survey <query>        multi-source search + frozen CorpusSnapshot\n'
+  + '  /ideas                 list IdeaCards (generate via idea_create tool)\n'
+  + '  /reproduce [json]      prepare + run Baseline reproduction (isolated)\n'
+  + '  /contract <json>       pre-register an ExperimentContract\n'
+  + '  /run [kind] [json]     submit a durable runner job\n'
+  + '  /evidence <json>       ingest a statistical EvidenceItem\n'
+  + '  /write                 build manuscript from the read-only ledger\n'
+  + '  /review                deterministic reviewer checks + Release Gate status\n'
+  + '  /export                private Release Bundle (not publication)\n'
+  + '  /release               create the human Release Gate'
 
-/** Register the `/research` command family. */
+const DIRECT_COMMANDS = [
+  ['help', 'List Research OS commands', ''],
+  ['new', 'Create a Research Project', '<name> [json]'],
+  ['list', 'List Research Projects', ''],
+  ['status', 'Show project status and next actions', '[project_id]'],
+  ['gates', 'List project gates', '[project_id]'],
+  ['jobs', 'List project jobs', '[project_id]'],
+  ['claims', 'Show the claim ledger state', '[project_id]'],
+  ['survey', 'Run a multi-source literature survey', '<query>'],
+  ['ideas', 'List project IdeaCards', ''],
+  ['reproduce', 'Start a baseline paper reproduction', '[json]'],
+  ['contract', 'Pre-register an ExperimentContract', '<json>'],
+  ['run', 'Submit a durable runner job', '[kind] [json]'],
+  ['evidence', 'Ingest a statistical EvidenceItem', '<json>'],
+  ['write', 'Build a manuscript from accepted evidence', ''],
+  ['review', 'Run deterministic manuscript checks', ''],
+  ['export', 'Generate a private Release Bundle', ''],
+  ['release', 'Create the human Release Gate', ''],
+] as const
+
+/** Register direct top-level commands. The DSH registry has no hidden-command
+ * flag, so the old aggregate descriptor is deliberately not registered. */
 export function registerResearchCommands(ctx: Context, commandCtx: CommandContext): void {
   const { client, cache, unattended } = commandCtx
 
-  ctx.commands.register({
-    name: 'research',
-    description: 'DSH Research OS: create and drive a Research Project (new|status|survey|ideas|contract|run|evidence|write|export|release)',
-    input: { hint: '<new|status|survey|ideas|contract|run|evidence|write|export|release> ...' },
-    handler: async invocation => {
-      const sessionId = invocation.agent.id
-      const { sub, rest } = parseSub(invocation.rawInput)
+  const execute = async (sub: string, rest: string, invocation: CommandInvocation) => {
+    const sessionId = invocation.agent.id
 
-      try {
-        switch (sub) {
+    try {
+      switch (sub) {
           case 'new': {
             const { json, positional } = jsonArg(rest)
             const name = positional.split(/\s+/)[0] ?? ''
             if (name === '') {
-              return { kind: 'error' as const, text: '/research new <name> [<brief-json>] — name is required' }
+              return { kind: 'error' as const, text: '/new <name> [<brief-json>] — name is required' }
             }
             const brief = briefFromJson(json)
             const project = await client.createProject({
@@ -136,7 +145,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               ? await client.getProject(projectId)
               : await client.getProjectBySession(sessionId)
             if (linked === null) {
-              return { kind: 'error' as const, text: 'No session-linked research project. Create one with /research new <name> or pass a project_id.' }
+              return { kind: 'error' as const, text: 'No session-linked research project. Create one with /new <name> or pass a project_id.' }
             }
             const projection = await client.projectProjection(linked.project_id)
             const pending = projection.pending_gates.map(g => `  - ${g.type} gate ${g.gate_id}: ${g.title} (${g.status})`).join('\n') || '  none'
@@ -154,7 +163,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
           case 'survey': {
             const project = await requireProject(client, sessionId, undefined)
             const query = rest.trim()
-            if (query === '') return { kind: 'error' as const, text: '/research survey <query> — query required' }
+            if (query === '') return { kind: 'error' as const, text: '/survey <query> — query required' }
             const result = await multiSourceSearch(query, { limit: 20 }, cache)
             const snapshot = await client.snapshotCorpus({
               project_id: project.project_id,
@@ -164,7 +173,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             const samples = result.hits.slice(0, 5).map(h => `  - ${h.paper.paper_id}: ${h.paper.title} (${h.paper.year ?? 'n.d.'})`).join('\n')
             const text = `Survey complete: **${snapshot.snapshot_id}** — ${snapshot.papers.length} papers after dedup (${result.dedup_removed} removed).\n\n`
               + `Top hits:\n${samples}\n\n`
-              + `Next: /research ideas (or generate IdeaCards with idea_create + novelty_audit).`
+              + `Next: /ideas (or generate IdeaCards with idea_create + novelty_audit).`
             return { kind: 'success' as const, text }
           }
 
@@ -191,7 +200,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               kind: 'baseline',
               command,
               payload: {
-                message: '/research reproduce',
+                message: '/reproduce',
                 repo: data?.repo !== undefined ? String(data.repo) : undefined,
                 commit: data?.commit !== undefined ? String(data.commit) : undefined,
                 expected_metrics: data?.expected_metrics,
@@ -210,7 +219,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             const { json } = jsonArg(rest)
             const data = briefFromJson(json)
             if (data === null) {
-              return { kind: 'error' as const, text: '/research contract <json> — supply contract JSON (idea_id, dataset_id, baseline, treatment, primary_metric, seeds)' }
+              return { kind: 'error' as const, text: '/contract <json> — supply contract JSON (idea_id, dataset_id, baseline, treatment, primary_metric, seeds)' }
             }
             const seeds = Array.isArray(data.seeds) ? data.seeds.map(Number) : [11, 23, 47, 89, 101]
             const contract = await client.registerContract({
@@ -240,7 +249,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               idempotency_key: idem,
               kind,
               command: Array.isArray(data?.command) ? data.command.map(String) : [],
-              payload: { message: String(data?.message ?? `/research run ${kind}`), ...(data ?? {}) },
+              payload: { message: String(data?.message ?? `/run ${kind}`), ...(data ?? {}) },
               contract_id: data?.contract_id !== undefined ? String(data.contract_id) : null,
             })
             const text = `Job **${job.job_id}** [${job.kind}] submitted (${job.status}, idempotency ${idem}).\n\n`
@@ -253,7 +262,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             const { json } = jsonArg(rest)
             const data = briefFromJson(json)
             if (data === null) {
-              return { kind: 'error' as const, text: '/research evidence <json> — supply evidence JSON (analysis_method, result{primary_metric,value,...})' }
+              return { kind: 'error' as const, text: '/evidence <json> — supply evidence JSON (analysis_method, result{primary_metric,value,...})' }
             }
             const item = await client.ingestEvidence({
               project_id: project.project_id,
@@ -289,7 +298,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               + `Overall: ${review.pass ? 'PASS — manuscript ready for the human Release Gate' : 'SEE CHECKS — fix before writing'}\n`
               + (releaseGates.length > 0
                 ? `Release Gate ${releaseGates.map(g => g.gate_id).join(', ')} pending (human only).`
-                : 'No Release Gate yet — run /research export then /research release.')
+                : 'No Release Gate yet — run /export then /release.')
             return { kind: 'success' as const, text }
           }
 
@@ -320,7 +329,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
           case 'list': {
             const projects = await client.listProjects()
             const text = projects.length === 0
-              ? 'No research projects yet. Create one with /research new <name>.'
+              ? 'No research projects yet. Create one with /new <name>.'
               : `Research projects (${projects.length}):\n${projects.map(p => `  - ${p.project_id} [${p.status}] ${p.name}`).join('\n')}`
             return { kind: 'success' as const, text }
           }
@@ -338,7 +347,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
             const project = await requireProject(client, sessionId, rest.trim() || undefined)
             const jobs = await client.listJobs(project.project_id)
             const text = jobs.length === 0
-              ? `No jobs for ${project.project_id} yet. Submit one with /research run or the experiment_submit tool.`
+              ? `No jobs for ${project.project_id} yet. Submit one with /run or the experiment_submit tool.`
               : `Jobs for ${project.project_id} (${jobs.length}):\n${jobs.map(j => `  - ${j.job_id} [${j.kind}] ${j.status}${j.contract_id !== null ? ` contract=${j.contract_id}` : ''}`).join('\n')}`
             return { kind: 'success' as const, text }
           }
@@ -356,17 +365,25 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
 
           default:
             return { kind: 'success' as const, text: RESEARCH_HELP }
-        }
-      } catch (error) {
-        return { kind: 'error' as const, text: `research: ${(error as Error).message}` }
       }
-    },
-  })
+    } catch (error) {
+      return { kind: 'error' as const, text: `research: ${(error as Error).message}` }
+    }
+  }
+
+  for (const [name, description, hint] of DIRECT_COMMANDS) {
+    ctx.commands.register({
+      name,
+      description,
+      ...(hint === '' ? {} : { input: { hint } }),
+      handler: invocation => execute(name, invocation.rawInput, invocation),
+    })
+  }
 }
 
 async function requireProject(client: ResearchClient, sessionId: string, projectId: string | undefined): Promise<{ project_id: string }> {
   if (projectId !== undefined && projectId !== '') return { project_id: projectId }
   const linked = await client.getProjectBySession(sessionId)
-  if (linked === null) throw new Error('No session-linked research project. Create one with /research new <name>.')
+  if (linked === null) throw new Error('No session-linked research project. Create one with /new <name>.')
   return { project_id: linked.project_id }
 }

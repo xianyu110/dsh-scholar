@@ -661,3 +661,15 @@ workspace 的每次 mutation 是**两种介质上的两个提交**：磁盘字�
 **验证**：tests/unit/crash-recovery.test.ts 11/11（全窗口 + 双扫幂等 + 重启持久 + 自愈）、tests/unit/workspace-store.test.ts 16/16、tests/unit/workspace-search.test.ts 12/12（内容搜索，WORK-01）、tests/unit/backup.test.ts 2/2、tests/unit/migrations.test.ts 17/17（0018 workspace 隔离 + 0019 Project tombstone 列/索引及 rewind 幂等）、tests/security/run-workspace-tests.sh 48/48（ws-crash-recovery 3 断言：真实 kernel 进程 kill+重启同 dataDir——启动隔离 503、恢复字节自愈、rename-before-row 前滚 v2；ws-content-search 7 断言）。
 
 **Fleet 侧**（§5 P2 附项）：`InMemoryAgentRegistry`、`RemoteFleetServer` 的 pending/outstanding/stages/claimedJobIds 与代理端 `AgentOutboundSpool` 全部为内存态（无磁盘 spool）。重启丢失按既有 lease 过期语义自愈，不引入大持久化框架：agent 重启后重新 register/heartbeat；fleet 重启后 kernel lease 过期（默认 300s TTL）→ 旧 claim 后续写入 409 lease_stale、job 回 queued retryable → fleet 重新 claim 分发；spool 内存条目随 agent 进程丢失 → terminal 帧缺 seq（kernel retention/gap 语义兜底），业务终态仍由 complete/cancel transaction 决定（详见 remote-runner-wire.md §5.3 / execution-runtime.md §5.1）。
+
+## 11. Init、Intake upload、Provider 与 OCR 增量
+
+后续 migration 只追加、不改已发布 checksum，并至少包含：projects.brief_status（collecting/confirmed）；intake_artifact_stages（stage/intake/project/owner/file/expected size+hash/committed offset/state/temp uri/expiry/finalized artifact）；model_providers（global descriptor、SecretRef metadata、revision）；project_model_bindings（purpose/provider/model/revision）；ocr_requests（source/provider/model/config pin/status/result/safe error/idempotency）。
+
+stage 创建按 expected_size 事务预留 Intake 配额；finalize 与 intake_artifacts 写入原子，失败不泄漏权威 Artifact。Provider/OCR 记录不得保存 secret value。备份/恢复与 integrity scan 必须覆盖开放 stage offset/temp 文件、binding foreign key、OCR config pin 和终态 result ref；GC 只删除 expired/aborted 临时文件，不触碰已采用或共享 Blob。
+
+## 12. Reproduction、Execution Environment 与 Session PTY 增量
+
+追加 `reproduction_specs`、`reproduction_attempts`、`reproduction_reports`、material/source link、`runner_targets`/`runner_profiles`/Config revision，并为 `pty_sessions` 增加 context_kind/context_id/parent_session_id 与 `(project_id,context_kind,context_id)` 索引。Spec/Attempt/Report 各自保存 canonical hash、revision/idempotency、Principal、Artifact refs；Report 不可变。Target/PTY 只保存 SecretRef metadata/token hash，不保存 SSH key/token 明文。
+
+恢复检查开放 attempt/lease/report ref、target/environment pin、PTY context/generation/lease expiry；同一 context 多 PTY 不互相覆盖。删除/retention 不得破坏 Report、signed RunManifest、released Bundle 或共享 Blob。

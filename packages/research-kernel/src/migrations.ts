@@ -19,7 +19,7 @@ import { TRAJECTORY_DDL } from './trajectory.js'
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 17
+export const SCHEMA_VERSION = 18
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1100,6 +1100,33 @@ const projectDeletionTombstone = (db: DatabaseSync, report: MigrationReport): vo
   ).get() as { n: number }).n)
 }
 
+/** 0020 — name-only Init keeps DRAFT while the canonical Brief is collected. */
+const projectBriefStatus = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'projects', 'brief_status', "TEXT NOT NULL DEFAULT 'confirmed'")
+  ensureColumn(db, 'projects', 'brief_confirm_request_id', 'TEXT')
+  ensureColumn(db, 'projects', 'brief_confirm_request_hash', 'TEXT')
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_brief_confirm_request
+    ON projects(brief_confirm_request_id) WHERE brief_confirm_request_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS project_grill_answers (
+      project_id TEXT NOT NULL,
+      intake_id TEXT NOT NULL,
+      question_code TEXT NOT NULL,
+      question_revision INTEGER NOT NULL DEFAULT 1,
+      value_json TEXT,
+      disposition TEXT NOT NULL DEFAULT 'answered',
+      answered_by_principal TEXT NOT NULL,
+      answered_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, question_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_grill_answers_intake
+      ON project_grill_answers(intake_id, question_code);`)
+  db.exec("UPDATE projects SET brief_status = 'confirmed' WHERE brief_status IS NULL OR trim(brief_status) = ''")
+  if (report.rows === undefined) report.rows = {}
+  report.rows.projects_collecting_brief = Number((db.prepare(
+    "SELECT COUNT(*) AS n FROM projects WHERE brief_status = 'collecting'",
+  ).get() as { n: number }).n)
+}
+
 /**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
@@ -1215,6 +1242,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'PROJECT-DELETE-01: archived project tombstone + idempotent deletion request receipt (audit/retention preserving)',
     body: projectDeletionTombstone.toString(),
     up: projectDeletionTombstone,
+  },
+  {
+    id: '0020_project_brief_status',
+    description: 'INIT-GRILL-02: additive collecting/confirmed Research Brief lifecycle',
+    body: projectBriefStatus.toString(),
+    up: projectBriefStatus,
   },
 ]
 

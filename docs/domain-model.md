@@ -62,6 +62,8 @@ deletion_reason: null
 
 Project name 去除首尾空白后长度 1–120。archive 是可恢复动作；ARCHIVED 项目默认只读，unarchive 恢复 archive 前状态。
 
+Project 另有 `brief_status: collecting | confirmed`。v2 name-only Init 创建 `DRAFT/collecting` 与 active Init Intake，不创建 Gate；数据库中的 collecting placeholder 只用于旧读兼容，不能作为已确认 Brief。PI Grill confirm 在同一事务写 canonical Brief、改为 confirmed 并创建唯一 pending Scope Gate。
+
 删除是独立于生命周期状态的 tombstone 轴，不新增 `DELETED` 状态。只有 `ARCHIVED` 项目可由 PI 删除；请求必须携带 `expected_revision`、精确项目名确认和非空 reason。成功时在同一 Kernel 事务写 `deleted_at/deleted_by/deletion_reason`、递增 revision 并追加 `project.deleted` Outbox。正常列表、读取、投影和全部项目写入必须把 tombstone 当作 404；相同 request id 的重放返回同一 DeletionReceipt。删除不能物理移除 Project、成员、Decision、Outbox、Artifact 引用或共享 Blob；这些记录由 retention/hold 与后续 purge/GC 协议处理。
 
 `runner_profile` 是 v1 兼容字段；迁移后由 `runner_profile_id` 取代并映射同名本机 profile。Project/Job 只能引用已登记的 opaque profile ID，不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
@@ -206,6 +208,8 @@ RunManifest 必须包含 run_id、project_id、job_id、contract 和版本、代
 
 `RunnerProfile` 包含 runner_profile_id、target_id、image allowlist/digest、network policy、resource limits、artifact transport、interaction policy、config_revision/config_sha256 和 enabled/draining 状态。Job submit 固定 profile/config hash；target 变更不会修改已存在 attempt。无 capability、离线或 draining 目标拒绝新 claim；除显式创建新 attempt 外，不得自动从远端回退本机。
 
+ExperimentContract 与 PaperReproductionSpec 的 execution binding 只保存 `runner_profile_id`、`target_id`、environment revision/hash；默认可继承 Project，但在 submit 时必须解析并固化。本机 Docker 与远端 SSH Runner 都是 RunnerTarget adapter；SSH endpoint/credential 只存在服务端 Config/SecretRef。
+
 **现状注记（已实现，commit d960f34）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地——`research-schemas/src/runner-profile.ts` 定义 `RunnerProfile`（profile_id/display_name/runner_mode(local-docker|isolated-subprocess)/锁内 image digest/network_policy=none/limits/capabilities/config_hash + enabled，`.strict()` 拒绝 docker flags/hostname/credential/endpoint）与内置注册表（`profile_local_docker_cpu_v1`、`profile_local_docker_gpu_v1`（无 GPU 路径，CPU-only pin）、`profile_isolated_subprocess_v1`（trusted-smoke-fixture 专用））；注册表 image 与 `configs/runner-profiles/images.lock.json` 的 node_fixture digest 对齐；v1 enum 经 `LEGACY_RUNNER_PROFILE_ENUM_TO_ID` 映射同名本机 opaque id。ExecutionConfig 增可选 `runner_profile_id`（优先于 enum；未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`）。kernel submitJob 对 secure kinds 把解析出的 profile 的 `profile_id` + `config_hash` 注入 Job payload（`payload.runner_profile_id`/`payload.profile_config_hash`，与 image digest 同一 pin 语义）；runner executeJob 按注册表复算校验，未知 id 或 hash 不一致 → `failure_class=environment`（绝不执行），docker 参数（limits/network/opaque profile_id）取自 profile 记录且缺省值与既有容器基线字节级一致；RemoteFleetServer 的 plan 固定同一 profile pin（不一致 → retryable，不带病分发）。legacy jobs（无 pin）行为不变。证据：tests/unit/runner-profile.test.ts 11/11、kernel.test.ts 109/109、根 pnpm test 664/664。
 
 远端 Runner 仍由 Kernel 掌握 Job、Run、lease、budget、Artifact、Manifest 和 Outbox；Runner Agent 只执行冻结 `ExecutionPlan` 并回传事实。每次 claim 返回 Kernel 创建的唯一 run_id，任何 adapter 都不得自行生成替代 run_id。
@@ -240,7 +244,7 @@ seq 在单个 run 内严格递增，保留 stdout 和 stderr 交错顺序；stre
 
 ### 10.1 PtySession
 
-PtySession 与 TerminalLog 分离。它包含 session_id、project_id、workspace_id、principal_id、runner_profile_id、target_id、purpose(shell/debug/build-terminal)、cwd、argv preset、cols、rows、status、session_generation、lease_token_hash、config_sha256、retained_from_seq、last_event_seq、created_at、last_activity_at、expires_at、closed_at。
+PtySession 与 TerminalLog 分离。它包含 pty_session_id、project_id、workspace_id、principal_id、context_kind(operator/research/chat/subagent)、context_id、parent_session_id、runner_profile_id、target_id、purpose(shell/debug/build-terminal)、cwd、argv preset、cols、rows、status、session_generation、lease_token_hash、config_sha256、retained_from_seq、last_event_seq、created_at、last_activity_at、expires_at、closed_at。一个 context 可绑定多个 PTY；所有 control/stream 校验 owner、lease expiry、expected generation 和 exact-parent 权限。
 
 PtyEvent 为 subscribed、data、gap、input_ack、resize_applied、state、exit。data 保存 raw byte length 和安全显示文本；input/resize 使用单调 client_seq 幂等。write、resize、signal、attach 和 close 都重新校验 project membership、terminal_write capability 与当前 session generation/token。断开浏览器连接不会自动杀进程；idle TTL、显式 close、权限撤销或 Operator policy 才结束会话。
 
@@ -274,6 +278,10 @@ WorkspaceSearch 是短期投影，不是科研权威：请求包含 query、glob
 
 TexDocument 绑定一个 `workspace_id` 和根相对 subtree。`TexPreview` 是可取消、可 supersede 的非权威 Build，保存成功后按配置 debounce 触发；它包含 preview_id、document_id、input_manifest_id、input_revision、config_sha256、job_id、status、diagnostics、pdf/log Artifact 与 superseded_by。任何 source revision 变化立即使旧 Preview/PDF `fresh=false`。显式 Compile 创建权威 latex-compile Job；Preview 永远不能直接产生 accepted Evidence。
 
+### 12.2 PaperReproductionSpec、Attempt 与 Report
+
+论文复现新增三个权威对象：`PaperReproductionSpec` 固定 paper/code/data/claims/comparators/execution/environment 与 revision；`ReproductionAttempt` 固定 Spec/Contract、Job/Run/lease 和全部环境 pin；`ReproducibilityReport` 保存论文目标比较与 clean-room identity 比较、checks、状态、stable error/failure class 和 Artifact refs。完整字段、比较算法与 provenance 见 `reproduction-contracts.md`。
+
 **现状注记（已实现，commit d960f34）**：保存路径已满足 §12 的原子性与可审计要求（TEX-SAVE，审计报告 §4 #3）——`tex-workspace.ts` 的 writeFile/deleteFile/moveFile 把「文件行 + document revision 递增」放在同一单事务内（失败整体回滚，无半写）；每次成功保存后 kernel 追加 `tex.file.saved` Outbox 事件（payload: project_id/document_id/path/revision，request_id/session_id 可透传；409 版本冲突不发事件；delete/move 按设计不发事件）。跨连接取舍见 storage-migrations.md §7 注记：tex store 为独立 WAL 连接，tex 写先提交、outbox 后写，outbox 追加失败记录 error 不阻塞保存。验证：tests/unit/tex-workspace.test.ts（单事务失败路径无半写）、tests/unit/tex-event.test.ts（事件信封/单调 seq/aggregate/revision/409 无事件/outbox 失败不阻塞）。
 
 ## 13. Intake、Proposal 与 Adoption
@@ -295,7 +303,13 @@ Intake status 为 draft、uploading、scanning、needs_input、grilling、propos
 
 NextAction 是 Kernel 投影，不是 UI 本地状态（GUIDE-01）。字段：`id`（`${code}:${projectId}` 稳定，ref-bound 覆盖动作追加 ref id）、`code`（稳定机器码：scope_gate_submit / survey_run / idea_generate / idea_gate_approve / contract_register / baseline_reproduce / pilot_formal_submit / evidence_verify / manuscript_write / reviewer_run / release_bundle / release_gate / gate_resolve / budget_resolve / gate_decide / job_retry / project_stop / project_archived / project_released / project_stopped / unknown）、`label`（i18n key 或英文默认文案；legacy `next_actions: string[]` 由此派生）、`reason`（为什么现在做）、`required`（true 或缺失前置项列表，如 `['approved_contract']`）、`route`（gates/runs/evidence/manuscript/budget/ideas/contracts/release/overview）、`capability` 可选（如 researcher/pi）、`revision`（依赖对象版本：gate 决策=project.revision、run 动作=contract version、idea gate=idea version；null=不适用）、`state`（ready=现在做 / blocked=前置缺失 / done=已完成）、`blocking`（是否阻塞阶段完成）、`refs`（gate/job/contract/idea/evidence 权威对象）、`required_by`（human/agent/runner）。
 
-NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code（`unknown` 退化）只能只读显示。每阶段至少一个动作：DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate、IDEATING→idea_gate_approve、IDEA_APPROVED/BASELINE_REPRO→contract_register+baseline_reproduce、CONTRACT_APPROVED/EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done。pending gate 产生 gate 决策动作（budget→budget_resolve，其余→gate_decide，base 已引用不重复）；失败/retryable 作业产生 job_retry（attempts 耗尽→blocked+repair_decision）。Intake/Grill 阶段动作待 ONBOARD-01 落地后扩展。
+NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code（`unknown` 退化）只能只读显示。每阶段至少一个动作：confirmed DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate、IDEATING→idea_gate_approve、IDEA_APPROVED/BASELINE_REPRO→contract_register+baseline_reproduce、CONTRACT_APPROVED/EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done。pending gate 产生 gate 决策动作（budget→budget_resolve，其余→gate_decide，base 已引用不重复）；失败/retryable 作业产生 job_retry（attempts 耗尽→blocked+repair_decision）。Intake/Grill 覆盖动作包括 `intake_resume`、`intake_scan`、`intake_answer`、`intake_propose`、`intake_adopt`；collecting DRAFT 不得产生 `scope_gate_submit`。
+
+### 14.1 Model Provider、Binding 与 OCR Request
+
+`ModelProvider` 是 global/instance 资源，字段为 provider_id、display_name、kind、base_url、enabled、capabilities、models、credential SecretRef、revision、created_at、updated_at。响应永不包含 secret value。`ProjectModelBinding` 只保存 project_id、purpose、provider_id、model_id、revision；OCR/Job 创建时固定 provider/config revision/hash。
+
+`OcrRequest` 包含 request_id、project_id、intake_id、source_artifact_id、provider_id、model_id、status、page/language options、config_revision/config_sha256、result_artifact_id、safe_error、created/updated/finished_at。OCR 输出以 `observed_unverified` Observation 保存，每个候选携带 source/page/locator/confidence/model/version；它不能成为 Human answer、Gate、Run 或 Evidence。
 
 ## 15. Trajectory 与 Subagent Node
 

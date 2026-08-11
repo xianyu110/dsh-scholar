@@ -15,7 +15,6 @@ export const state = {
   activeTab: 'phase',
   projectId: undefined as string | undefined,
   lastError: undefined as string | undefined,
-  density: 'normal' as 'compact' | 'normal',
   rerender: (() => {}) as () => void,
   refreshTimer: null as number | null,
   startRefreshTimer: (() => null) as () => number | null,
@@ -151,19 +150,6 @@ export function tabTogglePin(key: string): void {
   try { localStorage.setItem(FAV_KEY, JSON.stringify([...favs])) } catch { /* private mode */ }
   state.rerender()
 }
-
-/** Density preference (dsh-web state.density selector), shared across UI. */
-export const DENSITY_KEY = 'dsh-scholar-ui-state.density'
-export function densityLoad(): void {
-  try {
-    state.density = localStorage.getItem(DENSITY_KEY) === 'compact' ? 'compact' : 'normal'
-  } catch { /* private mode */ }
-}
-export function densityApply(panel: HTMLElement): void {
-  panel.classList.toggle('state.density-compact', state.density === 'compact')
-  try { localStorage.setItem(DENSITY_KEY, state.density) } catch { /* private mode */ }
-}
-
 
 /** Project favourites (dsh-web starred projects), persisted. */
 export const FAV_PROJECTS_KEY = 'dsh-scholar-ui-fav-projects'

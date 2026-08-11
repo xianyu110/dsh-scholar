@@ -205,6 +205,10 @@ describe('planForStatus — §8.3 automatic-advance mapping', () => {
 // ── §8.3/§8.4 pure rules: decideActions (idempotency + retry) ───────────────
 
 describe('decideActions — idempotency and retry policy', () => {
+  it('does not plan a Scope Gate while a name-only project is collecting its Brief', () => {
+    expect(decideActions('DRAFT', [], 'collecting')).toEqual([])
+  })
+
   it('fresh project: returns the planned action for its status', () => {
     expect(decideActions('DRAFT', [])).toHaveLength(1)
     expect(decideActions('DRAFT', [])[0]?.type).toBe('scope-gate')

@@ -77,7 +77,7 @@ export const zh = {
   'overview.jump.evidence': '证据',
   'overview.jump.budget': '预算',
   'overview.jump.manuscript': '手稿',
-  'overview.ideaEmpty': '还没有 IdeaCard — 运行 /research ideas 列出,或通过内核创建。',
+  'overview.ideaEmpty': '还没有 IdeaCard — 运行 /ideas 列出,或通过内核创建。',
   'overview.ideaMore': '… 还有 {count} 条',
   'overview.ideaRowTitle': '双击查看想法详情',
   'overview.ideaDetails': '想法详情',
@@ -211,7 +211,7 @@ export const en: Record<keyof typeof zh, string> = {
   'overview.jump.evidence': 'Evidence',
   'overview.jump.budget': 'Budget',
   'overview.jump.manuscript': 'Manuscript',
-  'overview.ideaEmpty': 'No IdeaCards yet — run /research ideas to list them, or create one via the kernel.',
+  'overview.ideaEmpty': 'No IdeaCards yet — run /ideas to list them, or create one via the kernel.',
   'overview.ideaMore': '… and {count} more',
   'overview.ideaRowTitle': 'double-click for idea details',
   'overview.ideaDetails': 'idea details',
@@ -269,4 +269,3 @@ export const en: Record<keyof typeof zh, string> = {
   'overview.detailSecondary': 'Secondary',
   'overview.detailSeeds': 'Seeds',
 }
-

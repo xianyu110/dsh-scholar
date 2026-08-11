@@ -66,27 +66,28 @@ export function openShortcutsModal(root: ShadowRoot | null | undefined): void {
 }
 
 export const CHAT_COMMANDS: Array<[string, string, string]> = [
-  ['help', '/research help', 'list every command with usage'],
-  ['new', '/research new demo1', 'create a project + Scope Gate'],
-  ['list', '/research list', 'list all projects'],
-  ['status', '/research status', 'phase, gates, jobs, budget of the active project'],
-  ['survey', '/research survey temporal action localization', 'multi-source literature search + frozen snapshot'],
-  ['ideas', '/research ideas', 'list IdeaCards of the active project'],
-  ['reproduce', '/research reproduce {"command":["node","baseline.js"]}', 'prepare + run a Baseline reproduction (isolated)'],
-  ['gates', '/research gates', 'gate list + decisions of the active project'],
-  ['jobs', '/research jobs', 'job list of the active project'],
-  ['contract', '/research contract {"idea_id":"...","dataset_id":"fixture","baseline":"b","treatment":"a","primary_metric":"macro_f1","seeds":[11,23,47]}', 'pre-register an ExperimentContract'],
-  ['run', '/research run {"kind":"echo","command":["echo","hi"]}', 'submit a durable runner job'],
-  ['evidence', '/research evidence {"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"acc","value":0.9,"baseline_value":0.8,"effect_size":0.1,"ci_low":0.05,"ci_high":0.15,"n_seeds":3}}', 'ingest an EvidenceItem'],
-  ['claims', '/research claims', 'claims + verification status'],
-  ['write', '/research write', 'build the manuscript from the Evidence Ledger'],
-  ['review', '/research review', 'deterministic reviewer checks'],
-  ['export', '/research export', 'generate a private Release Bundle'],
-  ['release', '/research release', 'create the human Release Gate'],
+  ['help', '/help', 'shell.commands.desc.help'],
+  ['new', '/new demo1', 'shell.commands.desc.new'],
+  ['confirm-brief', '/confirm-brief', 'shell.commands.desc.confirmBrief'],
+  ['list', '/list', 'shell.commands.desc.list'],
+  ['status', '/status', 'shell.commands.desc.status'],
+  ['survey', '/survey temporal action localization', 'shell.commands.desc.survey'],
+  ['ideas', '/ideas', 'shell.commands.desc.ideas'],
+  ['reproduce', '/reproduce {"command":["node","baseline.js"]}', 'shell.commands.desc.reproduce'],
+  ['gates', '/gates', 'shell.commands.desc.gates'],
+  ['jobs', '/jobs', 'shell.commands.desc.jobs'],
+  ['contract', '/contract {"idea_id":"...","dataset_id":"fixture","baseline":"b","treatment":"a","primary_metric":"macro_f1","seeds":[11,23,47]}', 'shell.commands.desc.contract'],
+  ['run', '/run {"kind":"echo","command":["echo","hi"]}', 'shell.commands.desc.run'],
+  ['evidence', '/evidence {"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"acc","value":0.9,"baseline_value":0.8,"effect_size":0.1,"ci_low":0.05,"ci_high":0.15,"n_seeds":3}}', 'shell.commands.desc.evidence'],
+  ['claims', '/claims', 'shell.commands.desc.claims'],
+  ['write', '/write', 'shell.commands.desc.write'],
+  ['review', '/review', 'shell.commands.desc.review'],
+  ['export', '/export', 'shell.commands.desc.export'],
+  ['release', '/release', 'shell.commands.desc.release'],
 ]
 
 /**
- * dsh-web "Commands" palette: every /research command with a one-line
+ * dsh-web "Commands" palette: every direct slash command with a one-line
  * description. Clicking one switches to the Chat tab, fills the composer
  * and runs it.
  */
@@ -129,8 +130,8 @@ export function openCommandsModal(root: ShadowRoot | null | undefined): void {
   const renderList = (): void => {
     list.replaceChildren()
     const q = paletteQuery.trim().toLowerCase()
-    const matches = q === '' ? CHAT_COMMANDS : CHAT_COMMANDS.filter(([name, line, desc]) =>
-      name.toLowerCase().includes(q) || line.toLowerCase().includes(q) || desc.toLowerCase().includes(q),
+    const matches = q === '' ? CHAT_COMMANDS : CHAT_COMMANDS.filter(([name, line, descKey]) =>
+      name.toLowerCase().includes(q) || line.toLowerCase().includes(q) || t('shell', descKey).toLowerCase().includes(q),
     )
     // dsh-web favourites: ★ commands sort to the top of the palette.
     const favsSet = favCommands()
@@ -141,7 +142,7 @@ export function openCommandsModal(root: ShadowRoot | null | undefined): void {
       list.appendChild(el('div', 'empty', t('shell', 'shell.commands.noMatch', { query: paletteQuery.trim() })))
       return
     }
-    for (const [name, line, desc] of ordered) {
+    for (const [name, line, descKey] of ordered) {
       const row = el('button')
       row.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--text);text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer'
       row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
@@ -151,7 +152,7 @@ export function openCommandsModal(root: ShadowRoot | null | undefined): void {
       bodyEl.style.cssText = 'min-width:0'
       const lineEl = el('div', 'mono', line)
       lineEl.style.cssText = 'font-size:10.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-      const descEl = el('div', 'muted', desc)
+      const descEl = el('div', 'muted', t('shell', descKey))
       descEl.style.cssText = 'font-size:10.5px'
       bodyEl.append(lineEl, descEl)
       const favBtn = el('span', 'artifact-kind', favCommands().has(name) ? '★' : '☆')
@@ -197,4 +198,3 @@ export function openCommandsModal(root: ShadowRoot | null | undefined): void {
   input.focus()
   trapFocus(overlay, null)
 }
-

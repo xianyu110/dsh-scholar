@@ -276,6 +276,7 @@ function projectFromRow(row: ProjectRow): ResearchProject {
     mode: row.mode as ResearchProject['mode'],
     status: row.status as ProjectStatus,
     revision: row.revision,
+    brief_status: row.brief_status === 'collecting' ? 'collecting' : 'confirmed',
     brief: jsonParse(row.brief, {} as ResearchProject['brief']),
     constraints: jsonParse(row.constraints, {} as ResearchProject['constraints']),
     execution: jsonParse(row.execution, {} as ResearchProject['execution']),
@@ -1001,6 +1002,7 @@ export class ResearchKernel {
     integrity?: ResearchProject['integrity']
     session_id?: string | null
     dsh_workspace_id?: string | null
+    brief_status?: 'collecting' | 'confirmed'
   }): ResearchProject {
     // hardening: store the PARSED brief (defaults applied), never the raw
     // caller object — projection and ledger stay consistent.
@@ -1054,6 +1056,7 @@ export class ResearchKernel {
       mode,
       status: 'DRAFT',
       revision: 0,
+      brief_status: input.brief_status ?? 'confirmed',
       brief,
       constraints: BudgetConstraints.parse(input.constraints ?? {}),
       execution,
@@ -1068,10 +1071,11 @@ export class ResearchKernel {
       deletion_reason: null,
     }
     this.db.prepare(
-      `INSERT INTO projects (project_id, name, workspace, mode, status, revision, brief, constraints, execution, integrity, session_id, dsh_workspace_id, created_at, updated_at, history)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (project_id, name, workspace, mode, status, revision, brief_status, brief, constraints, execution, integrity, session_id, dsh_workspace_id, created_at, updated_at, history)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       project.project_id, project.name, project.workspace, project.mode, project.status, project.revision,
+      project.brief_status ?? 'confirmed',
       JSON.stringify(project.brief), JSON.stringify(project.constraints), JSON.stringify(project.execution),
       JSON.stringify(project.integrity), project.session_id, project.dsh_workspace_id,
       project.created_at, project.updated_at, JSON.stringify(project.history),
@@ -1129,6 +1133,263 @@ export class ResearchKernel {
           .run(input.idempotency_key, input.request_hash ?? '', project.project_id)
       }
       return { project, gate, budget, membership: this.listProjectMembers(project.project_id) }
+    })
+  }
+
+  /**
+   * INIT-GRILL-02: atomically create a name-only DRAFT shell plus its active
+   * Init Intake. No Scope Gate exists until a PI confirms the collected Brief.
+   */
+  createProjectForGrill(input: {
+    name: string
+    creator_principal_id: string
+    creator_tenant_id?: string
+    idempotency_key: string
+    request_hash: string
+  }): { project: ResearchProject; intake: IntakeSession; budget: BudgetRecord; membership: Array<Record<string, unknown>> } {
+    const name = input.name.trim()
+    if (name === '' || name.length > 120) {
+      throw new KernelError(422, 'validation_error', 'project name must be 1-120 characters after trimming')
+    }
+    if (input.creator_principal_id.trim() === '') {
+      throw new KernelError(422, 'principal_required', 'name-only project creation requires a Human Principal')
+    }
+    const existing = this.db.prepare('SELECT project_id, request_hash FROM projects WHERE idempotency_key = ?')
+      .get(input.idempotency_key) as { project_id: string; request_hash: string | null } | undefined
+    if (existing !== undefined) {
+      if (existing.request_hash !== input.request_hash) {
+        throw new KernelError(409, 'idempotency_conflict', `idempotency key ${input.idempotency_key} was used with a different request hash`)
+      }
+      const project = this.getProject(existing.project_id)
+      const intake = this.listIntakes(project.project_id).find(item => item.status !== 'accepted' && item.status !== 'rejected' && item.status !== 'expired' && item.status !== 'failed')
+      if (intake === undefined) throw new KernelError(409, 'intake_state_conflict', 'collecting project has no active Init Intake')
+      return { project, intake, budget: this.getBudget(project.project_id), membership: this.listProjectMembers(project.project_id) }
+    }
+    return withTransaction(this.db, () => {
+      const slug = name.normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'project'
+      const project = this.createProject({
+        name,
+        workspace: `/research/${slug}`,
+        brief_status: 'collecting',
+        brief: {
+          problem: '[collecting]',
+          scope: '[collecting]',
+          questions: [],
+          primary_metrics: [],
+          resources: '',
+          risks: [],
+          target_outputs: ['conference-paper'],
+          target_venue: null,
+          baseline_repo: null,
+          domain: 'machine-learning',
+        },
+        creator_principal_id: input.creator_principal_id,
+        creator_tenant_id: input.creator_tenant_id,
+      } as Parameters<ResearchKernel['createProject']>[0] & { creator_principal_id: string; creator_tenant_id?: string })
+      const intake = this.beginIntake({
+        project_id: project.project_id,
+        source_label: 'project-init',
+        target_phase: 'brief',
+        owner: { principal_id: input.creator_principal_id, tenant_id: input.creator_tenant_id ?? '', auth_method: 'session' },
+        idempotency_key: `project-init:${project.project_id}`,
+        request_hash: input.request_hash,
+      })
+      this.db.prepare('UPDATE projects SET idempotency_key = ?, request_hash = ? WHERE project_id = ?')
+        .run(input.idempotency_key, input.request_hash, project.project_id)
+      return { project, intake, budget: this.getBudget(project.project_id), membership: this.listProjectMembers(project.project_id) }
+    })
+  }
+
+  /** Stable, versioned INIT-GRILL-02 question order. */
+  private static readonly PROJECT_GRILL_QUESTIONS = [
+    { question_code: 'brief.problem', prompt_key: 'grill.question.problem', required: true },
+    { question_code: 'brief.scope', prompt_key: 'grill.question.scope', required: true },
+    { question_code: 'brief.questions', prompt_key: 'grill.question.questions', required: true },
+    { question_code: 'brief.primary_metrics', prompt_key: 'grill.question.primaryMetrics', required: true },
+    { question_code: 'brief.target_outputs', prompt_key: 'grill.question.targetOutputs', required: true },
+    { question_code: 'brief.constraints', prompt_key: 'grill.question.constraints', required: true },
+    { question_code: 'brief.material_context', prompt_key: 'grill.question.materialContext', required: true },
+  ] as const
+
+  projectGrillProjection(projectId: string): {
+    project_id: string
+    project_revision: number
+    intake_id: string
+    intake_revision: number
+    question: { question_code: string; question_revision: number; prompt_key: string; required: boolean } | null
+    answers: Array<{ question_code: string; question_revision: number; value: unknown; disposition: string; answered_by: string; answered_at: string }>
+    brief_preview: ResearchBrief
+    ready_to_confirm: boolean
+  } {
+    const project = this.getProject(projectId)
+    if (project.brief_status !== 'collecting') {
+      const intake = this.listIntakes(projectId).find(item => item.source_label === 'project-init')
+      return {
+        project_id: projectId,
+        project_revision: project.revision,
+        intake_id: intake?.intake_id ?? '',
+        intake_revision: intake?.revision ?? 0,
+        question: null,
+        answers: this.projectGrillAnswers(projectId),
+        brief_preview: project.brief,
+        ready_to_confirm: false,
+      }
+    }
+    const intake = this.listIntakes(projectId).find(item => item.source_label === 'project-init' && !['accepted', 'rejected', 'expired', 'failed'].includes(item.status))
+    if (intake === undefined) throw new KernelError(409, 'intake_state_conflict', 'collecting project has no active Init Intake')
+    const answers = this.projectGrillAnswers(projectId)
+    const byCode = new Map(answers.map(answer => [answer.question_code, answer]))
+    const definition = ResearchKernel.PROJECT_GRILL_QUESTIONS.find(item => !byCode.has(item.question_code))
+    return {
+      project_id: projectId,
+      project_revision: project.revision,
+      intake_id: intake.intake_id,
+      intake_revision: intake.revision,
+      question: definition === undefined ? null : { ...definition, question_revision: 1 },
+      answers,
+      brief_preview: this.projectGrillBrief(answers),
+      ready_to_confirm: definition === undefined,
+    }
+  }
+
+  private projectGrillAnswers(projectId: string): Array<{ question_code: string; question_revision: number; value: unknown; disposition: string; answered_by: string; answered_at: string }> {
+    const rows = this.db.prepare(`SELECT question_code, question_revision, value_json, disposition,
+      answered_by_principal, answered_at FROM project_grill_answers WHERE project_id = ?`)
+      .all(projectId) as unknown as Array<{ question_code: string; question_revision: number; value_json: string | null; disposition: string; answered_by_principal: string; answered_at: string }>
+    const order = new Map<string, number>(ResearchKernel.PROJECT_GRILL_QUESTIONS.map((item, index) => [item.question_code, index]))
+    return rows.map(row => ({
+      question_code: row.question_code,
+      question_revision: row.question_revision,
+      value: jsonParse(row.value_json, null),
+      disposition: row.disposition,
+      answered_by: row.answered_by_principal,
+      answered_at: row.answered_at,
+    })).sort((a, b) => (order.get(a.question_code) ?? 99) - (order.get(b.question_code) ?? 99))
+  }
+
+  private projectGrillBrief(answers: Array<{ question_code: string; value: unknown; disposition: string }>): ResearchBrief {
+    const values = new Map(answers.map(answer => [answer.question_code, answer.disposition === 'answered' ? answer.value : null]))
+    const text = (code: string, fallback: string): string => {
+      const value = values.get(code)
+      return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
+    }
+    const strings = (code: string, fallback: string[]): string[] => {
+      const value = values.get(code)
+      if (Array.isArray(value)) {
+        const items = value.map(String).map(item => item.trim()).filter(Boolean)
+        if (items.length > 0) return items
+      }
+      if (typeof value === 'string') {
+        const items = value.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean)
+        if (items.length > 0) return items
+      }
+      return fallback
+    }
+    const constraints = text('brief.constraints', '[unknown constraints]')
+    const materials = text('brief.material_context', '[no material context supplied]')
+    return ResearchBrief.parse({
+      problem: text('brief.problem', '[unknown research problem]'),
+      scope: text('brief.scope', '[unknown research scope]'),
+      questions: strings('brief.questions', []),
+      primary_metrics: strings('brief.primary_metrics', []),
+      resources: `${constraints}\nMaterials: ${materials}`,
+      risks: [],
+      target_outputs: strings('brief.target_outputs', ['conference-paper']),
+      target_venue: null,
+      baseline_repo: null,
+      domain: 'machine-learning',
+    })
+  }
+
+  answerProjectGrill(input: {
+    project_id: string
+    question_code: string
+    question_revision: number
+    value?: unknown
+    disposition?: 'answered' | 'skipped' | 'unknown'
+    principal_id: string
+  }): ReturnType<ResearchKernel['projectGrillProjection']> {
+    const project = this.getProject(input.project_id)
+    if (project.brief_status !== 'collecting') throw new KernelError(409, 'brief_already_confirmed', 'Research Brief is already confirmed')
+    const definition = ResearchKernel.PROJECT_GRILL_QUESTIONS.find(item => item.question_code === input.question_code)
+    if (definition === undefined) throw new KernelError(422, 'grill_question_unknown', `unknown Grill question ${input.question_code}`)
+    if (input.principal_id.trim() === '') throw new KernelError(422, 'principal_required', 'Grill answers require a Human Principal')
+    const intake = this.listIntakes(input.project_id).find(item => item.source_label === 'project-init' && !['accepted', 'rejected', 'expired', 'failed'].includes(item.status))
+    if (intake === undefined) throw new KernelError(409, 'intake_state_conflict', 'collecting project has no active Init Intake')
+    const row = this.db.prepare('SELECT question_revision FROM project_grill_answers WHERE project_id = ? AND question_code = ?')
+      .get(input.project_id, input.question_code) as { question_revision: number } | undefined
+    const currentRevision = row?.question_revision ?? 1
+    if (input.question_revision !== currentRevision) {
+      throw new KernelError(409, 'question_revision_conflict', `expected question revision ${currentRevision}, got ${input.question_revision}`)
+    }
+    const disposition = input.disposition ?? 'answered'
+    if (disposition === 'answered' && input.value === undefined) throw new KernelError(422, 'question_required', 'answered Grill question requires value')
+    const answeredAt = nowIso()
+    return withTransaction(this.db, () => {
+      this.db.prepare(`INSERT INTO project_grill_answers
+        (project_id, intake_id, question_code, question_revision, value_json, disposition, answered_by_principal, answered_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, question_code) DO UPDATE SET
+          question_revision = excluded.question_revision, value_json = excluded.value_json,
+          disposition = excluded.disposition, answered_by_principal = excluded.answered_by_principal,
+          answered_at = excluded.answered_at`)
+        .run(input.project_id, intake.intake_id, input.question_code, currentRevision + 1,
+          JSON.stringify(input.value ?? null), disposition, input.principal_id, answeredAt)
+      this.db.prepare(`UPDATE intake_sessions SET status = 'grilling', revision = revision + 1,
+        updated_at = ? WHERE intake_id = ?`).run(answeredAt, intake.intake_id)
+      return this.projectGrillProjection(input.project_id)
+    })
+  }
+
+  confirmProjectGrill(input: {
+    project_id: string
+    expected_project_revision: number
+    expected_intake_revision: number
+    principal_id: string
+    request_id: string
+    request_hash: string
+  }): { project: ResearchProject; intake: IntakeSession; gate: Gate } {
+    const row = this.db.prepare(`SELECT brief_status, brief_confirm_request_id, brief_confirm_request_hash
+      FROM projects WHERE project_id = ? AND deleted_at IS NULL`).get(input.project_id) as {
+        brief_status: string; brief_confirm_request_id: string | null; brief_confirm_request_hash: string | null
+      } | undefined
+    if (row === undefined) throw new KernelError(404, 'project_not_found', 'project not found')
+    if (row.brief_confirm_request_id === input.request_id) {
+      if (row.brief_confirm_request_hash !== input.request_hash) throw new KernelError(409, 'idempotency_conflict', 'confirm request id was used with a different request')
+      const gate = this.listGates(input.project_id).find(item => item.type === 'scope')
+      const intake = this.listIntakes(input.project_id).find(item => item.source_label === 'project-init')
+      if (gate === undefined || intake === undefined) throw new KernelError(409, 'brief_confirm_incomplete', 'confirmed Brief is missing its Gate or Intake')
+      return { project: this.getProject(input.project_id), intake, gate }
+    }
+    if (row.brief_status !== 'collecting') throw new KernelError(409, 'brief_already_confirmed', 'Research Brief is already confirmed')
+    const project = this.getProject(input.project_id)
+    const intake = this.listIntakes(input.project_id).find(item => item.source_label === 'project-init' && !['accepted', 'rejected', 'expired', 'failed'].includes(item.status))
+    if (intake === undefined) throw new KernelError(409, 'intake_state_conflict', 'collecting project has no active Init Intake')
+    if (project.revision !== input.expected_project_revision) throw new KernelError(409, 'revision_conflict', `expected project revision ${input.expected_project_revision}, got ${project.revision}`)
+    if (intake.revision !== input.expected_intake_revision) throw new KernelError(409, 'intake_revision_conflict', `expected intake revision ${input.expected_intake_revision}, got ${intake.revision}`)
+    const answers = this.projectGrillAnswers(input.project_id)
+    const answered = new Set(answers.map(answer => answer.question_code))
+    const missing = ResearchKernel.PROJECT_GRILL_QUESTIONS.filter(item => item.required && !answered.has(item.question_code)).map(item => item.question_code)
+    if (missing.length > 0) throw new KernelError(422, 'question_required', `required Grill questions remain: ${missing.join(', ')}`)
+    const brief = this.projectGrillBrief(answers)
+    return withTransaction(this.db, () => {
+      const now = nowIso()
+      const update = this.db.prepare(`UPDATE projects SET brief = ?, brief_status = 'confirmed',
+        brief_confirm_request_id = ?, brief_confirm_request_hash = ?, revision = revision + 1,
+        updated_at = ?, history = ? WHERE project_id = ? AND revision = ? AND brief_status = 'collecting'`)
+        .run(JSON.stringify(brief), input.request_id, input.request_hash, now,
+          JSON.stringify([...project.history, 'brief confirmed']), input.project_id, input.expected_project_revision)
+      if (Number(update.changes) !== 1) throw new KernelError(409, 'revision_conflict', 'project changed while confirming the Brief')
+      this.db.prepare(`UPDATE intake_sessions SET status = 'accepted', revision = revision + 1,
+        updated_at = ? WHERE intake_id = ? AND revision = ?`)
+        .run(now, intake.intake_id, input.expected_intake_revision)
+      const existingGate = this.listGates(input.project_id).find(item => item.type === 'scope')
+      if (existingGate !== undefined) throw new KernelError(409, 'scope_gate_exists', 'a Scope Gate already exists for this project')
+      const gate = this.createGate({ project_id: input.project_id, type: 'scope', title: 'Scope Gate', summary: brief.scope })
+      const updated = this.getProject(input.project_id)
+      this.emit(input.project_id, 'project.brief.confirmed', { project_id: input.project_id, revision: updated.revision, intake_id: intake.intake_id, gate_id: gate.gate_id, confirmed_by: input.principal_id })
+      const updatedIntake = this.listIntakes(input.project_id).find(item => item.intake_id === intake.intake_id)!
+      return { project: updated, intake: updatedIntake, gate }
     })
   }
 

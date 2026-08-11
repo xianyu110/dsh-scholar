@@ -2,7 +2,7 @@
 # RSP-013 / §13.3 Golden Path end-to-end test — the full research lifecycle
 # through the REAL kernel + runner gateway + scholarly connectors:
 #
-#   /research new (DRAFT) → Scope Gate approved (SCOPED) → survey
+#   /new (DRAFT) → Scope Gate approved (SCOPED) → survey
 #   (CorpusSnapshot) → idea + novelty audit (IDEATING) → Idea Gate approved
 #   (IDEA_APPROVED) → baseline job via runner (BASELINE_REPRO) → contract
 #   (CONTRACT_APPROVED) → formal runs → evidence + claim verify
@@ -53,7 +53,7 @@ jqfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{con
 
 BRIEF='{"problem":"Does uncertainty weighting improve temporal localization under shift?","scope":"THUMOS14, supervised, no new data","questions":["Is the effect robust across seeds?"],"primary_metrics":["mAP@0.5"],"resources":"1 GPU, <=20 GPU-hours","risks":["Baseline may not reproduce"],"target_outputs":["conference-paper"],"target_venue":null,"baseline_repo":"https://github.com/example/baseline","domain":"machine-learning"}'
 
-say "1. /research new → DRAFT + Scope Gate"
+say "1. /new → DRAFT + Scope Gate"
 PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"golden-path\",\"workspace\":\"/research/golden-path\",\"brief\":$BRIEF,\"session_id\":\"golden-session\"}" | jqfield project_id)
 GATE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Scope Gate","session_id":"golden-session"}' | jqfield gate_id)
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)

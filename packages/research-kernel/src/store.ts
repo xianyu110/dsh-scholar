@@ -41,6 +41,7 @@ export interface ProjectRow {
   mode: string
   status: string
   revision: number
+  brief_status: string
   brief: string
   constraints: string
   execution: string

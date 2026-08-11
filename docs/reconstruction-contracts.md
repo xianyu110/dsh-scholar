@@ -477,6 +477,8 @@ interface AdoptionReceipt { adoption_id:string; intake_id:string; proposal_id:st
 
 Intake staged upload 复用 Content-Range/offset/hash 幂等规则，但绑定 intake Principal 而非 Runner lease。scan cache key 为 Blob hash + parser/detector versions。accept 仅 `intake_accept` Human Principal，并在单事务物化；proposal/target revision stale 均 409。精确映射和不可信边界见 research-onboarding.md。
 
+Name-only Init 固定创建 `DRAFT/brief_status=collecting` + active Intake，零 Gate；Chat 每次只提交一个 `IntakeQuestion`。批量 stage 默认 8 MiB chunk、2 GiB/Intake，硬上限分别为 32 MiB/10 GiB；重放、gap、finalize 与 Provider/OCR wire 以 `init-grill-upload-models.md` 为准。
+
 ## 24. NextAction、Trajectory 与 Subagent wire
 
 ~~~typescript

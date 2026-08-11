@@ -2,7 +2,7 @@ import type { Projection } from '../types'
 import { api, base } from '../api'
 import { getLocale, registerOverlayRebuild, setLocale, t } from '../i18n/index'
 import { openShortcutsModal } from '../modals/commands'
-import { accentColor, accentSet, autoRefreshEnabled, autoRefreshSet, chatClear, densityApply, radiusSet, radiusValue, readTheme, state, textureSet, textureValue, writeTheme } from '../state'
+import { accentColor, accentSet, autoRefreshEnabled, autoRefreshSet, chatClear, radiusSet, radiusValue, readTheme, state, textureSet, textureValue, writeTheme } from '../state'
 import { ACCENTS, ACCENT_DARK, copyText, el, rootHost, showToast, trapFocus } from '../ui'
 import { tokenProvider } from '../api'
 import { RADII, TEXTURES } from '../state'
@@ -269,7 +269,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
     tokenRow?.remove()
   }
 
-  // ── appearance: theme / accent / corners / texture / density ──
+  // ── appearance: theme / accent / corners / texture ──
   const themeSlot = slot('appearance', 'appearance.theme')
   if (themeSlot !== null) {
     const value = el('span', 'mono', readTheme() === 'dark' ? 'dark' : 'light')
@@ -348,22 +348,6 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
     }
     textureSlot.appendChild(textureSelect)
   }
-  const densitySlot = slot('appearance', 'appearance.density')
-  if (densitySlot !== null) {
-    const value = el('span', 'mono', state.density === 'compact' ? 'compact' : 'normal')
-    const toggle = el('button', 'hbtn', t('common', 'common.action.toggle'))
-    toggle.style.cssText = 'padding:1px 8px'
-    toggle.onclick = () => {
-      state.density = state.density === 'compact' ? 'normal' : 'compact'
-      const hostEl = document.querySelector('#dsh-scholar-ui')
-      const panelEl = hostEl !== null ? hostEl.shadowRoot?.querySelector('.panel') as HTMLElement | null : null
-      if (panelEl !== null) densityApply(panelEl)
-      value.textContent = state.density
-      state.rerender()
-    }
-    densitySlot.append(value, toggle)
-  }
-
   // ── preferences: language / auto-refresh / transcript / summary / actions ──
   const localeSlot = slot('preferences', 'preferences.language')
   if (localeSlot !== null) {

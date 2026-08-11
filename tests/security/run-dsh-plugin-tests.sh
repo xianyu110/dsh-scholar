@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # acceptance-tests.md §9 (DSH integration) + §17 (tool schema / canonical
-# names): the research plugin's tool catalog, ACL, /research subcommand
+# names): the research plugin's tool catalog, ACL, direct slash-command
 # handlers, headless tools and skill provider resolution.
 #
 #   1. Tool catalog == reconstruction-contracts.md §17 canonical registry
@@ -12,8 +12,8 @@
 #      denies unknown and unauthorized agents on every research write tool.
 #   3. Tools work headless (no httpServer): registration + execution through
 #      the kernel client/cache only.
-#   4. /research help|list|status|gates|jobs|claims|new|... all have real
-#      handlers returning kernel data (no generic-help fallthrough).
+#   4. /help|/list|/status|/gates|/jobs|/claims|/new|... are direct
+#      descriptors with real handlers; the aggregate descriptor is absent.
 #   5. Skill provider resolves the four groups from the PACKAGE ROOT skills/
 #      (never lib/skills) and Brief -> domain/venue selection is deterministic;
 #      npm pack ships the runtime skill assets.
@@ -401,11 +401,11 @@ HOSTFIX=$(jnode - "$REPO" <<'EOF'
 const repo = process.argv[2]
 const { createRequire } = await import('node:module')
 const { join } = await import('node:path')
-// cordis is a DSH host peer dep; resolve the SAME module instance the
+// Cordis is a DSH host peer dep; resolve the SAME module instance the
 // @deepseek-ai registries use (vendor/cordis via dsh-tools' node_modules) so
 // this fixture exercises the real cordis effect/lifecycle machinery.
 const require = createRequire(`${repo}/node_modules/@deepseek-ai/dsh-tools/package.json`)
-const { Context } = require('cordis')
+const { Context } = require('@deepseek-ai/cordis')
 const { ToolRegistry } = await import(`${repo}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`)
 const { CommandService } = await import(`${repo}/node_modules/@deepseek-ai/dsh-commands/lib/index.js`)
 const { SkillService } = await import(`${repo}/node_modules/@deepseek-ai/dsh-skill/lib/index.js`)
@@ -471,8 +471,12 @@ try {
   const toolsA = rootA.tools.schemas().map(s => s.name)
   if (toolsA.length !== 37) problems.push(`instance A tool count ${toolsA.length} != 37`)
   if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
-  if (!rootA.commands.list({}).some(c => c.name === 'research')) problems.push('/research command not registered')
-  if (rootA.skills.providers.size !== 1) problems.push(`instance A skill providers ${rootA.skills.providers.size} != 1`)
+  const expectedCommands = ['help','new','list','status','gates','jobs','claims','survey','ideas','reproduce','contract','run','evidence','write','review','export','release']
+  const registeredCommands = rootA.commands.list({}).map(c => c.name).sort()
+  if (registeredCommands.join(',') !== expectedCommands.slice().sort().join(',')) problems.push(`direct command descriptors mismatch: ${registeredCommands.join(',')}`)
+  if (registeredCommands.includes('research')) problems.push('aggregate research descriptor must not be registered')
+  const skillNamesA = (await rootA.skills.list()).map(skill => skill.name)
+  if (skillNamesA.length !== 4) problems.push(`instance A research skills ${skillNamesA.length} != 4`)
 
   // ── dual-instance isolation: tool execution resolves the RIGHT client ────
   const exec = { agent: { id: 'agent-x' }, signal: new AbortController().signal }
@@ -497,7 +501,7 @@ try {
   if (alive(oldPid)) problems.push('reload must stop the old kernel (sidecar disposer)')
   if (epFileA2.pid === oldPid) problems.push('reload must spawn/reuse a fresh kernel instance')
   if (rootA.tools.schemas().length !== 37) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 37, duplicate risk)`)
-  if (rootA.skills.providers.size !== 1) problems.push(`reload leaked skill providers (${rootA.skills.providers.size} != 1)`)
+  if ((await rootA.skills.list()).length !== 4) problems.push('reload leaked or lost research skills')
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('reload must keep kernel data (same dataDir)')
   if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 1) problems.push('reload must not duplicate the pre-execute listener')
 
@@ -508,8 +512,8 @@ try {
   if (alive(epFileA2.pid)) problems.push('dispose must stop the kernel sidecar child')
   if (existsSync(join(dirA, 'runtime', 'endpoint.json'))) problems.push('dispose must remove the owned endpoint.json')
   if (rootA.tools.get('research_project') !== undefined || rootA.tools.schemas().length !== 0) problems.push('dispose must unregister every research tool')
-  if (rootA.commands.list({}).length !== 0) problems.push('dispose must unregister the /research command')
-  if (rootA.skills.providers.size !== 0) problems.push(`dispose must unregister the skill provider (${rootA.skills.providers.size} left)`)
+  if (rootA.commands.list({}).length !== 0) problems.push('dispose must unregister every direct slash command')
+  if ((await rootA.skills.list()).length !== 0) problems.push('dispose must unregister the research skill provider')
   if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 0) problems.push('dispose must remove the pre-execute listener')
   const healthAfter = await fetch(`${lastEndpoint}/v1/health`).then(r => r.ok).catch(() => false)
   if (healthAfter) problems.push('dispose must release the kernel port (health still answering)')
@@ -569,8 +573,8 @@ else
   fi
 fi
 
-# ── §9: /research subcommand handlers against a real kernel ────────────────
-say "research subcommands (kernel-backed)"
+# ── §9: direct slash-command handlers against a real kernel ────────────────
+say "direct research commands (kernel-backed)"
 PORT=$((21500 + $$ % 400))
 nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
 KERNEL_PID=$!
@@ -593,27 +597,30 @@ const { registerResearchCommands } = await import(`${repo}/lib/plugin/commands.j
 const { ResearchClient } = await import('@dsh-scholar/research-client')
 
 const client = new ResearchClient({ endpoint: `http://127.0.0.1:${port}` })
-const captured = {}
-registerResearchCommands({ commands: { register: def => { captured.def = def } } },
+const captured = new Map()
+registerResearchCommands({ commands: { register: def => { captured.set(def.name, def) } } },
   { client, cache: {}, unattended: false })
-const handler = captured.def.handler
 // DSH commands hand the handler the text AFTER the slash command name
 // (parseCommand: rawInput = line.slice(match[0].length)).
-const run = async (rawInput) => handler({ agent: { id: 'plugin-test-agent' }, rawInput: rawInput.replace(/^\/research\s*/, '') })
+const run = async (name, rawInput = '') => {
+  const def = captured.get(name)
+  if (def === undefined) return { kind: 'not-registered', text: name }
+  return def.handler({ agent: { id: 'plugin-test-agent' }, rawInput })
+}
 
 const results = {}
-results.help = await run('/research help')
-results.listEmpty = await run('/research list')
-results.claimsNoProject = await run('/research claims')
-results.new = await run('/research new mlproj {"domain":"machine-learning","target_venue":"iclr-2026"}')
+results.help = await run('help')
+results.listEmpty = await run('list')
+results.claimsNoProject = await run('claims')
+results.new = await run('new', 'mlproj {"domain":"machine-learning","target_venue":"iclr-2026"}')
 const projId = /rsp_[a-z0-9_]+/.exec(results.new.text)?.[0] ?? ''
-results.status = await run(`/research status ${projId}`)
-results.gates = await run(`/research gates ${projId}`)
-results.jobs = await run(`/research jobs ${projId}`)
-results.claims = await run(`/research claims ${projId}`)
-results.list = await run('/research list')
-results.unknown = await run('/research frobnicate')
-console.log(JSON.stringify({ results, projId }))
+results.status = await run('status', projId)
+results.gates = await run('gates', projId)
+results.jobs = await run('jobs', projId)
+results.claims = await run('claims', projId)
+results.list = await run('list')
+results.aggregate = await run('research', 'help')
+console.log(JSON.stringify({ results, projId, commandNames: [...captured.keys()].sort() }))
 EOF
 )
 if [ -z "$CMDS" ]; then
@@ -621,15 +628,15 @@ if [ -z "$CMDS" ]; then
 else
   for SUB in help listEmpty new status gates jobs claims list; do
     if probe "$CMDS" "j.results['$SUB'] && j.results['$SUB'].kind === 'success'"; then
-      ok "/research $SUB has a real handler"
+      ok "/$SUB has a real handler"
     else
-      bad "/research $SUB handler failed"
+      bad "/$SUB handler failed"
     fi
   done
   if probe "$CMDS" "j.results.claimsNoProject && j.results.claimsNoProject.kind === 'error' && /session-linked/.test(j.results.claimsNoProject.text)"; then
-    ok "/research claims without project -> explicit error (real handler, not help)"
+    ok "/claims without project -> explicit error (real handler, not help)"
   else
-    bad "/research claims missing-project path"
+    bad "/claims missing-project path"
   fi
   if probe "$CMDS" "/domain-machine-learning/.test(j.results.new.text) && /venue-templates/.test(j.results.new.text)"; then
     ok "new echoes deterministic domain/venue skill selection"
@@ -646,10 +653,10 @@ else
   else
     bad "claims handler returned no ledger data"
   fi
-  if probe "$CMDS" "/subcommands/.test(j.results.unknown.text) && j.results.unknown.kind === 'success'"; then
-    ok "unknown subcommand falls back to documented help text"
+  if probe "$CMDS" "j.results.aggregate.kind === 'not-registered' && !j.commandNames.includes('research')"; then
+    ok "aggregate command descriptor is not registered or advertised"
   else
-    bad "unknown subcommand did not return help"
+    bad "aggregate command descriptor leaked into DSH"
   fi
   if probe "$CMDS" "j.projId !== '' && /rsp_/.test(j.results.status.text)"; then
     ok "status returns the real project projection"

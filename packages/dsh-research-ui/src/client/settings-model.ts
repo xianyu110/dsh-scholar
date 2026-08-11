@@ -115,7 +115,6 @@ export function settingsSections(): SettingsSectionDef[] {
         { id: 'appearance.accent', labelKey: 'shell.settings.accent' },
         { id: 'appearance.corners', labelKey: 'shell.settings.corners' },
         { id: 'appearance.texture', labelKey: 'shell.settings.texture' },
-        { id: 'appearance.density', labelKey: 'shell.settings.density' },
       ],
     },
     {

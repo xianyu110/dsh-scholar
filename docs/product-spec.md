@@ -30,8 +30,8 @@ DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研�
 
 ## 4. 端到端用户旅程
 
-1. 未选择项目时，用户从 Init、Resume、Upload 三入口开始。Init 创建最小 Research Brief；Resume 回到已有权威状态；Upload 把外部研究先放入隔离 Intake。
-2. Init 创建 DRAFT 项目与 Scope Gate；Upload 经静态扫描和 Grill Me 形成阶段/缺口提案，只有 Human adoption 后才创建或合并项目，且不能伪造历史 Gate、Run 或 Evidence。
+1. 未选择项目时，用户从 Init、Resume、Upload 三入口开始。Init 首次只填写项目名并创建 `DRAFT/brief_status=collecting` 项目；Resume 回到已有权威状态；Upload 把外部研究先放入隔离 Intake。
+2. Init 在项目 Chat 中通过 Grill Me 每轮收集一个问题，允许先批量上传材料并由 OCR/parser 提供带来源候选；PI 确认完整 Brief 后才创建唯一 Scope Gate。Upload 经静态扫描和 Grill Me 形成阶段/缺口提案，只有 Human adoption 后才创建或合并项目，且不能伪造历史 Gate、Run 或 Evidence。
 3. PI 批准 Scope 后，系统执行多源检索、去重和冻结 Corpus Snapshot；若采用了已有调研，先验证来源、license 与缺口。
 4. Idea Panel 生成可证伪候选，完成新颖性反查；PI 选择一个版本。
 5. 系统物化 Baseline 代码和数据，在隔离 Runner 中真实复现。
@@ -131,6 +131,21 @@ LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可�
 - history/cold read 不得激活 Agent，默认只返回脱敏安全摘要；
 - 精确模型、流协议和 DSH 移植边界见 trajectory-subagents.md。
 
+### 5.11 Model Provider 与 OCR
+
+- instance/global Provider Registry 支持内置与自定义 Provider；credential 只保存 SecretRef，项目只引用 provider/model ID；
+- OCR 是显式选择模型的异步 Intake pipeline，无匹配模型时 fail closed，禁止静默回退；
+- OCR/parser 结果保持 `observed_unverified`，带来源、页码、模型 revision 和 confidence，经 Chat 逐项由 Human 确认；
+- name-only Init、单题 Grill、批量分块上传和 Provider/OCR 的生成级契约见 `init-grill-upload-models.md`。
+
+### 5.12 论文复现
+
+- 用户用 `/reproduce` 或在 Chat 上传论文/PDF/代码/数据进入复现向导；所有 slash command 直接使用一级命令，不注册、不解析、不展示旧聚合前缀；
+- 系统固定论文来源、代码 commit/CodeSnapshot、数据/hash、ExperimentContract、环境和目标结果，在本机 Docker 或配置的远端 SSH Runner 上执行；
+- execution exit 0 不等于复现成功；必须生成不可变 ReproducibilityReport，对齐指标、表格、图和可选 TeX/PDF，结果为 pass/fail/blocked/inconclusive；
+- Chat 附件先进入隔离 Intake；Interactive Terminal 按 Research/Chat/Subagent session 打开多个独立 PTY，不能作为正式复现证据；
+- 生成级对象、比较算法、环境绑定、API、NextAction 与验收见 `reproduction-contracts.md`。
+
 ## 6. 明确不做
 
 - 不把 LLM 对新颖性或结果的自评当作 Evidence；
@@ -151,7 +166,7 @@ LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可�
 |---|---|---|
 | Start | `/start` | Init、Resume、Upload/Continue existing research |
 | Research | Overview | 唯一主 NextAction、阶段、Brief、可折叠 Trajectory/Topology |
-| Research | Chat | 使用受控 /research 命令，查看结构化结果卡 |
+| Research | Chat | 使用 `/new`、`/reproduce` 等一级 slash command，上传材料并查看结构化结果卡 |
 | Execution | Approvals | Human Gate 决策和审计 |
 | Execution | Runs | 任务筛选、详情、取消和 Manifest |
 | Execution | Run Terminal | 查看活动或历史 Run 的真实只读终端流 |

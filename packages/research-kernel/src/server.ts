@@ -104,10 +104,28 @@ const createProjectSchema = z.object({
   creator_tenant_id: z.string().optional(),
 })
 
+const createProjectForGrillSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  creator_principal_id: z.string().optional(),
+  creator_tenant_id: z.string().optional(),
+})
+
 const deleteProjectSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
   confirm_name: z.string(),
   reason: z.string().min(1),
+}).strict()
+
+const projectGrillAnswerSchema = z.object({
+  question_code: z.string().min(1),
+  question_revision: z.number().int().positive(),
+  value: z.unknown().optional(),
+  disposition: z.enum(['answered', 'skipped', 'unknown']).optional(),
+}).strict()
+
+const projectGrillConfirmSchema = z.object({
+  expected_project_revision: z.number().int().nonnegative(),
+  expected_intake_revision: z.number().int().positive(),
 }).strict()
 
 const transitionSchema = z.object({
@@ -2757,10 +2775,21 @@ async function handleV2(ctx: {
       send(res, 422, { error: { code: 'idempotency_key_required', message: 'POST /v2/projects requires an Idempotency-Key header' } })
       return
     }
-    const input = createProjectSchema.parse(body)
+    const input = createProjectForGrillSchema.parse(body)
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
-    const out = kernel.createProjectWithInitialGate({ ...input as Parameters<ResearchKernel['createProject']>[0], idempotency_key: idem, request_hash: requestHash })
-    send(res, 201, { project: out.project, gate: out.gate, budget: out.budget, membership: out.membership })
+    const creatorPrincipal = principal ?? input.creator_principal_id
+    if (creatorPrincipal === undefined || creatorPrincipal.trim() === '') {
+      send(res, 422, { error: { code: 'principal_required', message: 'POST /v2/projects requires an authenticated Human Principal' } })
+      return
+    }
+    const out = kernel.createProjectForGrill({
+      name: input.name,
+      creator_principal_id: creatorPrincipal,
+      creator_tenant_id: input.creator_tenant_id,
+      idempotency_key: idem,
+      request_hash: requestHash,
+    })
+    send(res, 201, { project: out.project, intake: out.intake, budget: out.budget, membership: out.membership })
     return
   }
   if (id === undefined && method === 'GET') {
@@ -2772,6 +2801,34 @@ async function handleV2(ctx: {
       ? page.items
       : page.items.filter(p => kernel.listProjectMembers(p.project_id).some(m => m.principal_id === principal))
     send(res, 200, { items, next_cursor: page.next_cursor })
+    return
+  }
+  if (id !== undefined && sub === 'grill' && subId === undefined && method === 'GET') {
+    memberOr404(id)
+    ok(res, kernel.projectGrillProjection(id))
+    return
+  }
+  if (id !== undefined && sub === 'grill' && subId === 'answers' && method === 'POST') {
+    memberOr404(id)
+    if (principal === undefined || principal.trim() === '') {
+      send(res, 422, { error: { code: 'principal_required', message: 'Grill answers require an authenticated Human Principal' } })
+      return
+    }
+    const input = projectGrillAnswerSchema.parse(body)
+    ok(res, kernel.answerProjectGrill({ project_id: id, principal_id: principal, ...input }))
+    return
+  }
+  if (id !== undefined && sub === 'grill' && subId === 'confirm' && method === 'POST') {
+    memberOr404(id)
+    if (!requirePiOnly(kernel, req, res, id, body, 'Grill confirm', { allowOperator: false })) return
+    const idem = typeof req.headers['idempotency-key'] === 'string' && req.headers['idempotency-key'] !== '' ? req.headers['idempotency-key'] : undefined
+    if (idem === undefined) {
+      send(res, 422, { error: { code: 'idempotency_key_required', message: 'Grill confirm requires an Idempotency-Key header' } })
+      return
+    }
+    const input = projectGrillConfirmSchema.parse(body)
+    const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
+    ok(res, kernel.confirmProjectGrill({ project_id: id, principal_id: principal!, request_id: idem, request_hash: requestHash, ...input }))
     return
   }
   if (id !== undefined && sub === undefined && method === 'GET') {

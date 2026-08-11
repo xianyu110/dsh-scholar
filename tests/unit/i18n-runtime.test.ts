@@ -21,6 +21,7 @@ import {
   subscribeLocale, t, unregisterOverlayRebuild,
 } from '../../packages/dsh-research-ui/src/client/i18n/index'
 import { chromeModelChoices, chromeTabGroups, chromeTabs } from '../../packages/dsh-research-ui/src/client/i18n/chrome'
+import { CHAT_COMMANDS } from '../../packages/dsh-research-ui/src/client/modals/commands'
 import { phasePipeline, statusLabel } from '../../packages/dsh-research-ui/src/client/ui'
 
 interface Report { namespace: string; key: string; locale: 'zh' | 'en' }
@@ -101,21 +102,28 @@ describe('i18n runtime: locale switching (acceptance §8 line 135)', () => {
     expect(chromeTabs().map(x => x.label)).toEqual(zhTabs.map(x => x.label))
   })
 
-  it('model selector and density options re-evaluate with the locale', () => {
+  it('model selector choices re-evaluate with the locale', () => {
     setLocale('zh')
     const zhModels = chromeModelChoices()
-    const zhDensity = t('shell', 'shell.density.compact')
-    expect(zhDensity).toBe('紧凑')
     setLocale('en')
     const enModels = chromeModelChoices()
     expect(enModels.map(m => m.id)).toEqual(zhModels.map(m => m.id))
-    // model names are proper nouns (identical in both locales), but the
-    // 'auto' seat and density options are real copy and must differ.
+    // Model names are proper nouns (identical in both locales), but the
+    // 'auto' seat is real copy and must differ.
     for (const m of enModels) expect(m.label).not.toBe('')
     expect(zhModels.find(m => m.id === '')!.label).toBe('自动（默认）')
     expect(enModels.find(m => m.id === '')!.label).toBe('Auto (default)')
-    expect(t('shell', 'shell.density.compact')).toBe('Compact')
-    expect(t('shell', 'shell.density.compact')).not.toBe(zhDensity)
+  })
+
+  it('direct command descriptions re-evaluate from i18n keys', () => {
+    setLocale('zh')
+    const zhDescriptions = CHAT_COMMANDS.map(([, , key]) => t('shell', key))
+    setLocale('en')
+    const enDescriptions = CHAT_COMMANDS.map(([, , key]) => t('shell', key))
+    expect(zhDescriptions).toHaveLength(CHAT_COMMANDS.length)
+    expect(enDescriptions).toHaveLength(CHAT_COMMANDS.length)
+    expect(zhDescriptions.every((value, index) => value !== enDescriptions[index])).toBe(true)
+    expect(reports).toEqual([])
   })
 
   it('pipeline steps re-evaluate after a locale switch', () => {

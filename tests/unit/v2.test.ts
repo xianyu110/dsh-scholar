@@ -43,7 +43,158 @@ async function withServer(kernel: ResearchKernel, fn: (base: string) => Promise<
 }
 
 describe('v2 project adapter', () => {
-  it('POST /v2/projects requires an Idempotency-Key and returns project+gate+budget+membership', async () => {
+  it('creates a name-only collecting project with an active Init Intake and no Gate', async () => {
+    const kernel = freshKernel()
+    await withServer(kernel, async (base) => {
+      const created = await fetch(`${base}/v2/projects`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'init-name-only-1',
+          'x-principal-id': 'pi-init',
+          'x-principal-role': 'pi',
+        },
+        body: JSON.stringify({ name: 'Continue my research' }),
+      })
+      expect(created.status).toBe(201)
+      const out = await created.json() as {
+        project: { project_id: string; status: string; brief_status: string }
+        intake: { intake_id: string; project_id: string; status: string }
+        budget: { project_id: string }
+        membership: Array<{ principal_id: string; role: string }>
+      }
+      expect(out.project.status).toBe('DRAFT')
+      expect(out.project.brief_status).toBe('collecting')
+      expect(out.intake.project_id).toBe(out.project.project_id)
+      expect(out.intake.status).toBe('draft')
+      expect(out.budget.project_id).toBe(out.project.project_id)
+      expect(out.membership).toContainEqual(expect.objectContaining({ principal_id: 'pi-init', role: 'pi' }))
+      expect(kernel.listGates(out.project.project_id)).toEqual([])
+      const projectionResponse = await fetch(`${base}/v2/projects/${out.project.project_id}/projection`, {
+        headers: { 'x-principal-id': 'pi-init', 'x-principal-role': 'pi' },
+      })
+      const projection = await projectionResponse.json() as { next_actions_v2: Array<{ code: string }> }
+      expect(projection.next_actions_v2.map(action => action.code)).toContain('intake_resume')
+      expect(projection.next_actions_v2.map(action => action.code)).not.toContain('scope_gate_submit')
+
+      const replay = await fetch(`${base}/v2/projects`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'init-name-only-1',
+          'x-principal-id': 'pi-init',
+          'x-principal-role': 'pi',
+        },
+        body: JSON.stringify({ name: 'Continue my research' }),
+      })
+      expect(replay.status).toBe(201)
+      const replayed = await replay.json() as { project: { project_id: string }; intake: { intake_id: string } }
+      expect(replayed.project.project_id).toBe(out.project.project_id)
+      expect(replayed.intake.intake_id).toBe(out.intake.intake_id)
+    })
+    kernel.close()
+  })
+
+  it('grills one question at a time and only PI confirmation creates the Scope Gate', async () => {
+    const kernel = freshKernel()
+    await withServer(kernel, async (base) => {
+      const headers = {
+        'content-type': 'application/json',
+        'x-principal-id': 'pi-grill',
+        'x-principal-role': 'pi',
+      }
+      const created = await fetch(`${base}/v2/projects`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': 'grill-project-1' },
+        body: JSON.stringify({ name: 'Grill study' }),
+      })
+      const init = await created.json() as { project: { project_id: string; revision: number }; intake: { intake_id: string; revision: number } }
+      const values: Record<string, unknown> = {
+        'brief.problem': 'Does method A improve accuracy?',
+        'brief.scope': 'Public benchmark datasets only.',
+        'brief.questions': ['What is the effect size?'],
+        'brief.primary_metrics': ['accuracy:higher_is_better'],
+        'brief.target_outputs': ['conference-paper'],
+        'brief.constraints': 'No private data; 40 GPU hours.',
+        'brief.material_context': 'Continue from an external literature survey.',
+      }
+
+      let projectRevision = init.project.revision
+      let intakeRevision = init.intake.revision
+      for (const expectedCode of Object.keys(values)) {
+        const current = await fetch(`${base}/v2/projects/${init.project.project_id}/grill`, { headers })
+        expect(current.status).toBe(200)
+        const projection = await current.json() as {
+          project_revision: number
+          intake_revision: number
+          question: { question_code: string; question_revision: number } | null
+          ready_to_confirm: boolean
+        }
+        expect(projection.question?.question_code).toBe(expectedCode)
+        expect(projection.ready_to_confirm).toBe(false)
+        projectRevision = projection.project_revision
+        intakeRevision = projection.intake_revision
+        const answered = await fetch(`${base}/v2/projects/${init.project.project_id}/grill/answers`, {
+          method: 'POST', headers,
+          body: JSON.stringify({
+            question_code: expectedCode,
+            question_revision: projection.question!.question_revision,
+            value: values[expectedCode],
+          }),
+        })
+        expect(answered.status).toBe(200)
+      }
+
+      const previewResponse = await fetch(`${base}/v2/projects/${init.project.project_id}/grill`, { headers })
+      const preview = await previewResponse.json() as {
+        project_revision: number
+        intake_revision: number
+        question: null
+        ready_to_confirm: boolean
+        brief_preview: { problem: string; scope: string; primary_metrics: string[] }
+      }
+      expect(preview.question).toBeNull()
+      expect(preview.ready_to_confirm).toBe(true)
+      expect(preview.brief_preview.problem).toBe(values['brief.problem'])
+      expect(kernel.listGates(init.project.project_id)).toEqual([])
+      projectRevision = preview.project_revision
+      intakeRevision = preview.intake_revision
+
+      kernel.addProjectMember({ project_id: init.project.project_id, principal_id: 'researcher-grill', role: 'researcher', actor: 'pi-grill' })
+      const denied = await fetch(`${base}/v2/projects/${init.project.project_id}/grill/confirm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-principal-id': 'researcher-grill', 'x-principal-role': 'researcher', 'idempotency-key': 'confirm-denied' },
+        body: JSON.stringify({ expected_project_revision: projectRevision, expected_intake_revision: intakeRevision }),
+      })
+      expect(denied.status).toBe(403)
+      expect(kernel.listGates(init.project.project_id)).toEqual([])
+
+      const confirmed = await fetch(`${base}/v2/projects/${init.project.project_id}/grill/confirm`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': 'confirm-grill-1' },
+        body: JSON.stringify({ expected_project_revision: projectRevision, expected_intake_revision: intakeRevision }),
+      })
+      expect(confirmed.status).toBe(200)
+      const result = await confirmed.json() as {
+        project: { brief_status: string; brief: { problem: string } }
+        gate: { gate_id: string; type: string }
+      }
+      expect(result.project.brief_status).toBe('confirmed')
+      expect(result.project.brief.problem).toBe(values['brief.problem'])
+      expect(result.gate.type).toBe('scope')
+
+      const replay = await fetch(`${base}/v2/projects/${init.project.project_id}/grill/confirm`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': 'confirm-grill-1' },
+        body: JSON.stringify({ expected_project_revision: projectRevision, expected_intake_revision: intakeRevision }),
+      })
+      expect(replay.status).toBe(200)
+      expect(kernel.listGates(init.project.project_id).filter(gate => gate.type === 'scope')).toHaveLength(1)
+    })
+    kernel.close()
+  })
+
+  it('POST /v2/projects requires an Idempotency-Key and returns project+intake+budget+membership', async () => {
     const kernel = freshKernel()
     await withServer(kernel, async (base) => {
       const noKey = await fetch(`${base}/v2/projects`, {
@@ -56,8 +207,8 @@ describe('v2 project adapter', () => {
         body: JSON.stringify(makeBody()),
       })
       expect(created.status).toBe(201)
-      const out = await created.json() as { project: { project_id: string }; gate: { type: string }; budget: Record<string, unknown>; membership: Array<{ role: string }> }
-      expect(out.gate.type).toBe('scope')
+      const out = await created.json() as { project: { project_id: string }; intake: { project_id: string }; budget: Record<string, unknown>; membership: Array<{ role: string }> }
+      expect(out.intake.project_id).toBe(out.project.project_id)
       expect(out.membership[0]!.role).toBe('pi')
       expect(out.budget.project_id).toBe(out.project.project_id)
       // Replay with the same key + identical body -> the SAME project.

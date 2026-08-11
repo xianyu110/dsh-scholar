@@ -8,7 +8,7 @@ import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast } from 
 export let dragSessionId: string | null = null
 
 /**
- * Chat transcript + built-in /research command executor. Mirrors the dsh web
+ * Chat transcript + built-in direct slash-command executor. Mirrors the dsh web
  * dialogue feel (message bubbles + composer) while talking straight to the
  * Kernel API through the same bridge the panels use — no agent loop needed.
  * The composer persists across 8s panel refreshes via state.chatDraft.
@@ -32,8 +32,8 @@ export function chatJsonArg(rest: string): Record<string, unknown> | null {
 
 /**
  * USAGE_GUIDE §5/§6: the subcommand kind may be a positional word before
- * the JSON (`/research run formal {...}`) or the JSON `kind` field
- * (`/research run {"kind":"echo",...}`). PURE — unit-tested.
+ * the JSON (`/run formal {...}`) or the JSON `kind` field
+ * (`/run {"kind":"echo",...}`). PURE — unit-tested.
  */
 export function chatRunKind(rest: string, json: Record<string, unknown> | null, fallback: string): string {
   const start = rest.indexOf('{')
@@ -43,12 +43,70 @@ export function chatRunKind(rest: string, json: Record<string, unknown> | null, 
   return typeof kind === 'string' && kind !== '' ? kind : fallback
 }
 
+/** Public pure seams for the name-only Init and prose-vs-command router. */
+export function projectCreatePayload(name: string): { name: string } {
+  return { name: name.trim() }
+}
+
+export function chatInputKind(line: string): { kind: 'command'; line: string } | { kind: 'grill-answer'; text: string } {
+  const trimmed = line.trim()
+  return trimmed.startsWith('/')
+    ? { kind: 'command', line: trimmed }
+    : { kind: 'grill-answer', text: trimmed }
+}
+
+interface ProjectGrillProjection {
+  project_revision: number
+  intake_revision: number
+  question: { question_code: string; question_revision: number; prompt_key: string; required: boolean } | null
+  brief_preview: { problem: string; scope: string; primary_metrics: string[]; target_outputs: string[] }
+  ready_to_confirm: boolean
+}
+
+function grillPrompt(projection: ProjectGrillProjection): string {
+  if (projection.question !== null) return t('intake', projection.question.prompt_key)
+  if (projection.ready_to_confirm) {
+    return t('intake', 'grill.ready', {
+      problem: projection.brief_preview.problem,
+      scope: projection.brief_preview.scope,
+    })
+  }
+  return t('intake', 'grill.complete')
+}
+
 /**
- * Execute one chat line: either a /research subcommand or a bare word that
- * maps to one. Returns the assistant answer text.
+ * Route ordinary prose to the current deterministic Grill question. Confirmed
+ * projects keep the legacy bare-command behavior for compatibility.
+ */
+export async function executeChatInput(line: string, activeProjectId: string | undefined): Promise<string> {
+  const input = chatInputKind(line)
+  if (input.kind === 'command' || activeProjectId === undefined || activeProjectId === '') {
+    return executeChatCommand(input.kind === 'command' ? input.line : input.text, activeProjectId)
+  }
+  const current = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill`)
+  if (current === null || (current.question === null && !current.ready_to_confirm)) {
+    return executeChatCommand(input.text, activeProjectId)
+  }
+  if (current.question === null) return grillPrompt(current)
+  const answered = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill/answers`, {
+    method: 'POST',
+    body: JSON.stringify({
+      question_code: current.question.question_code,
+      question_revision: current.question.question_revision,
+      value: input.text,
+    }),
+  })
+  if (answered === null) return t('intake', 'grill.answerFailed')
+  return grillPrompt(answered)
+}
+
+/**
+ * Execute one chat line: either a direct slash command or a bare word that
+ * maps to one. Aggregate command prefixes are intentionally not parsed.
+ * Returns the assistant answer text.
  */
 export async function executeChatCommand(line: string, activeProjectId: string | undefined): Promise<string> {
-  const trimmed = line.trim().replace(/^\/research\s+/i, '').replace(/^\//, '')
+  const trimmed = line.trim().replace(/^\//, '')
   const parts = trimmed.split(/\s+/)
   const sub = (parts[0] ?? '').toLowerCase()
   const rest = trimmed.slice(sub.length).trim()
@@ -57,57 +115,63 @@ export async function executeChatCommand(line: string, activeProjectId: string |
     case '':
     case 'help': {
       return 'Commands:\n'
-        + '  /research new <name> [json]      create project + Scope Gate\n'
-        + '  /research list                   all projects\n'
-        + '  /research status [project_id]    phase, gates, jobs, budget\n'
-        + '  /research survey <query>         multi-source search + snapshot\n'
-        + '  /research ideas                  IdeaCards\n'
-        + '  /research gates [project_id]     gate list + decisions\n'
-        + '  /research jobs [project_id]      job list\n'
-        + '  /research contract <json>        pre-register a contract\n'
-        + '  /research run <json>             submit a job\n'
-        + '  /research evidence <json>        ingest evidence\n'
-        + '  /research claims [project_id]    claims + verification status\n'
-        + '  /research write / review / export / release\n'
-        + '\nTry: /research new demo1 or /research status'
+        + '  /new <name>                      create a project, then start Grill Me\n'
+        + '  /confirm-brief [project_id]       confirm the Brief + create Scope Gate\n'
+        + '  /list                             all projects\n'
+        + '  /status [project_id]              phase, gates, jobs, budget\n'
+        + '  /survey <query>                   multi-source search + snapshot\n'
+        + '  /ideas                            IdeaCards\n'
+        + '  /gates [project_id]               gate list + decisions\n'
+        + '  /jobs [project_id]                job list\n'
+        + '  /reproduce [json]                 start a paper reproduction\n'
+        + '  /contract <json>                  pre-register a contract\n'
+        + '  /run <kind> <json>                submit a job\n'
+        + '  /evidence <json>                  ingest evidence\n'
+        + '  /claims [project_id]              claims + verification status\n'
+        + '  /write /review /export /release\n'
+        + '\nTry: /new demo1 or /status'
     }
     case 'new': {
       const name = parts[1] ?? ''
-      if (name === '') return 'usage: /research new <name> [json]'
-      const json = chatJsonArg(rest)
-      const brief = {
-        problem: String(json?.problem ?? 'To be specified in the Scope Gate.'),
-        scope: String(json?.scope ?? 'To be specified in the Scope Gate.'),
-        questions: Array.isArray(json?.questions) ? json.questions.map(String) : [],
-        primary_metrics: Array.isArray(json?.primary_metrics) ? json.primary_metrics.map(String) : [],
-        resources: String(json?.resources ?? ''),
-        risks: [],
-        target_outputs: ['conference-paper'],
-        target_venue: null,
-        baseline_repo: null,
-        domain: 'machine-learning',
-      }
-      const project = await api<{ project_id?: string; name?: string; status?: string }>('/v1/projects', {
+      if (name === '') return 'usage: /new <name>'
+      const created = await api<{ project?: { project_id?: string; name?: string; status?: string } }>('/v2/projects', {
         method: 'POST',
-        body: JSON.stringify({ name, workspace: `/research/${name}`, brief, mode: 'gate-only' }),
+        headers: { 'idempotency-key': `chat-init-${crypto.randomUUID()}` },
+        body: JSON.stringify(projectCreatePayload(name)),
       })
-      if (project === null || project.project_id === undefined) return 'create failed — kernel unreachable?'
-      await api(`/v1/projects/${encodeURIComponent(project.project_id)}/gates`, {
-        method: 'POST',
-        body: JSON.stringify({ type: 'scope', title: `Scope Gate — ${name}`, summary: 'Approve the research scope, data policy, budget and target venue.' }),
-      })
+      const project = created?.project
+      if (project == null || project.project_id === undefined) return 'create failed — kernel unreachable?'
       state.projectId = project.project_id
       void state.rerender()
-      return `Project **${project.project_id}** (${name}) created — DRAFT.\nScope Gate opened: approve it in Execution → Approvals (human only).`
+      const grill = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(project.project_id)}/grill`)
+      return `${t('intake', 'grill.projectCreated', { id: project.project_id, name })}\n\n${grill === null ? '' : grillPrompt(grill)}`
+    }
+    case 'confirm-brief': {
+      const id = parts[1] ?? activeProjectId
+      if (id === undefined) return t('intake', 'grill.noProject')
+      const current = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(id)}/grill`)
+      if (current === null) return t('intake', 'grill.loadFailed')
+      if (!current.ready_to_confirm) return grillPrompt(current)
+      const result = await api<{ gate?: { gate_id: string } }>(`/v2/projects/${encodeURIComponent(id)}/grill/confirm`, {
+        method: 'POST',
+        headers: { 'idempotency-key': `brief-confirm-${crypto.randomUUID()}` },
+        body: JSON.stringify({
+          expected_project_revision: current.project_revision,
+          expected_intake_revision: current.intake_revision,
+        }),
+      })
+      return result?.gate?.gate_id === undefined
+        ? t('intake', 'grill.confirmFailed')
+        : t('intake', 'grill.confirmed', { gate: result.gate.gate_id })
     }
     case 'list': {
       const projects = (await api<Array<{ project_id?: string; name?: string; status?: string }>>('/v1/projects')) ?? []
-      if (projects.length === 0) return 'No projects yet — try /research new demo1'
+      if (projects.length === 0) return 'No projects yet — try /new demo1'
       return `Projects (${projects.length}):\n${projects.map(fmtProjectRow).join('\n')}`
     }
     case 'status': {
       const id = parts[1] ?? activeProjectId
-      if (id === undefined) return 'No project selected — /research new <name> or /research status <project_id>'
+      if (id === undefined) return 'No project selected — /new <name> or /status <project_id>'
       const p = await api<Projection>(`/v1/projects/${encodeURIComponent(id)}/projection`)
       if (p === null || p.project === undefined) return `project ${id} not found`
       const pending = (p.pending_gates ?? []).map(g => `- ${g.type} gate ${g.gate_id}: ${g.title} (${g.status})`).join('\n') || 'none'
@@ -121,8 +185,8 @@ export async function executeChatCommand(line: string, activeProjectId: string |
     }
     case 'survey': {
       const query = rest.trim()
-      if (query === '') return 'usage: /research survey <query>'
-      if (activeProjectId === undefined) return 'No project selected — /research new <name> first'
+      if (query === '') return 'usage: /survey <query>'
+      if (activeProjectId === undefined) return 'No project selected — /new <name> first'
       const response = await fetch(`${base()}/api/chat/survey`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(await authHeaders()), 'x-csrf-token': (await ensureCsrfToken()) ?? '' },
@@ -134,10 +198,10 @@ export async function executeChatCommand(line: string, activeProjectId: string |
       }
       const result = (await response.json()) as { snapshot_id?: string; papers?: number; removed?: number; top?: Array<{ paper_id: string; title: string; year?: number }> }
       const top = (result.top ?? []).slice(0, 5).map(h => `- ${h.paper_id}: ${h.title} (${h.year ?? 'n.d.'})`).join('\n')
-      return `Survey complete: **${result.snapshot_id}** — ${result.papers ?? 0} papers after dedup (${result.removed ?? 0} removed).\n\nTop hits:\n${top}\n\nNext: /research ideas`
+      return `Survey complete: **${result.snapshot_id}** — ${result.papers ?? 0} papers after dedup (${result.removed ?? 0} removed).\n\nTop hits:\n${top}\n\nNext: /ideas`
     }
     case 'ideas': {
-      if (activeProjectId === undefined) return 'No project selected — /research new <name> first'
+      if (activeProjectId === undefined) return 'No project selected — /new <name> first'
       const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(activeProjectId)}/ideas`)) ?? []
       if (ideas.length === 0) return 'No IdeaCards yet — create them with the idea_create tool, then novelty_audit before the Idea Gate.'
       return `IdeaCards:\n${ideas.map(i => `- \`${String(i.idea_id)}\` [${String(i.status ?? '')}] ${String(i.title ?? '')}`).join('\n')}`
@@ -159,7 +223,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
     case 'contract': {
       if (activeProjectId === undefined) return 'No project selected'
       const json = chatJsonArg(rest)
-      if (json === null) return 'usage: /research contract {"idea_id":"...","dataset_id":"...","baseline":"b","treatment":"a","primary_metric":"m","seeds":[11,23,47]}'
+      if (json === null) return 'usage: /contract {"idea_id":"...","dataset_id":"...","baseline":"b","treatment":"a","primary_metric":"m","seeds":[11,23,47]}'
       const seeds = Array.isArray(json.seeds) ? json.seeds.map(Number) : [11, 23, 47]
       const c = await api<{ contract_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/contracts`, {
         method: 'POST',
@@ -192,7 +256,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
           kind: 'baseline',
           command,
           payload: {
-            message: '/research reproduce',
+            message: '/reproduce',
             repo: typeof json?.repo === 'string' ? json.repo : undefined,
             commit: typeof json?.commit === 'string' ? json.commit : undefined,
             expected_metrics: json?.expected_metrics,
@@ -208,7 +272,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
     case 'run': {
       if (activeProjectId === undefined) return 'No project selected'
       const json = chatJsonArg(rest)
-      // USAGE_GUIDE §6: `/research run <kind> <json>` — the kind may be a
+      // USAGE_GUIDE §6: `/run <kind> <json>` — the kind may be a
       // positional word before the JSON or the `kind` field of the JSON.
       const kind = chatRunKind(rest, json, 'echo')
       const job = await api<{ job_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/jobs`, {
@@ -217,7 +281,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
           idempotency_key: String(json?.idempotency_key ?? `chat-${Date.now()}`),
           kind,
           command: Array.isArray(json?.command) ? json.command.map(String) : [],
-          payload: { message: `chat /research run ${kind}`, ...(json ?? {}) },
+          payload: { message: `chat /run ${kind}`, ...(json ?? {}) },
           contract_id: typeof json?.contract_id === 'string' ? json.contract_id : null,
           code_snapshot_id: typeof json?.code_snapshot_id === 'string' ? json.code_snapshot_id : null,
         }),
@@ -229,7 +293,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
       if (activeProjectId === undefined) return 'No project selected'
       const json = chatJsonArg(rest)
       if (json === null || typeof json.analysis_method !== 'string') {
-        return 'usage: /research evidence {"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"acc","value":0.9,"baseline_value":0.8,"effect_size":0.1,"ci_low":0.05,"ci_high":0.15,"n_seeds":3}}'
+        return 'usage: /evidence {"analysis_method":"bootstrap_95_mean_difference","result":{"primary_metric":"acc","value":0.9,"baseline_value":0.8,"effect_size":0.1,"ci_low":0.05,"ci_high":0.15,"n_seeds":3}}'
       }
       const ev = await api<{ evidence_id?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/evidence`, {
         method: 'POST',
@@ -284,14 +348,14 @@ export async function executeChatCommand(line: string, activeProjectId: string |
       return `Release Gate **${gate.gate_id}** created and left **pending** (human only).`
     }
     default:
-      return `Unknown command: /research ${sub}. Try /research help`
+      return `Unknown command: /${sub}. Try /help`
   }
 }
 
 
 /**
  * Chat tab: message bubbles (dsh-web style) + a composer that runs
- * /research commands directly against the Kernel bridge. The transcript
+ * direct slash commands against the Kernel bridge. The transcript
  * survives 8s panel refreshes (state.chatMessages), as does the draft text.
  * Clicking a message opens the dsh-web "details" side panel.
  */
@@ -302,7 +366,12 @@ export let chatSearchQuery = ''
 export let chatCommandsOnly = false
 /** Global search state (dsh-web cross-session search). */
 
-export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId: string): Promise<void> {
+export async function renderChat(
+  body: HTMLElement,
+  dock: HTMLElement,
+  projectId: string,
+  modelSelect?: HTMLSelectElement,
+): Promise<void> {
   // Rebuild the persistent footer synchronously. Its old geometry stays in
   // place throughout async refresh work, and this swap cannot paint halfway.
   dock.replaceChildren()
@@ -728,12 +797,12 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     const starters = el('div')
     starters.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding:2px'
     const starterDefs: Array<[string, string]> = [
-      [t('shell', 'shell.chat.starterNew'), '/research new demo1'],
-      [t('shell', 'shell.chat.starterList'), '/research list'],
-      [t('shell', 'shell.chat.starterStatus'), '/research status'],
-      [t('shell', 'shell.chat.starterClaims'), '/research claims'],
-      [t('shell', 'shell.chat.starterWrite'), '/research write'],
-      [t('shell', 'shell.chat.starterExport'), '/research export'],
+      [t('shell', 'shell.chat.starterNew'), '/new demo1'],
+      [t('shell', 'shell.chat.starterList'), '/list'],
+      [t('shell', 'shell.chat.starterStatus'), '/status'],
+      [t('shell', 'shell.chat.starterClaims'), '/claims'],
+      [t('shell', 'shell.chat.starterWrite'), '/write'],
+      [t('shell', 'shell.chat.starterExport'), '/export'],
     ]
     for (const [label, line] of starterDefs) {
       const chip = el('button', 'hbtn', label)
@@ -813,7 +882,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       bubble.classList.add('selected')
     }
     // Rich line rendering (headings/lists/code/bold) — textContent-safe.
-    // /research status answers render as a field-card grid (dsh-web
+    // /status answers render as a field-card grid (dsh-web
     // structured results) instead of raw text.
     const isStatus = msg.role === 'assistant' && /^\*\*.*\*\* \(`rsp_/.test(msg.text) && msg.text.includes('Next actions:')
     const isSurvey = msg.role === 'assistant' && msg.text.startsWith('Survey complete:')
@@ -1276,7 +1345,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     }
     if (msg.role === 'assistant' || msg.role === 'error') {
       const actionsRow = el('div')
-      actionsRow.style.cssText = 'align-self:flex-start;display:flex;gap:6px;margin-top:2px'
+      actionsRow.style.cssText = 'align-self:flex-end;display:flex;gap:6px;margin-top:2px'
       const copy = el('button', 'hbtn', t('common', 'common.action.copyText'))
       copy.style.cssText = 'padding:0 6px;font-size:9px'
       copy.onclick = () => {
@@ -1318,9 +1387,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
       stream.appendChild(actionsRow)
     }
     const stamp = el('div')
-    stamp.style.cssText = msg.role === 'user'
-      ? 'align-self:flex-end;color:var(--text-3);font-size:9px;margin-top:-4px'
-      : 'align-self:flex-start;color:var(--text-3);font-size:9px;margin-top:-4px'
+    stamp.style.cssText = 'align-self:flex-end;color:var(--text-3);font-size:9px;margin-top:-4px'
     stamp.textContent = msg.time
     stream.appendChild(stamp)
   }
@@ -1484,8 +1551,8 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   let completionOpen = false
   const renderCompletions = (force = false): void => {
     const draft = input.value.trim()
-    const match = /^\/(?:research\s+)?([a-z]*)$/i.exec(draft)
-    const shouldOpen = (force || completionOpen) && (match !== null || draft.startsWith('/research '))
+    const match = /^\/([a-z-]*)$/i.exec(draft)
+    const shouldOpen = (force || completionOpen) && match !== null
     if (!shouldOpen) {
       completionBox.style.display = 'none'
       completionOpen = false
@@ -1548,7 +1615,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     streamEl.appendChild(runningBubble)
     streamEl.scrollTop = streamEl.scrollHeight
     try {
-      const answer = await executeChatCommand(line, projectId)
+      const answer = await executeChatInput(line, projectId)
       input.disabled = false
       send.disabled = false
       runningBubble.remove()
@@ -1641,22 +1708,15 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
     } else if (event.key === 'Tab') {
       // dsh-web keyboard navigation: Tab completes the command name.
       const draft = input.value.trim()
-      const match = /^\/(?:research\s+)?([a-z]*)$/i.exec(draft)
+      const match = /^\/([a-z-]*)$/i.exec(draft)
       if (match !== null) {
         event.preventDefault()
         const prefix = (match[1] ?? '').toLowerCase()
-        // 'research' itself is a valid completion (→ /research <sub>).
-        if (prefix !== '' && 'research'.startsWith(prefix) && prefix.length < 8) {
-          input.value = draft.replace(/[a-z]*$/i, 'research ')
+        const hit = CHAT_COMMANDS.find(([name]) => name.startsWith(prefix))
+        if (hit !== undefined && prefix !== hit[0]) {
+          input.value = draft.replace(/[a-z-]*$/i, hit[0] + ' ')
           state.chatDraft = input.value
           autosize()
-        } else {
-          const hit = CHAT_COMMANDS.find(([name]) => name.startsWith(prefix))
-          if (hit !== undefined && prefix !== hit[0]) {
-            input.value = draft.replace(/[a-z]*$/i, hit[0] + ' ')
-            state.chatDraft = input.value
-            autosize()
-          }
         }
       }
     }
@@ -1696,6 +1756,7 @@ export async function renderChat(body: HTMLElement, dock: HTMLElement, projectId
   linkBtn.onclick = () => insertMarkdown('[', '](https://)', 'text')
   const listBtn = mkBtn('•', t('shell', 'shell.chat.toolList'))
   listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
+  if (modelSelect !== undefined) toolbar.appendChild(modelSelect)
   toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, clear)
   const composerActions = el('div', 'chat-composer-actions')
   composerActions.append(toolbar, send)
@@ -1911,4 +1972,3 @@ export function inlineChatText(text: string, highlight?: string): HTMLElement[] 
   }
   return nodes
 }
-

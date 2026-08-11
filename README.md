@@ -58,33 +58,34 @@ bash scripts/start-standalone-ui.sh
 
 ### 3. 使用研究命令
 
-在独立 UI 的 Chat 中通过 `/research` 推进研究流程：
+在独立 UI 的 Chat 中直接使用一级 slash command；创建项目只需名称，随后在 Chat 中逐题完成 Grill Me，也可以给消息附加论文、代码、数据或已有结果：
 
 ```text
-/research help
-/research new <name> [brief-json]
-/research list
-/research status [project_id]
-/research survey <query>
-/research ideas
-/research gates [project_id]
-/research jobs [project_id]
-/research reproduce [json]
-/research contract <json>
-/research run <kind> <json>
-/research evidence <json>
-/research claims [project_id]
-/research write
-/research review
-/research export
-/research release
+/help
+/new <name>
+/confirm-brief [project_id]
+/list
+/status [project_id]
+/survey <query>
+/ideas
+/gates [project_id]
+/jobs [project_id]
+/reproduce [json]
+/contract <json>
+/run <kind> <json>
+/evidence <json>
+/claims [project_id]
+/write
+/review
+/export
+/release
 ```
 
-正式 `run` 必须绑定已经批准的 Experiment Contract 和真实 Code Snapshot。完整流程、Gate 停点和参数说明见 [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)。
+正式 `run` 必须绑定已经批准的 Experiment Contract、真实 Code Snapshot 和固定的执行环境。Workspace 可直接查看、编辑和上传项目文件；每个 Research/Chat/Subagent session 使用各自的 Terminal context；Manuscript 同页编辑 TeX、查看编译日志与实时 PDF；实验环境通过 Settings 选择本机 Docker 或受控远端 target，远端不可用时不会静默回退本机。完整流程、Gate 停点和参数说明见 [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)。
 
 ### 4. 可选：启用 DSH Agent 开发集成
 
-DSH 仍可以加载 Scholar 的 tools、`/research` commands、subagents、Skills、Session 关联和 headless 能力，但不会注入任何 Scholar 浏览器页面：
+DSH 仍可以加载 Scholar 的 tools、直接 slash commands、subagents、Skills、Session 关联和 headless 能力，但不会注入任何 Scholar 浏览器页面：
 
 ```bash
 export DSH_SCHOLAR_DSH_ROOT=/absolute/path/to/dsh

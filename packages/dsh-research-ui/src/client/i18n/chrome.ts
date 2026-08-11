@@ -1,7 +1,7 @@
 /**
  * Pure chrome-copy model (acceptance-tests.md §8 / §13.4): the shell's
  * once-built chrome — tab groups, tab labels/descriptions, model selector
- * choices, density options — is defined here as FUNCTIONS that evaluate
+ * choices — is defined here as FUNCTIONS that evaluate
  * `t()` against the CURRENT locale on every call. The DOM layer re-paints
  * from these on locale switch, so nothing snapshots copy at init time.
  * Kept free of DOM so unit tests can assert zh/en re-evaluation purely.
@@ -11,7 +11,6 @@ import { t } from './index'
 export interface ChromeTab { key: string; label: string; description: string }
 export interface ChromeTabGroup { label: string; tabs: ChromeTab[] }
 export interface ChromeModelChoice { id: string; label: string }
-export interface ChromeDensityOption { value: 'compact' | 'normal'; label: string }
 
 /** Tab groups with labels/descriptions in the CURRENT locale. */
 export function chromeTabGroups(): ChromeTabGroup[] {
@@ -66,13 +65,5 @@ export function chromeModelChoices(): ChromeModelChoice[] {
     { id: '', label: t('shell', 'shell.model.auto') },
     { id: 'deepseek-v4-flash', label: t('shell', 'shell.model.deepseek-v4-flash') },
     { id: 'deepseek-v4-pro', label: t('shell', 'shell.model.deepseek-v4-pro') },
-  ]
-}
-
-/** Density selector options in the CURRENT locale. */
-export function chromeDensityOptions(): ChromeDensityOption[] {
-  return [
-    { value: 'compact', label: t('shell', 'shell.density.compact') },
-    { value: 'normal', label: t('shell', 'shell.density.normal') },
   ]
 }

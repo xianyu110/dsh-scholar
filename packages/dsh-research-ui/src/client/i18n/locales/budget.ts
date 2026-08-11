@@ -15,6 +15,7 @@ export const zh = {
   'budget.modal.placeholderName': '例如 shift-localization',
   'budget.modal.placeholderProblem': '例如 不确定性加权在域偏移下是否有帮助?',
   'budget.modal.placeholderMetric': '例如 mAP@0.5',
+  'budget.modal.nameOnlyHint': '创建后在 Chat 中使用 Grill Me 逐步补充研究问题、范围、指标和已有材料；确认前不会创建 Scope Gate。',
   'budget.detailsModal': '💰 预算与策略详情',
   'budget.modelCost': '模型成本',
   'budget.gpuHours': 'GPU 小时',
@@ -47,6 +48,7 @@ export const en: Record<keyof typeof zh, string> = {
   'budget.modal.placeholderName': 'e.g. shift-localization',
   'budget.modal.placeholderProblem': 'e.g. Does uncertainty weighting help under domain shift?',
   'budget.modal.placeholderMetric': 'e.g. mAP@0.5',
+  'budget.modal.nameOnlyHint': 'After creation, Chat uses Grill Me to collect the problem, scope, metrics and existing materials. No Scope Gate is created before confirmation.',
   'budget.detailsModal': '💰 Budget & policy details',
   'budget.modelCost': 'Model cost',
   'budget.gpuHours': 'GPU hours',
@@ -64,4 +66,3 @@ export const en: Record<keyof typeof zh, string> = {
   'budget.cleanRoom': 'Clean-room',
   'budget.autoRelease': 'Auto release',
 }
-

@@ -1,12 +1,37 @@
 /**
  * chat command arg parsing (client/chat.ts, USAGE_GUIDE §5/§6): the PURE
- * helpers behind the standalone Chat's /research executor — `chatJsonArg`
+ * helpers behind the standalone Chat's direct slash executor — `chatJsonArg`
  * (extract the trailing JSON object) and `chatRunKind` (positional kind
  * before the JSON wins, else the JSON `kind` field, else the fallback).
  * Import-safe under vitest (no DOM at module scope).
  */
 import { describe, expect, it } from 'vitest'
-import { chatJsonArg, chatRunKind } from '../../packages/dsh-research-ui/src/client/chat'
+import { chatInputKind, chatJsonArg, chatRunKind, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
+import { CHAT_COMMANDS } from '../../packages/dsh-research-ui/src/client/modals/commands'
+
+describe('name-only Init and Grill prose routing', () => {
+  it('builds a name-only v2 project payload', () => {
+    expect(projectCreatePayload('  My study  ')).toEqual({ name: 'My study' })
+  })
+
+  it('routes slash input to commands and ordinary prose to the active Grill', () => {
+    expect(chatInputKind('/status')).toEqual({ kind: 'command', line: '/status' })
+    expect(chatInputKind('Public datasets only')).toEqual({ kind: 'grill-answer', text: 'Public datasets only' })
+  })
+
+  it('advertises only direct command descriptors', async () => {
+    expect(CHAT_COMMANDS.map(([, line]) => line)).not.toContainEqual(expect.stringMatching(/^\/research(?:\s|$)/))
+    expect(CHAT_COMMANDS.some(([name, line]) => name === 'confirm-brief' && line === '/confirm-brief')).toBe(true)
+    const help = await executeChatCommand('/help', undefined)
+    expect(help).toContain('/reproduce')
+    expect(help).toContain('/confirm-brief')
+    expect(help).not.toContain('/research')
+  })
+
+  it('rejects the removed aggregate prefix instead of silently aliasing it', async () => {
+    expect(await executeChatCommand('/research help', undefined)).toBe('Unknown command: /research. Try /help')
+  })
+})
 
 describe('chatJsonArg', () => {
   it('extracts a trailing JSON object', () => {
@@ -23,7 +48,7 @@ describe('chatJsonArg', () => {
   })
 })
 
-describe('chatRunKind (USAGE_GUIDE §6: /research run <kind> <json>)', () => {
+describe('chatRunKind (USAGE_GUIDE §6: /run <kind> <json>)', () => {
   it('positional kind before the JSON wins', () => {
     expect(chatRunKind('formal {"contract_id":"c1"}', { contract_id: 'c1' }, 'echo')).toBe('formal')
     expect(chatRunKind('baseline', null, 'echo')).toBe('baseline')

@@ -10,13 +10,13 @@
 import { t, getLocale, subscribeLocale, assertLocaleParity, registerOverlayRebuild } from './i18n/index'
 import { chromeTabGroups, chromeTabs, chromeModelChoices } from './i18n/chrome'
 import { api } from './api'
-import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost, STATUS_META, statusLabel } from './ui'
+import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost } from './ui'
 import type { ProjectRow, Projection } from './types'
-import { MORE_TAB_KEYS, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups, filterProjects } from './nav'
+import { navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups } from './nav'
 import {
   state, readTheme, writeTheme, radiusValue, textureValue, accentColor,
-  tabPinned, tabTogglePin, tabSave, tabLoad, autoRefreshEnabled,
-  densityLoad, densityApply, notifLoad, favProjectsLoad,
+  tabSave, tabLoad, autoRefreshEnabled,
+  notifLoad, favProjectsLoad,
   chatLoad, historyLoad, chatSyncActive,
 } from './state'
 import { renderSidebar, sidebarSortLoad } from './sidebar'
@@ -269,13 +269,6 @@ export function apply(): void {
 .sidebar.collapsed .ws-item { justify-content:center; padding:8px 0; }
 .sidebar.collapsed .ws-dot { width:10px; height:10px; }
 .main.expanded { flex:1; }
-/* dsh-web density: Compact tightens fonts and paddings. */
-.panel.density-compact { font-size:11px; }
-.panel.density-compact .body { padding:10px 12px 8px; }
-.panel.density-compact .card { padding:7px 9px; margin:4px 0; }
-.panel.density-compact .tab { padding:7px 2px 6px; }
-.panel.density-compact .section-label { margin:10px 0 4px; }
-.panel.density-compact .pstep .lbl { font-size:7px; }
 /* dsh-web background texture preferences. */
 :host([data-texture="grid"]) .panel { background-image: linear-gradient(var(--border-2) 1px, transparent 1px), linear-gradient(90deg, var(--border-2) 1px, transparent 1px); background-size: 22px 22px; }
 :host([data-texture="dots"]) .panel { background-image: radial-gradient(var(--border-2) 1px, transparent 1px); background-size: 18px 18px; }
@@ -313,16 +306,17 @@ export function apply(): void {
 .hbtn:hover { transform:none; background:var(--bg-hover); color:var(--text); border-color:transparent; }
 .hbtn:active { transform:none; }
 .hbtn.icon-btn { min-width:28px; padding:3px 6px; font-size:15px; }
-.density-select { width:auto; min-height:28px; margin:0; padding:3px 22px 3px 8px; border:0; border-radius:8px; background-color:transparent; font-size:12px; line-height:18px; }
-.tabs { flex:none; min-height:44px; align-items:stretch; gap:0; padding:0 28px; overflow-x:auto; overflow-y:hidden; background:var(--bg); border-bottom:1px solid var(--border); scrollbar-width:none; }
+.chat-model-select { flex:none; width:auto; max-width:190px; min-height:28px; margin:0 4px 0 0; padding:3px 24px 3px 8px; border:0; border-radius:8px; background-color:var(--bg-hover); color:var(--text-2); font:500 11px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.tabs { flex:none; min-height:44px; align-items:stretch; gap:6px; padding:0 28px; overflow-x:auto; overflow-y:hidden; background:var(--bg); border-bottom:1px solid var(--border); scrollbar-width:none; }
 .tabs::-webkit-scrollbar { display:none; }
-.tab-group { display:flex; align-items:stretch; gap:12px; flex:0 0 auto; }
-.tab-group + .tab-group { margin-left:20px; padding-left:20px; border-left:1px solid var(--border-2); }
-.tab-group-label { align-self:center; color:var(--text-3); font:500 10px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-transform:uppercase; letter-spacing:.06em; }
-.tab-group-tabs { display:flex; align-items:flex-end; gap:20px; }
 .tab { position:relative; flex:0 0 auto; min-height:35px; padding:8px 0 11px; border:0; border-radius:0; color:var(--text-3); background:transparent; font:500 13px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; transition:color .1s cubic-bezier(.4,0,.2,1); }
 .tab:hover { color:var(--text); background:transparent; }
 .tab.active { color:var(--accent-text); background:transparent; border-bottom:3px solid var(--accent); }
+.category-tab { display:flex; align-items:center; gap:8px; min-height:44px; padding:8px 12px 10px; }
+.category-name { color:var(--text-3); font:600 10px/16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:.06em; text-transform:uppercase; }
+.category-current { color:var(--text-2); font:500 13px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.category-caret { color:var(--text-3); font-size:10px; }
+.category-tab.active .category-name,.category-tab.active .category-current { color:var(--accent-text); }
 .body { min-height:0; background:var(--bg); padding:20px 24px 16px; scrollbar-gutter:stable; }
 .body.chat-active { display:flex; flex-direction:column; overflow:hidden; padding-bottom:0; }
 .body.chat-active > .project-title,
@@ -377,6 +371,7 @@ export function apply(): void {
 .sidebar-brand-row { flex:none; display:flex; align-items:center; gap:8px; height:60px; padding:8px 4px; margin-bottom:16px; overflow:hidden; }
 .sidebar-wordmark { color:var(--text); font:700 18px/22px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:-.06em; }
 .sidebar-product { color:var(--text-3); font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.sidebar-brand-row .sidebar-toggle { flex:none; margin-left:auto; }
 .sidebar-head { min-height:36px; padding:0 0 0 12px; margin-bottom:4px; border-bottom:0; border-radius:12px; }
 .sidebar-title { color:var(--text-3); font:400 13px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; letter-spacing:0; text-transform:none; }
 .sidebar-new { min-width:28px; min-height:28px; padding:3px 6px; border:0; border-radius:50%; background:transparent; color:var(--text-2); font:500 12px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
@@ -398,7 +393,8 @@ export function apply(): void {
 .sidebar-foot { padding:8px 0 0; border-top:1px solid var(--border-2); }
 .sidebar.collapsed { width:56px; padding:18px 10px 6px; }
 .sidebar.collapsed .sidebar-brand-row { height:36px; justify-content:center; padding:0; margin-bottom:12px; }
-.sidebar.collapsed .sidebar-product,.sidebar.collapsed .sidebar-session-label,.sidebar.collapsed .sidebar-title,.sidebar.collapsed .sidebar-head > :not(:last-child),.sidebar.collapsed .sidebar-groups { display:none; }
+.sidebar.collapsed .sidebar-wordmark,.sidebar.collapsed .sidebar-product,.sidebar.collapsed .sidebar-session-label,.sidebar.collapsed .sidebar-title,.sidebar.collapsed .sidebar-head > :not(:last-child),.sidebar.collapsed .sidebar-groups { display:none; }
+.sidebar.collapsed .sidebar-brand-row .sidebar-toggle { margin-left:0; }
 .sidebar.collapsed .sidebar-head { justify-content:center; padding:0; }
 .sidebar.collapsed .sidebar-list { padding:0; }
 .sidebar.collapsed .ws-item { width:36px; min-height:36px; justify-content:center; padding:0; }
@@ -442,21 +438,20 @@ export function apply(): void {
 @media (max-width: 1024px) {
   .header-secondary,.mode-badge { display:none; }
   .sidebar { width:240px; }
-  .tab-group-label { display:none; }
-  .tab-group + .tab-group { margin-left:16px; padding-left:16px; }
   .chat-message.assistant,.chat-message.error { width:min(712px,100%); }
   .chat-composer-row { max-width:712px; }
 }
 @media (max-width: 720px) {
-  .brand-subtitle,.header-command .long-label,.header-refresh .long-label,.header-notifications .long-label,.density-select { display:none; }
+  .brand-subtitle,.header-command .long-label,.header-refresh .long-label,.header-notifications .long-label { display:none; }
   .header { padding:8px 10px; }
   .header-actions { gap:4px; }
   .tabs { padding-left:8px; padding-right:8px; overflow-x:auto; }
-  .tab-group + .tab-group { margin-left:12px; padding-left:12px; }
+  .category-tab { padding-left:10px; padding-right:10px; }
   .body { padding:16px 12px 10px; }
   .project-title { position:relative; top:auto; margin:-16px -12px 14px; padding:11px 12px; flex-wrap:wrap; }
   .project-title .pid { width:100%; margin-left:0; }
   .chat-dock { padding:8px 12px 10px; }
+  .chat-model-select { max-width:132px; }
   .welcome { min-height:calc(100vh - 120px); padding:32px 10px; }
   .welcome-steps { flex-direction:column; }
   .overlay { padding:14px; }
@@ -469,11 +464,11 @@ export function apply(): void {
 .start-card:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 .start-card-label { font:600 14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
 .start-card-desc { color:var(--text-2); font:400 11.5px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
-/* UI-SIMPLE-01: More dropdown (four primary tabs + More) */
-.more-btn { color:var(--text-3); }
+/* Category menus keep every route inside its own information-architecture group. */
 .more-menu { position:fixed; min-width:240px; background:var(--bg-2); border:1px solid var(--border-strong); border-radius:12px; padding:6px; box-shadow:0 12px 40px rgba(0,0,0,.35); z-index:10002; font:12px/1.4 system-ui,sans-serif; color:var(--text); display:flex; flex-direction:column; gap:2px; }
 .more-item { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; border:0; background:none; color:var(--text); text-align:left; padding:8px 10px; border-radius:8px; cursor:pointer; font:inherit; }
 .more-item:hover { background:var(--bg-hover); }
+.more-item.active { background:var(--accent-soft); color:var(--accent-text); }
 .more-item .muted { font-size:10px; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* UI-SIMPLE-01: Settings progressive disclosure (acceptance §8 ui-settings) */
 .settings-section { border:1px solid var(--border-2); border-radius:12px; margin:8px 0; background:var(--bg-3); overflow:hidden; }
@@ -598,26 +593,9 @@ export function apply(): void {
     sidebarToggle.setAttribute('aria-expanded', String(!sidebarCollapsed))
     void render()
   }
-  // dsh-web state.density selector (the model dropdown's visual slot): Compact /
-  // Normal controls the panel font scale.
-  densityLoad()
-  const densitySelect = el('select', 'picker state.density-select')
-  const dOptCompact = el('option', '', '')
-  dOptCompact.value = 'compact'
-  const dOptNormal = el('option', '', '')
-  dOptNormal.value = 'normal'
-  densitySelect.append(dOptCompact, dOptNormal)
-  densitySelect.value = state.density
-  densitySelect.onchange = () => {
-    state.density = densitySelect.value === 'compact' ? 'compact' : 'normal'
-    densityApply(panel)
-  }
-  densityApply(panel)
-  // Research-agent model seat: the selection is persisted by the standalone
-  // server (/api/model → model.json) and consumed by the DSH-side plugin for
-  // the primary research role ('auto' = agent default). Labels re-evaluate
-  // with the locale (chromeModelChoices).
-  const modelSelect = el('select', 'picker state.density-select')
+  // Research-agent model seat. It belongs to the chat composer rather than
+  // global header chrome; the server still persists it through /api/model.
+  const modelSelect = el('select', 'chat-model-select')
   modelSelect.onchange = () => {
     const chosen = modelSelect.value
     void api<{ ok?: boolean }>('/api/model', {
@@ -630,9 +608,7 @@ export function apply(): void {
       }
     })
   }
-  const paintSelects = (): void => {
-    dOptCompact.textContent = t('shell', 'shell.density.compact')
-    dOptNormal.textContent = t('shell', 'shell.density.normal')
+  const paintModelSelect = (): void => {
     const modelValue = modelSelect.value
     modelSelect.replaceChildren()
     for (const choice of chromeModelChoices()) {
@@ -644,26 +620,24 @@ export function apply(): void {
     modelSelect.setAttribute('aria-label', t('shell', 'shell.model.ariaLabel'))
     modelSelect.title = t('shell', 'shell.model.label')
   }
-  paintSelects()
+  paintModelSelect()
   void api<{ ok?: boolean; model?: string }>('/api/model').then(state => {
     if (state?.ok === true && typeof state.model === 'string') {
       modelSelect.value = state.model
     }
   }).catch(() => { /* keep auto default */ })
   const headerActions = el('div', 'header-actions')
-  headerActions.append(sidebarToggle, modeBadge, commandsBtn, shortcutsBtn, bellBtn, densitySelect, modelSelect, themeBtn, refresh)
+  headerActions.append(modeBadge, commandsBtn, shortcutsBtn, bellBtn, themeBtn, refresh)
   header.appendChild(headerActions)
   main.appendChild(header)
 
-  // ── tabs (UI-SIMPLE-01: four primary tabs + More) ──
-  // Grouping/keys are locale-independent; labels/descriptions come from the
-  // pure navigation model (nav.ts tabGroups) and are re-painted on locale
-  // switch (paintChrome). Every non-primary entry stays reachable through
-  // the More menu with a stable deep link (acceptance §8 ui-routes).
+  // ── category navigation ──
+  // Every feature lives inside its semantic category. This keeps the top bar
+  // compact without hiding unrelated routes behind a generic "More" bucket.
   const tabs = el('div', 'tabs')
-  tabs.setAttribute('role', 'tablist')
+  tabs.setAttribute('role', 'navigation')
   tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
-  const tabButtons = new Map<string, HTMLElement>()
+  const categoryButtons = new Map<number, HTMLButtonElement>()
   const syncHash = (tab: string): void => {
     try { history.replaceState(null, '', `#tab=${tab}`) } catch { /* sandboxed iframe */ }
   }
@@ -680,53 +654,28 @@ export function apply(): void {
     }
     activateTab(entry.key)
   }
-  for (const tab of tabGroups().primary) {
-    const button = el('button', 'tab', '')
-    button.dataset.tab = tab.key
-    button.id = `tab-${tab.key}`
-    button.setAttribute('aria-controls', 'panel-body')
-    const shortcut = navShortcutIndex(tab.key)
-    if (shortcut >= 1 && shortcut <= 9) button.setAttribute('aria-keyshortcuts', `Alt+${shortcut}`)
-    button.setAttribute('role', 'tab')
-    button.setAttribute('aria-selected', tab.key === state.activeTab ? 'true' : 'false')
-    button.onclick = (event) => {
-      // A click on the pin glyph toggles the favourite instead of switching.
-      const target = event.target as HTMLElement
-      if (target.classList.contains('tab-pin')) {
-        tabTogglePin(tab.key)
-        return
-      }
-      activateTab(tab.key)
-    }
-    button.oncontextmenu = (event) => {
-      event.preventDefault()
-      tabTogglePin(tab.key)
-    }
-    tabButtons.set(tab.key, button)
-    tabs.appendChild(button)
-  }
-  // More dropdown: Gate/Budget/Artifacts/Terminal/Chat + Settings modal.
-  const moreBtn = el('button', 'tab more-btn', '')
-  moreBtn.dataset.tab = 'more'
-  moreBtn.setAttribute('aria-haspopup', 'menu')
-  moreBtn.setAttribute('aria-expanded', 'false')
-  const openMoreMenu = (): void => {
+  const openCategoryMenu = (groupIndex: number): void => {
+    const group = chromeTabGroups()[groupIndex]
+    const anchor = categoryButtons.get(groupIndex)
+    if (group === undefined || anchor === undefined) return
     const scrim = el('div', 'ctx-scrim')
     scrim.style.cssText = 'position:fixed;inset:0;z-index:10001;background:transparent'
-    const menu = el('div', 'more-menu')
+    const menu = el('div', 'more-menu category-menu')
     menu.setAttribute('role', 'menu')
-    menu.setAttribute('aria-label', t('shell', 'shell.nav.more.ariaLabel'))
-    for (const entry of tabGroups().more) {
+    menu.setAttribute('aria-label', group.label)
+    const appendEntry = (entry: { key: string; label: string; description: string; deepLink: string; kind?: string }): void => {
       const item = el('button', 'more-item')
       item.setAttribute('role', 'menuitem')
-      item.dataset.moreKey = entry.key
+      item.dataset.categoryKey = entry.key
       item.dataset.deepLink = entry.deepLink
-      item.id = `more-${entry.key}`
+      item.id = `category-${entry.key}`
+      const selected = entry.kind !== 'modal' && entry.key === state.activeTab
+      item.classList.toggle('active', selected)
+      if (selected) item.setAttribute('aria-current', 'page')
       const shortcut = navShortcutIndex(entry.key)
       if (shortcut >= 1 && shortcut <= 9) {
-        item.title = t('shell', 'shell.tab.title.more', {
+        item.title = t('shell', 'shell.tab.title', {
           label: entry.label,
-          menu: t('shell', 'shell.nav.more'),
           key: `Alt+${shortcut}`,
         })
       }
@@ -739,25 +688,38 @@ export function apply(): void {
       }
       menu.appendChild(item)
     }
+    for (const entry of group.tabs) {
+      appendEntry({ ...entry, deepLink: `#tab=${entry.key}` })
+    }
+    if (groupIndex === chromeTabGroups().length - 1) {
+      const settings = tabGroups().more.find(entry => entry.key === 'settings')
+      if (settings !== undefined) appendEntry(settings)
+    }
     scrim.onclick = () => scrim.remove()
     scrim.oncontextmenu = (event) => { event.preventDefault(); scrim.remove() }
     scrim.appendChild(menu)
     root.appendChild(scrim)
-    // Anchor under the More button, flipping at the right viewport edge.
-    const rect = moreBtn.getBoundingClientRect()
+    // Anchor under the category, flipping at the right viewport edge.
+    const rect = anchor.getBoundingClientRect()
     menu.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`
     menu.style.top = `${rect.bottom + 6}px`
-    // dsh-web i18n §13.4: locale switch re-opens the menu in the new locale.
-    registerOverlayRebuild(scrim, () => { scrim.remove(); openMoreMenu() })
+    registerOverlayRebuild(scrim, () => { scrim.remove(); openCategoryMenu(groupIndex) })
   }
-  moreBtn.onclick = () => openMoreMenu()
-  tabs.appendChild(moreBtn)
+  for (const [groupIndex, group] of chromeTabGroups().entries()) {
+    const button = el('button', 'tab category-tab', '')
+    button.dataset.category = String(groupIndex)
+    button.setAttribute('aria-haspopup', 'menu')
+    button.setAttribute('aria-expanded', 'false')
+    button.onclick = () => openCategoryMenu(groupIndex)
+    categoryButtons.set(groupIndex, button)
+    tabs.appendChild(button)
+  }
   main.appendChild(tabs)
 
   // ── body + picker ──
   const body = el('div', 'body')
   body.id = 'panel-body'
-  body.setAttribute('role', 'tabpanel')
+  body.setAttribute('role', 'region')
   body.setAttribute('aria-label', t('shell', 'shell.panelBody.aria'))
   main.appendChild(body)
   // Chat owns a main-level footer, outside the scrollable panel body. Keeping
@@ -767,35 +729,21 @@ export function apply(): void {
   main.appendChild(chatDock)
   const styleTabs = (): void => {
     body.classList.toggle('chat-active', state.activeTab === 'chat')
-    // UI-SIMPLE-01: when a More entry is active, the More button carries
-    // the active indicator (no primary tab matches).
-    const moreActive = (MORE_TAB_KEYS as readonly string[]).includes(state.activeTab)
-    moreBtn.classList.toggle('active', moreActive)
-    for (const [key, button] of tabButtons) {
-      const selected = key === state.activeTab
+    const groups = chromeTabGroups()
+    for (const [groupIndex, button] of categoryButtons) {
+      const group = groups[groupIndex]
+      if (group === undefined) continue
+      const active = group.tabs.find(entry => entry.key === state.activeTab)
+      const selected = active !== undefined
       button.classList.toggle('active', selected)
-      button.setAttribute('aria-selected', String(selected))
       if (selected) button.setAttribute('aria-current', 'page')
       else button.removeAttribute('aria-current')
-      // dsh-web pinned tabs: keep the ★ marker in sync (buttons are built
-      // once, so the pin class must be refreshed on every render).
-      const pinned = tabPinned(key)
-      button.classList.toggle('pinned', pinned)
-      button.setAttribute('aria-pressed', pinned ? 'true' : 'false')
-      const hasStar = button.querySelector('.tab-pin') !== null
-      if (pinned && !hasStar) {
-        const pin = el('span', 'tab-pin', '★ ')
-        pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
-        button.prepend(pin)
-      } else if (!pinned && hasStar) {
-        button.querySelector('.tab-pin')?.remove()
-      }
+      button.replaceChildren(el('span', 'category-name', group.label))
+      if (active !== undefined) button.appendChild(el('span', 'category-current', active.label))
+      button.appendChild(el('span', 'category-caret', '⌄'))
+      button.title = active !== undefined ? `${group.label} · ${active.label}` : group.label
+      button.setAttribute('aria-label', active !== undefined ? `${group.label}: ${active.label}` : group.label)
     }
-    // UI-SIMPLE-01: More tabs are not rendered as tablist buttons, so the
-    // panel is only labelled when its tab button actually exists.
-    const activeBtn = tabButtons.get(state.activeTab)
-    if (activeBtn !== undefined) body.setAttribute('aria-labelledby', activeBtn.id)
-    else body.removeAttribute('aria-labelledby')
   }
 
   // dsh-web document title: reflect the active tab + project in the tab
@@ -903,16 +851,15 @@ export function apply(): void {
     }
     if (projection !== null && booting) booting = false
     syncTitle(projection?.project?.name)
-    renderSidebar(sidebar, projects, state.projectId, (id) => { state.projectId = id; void render() })
+    renderSidebar(sidebar, projects, state.projectId, (id) => { state.projectId = id; void render() }, sidebarToggle)
     if (state.projectId === undefined) {
       syncTitle(undefined)
       // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start, §5 P1 ONBOARD-01):
       // the first screen offers exactly three primary actions — 新建研究 /
       // 打开已有项目 / 上传·接入 — defined by the pure nav.ts startActions()
       // model (labels re-evaluate per locale; codes/routes are the stable
-      // contract). The screen shows whenever NO project is selected (even
-      // when projects exist): the open list requires an EXPLICIT pick —
-      // projects[0] is never auto-selected (startScreenVisible contract).
+      // contract). Existing projects stay in the persistent sidebar, so the
+      // landing content does not duplicate its search and project list.
       const start = el('div', 'welcome start-screen')
       start.appendChild(el('div', 'welcome-mark', '⌁'))
       start.appendChild(el('h1', '', t('shell', 'shell.start.title')))
@@ -931,51 +878,6 @@ export function apply(): void {
         cards.appendChild(card)
       }
       start.appendChild(cards)
-      // Open-project list (Resume): explicit selection or exact id input.
-      if (projects.length > 0) {
-        start.appendChild(el('div', 'section-label', t('shell', 'shell.start.openListTitle')))
-        const pick = el('input', 'picker')
-        pick.type = 'text'
-        pick.placeholder = t('shell', 'shell.start.openListIdPlaceholder')
-        pick.style.cssText = 'width:100%;box-sizing:border-box;margin-bottom:8px'
-        const listBox = el('div')
-        listBox.style.cssText = 'max-height:30vh;overflow-y:auto;text-align:left'
-        const paintList = (): void => {
-          const q = pick.value
-          const matches = filterProjects(projects, q)
-          listBox.replaceChildren()
-          if (matches.length === 0) {
-            listBox.appendChild(el('div', 'empty', t('shell', 'shell.start.openListNoMatch', { query: q.trim() })))
-            return
-          }
-          for (const rp of matches) {
-            if (rp.project_id === undefined) continue
-            const row = el('button', 'ws-item')
-            row.style.cssText = 'width:100%;border:0;background:none;color:var(--text);text-align:left;padding:7px 10px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px'
-            const tone = STATUS_META[rp.status ?? '']?.tone ?? 'slate'
-            const dot = el('span')
-            dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:var(--tone-${tone});flex-shrink:0`
-            const name = el('span', 'grow', rp.name ?? rp.project_id)
-            name.style.cssText = 'font-size:11.5px'
-            const meta = el('span', 'muted mono', `${statusLabel(rp.status)} · ${rp.project_id.slice(0, 14)}`)
-            meta.style.cssText = 'font-size:9.5px'
-            row.append(dot, name, meta)
-            row.onmouseenter = () => { row.style.background = 'var(--bg-hover)' }
-            row.onmouseleave = () => { row.style.background = 'none' }
-            row.onclick = () => {
-              state.projectId = rp.project_id!
-              void render()
-            }
-            listBox.appendChild(row)
-          }
-        }
-        pick.oninput = paintList
-        start.appendChild(pick)
-        start.appendChild(listBox)
-        paintList()
-      } else {
-        start.appendChild(el('div', 'empty', t('shell', 'shell.start.openListEmpty')))
-      }
       chatDock.hidden = true
       chatDock.replaceChildren()
       body.replaceChildren(start)
@@ -1027,7 +929,7 @@ export function apply(): void {
     }
 
     switch (state.activeTab) {
-      case 'chat': await renderChat(body, chatDock, activeTarget); break
+      case 'chat': await renderChat(body, chatDock, activeTarget, modelSelect); break
       case 'phase': await renderPhase(body, projection, activeTarget); break
       case 'gates': await renderGates(body, activeTarget); break
       case 'runs': renderRuns(body, projection); break
@@ -1084,26 +986,8 @@ export function apply(): void {
     sidebarToggle.title = t('shell', 'shell.sidebar.toggle')
     sidebarToggle.setAttribute('aria-label', t('shell', 'shell.sidebar.toggleAria'))
     paintBell()
-    paintSelects()
-    // UI-SIMPLE-01: primary tabs + More re-paint from the pure nav model
-    // (tabGroups() evaluates t() against the current locale).
-    moreBtn.textContent = t('shell', 'shell.nav.more')
-    moreBtn.title = t('shell', 'shell.nav.more.title')
-    for (const tab of tabGroups().primary) {
-      const button = tabButtons.get(tab.key)
-      if (button === undefined) continue
-      button.replaceChildren()
-      const pinned = tabPinned(tab.key)
-      if (pinned) {
-        const pin = el('span', 'tab-pin', '★ ')
-        pin.style.cssText = 'color:var(--tone-amber);font-size:10px'
-        button.prepend(pin)
-      }
-      button.append(document.createTextNode(tab.label))
-      button.title = pinned
-        ? t('shell', 'shell.tab.pinned.title', { label: tab.label })
-        : t('shell', 'shell.tab.title', { label: tab.label, key: `Alt+${navShortcutIndex(tab.key)}` })
-    }
+    paintModelSelect()
+    styleTabs()
     tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
     syncTitle(lastProjectName)
   }
@@ -1287,12 +1171,14 @@ export function apply(): void {
       sidebar.classList.add('collapsed')
       if (main !== null) main.classList.add('expanded')
       sidebarToggle.textContent = '›'
+      sidebarToggle.setAttribute('aria-expanded', 'false')
     }
   }
   if (sidebarCollapsed && sidebar !== null) {
     sidebar.classList.add('collapsed')
     if (main !== null) main.classList.add('expanded')
     sidebarToggle.textContent = '›'
+    sidebarToggle.setAttribute('aria-expanded', 'false')
   }
   onResize()
   window.addEventListener('resize', onResize)

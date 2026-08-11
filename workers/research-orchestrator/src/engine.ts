@@ -115,7 +115,7 @@ export interface ProjectionGate {
 
 /** Minimal structural view of the Kernel projection response (self-contained). */
 export interface KernelProjection {
-  project: { project_id: string; status: string }
+  project: { project_id: string; status: string; brief_status?: 'collecting' | 'confirmed' }
   pending_gates: ProjectionGate[]
 }
 
@@ -230,7 +230,8 @@ export function planForStatus(status: ProjectStatus): ActionPlan | null {
  * re-run. Retry: `queued`/`running`/`failed` actions are re-run only while
  * attempt < max_attempts; a `failed` action at its attempt cap stays failed.
  */
-export function decideActions(status: ProjectStatus, existing: ActionLike[]): ActionPlan[] {
+export function decideActions(status: ProjectStatus, existing: ActionLike[], briefStatus: 'collecting' | 'confirmed' = 'confirmed'): ActionPlan[] {
+  if (status === 'DRAFT' && briefStatus === 'collecting') return []
   const plan = planForStatus(status)
   if (plan === null) return []
   const prior = existing.find(a => a.idempotency_key === plan.idempotency_key)
@@ -382,7 +383,7 @@ export class Engine {
         const projection = await this.getProjection(project.project_id)
         detail.status = projection.project.status
         const existing = this.dryRun ? [] : this.store.listByProject(project.project_id)
-        const plans = decideActions(projection.project.status as ProjectStatus, existing)
+        const plans = decideActions(projection.project.status as ProjectStatus, existing, projection.project.brief_status ?? 'confirmed')
         detail.planned = plans
         result.planned += plans.length
         for (const plan of plans) {
