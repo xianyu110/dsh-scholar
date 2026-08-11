@@ -227,6 +227,77 @@ describe('project state machine', () => {
     kernel.close()
   })
 
+  it('PROJECT-DELETE-01: only an archived project can be tombstoned and normal reads become 404', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'Delete Me', workspace: '/w', brief: makeBrief() })
+    expectKernelError(() => kernel.deleteProject({
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      confirm_name: project.name,
+      reason: 'research discontinued',
+      deleted_by: 'pi_owner',
+      request_id: 'req_delete_1',
+    }), 409, 'project_not_archived')
+
+    const archived = kernel.archiveProject(project.project_id)
+    const receipt = kernel.deleteProject({
+      project_id: project.project_id,
+      expected_revision: archived.revision,
+      confirm_name: project.name,
+      reason: 'research discontinued',
+      deleted_by: 'pi_owner',
+      request_id: 'req_delete_1',
+    })
+    expect(receipt).toMatchObject({
+      project_id: project.project_id,
+      deleted_by: 'pi_owner',
+      revision: archived.revision + 1,
+      request_id: 'req_delete_1',
+    })
+    expect(kernel.listProjects()).toEqual([])
+    expectKernelError(() => kernel.getProject(project.project_id), 404, 'project_not_found')
+    const deleted = kernel.listEvents(project.project_id).filter(event => event.kind === 'project.deleted')
+    expect(deleted).toHaveLength(1)
+    expect(deleted[0]?.payload).toMatchObject({ project_id: project.project_id, deleted_by: 'pi_owner', request_id: 'req_delete_1' })
+    // Idempotent replay is available through the dedicated delete seam even
+    // though ordinary project reads are now deliberately hidden.
+    expect(kernel.deleteProject({
+      project_id: project.project_id,
+      expected_revision: archived.revision,
+      confirm_name: project.name,
+      reason: 'research discontinued',
+      deleted_by: 'pi_owner',
+      request_id: 'req_delete_1',
+    })).toEqual(receipt)
+    kernel.close()
+  })
+
+  it('PROJECT-DELETE-01: confirmation, revision and shared CAS references are protected', () => {
+    const kernel = freshKernel()
+    const first = kernel.createProject({ name: 'First', workspace: '/w/1', brief: makeBrief() })
+    const second = kernel.createProject({ name: 'Second', workspace: '/w/2', brief: makeBrief() })
+    const bytes = Buffer.from([0, 255, 1, 2, 3, 128])
+    const a = kernel.registerArtifact({ project_id: first.project_id, kind: 'data', content: bytes, metadata: {} })
+    const b = kernel.registerArtifact({ project_id: second.project_id, kind: 'data', content: bytes, metadata: {} })
+    expect(a.sha256).toBe(b.sha256)
+    const archived = kernel.archiveProject(first.project_id)
+    const base = {
+      project_id: first.project_id,
+      expected_revision: archived.revision,
+      reason: 'done',
+      deleted_by: 'pi_owner',
+      request_id: 'req_delete_2',
+    }
+    expectKernelError(() => kernel.deleteProject({ ...base, confirm_name: 'wrong' }), 422, 'project_delete_confirmation_invalid')
+    expectKernelError(() => kernel.deleteProject({ ...base, confirm_name: first.name, expected_revision: archived.revision - 1 }), 409, 'revision_conflict')
+    kernel.deleteProject({ ...base, confirm_name: first.name })
+    expect(kernel.getArtifact(second.project_id, b.artifact_id).size_bytes).toBe(bytes.byteLength)
+    expect(kernel.verifyArtifactRefs([b.sha256])).toEqual({ ok: true, missing: [] })
+    kernel.collectOrphanBlobs()
+    expect(kernel.verifyArtifactRefs([b.sha256])).toEqual({ ok: true, missing: [] })
+    kernel.close()
+  })
+
   it('product-spec.md §1: high-risk domains (clinical/wet-lab/weapons/biosecurity) are rejected at creation', () => {
     const kernel = freshKernel()
     for (const domain of ['clinical', 'wet-lab', 'weapons', 'biosecurity', 'human-trials']) {
@@ -2231,6 +2302,93 @@ describe('v1 PI-only intake adopt / archive / unarchive (GOV-01/ONBOARD-01 §5 P
       const piUn = await fetch(`${base}/v1/projects/${projectId}/unarchive`, { method: 'POST', headers: H('ops-1') })
       expect(piUn.status).toBe(200)
       expect((await piUn.json() as { status: string }).status).not.toBe('ARCHIVED')
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('PROJECT-DELETE-01: v1/v2 DELETE is archived-only, PI-only, confirmed and idempotent', async () => {
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const kernel = freshKernel()
+    const project = kernel.createProject({
+      name: 'Delete HTTP', workspace: '/w', brief: makeBrief(), creator_principal_id: 'pi-1',
+    } as never)
+    kernel.addProjectMember({ project_id: project.project_id, principal_id: 'operator-1', role: 'operator', actor: 'pi-1' })
+    kernel.addProjectMember({ project_id: project.project_id, principal_id: 'researcher-1', role: 'researcher', actor: 'pi-1' })
+    kernel.addProjectMember({ project_id: project.project_id, principal_id: 'auditor-1', role: 'auditor', actor: 'pi-1' })
+    kernel.addProjectMember({ project_id: project.project_id, principal_id: 'viewer-1', role: 'viewer', actor: 'pi-1' })
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    const base = `http://127.0.0.1:${port}`
+    const body = (revision: number, confirmName = project.name) => JSON.stringify({
+      expected_revision: revision, confirm_name: confirmName, reason: 'finished',
+    })
+    const headers = (principal: string, requestId: string, role?: string): Record<string, string> => ({
+      'content-type': 'application/json',
+      'x-principal-id': principal,
+      'x-request-id': requestId,
+      ...(role !== undefined ? { 'x-principal-role': role } : {}),
+    })
+    try {
+      const active = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: headers('pi-1', 'req-http-delete'), body: body(project.revision),
+      })
+      expect(active.status).toBe(409)
+      expect((await active.json() as { error: { code: string } }).error.code).toBe('project_not_archived')
+      const archived = kernel.archiveProject(project.project_id)
+      const operator = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: headers('operator-1', 'req-http-operator'), body: body(archived.revision),
+      })
+      expect(operator.status).toBe(403)
+      expect((await operator.json() as { error: { code: string } }).error.code).toBe('role_forbidden')
+      for (const [principal, role] of [['researcher-1', 'researcher'], ['auditor-1', 'auditor'], ['viewer-1', 'viewer']] as const) {
+        const denied = await fetch(`${base}/v1/projects/${project.project_id}`, {
+          method: 'DELETE', headers: headers(principal, `req-http-${role}`), body: body(archived.revision),
+        })
+        expect(denied.status).toBe(403)
+        expect((await denied.json() as { error: { code: string } }).error.code).toBe('role_forbidden')
+      }
+      const stranger = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: headers('stranger-1', 'req-http-stranger'), body: body(archived.revision),
+      })
+      expect(stranger.status).toBe(404)
+      const anonymous = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: { 'content-type': 'application/json', 'x-request-id': 'req-http-anonymous' }, body: body(archived.revision),
+      })
+      expect(anonymous.status).toBe(422)
+      expect((await anonymous.json() as { error: { code: string } }).error.code).toBe('principal_required')
+      const wrong = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: headers('pi-1', 'req-http-wrong'), body: body(archived.revision, 'wrong'),
+      })
+      expect(wrong.status).toBe(422)
+      const deleted = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: headers('pi-1', 'req-http-delete'), body: body(archived.revision),
+      })
+      expect(deleted.status).toBe(200)
+      const receipt = await deleted.json() as { project_id: string; request_id: string; revision: number }
+      expect(receipt).toMatchObject({ project_id: project.project_id, request_id: 'req-http-delete', revision: archived.revision + 1 })
+      expect((await fetch(`${base}/v1/projects/${project.project_id}`)).status).toBe(404)
+      await expect((await fetch(`${base}/v1/projects`)).json()).resolves.toEqual([])
+      const hiddenWrite = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'resurrected' }),
+      })
+      expect(hiddenWrite.status).toBe(404)
+      const replay = await fetch(`${base}/v1/projects/${project.project_id}`, {
+        method: 'DELETE', headers: headers('pi-1', 'req-http-delete'), body: body(archived.revision),
+      })
+      expect(replay.status).toBe(200)
+      expect(await replay.json()).toEqual(receipt)
+
+      const v2Project = kernel.createProject({
+        name: 'Delete V2', workspace: '/w2', brief: makeBrief(), creator_principal_id: 'pi-1',
+      } as never)
+      const v2Archived = kernel.archiveProject(v2Project.project_id)
+      const v2Deleted = await fetch(`${base}/v2/projects/${v2Project.project_id}`, {
+        method: 'DELETE', headers: headers('pi-1', 'req-http-v2', 'pi'),
+        body: JSON.stringify({ expected_revision: v2Archived.revision, confirm_name: v2Project.name, reason: 'finished' }),
+      })
+      expect(v2Deleted.status).toBe(200)
+      expect((await v2Deleted.json() as { request_id: string }).request_id).toBe('req-http-v2')
     } finally {
       server.close()
       kernel.close()

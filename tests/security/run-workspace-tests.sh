@@ -31,6 +31,9 @@
 #   ws-watch                  ?after_revision=N -> changed nodes + deleted
 #                             tombstones; current revision -> empty
 #   ws-search                 POST search: prefix + glob path matching
+#   ws-content-search         POST search q/mode=content: line/snippet hits,
+#                             case sensitivity, binary skip, empty q 422,
+#                             q+prefix / q+mode=path 422, path search intact
 #   ws-history-rollback       GET history + ?path=&version=N rollback read
 #   ws-cross-project          workspace of another project -> 404
 #   ws-manuscript-list        project workspace list includes the
@@ -332,6 +335,86 @@ SEARCH_HIT=$(printf '%s' "$SEARCH" | jqfield "(j.nodes||[]).some((n)=>n.path==='
 [ "$SEARCH_HIT" = "true" ] \
   && ok "ws-search: glob img/*.png finds the asset" \
   || bad "ws-search: expected img/plot.png from glob, got $SEARCH"
+
+# ── ws-content-search (WORK-01: linear text scan, bounded) ──────────────────
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/nodes" \
+  -d '{"path":"src/search-target.ts","content":"export const needle = 1\nNeedle uppercase here\nplain line\n"}' > /dev/null
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/nodes" \
+  -d '{"path":"notes/search-notes.md","content":"nothing to find here\n"}' > /dev/null
+CSEARCH=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"needle","mode":"content"}')
+CSEARCH_HIT=$(printf '%s' "$CSEARCH" | jqfield "(j.hits||[]).some((h)=>h.path==='src/search-target.ts')")
+CSEARCH_LINE=$(printf '%s' "$CSEARCH" | jqfield "(j.hits.find((h)=>h.path==='src/search-target.ts')||{}).matches?.[0]?.line??-1")
+CSEARCH_SNIP=$(printf '%s' "$CSEARCH" | jqfield "(j.hits.find((h)=>h.path==='src/search-target.ts')||{}).matches?.[0]?.snippet??''")
+if [ "$CSEARCH_HIT" = "true" ] && [ "$CSEARCH_LINE" = "1" ] && [ "$CSEARCH_SNIP" = "export const needle = 1" ]; then
+  ok "ws-content-search: q=needle -> src/search-target.ts line 1 with snippet"
+else
+  bad "ws-content-search: expected line 1 hit with snippet, got hit=$CSEARCH_HIT line=$CSEARCH_LINE snippet=$CSEARCH_SNIP"
+fi
+CSEARCH_NOMATCH=$(printf '%s' "$CSEARCH" | jqfield "(j.hits||[]).some((h)=>h.path==='notes/search-notes.md')")
+if [ "$CSEARCH_NOMATCH" = "false" ] && [ "$(printf '%s' "$CSEARCH" | jqfield "j.truncated??''")" = "false" ]; then
+  ok "ws-content-search: non-matching text file absent, truncated=false"
+else
+  bad "ws-content-search: expected notes/search-notes.md absent + truncated=false, got $CSEARCH"
+fi
+# Case sensitivity: q=needle is case-insensitive by default (2 lines), exact
+# with case_sensitive=true (1 line — 'Needle' is not 'needle').
+CS_LOOSE=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"needle"}' | jqfield "(j.hits.find((h)=>h.path==='src/search-target.ts')||{}).match_count??-1")
+CS_EXACT=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"needle","case_sensitive":true}' | jqfield "(j.hits.find((h)=>h.path==='src/search-target.ts')||{}).match_count??-1")
+if [ "$CS_LOOSE" = "2" ] && [ "$CS_EXACT" = "1" ]; then
+  ok "ws-content-search: case-insensitive default (2 matches), case_sensitive=true exact (1)"
+else
+  bad "ws-content-search: expected loose=2 exact=1, got loose=$CS_LOOSE exact=$CS_EXACT"
+fi
+# Binary nodes are excluded: the uploaded PNG asset carries the ASCII text
+# 'BINARYPAYLOAD' — content search must never report it.
+CS_BIN=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"BINARYPAYLOAD"}' | jqfield "(j.hits||[]).some((h)=>h.path==='img/plot.png')")
+if [ "$CS_BIN" = "false" ]; then
+  ok "ws-content-search: binary node (img/plot.png) excluded despite matching ASCII bytes"
+else
+  bad "ws-content-search: binary node leaked into content search results"
+fi
+# Param validation: empty/whitespace q -> 422 invalid_query; q combined with
+# path filters -> 422 invalid_search_params; mode='path' with q -> 422.
+CS_EMPTY_CODE=$(curl -s -o "$WORK/cs-empty.json" -w '%{http_code}' -X POST \
+  "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":""}')
+CS_EMPTY_ERR=$(jqfield "j.error?.code??''" < "$WORK/cs-empty.json")
+CS_WS_CODE=$(curl -s -o "$WORK/cs-ws.json" -w '%{http_code}' -X POST \
+  "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"   "}')
+CS_WS_ERR=$(jqfield "j.error?.code??''" < "$WORK/cs-ws.json")
+if [ "$CS_EMPTY_CODE" = "422" ] && [ "$CS_EMPTY_ERR" = "invalid_query" ] \
+  && [ "$CS_WS_CODE" = "422" ] && [ "$CS_WS_ERR" = "invalid_query" ]; then
+  ok "ws-content-search: empty + whitespace q -> HTTP 422 invalid_query"
+else
+  bad "ws-content-search: expected 422 invalid_query for empty/whitespace q, got $CS_EMPTY_CODE/$CS_EMPTY_ERR and $CS_WS_CODE/$CS_WS_ERR"
+fi
+CS_MIX_CODE=$(curl -s -o "$WORK/cs-mix.json" -w '%{http_code}' -X POST \
+  "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"needle","prefix":"src"}')
+CS_MIX_ERR=$(jqfield "j.error?.code??''" < "$WORK/cs-mix.json")
+CS_PATHQ_CODE=$(curl -s -o "$WORK/cs-pathq.json" -w '%{http_code}' -X POST \
+  "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"q":"needle","mode":"path"}')
+CS_PATHQ_ERR=$(jqfield "j.error?.code??''" < "$WORK/cs-pathq.json")
+if [ "$CS_MIX_CODE" = "422" ] && [ "$CS_MIX_ERR" = "invalid_search_params" ] \
+  && [ "$CS_PATHQ_CODE" = "422" ] && [ "$CS_PATHQ_ERR" = "invalid_search_params" ]; then
+  ok "ws-content-search: q+prefix and q+mode=path -> HTTP 422 invalid_search_params"
+else
+  bad "ws-content-search: expected 422 invalid_search_params, got $CS_MIX_CODE/$CS_MIX_ERR and $CS_PATHQ_CODE/$CS_PATHQ_ERR"
+fi
+# Legacy path search still answers on the same endpoint (no q).
+CS_LEGACY=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/search" \
+  -H 'content-type: application/json' -d '{"prefix":"src"}' | jqfield "(j.nodes||[]).some((n)=>n.path==='src/search-target.ts')")
+if [ "$CS_LEGACY" = "true" ]; then
+  ok "ws-content-search: legacy path search (prefix only) unaffected"
+else
+  bad "ws-content-search: legacy prefix search regressed"
+fi
 # Rollback read: v1 of a rewritten node comes back from history bytes.
 printf 'first draft\n' > "$WORK/rev.txt"
 ROLL1=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/workspaces/$WS/nodes" \

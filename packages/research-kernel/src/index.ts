@@ -10,9 +10,14 @@ export {
   INTAKE_DDL, GRILL_TAXONOMY_VERSION, GRILL_QUESTION_REVISION, INTAKE_DEFAULT_TTL_MS, INTAKE_STAGED_TTL_MS,
   GRILL_QUESTION_BANK, questionsForTargetPhase, requiredQuestionCodes, scanIntakeArtifactStatic,
   artifactKindForFile, isImportableMetricsFile, parseMetricsFileV1, buildPhaseProposal, questionViews,
-  SAFE_PHASE_LANDING,
+  SAFE_PHASE_LANDING, isTexMaterializableFile, isCodeMaterializableFile,
+  TEX_MATERIALIZE_EXTENSIONS, CODE_MATERIALIZE_EXTENSIONS, ARCHIVE_SCAN_EXTENSIONS, INTAKE_ARCHIVE_EXTENSIONS,
   type GrillQuestionDef, type StaticScanVerdict, type PhaseLanding, type ParsedMetricsFile,
 } from './intake.js'
+export {
+  scanArchive, extractArchiveEntries, archiveKindOf, ArchiveScanError, DEFAULT_ARCHIVE_LIMITS,
+  type ArchiveKind, type ArchiveLimits, type ArchiveScanEntry, type ArchiveScanResult, type ArchiveScanErrorCode,
+} from './archive-scan.js'
 export { IMAGES_LOCK, getLockedDigest, validateImageDigest, type ImagesLock, type LockedImageKind, type SecureJobKind } from './images-lock.js'
 export { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
 export { startKernelServer, type KernelServerOptions } from './server.js'

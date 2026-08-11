@@ -103,7 +103,7 @@ for s in "${SCRIPTS[@]}"; do
   bash "$s" > "$LOG" 2>&1
   RC=$?
   SKIPPED=0
-  if grep -qE "SKIP|skip" "$LOG"; then SKIPPED=1; fi
+  if grep -qE "(^|[[:space:]])SKIP([[:space:]:]|$)|(^|[[:space:]])skip([[:space:]:]|$)" "$LOG"; then SKIPPED=1; fi
   ZERO=0
   # "180 passed" must NOT count as "0 passed" — require the count to be a
   # standalone zero (not preceded by another digit).

@@ -75,6 +75,8 @@ draft → uploading → scanning → needs_input ↔ grilling
 
 扫描必须验证 MIME 与 magic、归一化根相对路径，拒绝绝对路径、`..`、NUL、设备、FIFO、越界 symlink、重复大小写冲突、zip/tar bomb。Parser 在无网络、无执行权限、只读输入、受限 CPU/内存/时间的 sandbox 中运行；TeX、脚本、notebook、HTML、SVG 和 ANSI 均不能自动执行。不可信 HTML/SVG 只允许安全文本或光栅预览。
 
+> 实现注记（commit 待定，主代理统一提交）：受控 archive 解包扫描已实现（archive-scan.ts，node 内置 zlib gunzip/inflateRawSync（`maxOutputLength` 有界）+ 手写最小 ZIP（EOCD + central directory）/TAR（ustar + GNU longname/longlink + pax）只读解析，不 shell 出系统 unzip/tar、不执行内容）：scanIntake 对 clean 的 .zip/.tar/.tar.gz/.tgz（扩展名 + magic）逐条目应用与 workspace 相同的路径安全规则（复用 normalizeWorkspacePath：绝对/`..`/NUL/盘符/反斜杠拒绝；重复规范化与大小写冲突拒绝；symlink/hardlink/设备/FIFO 条目拒绝——失败即 quarantine，fail closed），并强制条目数（≤1000）、总解压字节（≤512MiB）、单文件（≤64MiB）、压缩比（>100x）上限（`ResearchKernel.ARCHIVE_MAX_*` 静态可覆写）。解包结果以"展开视图"进入 scan_result.archive_extract（status=ok + entries 路径/大小）与 scan_summary（extracted_entries/extracted_bytes）；**只写 intake 隔离区**（intake 表 + intake-staged，pre-accept 零权威写不变），adopt 物化时按条目重读 staged 字节。bz2/xz/7z 与单文件 gzip（如 data.csv.gz）无解包器 → 记录 status=unsupported（不 quarantine，仍可按代码 Artifact 采用）；zip64 单条目与未知压缩方法 → 拒绝（unsupported_format/unsupported_compression，环境上限内实际不可达）。
+
 Secret detector 命中时默认 quarantine 并要求用户删除、替换或建立服务端 `SecretRef`；secret value 不进入模型 prompt、浏览器响应、日志、配置、Manifest 或 Bundle。
 
 ## 5. Grill Me
@@ -120,9 +122,13 @@ Grill Me 是确定性缺口收集器，不是让 LLM 自由判断研究已完成
 
 没有由本 Kernel 接受的签名 RunManifest 时，不得合成 RunSet、accepted Evidence 或 supported Claim。
 
+> 实现注记（commit 待定，主代理统一提交）：TeX/CodeSnapshot 采用物化已实现——adopt 单事务（权威导入：CAS 提升 + Artifact 行 + pending Gate + draft Evidence + AdoptionReceipt）**成功后**（绝不回滚 adopt）执行尽力增强物化：TeX 文件/展开条目 → 项目 TeX workspace document（tex-workspace `ensureDocument`/`writeFile`，document_id 生成规则为 tex-workspace 的 `doc_<uuid12>`、每项目一个文档复用、首写文件 version=1，路径冲突 → gap `tex_path_conflict`，不静默覆盖）；代码文件/展开条目 → 项目 `code` workspace（workspace-store `write`/`writeBinary`，expected version=0 create-if-absent，冲突 → gap；workspace 名 `intake-<intake 后缀>`），代码物化后经 `snapshotCodeArchive` 的 workspace 语义生成可选 CodeSnapshot（`receipt.code_snapshot_refs`，失败仅审计）；物化结果写入 `AdoptionReceipt.import_mappings`（每映射：source 文件名/条目 → 目标 workspace path 或 document_id + status `materialized|gap` + reason；archive 内非 TeX/代码条目 → gap `entry_type_not_materialized`，留在被采用归档 Artifact 内）。语义：**adopt 是权威导入，物化是尽力增强**——任何物化失败（含超上限条目）只记 gap，adopt 保持成功；崩溃窗口（adopt 已提交、物化未完成）下 receipt 无 import_mappings，幂等重放返回已存 Receipt，不重作物化。
+
 ## 7. Adoption 事务、恢复与 GC
 
 accept 必须在一个 Kernel 事务中校验 Human Principal、最新 proposal、target revision、Blob scan、mapping ownership 和 required questions，然后写入 AdoptionReceipt、Project/ProjectArtifact/Workspace 映射、待处理 Gate/Action 与 Outbox。失败全部回滚。相同 scope + Idempotency-Key + request hash 返回同一 Receipt；不同 hash 返回 409。
+
+> 物化边界（commit 待定）：§6.1 的 TeX/CodeSnapshot 物化**在事务提交后**执行（见 §6.1 注记），不属于本事务的原子范围——事务内的 Workspace 映射指权威 Artifact/采纳对象，workspace 物化是事务后的尽力增强，失败记 gap/审计且不回滚 adopt（崩溃恢复按 adoption_id 重驱仍只保证事务内对象不部分采用）。
 
 崩溃后按 adoption_id 重驱，不得出现部分采用。未采用临时 Blob 默认 24 小时 GC，Intake 默认 7 天过期；quarantine、expiry、purge 都写审计。已采用 Artifact 进入正常 retention，不受 intake GC 影响。
 

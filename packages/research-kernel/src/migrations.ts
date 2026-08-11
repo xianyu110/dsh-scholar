@@ -19,7 +19,7 @@ import { TRAJECTORY_DDL } from './trajectory.js'
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 16
+export const SCHEMA_VERSION = 17
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1082,6 +1082,25 @@ const workspaceRecoveryQuarantine = (db: DatabaseSync, report: MigrationReport):
 }
 
 /**
+ * 0019 — PROJECT-DELETE-01: archived Project deletion is an additive,
+ * auditable tombstone. The aggregate row and all evidence/audit references
+ * remain in place; ordinary read paths filter deleted_at. A partial unique
+ * index makes request replay stable without constraining legacy NULL rows.
+ */
+const projectDeletionTombstone = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'projects', 'deleted_at', 'TEXT')
+  ensureColumn(db, 'projects', 'deleted_by', 'TEXT')
+  ensureColumn(db, 'projects', 'deletion_reason', 'TEXT')
+  ensureColumn(db, 'projects', 'deletion_request_id', 'TEXT')
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_deletion_request
+    ON projects(deletion_request_id) WHERE deletion_request_id IS NOT NULL`)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.projects_tombstoned = Number((db.prepare(
+    'SELECT COUNT(*) AS n FROM projects WHERE deleted_at IS NOT NULL',
+  ).get() as { n: number }).n)
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -1190,6 +1209,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'WORK-01 §5 P2: workspaces.quarantine TEXT — durable marker for the crash-recovery scan (scanWorkspaceIntegrity isolates unrepairable workspaces until a later scan reconciles cleanly)',
     body: workspaceRecoveryQuarantine.toString(),
     up: workspaceRecoveryQuarantine,
+  },
+  {
+    id: '0019_project_deletion_tombstone',
+    description: 'PROJECT-DELETE-01: archived project tombstone + idempotent deletion request receipt (audit/retention preserving)',
+    body: projectDeletionTombstone.toString(),
+    up: projectDeletionTombstone,
   },
 ]
 

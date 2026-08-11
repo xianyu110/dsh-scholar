@@ -141,7 +141,7 @@ export interface ClaimRow { claim_id?: string; statement?: string; status?: stri
 export interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number }; artifact_refs?: string[]; run_ids?: string[]; provenance_status?: string }
 export interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number; metadata?: Record<string, unknown> }
 export interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
-export interface ProjectRow { project_id?: string; name?: string; status?: string; updated_at?: string }
+export interface ProjectRow { project_id?: string; name?: string; status?: string; revision?: number; updated_at?: string }
 
 /* ── TRAJ-01/SUBAGENT-01 wire shapes (research-schemas/trajectory.ts
  *  contract, docs/trajectory-subagents.md §1/§3 — mirrored structurally so

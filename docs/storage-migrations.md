@@ -54,6 +54,8 @@ meta 保存 schema_version、database_id、created_at、last_migrated_at。代�
 
 所有项目子表按 project_id 建索引。外键使用 RESTRICT 或明确 tombstone，不用级联删除审计对象。
 
+Project delete 采用 additive tombstone migration，不物理删除 `projects` 行：`deleted_at/deleted_by/deletion_reason/deletion_request_id` 均可空，`deletion_request_id` 对非空值唯一。删除事务仅在 ARCHIVED + revision/确认匹配时填写这些列、递增 revision 并写 `project.deleted` Outbox；正常查询统一加 `deleted_at IS NULL`。成员、Decision、Outbox、Artifact/Workspace/TeX 引用在 retention 期间继续保留。物理 purge 是独立、可恢复的运维流程，必须跨所有 WAL store 完成 quiesce/receipt，且不能直接 unlink CAS；GC 的全局 live ref 集合至少覆盖 Artifact、workspace node/FileRevision 和 released Bundle，最后引用消失且超过 grace/hold 才能删 Blob。
+
 ### 3.1 Schema v2 初始 DDL
 
 除 §4 Terminal 与 §5 TeX 表外，初始迁移必须等价于下列 DDL。JSON body 在写入前由 reconstruction-contracts.md 对应 Zod Schema 校验。
@@ -83,6 +85,10 @@ CREATE TABLE projects (
   fixture_id TEXT,
   pre_archive_status TEXT,
   history_json TEXT NOT NULL DEFAULT '[]',
+  deleted_at TEXT,
+  deleted_by TEXT,
+  deletion_reason TEXT,
+  deletion_request_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -648,8 +654,8 @@ workspace 的每次 mutation 是**两种介质上的两个提交**：磁盘字�
 - **孤儿 `.ws-tmp-<8hex>`**（树内 + `.ws-meta` 历史区）→ 删除；被 row 覆盖的同名文件不误删。
 - **超上限文件 / 树内 symlink**：外部篡改——有 CAS 副本则恢复，否则隔离。
 
-**隔离语义**：无法可证修复时把 `workspaces.quarantine = <reason>` 落库（migration 0018 增加列，SCHEMA_VERSION 16，幂等 ensureColumn；0011 已发布 WORKSPACE_DDL 不原地改，store 自身连接用同款存在性检查收敛——STORE-08）。隔离 workspace 的一切读写/move/delete/history/watch/快照拒绝（HTTP 503 `workspace_inconsistent`）直到字节恢复后下一次扫描干净收敛自动清除（自愈，无手工 flag）。列由 0018 增加，旧库升级即得。
+**隔离语义**：无法可证修复时把 `workspaces.quarantine = <reason>` 落库（migration 0018 引入该列时为 SCHEMA_VERSION 16；当前 0019 后为 17，幂等 ensureColumn；0011 已发布 WORKSPACE_DDL 不原地改，store 自身连接用同款存在性检查收敛——STORE-08）。隔离 workspace 的一切读写/move/delete/history/watch/快照拒绝（HTTP 503 `workspace_inconsistent`）直到字节恢复后下一次扫描干净收敛自动清除（自愈，无手工 flag）。列由 0018 增加，旧库升级即得。
 
-**验证**：tests/unit/crash-recovery.test.ts 11/11（全窗口 + 双扫幂等 + 重启持久 + 自愈）、tests/unit/workspace-store.test.ts 16/16、tests/unit/backup.test.ts 2/2、tests/unit/migrations.test.ts 16/16（0018 列/rewind 幂等）、tests/security/run-workspace-tests.sh 41/41（ws-crash-recovery 3 断言：真实 kernel 进程 kill+重启同 dataDir——启动隔离 503、恢复字节自愈、rename-before-row 前滚 v2）。
+**验证**：tests/unit/crash-recovery.test.ts 11/11（全窗口 + 双扫幂等 + 重启持久 + 自愈）、tests/unit/workspace-store.test.ts 16/16、tests/unit/workspace-search.test.ts 12/12（内容搜索，WORK-01）、tests/unit/backup.test.ts 2/2、tests/unit/migrations.test.ts 17/17（0018 workspace 隔离 + 0019 Project tombstone 列/索引及 rewind 幂等）、tests/security/run-workspace-tests.sh 48/48（ws-crash-recovery 3 断言：真实 kernel 进程 kill+重启同 dataDir——启动隔离 503、恢复字节自愈、rename-before-row 前滚 v2；ws-content-search 7 断言）。
 
 **Fleet 侧**（§5 P2 附项）：`InMemoryAgentRegistry`、`RemoteFleetServer` 的 pending/outstanding/stages/claimedJobIds 与代理端 `AgentOutboundSpool` 全部为内存态（无磁盘 spool）。重启丢失按既有 lease 过期语义自愈，不引入大持久化框架：agent 重启后重新 register/heartbeat；fleet 重启后 kernel lease 过期（默认 300s TTL）→ 旧 claim 后续写入 409 lease_stale、job 回 queued retryable → fleet 重新 claim 分发；spool 内存条目随 agent 进程丢失 → terminal 帧缺 seq（kernel retention/gap 语义兜底），业务终态仍由 complete/cancel transaction 决定（详见 remote-runner-wire.md §5.3 / execution-runtime.md §5.1）。

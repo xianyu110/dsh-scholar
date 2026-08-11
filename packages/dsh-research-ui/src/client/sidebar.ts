@@ -1,6 +1,6 @@
 import type { ContextMenuItem, ProjectRow } from './types'
 import { api } from './api'
-import { openNewProjectModal, openProjectDetailModal, openRenameModal } from './modals/project'
+import { openDeleteProjectModal, openNewProjectModal, openProjectDetailModal, openRenameModal } from './modals/project'
 import { openCompareModal } from './modals/search'
 import { openSettingsModal } from './modals/settings'
 import { favProjectToggle, favProjects, state, tabSave } from './state'
@@ -215,6 +215,16 @@ export function renderSidebar(
             divider: true,
             onPick: () => { void api(`/v1/projects/${encodeURIComponent(id)}/unarchive`, { method: 'POST' }).then(() => state.rerender()) },
           })
+          ctxItems.push({
+            label: `⌫ ${t('shell', 'shell.sidebar.deleteTitle')}`,
+            onPick: () => openDeleteProjectModal(root, {
+              project_id: id, name: p.name ?? id, status: p.status ?? '', revision: p.revision ?? 0,
+            }, () => {
+              if (state.projectId === id) state.projectId = undefined
+              showToast(rootHost(), t('shell', 'shell.deleteProject.deleted', { name: p.name ?? id }))
+              state.rerender()
+            }),
+          })
         } else {
           ctxItems.push({
             label: `🗄 ${t('common', 'common.action.archive')}`,
@@ -265,6 +275,24 @@ export function renderSidebar(
         state.rerender()
       }
       actionsWrap.append(renameBtn, arcBtn)
+      if (archived && p.project_id !== undefined) {
+        const deleteBtn = el('span', 'ws-rename', '⌫')
+        deleteBtn.title = t('shell', 'shell.sidebar.deleteTitle')
+        deleteBtn.onclick = (event) => {
+          event.stopPropagation()
+          const root = sidebar.getRootNode() instanceof ShadowRoot ? sidebar.getRootNode() as ShadowRoot : null
+          if (root === null) return
+          const id = p.project_id!
+          openDeleteProjectModal(root, {
+            project_id: id, name: p.name ?? id, status: p.status ?? '', revision: p.revision ?? 0,
+          }, () => {
+            if (state.projectId === id) state.projectId = undefined
+            showToast(rootHost(), t('shell', 'shell.deleteProject.deleted', { name: p.name ?? id }))
+            state.rerender()
+          })
+        }
+        actionsWrap.appendChild(deleteBtn)
+      }
       item.appendChild(actionsWrap)
       list.appendChild(item)
     }

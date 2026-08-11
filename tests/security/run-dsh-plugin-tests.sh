@@ -4,10 +4,12 @@
 # handlers, headless tools and skill provider resolution.
 #
 #   1. Tool catalog == reconstruction-contracts.md §17 canonical registry
-#      (29 canonical names), legacy claim_verify/analysis_build/release_bundle
-#      registered as one-version deprecation aliases (never unknown tool).
-#   2. No Human Decision / gate-decision tool exists; ACL denies unknown and
-#      unauthorized agents on every research write tool.
+#      (34 canonical names incl. the ONBOARD-01 intake prepare surface),
+#      legacy claim_verify/analysis_build/release_bundle registered as
+#      one-version deprecation aliases (never unknown tool).
+#   2. No Human Decision / gate-decision tool exists; no intake adopt/accept
+#      tool exists (research-onboarding.md §2.1 — Agent has no accept); ACL
+#      denies unknown and unauthorized agents on every research write tool.
 #   3. Tools work headless (no httpServer): registration + execution through
 #      the kernel client/cache only.
 #   4. /research help|list|status|gates|jobs|claims|new|... all have real
@@ -64,8 +66,12 @@ const CANONICAL = [
   'experiment_register', 'experiment_submit', 'experiment_status', 'experiment_cancel',
   'evidence_note_create', 'claim_create', 'claim_verify_request', 'analysis_request',
   'manuscript_build', 'manuscript_review', 'release_bundle_request',
+  // ONBOARD-01 intake prepare surface (research-onboarding.md §2): agents
+  // begin/stage/scan/answers/propose; NO adopt tool (Agent has no accept).
+  'research_intake_begin', 'research_intake_stage', 'research_intake_scan',
+  'research_intake_answers', 'research_intake_propose',
 ]
-if (CANONICAL.length !== 29) throw new Error(`§17 registry has ${CANONICAL.length} entries, expected 29`)
+if (CANONICAL.length !== 34) throw new Error(`§17 registry has ${CANONICAL.length} entries, expected 34`)
 
 const registered = []
 // Tool defs capture `client` at registration time; one registration serves
@@ -76,6 +82,8 @@ const stubClient = {
   projectProjection: async () => ({ project: { status: 'DRAFT' }, counts: { claims: 0 } }),
   verifyClaim: async () => ({ claim_id: 'claim_x', status: 'supported' }),
   createProject: async () => ({ project_id: 'rsp_x', brief: { domain: 'machine-learning', target_venue: null } }),
+  // ONBOARD-01 intake prepare surface (headless probes below).
+  beginIntake: async (projectId) => ({ intake_id: 'intk_headless', project_id: projectId, source_label: 'headless', status: 'draft' }),
 }
 const stubCache = { get: async () => undefined, set: async () => undefined }
 const roles = new RoleRegistry()
@@ -105,6 +113,17 @@ if (gateTool !== undefined) {
   const actions = gateTool.parameters?.properties?.action?.enum ?? []
   if (actions.some(a => String(a) === 'decide')) problems.push('research_gate_request must not expose action=decide')
 }
+// 3b. ONBOARD-01 (research-onboarding.md §2.1): the Agent has NO accept —
+//     no adopt tool exists and every intake tool is prepare-only copy.
+const intakeNames = names.filter(n => n.startsWith('research_intake'))
+if (intakeNames.length !== 5) problems.push(`expected exactly 5 intake tools, got ${intakeNames.length}`)
+if (intakeNames.some(n => /adopt|accept/.test(n))) problems.push(`adopt/accept intake tools must not exist: ${intakeNames.join(',')}`)
+for (const n of intakeNames) {
+  const t = registered.find(x => x.name === n)
+  const desc = String(t?.description ?? '')
+  if (!/prepare-only/i.test(desc)) problems.push(`${n} description lacks PREPARE-ONLY marker`)
+  if (!/PI|human/i.test(desc)) problems.push(`${n} description lacks the PI-adopts note`)
+}
 // 4. ACL surface: RESEARCH_TOOLS covers canonical + aliases; role surfaces canonical-only
 for (const n of names) if (!RESEARCH_TOOLS.includes(n)) problems.push(`RESEARCH_TOOLS missing ${n}`)
 for (const c of CANONICAL) if (!RESEARCH_TOOLS.includes(c)) problems.push(`RESEARCH_TOOLS missing canonical ${c}`)
@@ -112,6 +131,17 @@ for (const role of Object.keys(ROLE_TOOLS)) {
   for (const t of ROLE_TOOLS[role]) {
     if (!CANONICAL.includes(t)) problems.push(`ROLE_TOOLS[${role}] has non-canonical ${t}`)
   }
+}
+// 4b. intake ACL: unknown/none denied on every intake tool; the researcher
+//     (scholar) role may prepare (begin/scan/answers/propose); no adopt in
+//     any role surface.
+for (const n of intakeNames) {
+  if (roles.allows(DEFAULT_ROLE, n)) problems.push(`unknown agent may call ${n}`)
+  if (!roles.allows('scholar', n)) problems.push(`scholar (researcher) denied on ${n}`)
+  if (roles.allows('writer', n)) problems.push(`writer must not call ${n}`)
+}
+for (const role of Object.keys(ROLE_TOOLS)) {
+  if (ROLE_TOOLS[role].includes('research_intake_adopt')) problems.push(`ROLE_TOOLS[${role}] must not contain an adopt tool`)
 }
 // 5. unknown/unregistered agent -> DEFAULT_ROLE none -> every tool denied
 for (const n of names) if (roles.allows(DEFAULT_ROLE, n)) problems.push(`unknown agent may call ${n}`)
@@ -135,6 +165,15 @@ const aliasResult = await aliasTool.execute(
 if (aliasResult.deprecated !== true) problems.push('claim_verify alias response lacks deprecated metadata')
 if (aliasResult.canonical !== 'claim_verify_request') problems.push('claim_verify alias response lacks canonical name')
 
+// 7. intake tools run headless (no httpServer): research_intake_begin
+//    resolves the session project and calls the stub beginIntake.
+const intakeBeginTool = registered.find(x => x.name === 'research_intake_begin')
+const intakeResult = await intakeBeginTool.execute(
+  { source_label: 'headless-paper' },
+  { agent: { id: 'headless-session' }, signal: new AbortController().signal })
+if (intakeResult.ok !== true) problems.push('headless research_intake_begin execution failed')
+if (intakeResult.intake?.intake_id !== 'intk_headless') problems.push('headless research_intake_begin did not reach the client beginIntake')
+
 console.log(JSON.stringify({ names, aliasCount: Object.keys(TOOL_ALIASES).length, problems }))
 EOF
 )
@@ -144,11 +183,11 @@ PROBLEMS=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c
 ALIASN=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).aliasCount))")
 
 if [ -z "$PROBLEMS" ]; then
-  ok "all 29 §17 canonical tools registered, aliases + ACL consistent"
+  ok "all 34 §17 canonical tools registered, aliases + ACL consistent"
 else
   bad "catalog/ACL problems: $PROBLEMS"
 fi
-for C in claim_verify_request analysis_request release_bundle_request research_project research_gate_request research_budget; do
+for C in claim_verify_request analysis_request release_bundle_request research_project research_gate_request research_budget research_intake_begin research_intake_stage research_intake_scan research_intake_answers research_intake_propose; do
   case ",$NAMES," in
     *",$C,"*) ok "canonical tool $C registered" ;;
     *) bad "canonical tool $C missing" ;;
@@ -165,6 +204,15 @@ case ",$NAMES," in
   *",research_gate,"*|*",research_gate_decide,"*|*",gate_decide,"*) bad "gate-decision tool present in catalog" ;;
   *) ok "no gate-decision tool in catalog" ;;
 esac
+case ",$NAMES," in
+  *",research_intake_adopt,"*|*",research_intake_accept,"*) bad "intake adopt/accept tool present in catalog (Agent has no accept)" ;;
+  *) ok "no intake adopt/accept tool in catalog (research-onboarding §2.1)" ;;
+esac
+if probe "$CATALOG" "j.names.filter(n=>n.startsWith('research_intake')).length === 5"; then
+  ok "exactly 5 intake prepare tools registered (begin/stage/scan/answers/propose)"
+else
+  bad "intake prepare tool count wrong"
+fi
 if probe "$CATALOG" "!j.problems.some(p=>/unknown agent/.test(p))"; then
   ok "unknown/unregistered agent denied on every research tool"
 else
@@ -179,6 +227,11 @@ if probe "$CATALOG" "!j.problems.some(p=>/deprecated metadata/.test(p))"; then
   ok "legacy alias responses carry deprecation metadata + canonical name"
 else
   bad "alias deprecation metadata missing"
+fi
+if probe "$CATALOG" "!j.problems.some(p=>/PREPARE-ONLY|intake tools|intake ACL|headless research_intake/.test(p))"; then
+  ok "intake tools: prepare-only copy, ACL (none deny / scholar allow), headless begin all pass"
+else
+  bad "intake tool surface: $(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.filter(p=>/PREPARE-ONLY|intake/.test(p)).join('|')))")"
 fi
 
 # ── §9 DSH-01: unknown Agent ACL deny + pre-execute semantics + disposer ─────
@@ -337,7 +390,7 @@ fi
 #     client (no module-level tool-context ref), roles and ACL listeners are
 #     per-instance (granting a role in B never leaks into A);
 #   - reload: cordis update() unloads (kills the old kernel, unregisters
-#     tools) then re-applies — no duplicate registration (still exactly 32
+#     tools) then re-applies — no duplicate registration (still exactly 37
 #     tools / 1 skill provider), data persists in the same dataDir;
 #   - dispose: sidecar kernel dead, endpoint.json removed, port released,
 #     tools/commands/skills/pre-execute listeners all gone, the other
@@ -416,7 +469,7 @@ try {
 
   // ── tools / commands / skills registered exactly once ────────────────────
   const toolsA = rootA.tools.schemas().map(s => s.name)
-  if (toolsA.length !== 32) problems.push(`instance A tool count ${toolsA.length} != 32`)
+  if (toolsA.length !== 37) problems.push(`instance A tool count ${toolsA.length} != 37`)
   if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
   if (!rootA.commands.list({}).some(c => c.name === 'research')) problems.push('/research command not registered')
   if (rootA.skills.providers.size !== 1) problems.push(`instance A skill providers ${rootA.skills.providers.size} != 1`)
@@ -443,7 +496,7 @@ try {
   trackedPids.push(epFileA2.pid)
   if (alive(oldPid)) problems.push('reload must stop the old kernel (sidecar disposer)')
   if (epFileA2.pid === oldPid) problems.push('reload must spawn/reuse a fresh kernel instance')
-  if (rootA.tools.schemas().length !== 32) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 32, duplicate risk)`)
+  if (rootA.tools.schemas().length !== 37) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 37, duplicate risk)`)
   if (rootA.skills.providers.size !== 1) problems.push(`reload leaked skill providers (${rootA.skills.providers.size} != 1)`)
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('reload must keep kernel data (same dataDir)')
   if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 1) problems.push('reload must not duplicate the pre-execute listener')
@@ -461,14 +514,14 @@ try {
   const healthAfter = await fetch(`${lastEndpoint}/v1/health`).then(r => r.ok).catch(() => false)
   if (healthAfter) problems.push('dispose must release the kernel port (health still answering)')
   // the sibling instance is untouched
-  if (rootB.tools.schemas().length !== 32) problems.push('disposing A must not affect B tools')
+  if (rootB.tools.schemas().length !== 37) problems.push('disposing A must not affect B tools')
   if (rootB.research === undefined) problems.push('disposing A must not affect B research service')
 
   // ── re-apply on the same root: usable again, still exactly once ──────────
   const handleA2 = await rootA.plugin(pluginMod, cfgA)
   const epFileA3 = readEp(dirA)
   trackedPids.push(epFileA3.pid)
-  if (rootA.tools.schemas().length !== 32) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 32`)
+  if (rootA.tools.schemas().length !== 37) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 37`)
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('re-apply must restore the client against the same dataDir')
   await handleA2.dispose()
 } catch (error) {

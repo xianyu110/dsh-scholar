@@ -32,7 +32,9 @@
 
 import { workspaceEtag, type WorkspaceInfo, type WorkspaceKind, type WorkspaceNode, type WorkspaceRevision } from '@dsh-scholar/research-schemas'
 import { TexWorkspaceStore, TexError, fileMediaType, type TexDocumentInfo, type TexFileEntry } from './tex-workspace.js'
-import { WorkspaceError, matchWorkspaceGlob, withImpliedDirs, type WorkspaceExpected, type WorkspaceStoreLike } from './workspace-store.js'
+import { WorkspaceError, matchWorkspaceGlob, withImpliedDirs, isSearchableTextMedia, hasBinaryMagic, scanTextForQuery,
+  WORKSPACE_SEARCH_MAX_FILES, type WorkspaceContentHit, type WorkspaceContentSearchQuery, type WorkspaceContentSearchResult,
+  type WorkspaceExpected, type WorkspaceStoreLike } from './workspace-store.js'
 
 /**
  * Translate a TexError into the generic workspace error contract (409/404/
@@ -262,7 +264,7 @@ export class TexWorkspaceFacade implements WorkspaceStoreLike {
   }
 
   /** PATH search (prefix and/or `*`/`?` glob) over the tex tree — same
-   * semantics as the generic store; content search is not implemented. */
+   * semantics as the generic store. */
   search(workspaceId: string, query: { prefix?: string; glob?: string }): { info: WorkspaceInfo; nodes: WorkspaceNode[] } {
     try {
       const tree = this.tree(workspaceId)
@@ -276,6 +278,42 @@ export class TexWorkspaceFacade implements WorkspaceStoreLike {
         nodes = nodes.filter(n => matchWorkspaceGlob(n.path, glob))
       }
       return { info: tree.info, nodes }
+    } catch (error) {
+      return translateTexError(error)
+    }
+  }
+
+  /** CONTENT search over the tex tree — same caps and semantics as the
+   * generic store (text-only media allowlist, per-file/per-result limits,
+   * case-insensitive by default). The tex store is text-only, so every file
+   * is a candidate; content comes from the tex store itself (no second byte
+   * authority). */
+  searchContent(workspaceId: string, query: WorkspaceContentSearchQuery): WorkspaceContentSearchResult {
+    try {
+      if (query.q === undefined || query.q.trim() === '') {
+        throw new WorkspaceError('invalid_query', 'content search requires a non-empty q')
+      }
+      const documentId = texDocumentId(workspaceId)
+      const tree = this.tex.tree(documentId)
+      const info = texInfoToWorkspaceInfo(tree.document)
+      const hits: WorkspaceContentHit[] = []
+      let truncated = false
+      for (const file of tree.files) {
+        if (hits.length >= WORKSPACE_SEARCH_MAX_FILES) {
+          truncated = true
+          break
+        }
+        if (!isSearchableTextMedia(file.media)) continue
+        const entry = this.tex.readFile(documentId, file.path)
+        if (entry === null) continue
+        const content = entry.content ?? ''
+        if (hasBinaryMagic(Buffer.from(content, 'utf8'))) continue
+        const { matches, total } = scanTextForQuery(content, query.q, {
+          case_sensitive: query.case_sensitive,
+        })
+        if (total > 0) hits.push({ path: file.path, match_count: total, matches })
+      }
+      return { info, hits, truncated }
     } catch (error) {
       return translateTexError(error)
     }

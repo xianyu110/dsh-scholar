@@ -34,14 +34,14 @@
 | 401 | unauthorized | 缺失或无效身份 |
 | 403 | forbidden、csrf_rejected | 身份有效但不允许 |
 | 404 | project_not_found、resource_not_found | 资源不可见或不存在 |
-| 409 | revision_conflict、gate_already_decided、lease_stale、document_version_conflict | 并发或状态冲突 |
+| 409 | revision_conflict、gate_already_decided、lease_stale、document_version_conflict、project_not_archived | 并发或状态冲突 |
 | 413 | payload_too_large | 请求或上传超过上限 |
 | 422 | validation_error、invalid_transition、container_execution_required | 可解析但违反契约 |
 | 429 | rate_limited | 超过限流 |
 | 500 | internal_error | 脱敏内部失败 |
 | 502 | kernel_unreachable、connector_unavailable | 依赖不可用 |
 
-稳定补充 code：invalid_cursor(400,false)、unsupported_media_type(415,false)、idempotency_conflict(409,false)、upload_offset_conflict(409,true)、artifact_stage_expired(409,false)、document_version_conflict(409,true)、tex_root_not_found(422,false)、lease_conflict/lease_stale(409,true)、job_finished(409,false)、manifest_invalid/signature_invalid(422,false)、project_required(422,false)、fixture_required(422,false)、fixture_image_mismatch(422,false)、fixture_artifact_outside_profile(422,false)、fixture_code_mismatch(422,false)、jobs_running(409,false)、domain_unsupported(422,false)、idea_corpus_unknown(422,false)、idea_corpus_foreign(422,false)、passage_content_hash_required(422,false)。括号第二项是 retryable；未登记 code 默认 retryable=false。
+稳定补充 code：invalid_cursor(400,false)、unsupported_media_type(415,false)、idempotency_conflict(409,false)、upload_offset_conflict(409,true)、artifact_stage_expired(409,false)、document_version_conflict(409,true)、tex_root_not_found(422,false)、lease_conflict/lease_stale(409,true)、job_finished(409,false)、manifest_invalid/signature_invalid(422,false)、project_required(422,false)、fixture_required(422,false)、fixture_image_mismatch(422,false)、fixture_artifact_outside_profile(422,false)、fixture_code_mismatch(422,false)、jobs_running(409,false)、project_not_archived(409,false)、project_delete_confirmation_invalid(422,false)、domain_unsupported(422,false)、idea_corpus_unknown(422,false)、idea_corpus_foreign(422,false)、passage_content_hash_required(422,false)。括号第二项是 retryable；未登记 code 默认 retryable=false。
 
 Zod 错误 details 只返回字段路径和安全消息。上游 5xx、文件系统绝对路径、SQL、环境变量和 Token 不得传到浏览器。
 
@@ -63,6 +63,7 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 | PATCH | /v2/projects/{id} | name 或允许的配置 + expected_revision |
 | POST | /v2/projects/{id}/archive | expected_revision |
 | POST | /v2/projects/{id}/unarchive | expected_revision |
+| DELETE | /v2/projects/{id} | PI-only；`{expected_revision, confirm_name, reason}`；返回 DeletionReceipt |
 | POST | /bff/research/projects/{id}/stop | PI；expected_revision、reason |
 | POST | /bff/research/projects/{id}/fail | PI/Policy；expected_revision、reason、failure_class |
 | POST | /bff/research/projects/{id}/refine | PI；expected_revision、target phase、reason |
@@ -72,6 +73,8 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 | GET | /v2/session-links/current | 从调用 Principal 当前 session 返回 project_id |
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
+
+`DELETE /v2/projects/{id}` 是 Human-only governance 写面，Agent tool/command 不暴露。仅当项目为 `ARCHIVED`、无 active Job 且 revision/精确名称确认匹配时成功；成功后普通 GET/list/projection 和任何项目写入均返回/表现为 404，并保留 tombstone、成员、Decision、Outbox 与受 retention 管理的证据引用。相同 `X-Request-Id` 重放返回同一 `{project_id, deleted_at, deleted_by, revision, request_id}`。迁移期 `/v1/projects/{id}` DELETE 是同一 Kernel 方法的 adapter，不得拥有不同权限或物理清理语义。
 
 成员接口为 GET/POST/PATCH/DELETE /bff/research/projects/{id}/members；角色和最后一个 PI 约束见 reconstruction-contracts.md。standalone 解锁、SSO、DSH Agent session 关联和 service identity 的 Principal 解析也以该文档为准。
 
@@ -344,6 +347,10 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 | POST | `/v2/workspaces/{id}/snapshots` | 冻结 archive + manifest |
 
 所有 path、ETag、Revision 和 multipart 行为以 reconstruction-contracts.md 为准。TeX Document route 是绑定 manuscript workspace subtree 的领域 facade，不能维护第二套文件存储。
+
+**search 参数契约（POST `/v1/projects/{id}/workspaces/{wid}/search`，commit 待定主代理统一提交）**：同一端点双模式，strict body——
+- 路径搜索（legacy，不变）：`{prefix?, glob?}`（至少其一，AND；`*` 不跨 `/`）；响应 `{info, nodes}`；
+- 内容搜索：`{q, mode?: 'content', case_sensitive?: boolean}`（`q` 出现或 `mode='content'` 即内容模式；`mode` 缺省时 `q` 出现即为内容）。响应 `{info, hits: [{path, match_count, matches: [{line, snippet}]}], truncated}`——`line` 为 1-based 行号，`snippet` 为所在行（超 240 字符以 `…` 居中截断），`match_count` 为该文件真实匹配总数，`matches` 最多返回前 20 个，`truncated` 表示 50 文件上限截断。语义：只扫文本节点（`binary=0` 且 media 文本类，NUL magic 硬跳过）；>512 KiB 文件整文件跳过（绝不部分扫描）；大小写不敏感默认；非法 UTF-8 字节按替换符容错（不抛错）。参数校验：空/纯空白 `q` → 422 `invalid_query`；`q` 与 `prefix`/`glob` 混用或 `mode='path'` 携带 `q` → 422 `invalid_search_params`。**无全文索引**——线性扫描，大数据集性能受限（如实记录，索引属后续增强）；并发搜索有简单槽位上限（超限 429 `search_busy`）。内容搜索与路径搜索同受 workspace 钉定与隔离语义约束（跨项目 404、隔离 503）。
 
 **崩溃恢复语义（WORK-01 §5 P2，hardening §5 行，storage-migrations.md §10.1）**：kernel 启动与按需 `scanWorkspaceIntegrity()` 恢复扫描会把磁盘字节与 `workspace_nodes`/`workspace_ops` 收敛——可证修复（rename-before-row 前滚、CAS/历史恢复、孤儿回滚等）静默完成；不可证修复把 workspace 标记隔离，此后该 workspace 的全部路由（tree/nodes/assets/moves/history/search/events/snapshots/blob）返回 **503 `workspace_inconsistent`**，直到字节恢复后下一次扫描干净收敛自动解除。
 

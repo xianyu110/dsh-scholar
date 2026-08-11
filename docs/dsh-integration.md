@@ -6,7 +6,7 @@
 
 根包名为 @dsh-scholar/research-plugin，ESM，只导出 Cordis Agent 插件。它不导出 `./client`、不声明 `dshClient`、不向 DSH Web 注入 Scholar UI。宿主提供 cordis、schemastery 以及 @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-local 等模块；这些 DeepSeek 包不假设存在于公共 npm registry。
 
-开发环境通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。
+开发环境通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。symlink/check-out 验证只用于开发反馈，不能计为宿主兼容性 PASS。
 
 ## 2. Cordis 插件形状
 
@@ -135,6 +135,8 @@ Domain/venue 选择必须由项目 brief.domain 和 target_venue 产生确定性
 根 package 的 dsh.bundle.patch 只插入 Agent `research-plugin` 行，不包含 UI row 或 browser client metadata。standalone UI 独立管理自己的 loopback server、BFF、Token、dataDir 和 Kernel sidecar。同一 dataDir 不得同时被 DSH Agent sidecar 和 standalone sidecar 打开。
 
 静态 repository plugin 只承载 Skills/MCP，不能替代完整代码 bundle。安装验收必须使用全新 DSH_HOME 和远程或打包产物，不能只验证本地 symlink。
+
+私有宿主兼容性测试通过 `tests/integration/run-dsh-private-registry-tests.sh` 触发，固定输入为 `DSH_PRIVATE_REGISTRY_URL`、`DSH_PRIVATE_REGISTRY_TOKEN`（可显式选择受控的 `NPM_TOKEN` fallback）、精确版本 `DSH_PRIVATE_DSH_SPEC` 和已发布/可安装的精确 `DSH_SCHOLAR_PLUGIN_SPEC`；token 只写入权限 0600 的临时 npm userconfig，禁止进入仓库、命令行、日志或测试报告。测试必须在空目录安装真实私有 `@deepseek-ai/dsh` 及其 host 包，再经公开 `dsh plugin --profile … add`、profile boot/dump-config、Cordis apply/dispose 观察 Scholar。未提供私有 registry/credential/Scholar 安装 spec 的开发机输出 `NOT_RUN_MANUAL_PENDING`，不能计 PASS；真实 CI/人工执行一旦开始则缺包、版本漂移、symlink、checkout realpath 或生命周期失败必须非零退出。
 
 ## 13. 开发模式的 Cordis self-referential 工具
 

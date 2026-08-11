@@ -20,6 +20,7 @@
 - Node.js 24；
 - pnpm 11；
 - DSH Agent/plugin 集成开发才需要 DSH checkout，通过 DSH_SCHOLAR_DSH_ROOT 指定；
+- DSH 发布兼容性验收需要私有 registry URL、短期只读 token、固定 `@deepseek-ai/dsh` spec 和已发布/可安装的固定 Scholar plugin spec；这些 secret 不写仓库 `.npmrc`；
 - Docker，用于正式 Job、Terminal、Golden、TeX 和 clean-room；
 - 固定 TeX Live image；本机不要求安装 pdflatex；
 - 远端验收需要第二个受控 Linux/VM/container namespace、mTLS test CA 和可注入网络分区的 transport；不能用同一进程 fake 代替阻断验收；
@@ -66,6 +67,18 @@ curl http://127.0.0.1:17412/v1/health
 ~~~
 
 Agent 集成验收必须证明 tools、commands、subagents、四组 Skills 可用，且根 Agent 包 manifest 没有 `dshClient` 和 `./client` export。standalone UI 包可合法导出自己的 `./client`。浏览器 Golden Path 只在 standalone 18610 验收。
+
+发布兼容性不复用上述 checkout。用隔离环境执行：
+
+~~~bash
+DSH_PRIVATE_REGISTRY_URL=https://registry.example.invalid \
+DSH_PRIVATE_REGISTRY_TOKEN='<short-lived-read-token>' \
+DSH_PRIVATE_DSH_SPEC='@deepseek-ai/dsh@0.0.1' \
+DSH_SCHOLAR_PLUGIN_SPEC='@dsh-scholar/research-plugin@0.1.0' \
+bash tests/integration/run-dsh-private-registry-tests.sh
+~~~
+
+脚本自行创建全新安装目录、`DSH_HOME` 和权限 0600 的临时 npm userconfig；输出必须脱敏。缺少真实 registry/credential 时登记 `NOT_RUN_MANUAL_PENDING`，本地 symlink/fake host 不计 PASS。
 
 ## 6. 开发模式启用 Cordis self-referential
 
@@ -114,6 +127,7 @@ pnpm test:workspace-pty-remote
 pnpm test:onboarding
 pnpm test:trajectory
 pnpm test:config
+pnpm test:dsh-private
 pnpm test:all
 ~~~
 

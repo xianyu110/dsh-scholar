@@ -1,7 +1,7 @@
 /**
  * PACK-01 / SKILL-01 / UI-03 packaging tests: every published tarball is
  * complete (lib/, skills/, cordis.patch.yml), a clean consumer install
- * resolves via overrides (file: deps stay relative in packed manifests),
+ * resolves from sibling tarballs through test-only overrides,
  * the installed plugin declares its DSH host peers, the consumer install is
  * hermetic (real extracted files, no original-checkout paths, optional host
  * peers never force-installed without a registry), every skill ships with
@@ -29,7 +29,7 @@ const PACKAGE_NAMES = ['research-plugin', 'research-client', 'research-kernel', 
 /** Runtime graph a clean consumer actually receives: the plugin plus its
  * runtime dependencies. runner-gateway/analysis-worker are dev-only workers
  * of the plugin and legitimately absent from a consumer install. */
-const RUNTIME_NAMES = ['research-plugin', 'research-client', 'research-kernel', 'research-schemas', 'scholar-connectors']
+const RUNTIME_NAMES = ['research-plugin', 'research-client', 'research-kernel', 'research-schemas', 'scholar-connectors', 'analysis-worker']
 const HOST_PEERS = ['@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-skill-local', '@deepseek-ai/dsh-tools']
 /** Sibling DSH host harness checkout (SELFMOD-01): must never be referenced
  * by a published artifact or a clean consumer install. */
@@ -136,9 +136,12 @@ function tarJson(tgz: string, path: string): Record<string, unknown> {
   return JSON.parse(run('tar', ['-xOzf', tgz, path], '/')) as Record<string, unknown>
 }
 
-/** Write the same clean consumer project used by the PACK-01 tests:
- * tarball overrides with autoInstallPeers off, so the DSH host peers can
- * never be pulled from a registry. */
+/** Write the clean Scholar-artifact consumer used by the local PACK-01 unit
+ * seam. pnpm still resolves transitive semver specs through a registry even
+ * when sibling tarballs are direct dependencies, so this registry-less seam
+ * needs explicit tarball overrides. It proves artifact extraction/path
+ * isolation only and MUST NOT be reported as private-host compatibility;
+ * tests/integration/run-dsh-private-registry-tests.sh owns that public seam. */
 function writeConsumerProject(consumer: string, packed: Packed): void {
   const tgz = (n: string) => packed.tarballs[n]!.replaceAll('\\', '/')
   writeFileSync(join(consumer, 'pnpm-workspace.yaml'), [
@@ -149,7 +152,6 @@ function writeConsumerProject(consumer: string, packed: Packed): void {
     `  '@dsh-scholar/research-kernel': file:${tgz('research-kernel')}`,
     `  '@dsh-scholar/research-schemas': file:${tgz('research-schemas')}`,
     `  '@dsh-scholar/scholar-connectors': file:${tgz('scholar-connectors')}`,
-    `  '@dsh-scholar/runner-gateway': file:${tgz('runner-gateway')}`,
     `  '@dsh-scholar/analysis-worker': file:${tgz('analysis-worker')}`,
     '',
   ].join('\n'))

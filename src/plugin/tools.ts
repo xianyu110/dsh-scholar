@@ -8,7 +8,7 @@
 
 import { defineTool, type InferArgs, type InferValue, type ObjectValueSchemaSpec, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { ResearchClient } from '@dsh-scholar/research-client'
+import { KernelApiError, type ResearchClient } from '@dsh-scholar/research-client'
 import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { selectSkillPacks, selectedSkillNames } from './skills.js'
 
@@ -126,6 +126,66 @@ const okSchema = {
   additionalProperties: true,
   properties: { ok: { type: 'boolean' } },
 } as const satisfies ObjectValueSchemaSpec
+
+/**
+ * Stable copy per intake error code (research-onboarding.md §9; mirrors the
+ * browser wizard's `INTAKE_ERROR_KEYS` semantics so the agent and the UI
+ * surface the same meaning for the same machine code).
+ */
+export const INTAKE_ERROR_COPY: Record<string, string> = {
+  intake_not_found: 'intake session not found or not accessible for this project',
+  intake_state_conflict: 'intake session state does not allow this operation — refresh the projection and retry',
+  intake_expired: 'intake session expired — start a new intake',
+  artifact_quarantined: 'quarantined/rejected artifacts exist — delete or replace them before adoption',
+  question_required: 'required questions are unanswered — answer them before proposing',
+  proposal_stale: 'the proposal is stale (artifacts or revisions changed) — regenerate it',
+  acceptance_required: 'this operation requires PI adoption authority — agents cannot adopt',
+  phase_unadoptable: 'the intake session has no target project and cannot be adopted',
+  project_revision_conflict: 'the target project changed — regenerate the proposal',
+  cross_project_reference: 'cross-project references are rejected',
+  question_revision_conflict: 'the question taxonomy revision changed — refresh the questions and re-answer',
+  unknown_question: 'unknown question code — rejected by the server taxonomy',
+  intake_artifact_not_found: 'intake artifact not found or already removed',
+  principal_required: 'an authenticated principal is required for this action',
+  payload_too_large: 'the file exceeds the 32 MiB limit',
+  invalid_file_name: 'the file name is invalid (path separators and unsafe names are rejected)',
+  stage_corrupted: 'staged file integrity check failed — re-upload',
+  idempotency_conflict: 'idempotency key conflict — retry with a fresh key',
+  validation_error: 'request validation failed — check the inputs',
+  missing_file: 'the upload is missing a file part',
+  multiple_files: 'single-file uploads must not carry multiple files',
+  unsupported_media_type: 'intake artifact upload requires multipart/form-data',
+  project_not_found: 'project not found or not accessible',
+}
+
+/** Stable text for a kernel intake error code (fallback: raw message). */
+export function intakeErrorText(code: string, fallback: string): string {
+  return INTAKE_ERROR_COPY[code] ?? fallback
+}
+
+/** ≤32 MiB per staged file — mirrors ResearchKernel.UPLOAD_MAX_FILE_BYTES
+ *  (the kernel re-enforces the same cap with 413 payload_too_large). */
+export const INTAKE_MAX_FILE_BYTES = 32 * 1024 * 1024
+
+/** Agent identity for intake records. Agents are never human principals
+ *  (research-onboarding.md §2.1/§5): the kernel records 'agent' as the
+ *  owner/answerer and still refuses adopt — only the PI path adopts. */
+function agentPrincipal(sessionId: string | undefined): { principal_id: string; auth_method: string; session_id: string | null } {
+  return { principal_id: 'agent', auth_method: 'agent', session_id: sessionId ?? null }
+}
+
+/** Run one intake client call; stable intake error codes surface stable
+ *  copy (machine code preserved), other errors pass through unchanged. */
+async function callIntake<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (error) {
+    if (error instanceof KernelApiError && INTAKE_ERROR_COPY[error.code] !== undefined) {
+      throw new Error(`intake ${error.code}: ${INTAKE_ERROR_COPY[error.code]}`)
+    }
+    throw error
+  }
+}
 
 export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<typeof defineTool>): void } }, toolCtx: ResearchToolContext): void {
   const { client } = toolCtx
@@ -297,6 +357,149 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       return { ok: true, projection: await client.projectProjection(projectId) }
+    },
+  }, toolCtx))
+
+  // ── onboarding intake (ONBOARD-01, research-onboarding.md §2/§3) ──────────
+  // Prepare-only surface: begin → stage → scan → answers → propose. There is
+  // NO adopt tool — research-onboarding.md §2.1: "DSH Agent 可 begin、stage、
+  // scan、grill、propose、status，但不存在 accept、adopt 或 Gate Decision
+  // tool"; only the Human PI (BFF/UI) may adopt an intake.
+
+  ctx.tools.register(researchTool({
+    name: 'research_intake_begin',
+    description: 'PREPARE-ONLY: create (or recover — idempotent) the single active Intake session for importing EXISTING research material (ONBOARD-01). Adoption is NOT possible here: only the Human PI adopts an intake in the authenticated UI (research-onboarding.md §2). Use research_intake_stage to add files, research_intake_scan to scan them, research_intake_answers for the Grill Me questions and research_intake_propose to build the phase proposal.',
+    parameters: {
+      project_id: OPT_STRING,
+      source_label: { type: 'string', required: true },
+      target_phase: { type: 'string', enum: ['brief', 'survey', 'idea', 'baseline', 'contract', 'experiment', 'evidence', 'writing', 'review', 'release'] },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveProjectId(client, sessionId, args.project_id)
+      if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      const session = await callIntake(() => client.beginIntake(projectId, {
+        source_label: String(args.source_label),
+        target_phase: args.target_phase as never,
+        // No client idempotency key: the kernel guarantees at most ONE active
+        // intake per project and reuses it (recovery-friendly idempotency);
+        // a stable key would replay a TERMINAL (adopted/rejected) session
+        // forever and block a fresh intake for the same project.
+      }))
+      return {
+        ok: true,
+        intake: session,
+        note: 'prepare-only — a Human PI must adopt the intake in the UI (research-onboarding.md §2; agents have no accept/adopt tool)',
+      }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_intake_stage',
+    description: 'PREPARE-ONLY: stage ONE file (base64, ≤32 MiB) into the isolated intake staging CAS of an intake session (ONBOARD-01 §4). No project artifact is written before adoption (pre-accept zero authority). Re-staging identical bytes is content-addressed idempotent. Adoption is NOT possible here — the Human PI adopts in the UI.',
+    parameters: {
+      project_id: OPT_STRING,
+      intake_id: { type: 'string', required: true },
+      file_name: { type: 'string', required: true },
+      content_base64: { type: 'string', required: true },
+      media_type: OPT_STRING,
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveProjectId(client, sessionId, args.project_id)
+      if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      const bytes = Buffer.from(String(args.content_base64), 'base64')
+      if (bytes.byteLength > INTAKE_MAX_FILE_BYTES) {
+        throw new Error(`intake payload_too_large: file exceeds the 32 MiB limit (${bytes.byteLength} bytes)`)
+      }
+      const artifact = await callIntake(() => client.stageIntakeArtifact(projectId, String(args.intake_id), {
+        file_name: String(args.file_name),
+        content_base64: String(args.content_base64),
+        media_type: args.media_type,
+      }))
+      return {
+        ok: true,
+        artifact,
+        note: 'staged into the isolated intake CAS — scan it (research_intake_scan); adoption requires a Human PI in the UI',
+      }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_intake_scan',
+    description: 'PREPARE-ONLY: run the deterministic static security scan over the staged intake files (ONBOARD-01 §4.2). Returns the resumable intake projection: session status, artifact quarantine verdicts, observations and the Grill Me questions for the target phase. Adoption is NOT possible here — the Human PI adopts in the UI.',
+    parameters: {
+      project_id: OPT_STRING,
+      intake_id: { type: 'string', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveProjectId(client, sessionId, args.project_id)
+      if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      const projection = await callIntake(() => client.scanIntake(projectId, String(args.intake_id)))
+      return {
+        ok: true,
+        intake_id: projection.session.intake_id,
+        status: projection.session.status,
+        scan_summary: projection.session.scan_summary,
+        artifacts: projection.artifacts,
+        observations: projection.observations,
+        questions: projection.questions,
+        note: 'prepare-only — answer the required questions with research_intake_answers, then propose',
+      }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_intake_answers',
+    description: 'PREPARE-ONLY: record Grill Me answers for an intake session (ONBOARD-01 §5). answers_json is a JSON array of {question_code, answer, question_revision} — take the questions from research_intake_scan / research_intake_begin projection and keep their question_revision; `unknown` is a valid answer that keeps the gap and lowers proposal confidence. Answers are recorded with an agent identity (human_assertion provenance is reserved for the Human UI); adoption is NOT possible here — the Human PI adopts in the UI.',
+    parameters: {
+      project_id: OPT_STRING,
+      intake_id: { type: 'string', required: true },
+      answers_json: { type: 'string', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveProjectId(client, sessionId, args.project_id)
+      if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      const parsed = JSON.parse(String(args.answers_json)) as unknown
+      if (!Array.isArray(parsed) || parsed.some(a => typeof (a as { question_code?: unknown }).question_code !== 'string'
+        || typeof (a as { answer?: unknown }).answer !== 'string'
+        || typeof (a as { question_revision?: unknown }).question_revision !== 'number')) {
+        throw new Error('answers_json must be a JSON array of {question_code, answer, question_revision} objects')
+      }
+      const projection = await callIntake(() => client.submitIntakeAnswers(
+        projectId, String(args.intake_id),
+        parsed.map(a => ({ question_code: (a as { question_code: string }).question_code, answer: (a as { answer: string }).answer, question_revision: (a as { question_revision: number }).question_revision })),
+        agentPrincipal(sessionId),
+      ))
+      return {
+        ok: true,
+        intake_id: projection.session.intake_id,
+        status: projection.session.status,
+        questions: projection.questions,
+        note: 'prepare-only — once every required question is answered the intake is proposal_ready; propose with research_intake_propose, adoption stays with the Human PI (UI)',
+      }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_intake_propose',
+    description: 'PREPARE-ONLY: deterministically build the PhaseProposal (observed_phase → safe project status, confidence, risks, pre-accept checklist, suggested mappings, required gates) for a scanned + answered intake (ONBOARD-01 §6). The intake then waits for the Human PI: adoption is NOT possible through agent tools (research-onboarding.md §2) — the PI adopts in the authenticated UI; safe_project_status is derived from the kernel state machine and never fabricates approved gates.',
+    parameters: {
+      project_id: OPT_STRING,
+      intake_id: { type: 'string', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveProjectId(client, sessionId, args.project_id)
+      if (projectId === undefined) throw new Error('no project_id and no session-linked project')
+      const proposal = await callIntake(() => client.proposeIntake(projectId, String(args.intake_id)))
+      return {
+        ok: true,
+        proposal,
+        note: `proposal revision ${proposal.revision} awaits Human adoption (awaiting_human) — agents cannot adopt; the PI approves it in the UI (research-onboarding.md §2)`,
+      }
     },
   }, toolCtx))
 

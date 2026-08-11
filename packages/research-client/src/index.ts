@@ -6,8 +6,9 @@
  */
 
 import type {
-  ArtifactRecord, Claim, CorpusSnapshot, Decision, EvidenceItem, ExperimentContract, Gate,
-  IdeaCard, JobRecord, KernelEvent, ResearchProject, RunnerKey, SessionLink,
+  AdoptionReceipt, ArtifactRecord, Claim, CorpusSnapshot, Decision, EvidenceItem, ExperimentContract, Gate,
+  GrillAnswerInput, GrillAnswerView, HumanPrincipal, IdeaCard, IntakeArtifact, IntakeProjection, IntakeSession,
+  JobRecord, KernelEvent, ObservedPhase, PhaseProposal, ProjectDeletionReceipt, ResearchProject, RunnerKey, SessionLink,
 } from '@dsh-scholar/research-schemas'
 
 export class KernelUnavailableError extends Error {
@@ -74,12 +75,61 @@ export class ResearchClient {
       clearTimeout(timer)
     }
     if (!response.ok) {
-      let detail = ''
+      // api-contracts.md §1: the server envelope carries the STABLE machine
+      // code in error.code and the human message in error.message — expose
+      // both faithfully (error.code = machine code, error.message =
+      // `${code}: ${message}`), so callers can map stable copy per code.
+      let code = ''
+      let message = ''
       try {
         const parsed = await response.json() as { error?: { code?: string; message?: string } }
-        detail = parsed.error?.message ?? ''
+        code = parsed.error?.code ?? ''
+        message = parsed.error?.message ?? ''
       } catch { /* keep empty */ }
-      throw new KernelApiError(response.status, detail || `http_${response.status}`, detail || `request ${method} ${path} failed`)
+      if (code === '') code = `http_${response.status}`
+      if (message === '') message = `request ${method} ${path} failed`
+      throw new KernelApiError(response.status, code, message)
+    }
+    return (await response.json()) as T
+  }
+
+  /**
+   * Raw-body request (multipart uploads): identical error semantics to
+   * {@link request} (KernelUnavailableError / KernelApiError with the stable
+   * server error code), but the caller supplies the exact body bytes and the
+   * content-type header instead of a JSON payload.
+   */
+  private async requestRaw<T>(method: string, path: string, body: Uint8Array, headers: Record<string, string> = {}): Promise<T> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    let response: Response
+    try {
+      response = await fetch(`${this.endpoint}${path}`, {
+        method,
+        headers: {
+          ...this.token !== undefined ? { authorization: `Bearer ${this.token}` } : {},
+          ...this.serviceToken !== undefined ? { 'x-service-token': this.serviceToken } : {},
+          ...headers,
+        },
+        body: body as BodyInit,
+        signal: controller.signal,
+      })
+    } catch (error) {
+      throw new KernelUnavailableError(this.endpoint, error)
+    } finally {
+      clearTimeout(timer)
+    }
+    if (!response.ok) {
+      let code = ''
+      let message = ''
+      try {
+        const parsed = await response.json() as { error?: { code?: string; message?: string } }
+        code = parsed.error?.code ?? ''
+        message = parsed.error?.message ?? ''
+      } catch { /* keep empty */ }
+      if (code === '') code = `http_${response.status}`
+      if (message === '') message = `request ${method} ${path} failed`
+      throw new KernelApiError(response.status, code, message)
     }
     return (await response.json()) as T
   }
@@ -121,6 +171,20 @@ export class ResearchClient {
 
   unarchiveProject(projectId: string): Promise<ResearchProject> {
     return this.request('POST', `/v1/projects/${projectId}/unarchive`)
+  }
+
+  deleteProject(projectId: string, input: {
+    expected_revision: number
+    confirm_name: string
+    reason: string
+    principal_id: string
+    request_id: string
+  }): Promise<ProjectDeletionReceipt> {
+    const { principal_id, request_id, ...body } = input
+    return this.request('DELETE', `/v1/projects/${projectId}`, body, {
+      'x-principal-id': principal_id,
+      'x-request-id': request_id,
+    })
   }
 
   projectProjection(projectId: string): Promise<{
@@ -191,6 +255,87 @@ export class ResearchClient {
 
   listArtifacts(projectId: string): Promise<ArtifactRecord[]> {
     return this.request('GET', `/v1/projects/${projectId}/artifacts`)
+  }
+
+  // ── onboarding intake (ONBOARD-01, research-onboarding.md) ────────────────
+  // Agent-facing prepare pipeline: begin → stage → scan → answers → propose.
+  // Adoption (adopt/reject) is NOT exposed here — the Agent surface stops at
+  // propose (research-onboarding.md §2; only the Human PI/BFF path adopts).
+
+  /** Create (or recover the single active) Intake session for a project. */
+  beginIntake(projectId: string, input: {
+    source_label: string
+    target_phase?: ObservedPhase | null
+    expires_in_ms?: number
+    idempotency_key?: string
+    request_hash?: string
+  }): Promise<IntakeSession> {
+    return this.request('POST', `/v1/projects/${projectId}/intake`, {
+      source_label: input.source_label,
+      target_phase: input.target_phase ?? null,
+      expires_in_ms: input.expires_in_ms,
+      idempotency_key: input.idempotency_key,
+      request_hash: input.request_hash,
+    })
+  }
+
+  listIntakes(projectId: string): Promise<IntakeSession[]> {
+    return this.request('GET', `/v1/projects/${projectId}/intake`)
+  }
+
+  /** Full resumable intake state (session + artifacts + observations + questions + proposal). */
+  intakeProjection(projectId: string, intakeId: string): Promise<IntakeProjection> {
+    return this.request('GET', `/v1/projects/${projectId}/intake/${encodeURIComponent(intakeId)}`)
+  }
+
+  /**
+   * Stage ONE file into the isolated intake staging CAS (multipart, ≤32 MiB,
+   * server-computed sha256; identical bytes are content-addressed idempotent).
+   * The client decodes base64 and builds the multipart body itself — no
+   * project artifact row is written before adoption (pre-accept zero authority).
+   */
+  stageIntakeArtifact(projectId: string, intakeId: string, input: {
+    file_name: string
+    content_base64: string
+    media_type?: string
+  }): Promise<IntakeArtifact> {
+    const bytes = Buffer.from(input.content_base64, 'base64')
+    const boundary = `----dshScholarIntake${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`
+    const mediaType = input.media_type ?? 'application/octet-stream'
+    const crlf = Buffer.from('\r\n')
+    const enc = (text: string): Buffer => Buffer.from(text, 'utf8')
+    const chunks: Buffer[] = []
+    const pushField = (name: string, value: string): void => {
+      chunks.push(enc(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`))
+    }
+    pushField('file_name', input.file_name)
+    pushField('media_type', mediaType)
+    chunks.push(enc(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${input.file_name.replaceAll('"', '')}"\r\nContent-Type: ${mediaType}\r\n\r\n`))
+    chunks.push(bytes, crlf, enc(`--${boundary}--\r\n`))
+    const body = Buffer.concat(chunks)
+    return this.requestRaw('POST', `/v1/projects/${projectId}/intake/${encodeURIComponent(intakeId)}/artifacts`, body, {
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+    })
+  }
+
+  /** Deterministic static security scan; returns the resumable projection. */
+  scanIntake(projectId: string, intakeId: string): Promise<IntakeProjection> {
+    return this.request('POST', `/v1/projects/${projectId}/intake/${encodeURIComponent(intakeId)}/scan`)
+  }
+
+  /** Deterministic Grill Me question set for the session's target phase. */
+  intakeQuestions(projectId: string, intakeId: string): Promise<{ questions: GrillAnswerView[] }> {
+    return this.request('GET', `/v1/projects/${projectId}/intake/${encodeURIComponent(intakeId)}/questions`)
+  }
+
+  /** Record Grill Me answers (provenance recorded server-side per principal). */
+  submitIntakeAnswers(projectId: string, intakeId: string, answers: GrillAnswerInput[], principal: HumanPrincipal): Promise<IntakeProjection> {
+    return this.request('POST', `/v1/projects/${projectId}/intake/${encodeURIComponent(intakeId)}/answers`, { answers, principal })
+  }
+
+  /** Deterministic PhaseProposal; the intake then waits for a Human PI. */
+  proposeIntake(projectId: string, intakeId: string): Promise<PhaseProposal> {
+    return this.request('POST', `/v1/projects/${projectId}/intake/${encodeURIComponent(intakeId)}/propose`)
   }
 
   // ── ideas / contracts / corpus ───────────────────────────────────────────

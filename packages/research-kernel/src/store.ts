@@ -50,6 +50,10 @@ export interface ProjectRow {
   created_at: string
   updated_at: string
   history: string
+  deleted_at: string | null
+  deleted_by: string | null
+  deletion_reason: string | null
+  deletion_request_id: string | null
 }
 
 /** Row shape for gates. */

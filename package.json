@@ -27,6 +27,7 @@
     "test:watch": "vitest",
     "test:fault": "bash tests/fault-injection/run-fault-tests.sh",
     "test:security": "bash tests/security/run-hardening-tests.sh && bash tests/security/run-all-v2-blocking-tests.sh",
+    "test:dsh-private": "bash tests/integration/run-dsh-private-registry-tests.sh",
     "test:ci": "bash scripts/ci-gate.sh",
     "test:all": "pnpm run verify:docs && pnpm test && pnpm run test:security && bash tests/e2e/golden-path.sh && bash evals/docker-eval.sh && bash evals/golden-path-v2/run-golden-v2.sh && bash evals/clean-room-rerun.sh",
     "test:all:requires-docker": "echo 'test:all composes unit + security + e2e + evals; the e2e and eval steps require a working docker runtime (docker info must pass; GitHub ubuntu-latest runners provide it)'",

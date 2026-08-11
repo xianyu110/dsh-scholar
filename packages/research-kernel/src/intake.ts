@@ -10,8 +10,10 @@
  *    (§5 — LLM may only translate/rephrase, never invent or judge);
  *  - static scan: extension allow/deny/quarantine, magic sniffing, static
  *    secret patterns (§4.2 — no AV in this environment, recorded honestly;
- *    deep archive extraction is deferred to the adoption-time code-snapshot
- *    walk, which enforces the path/symlink/bomb limits);
+ *    the CONTROLLED archive unpack scan (archive-scan.ts: path/symlink/
+ *    duplicate/bomb limits, zip/tar/tar.gz) runs at scan time and records
+ *    an unpacked view; adoption-time materialization re-extracts entry
+ *    content into the TeX/code workspaces with the same limits);
  *  - safe phase landing: research-onboarding.md §6 table — observed_phase is
  *    metadata; the kernel derives safe_project_status from the REAL state
  *    machine (a fresh DRAFT project stays DRAFT; gates are created PENDING
@@ -136,7 +138,47 @@ export const INTAKE_ALLOW_EXTENSIONS: readonly string[] = [
 ]
 
 /** Archive extensions: extract-time code-snapshot walk limits apply (§4.1). */
-const ARCHIVE_EXTENSIONS = new Set(['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z'])
+export const INTAKE_ARCHIVE_EXTENSIONS = new Set(['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z'])
+const ARCHIVE_EXTENSIONS = INTAKE_ARCHIVE_EXTENSIONS
+
+/**
+ * Archive extensions the CONTROLLED unpack scan processes at scan time
+ * (research-onboarding.md §4.2 — see archive-scan.ts). bz2/xz/7z are
+ * allow-listed for import but have no extractor in this environment: they
+ * stay opaque single-blob code artifacts (recorded `unsupported`).
+ */
+export const ARCHIVE_SCAN_EXTENSIONS: readonly string[] = ['zip', 'tar', 'gz', 'tgz']
+
+/**
+ * TeX-family extensions materialized into the project TeX workspace
+ * document at adoption (research-onboarding.md §6.1 "TeX 目录 →
+ * 版本化 Workspace/TexFileRevision").
+ */
+export const TEX_MATERIALIZE_EXTENSIONS: readonly string[] = [
+  'tex', 'bib', 'sty', 'cls', 'bst', 'clo', 'def', 'dtx', 'ins', 'ltx',
+]
+
+/** Whether a file name maps to a TeX-workspace document at adoption. */
+export function isTexMaterializableFile(fileName: string): boolean {
+  return TEX_MATERIALIZE_EXTENSIONS.includes(extensionOf(fileName))
+}
+
+/**
+ * Code-family extensions materialized into the project code workspace at
+ * adoption (scripts/notebooks import as code — never auto-executed).
+ * Archives themselves are excluded: their ENTRIES are materialized instead.
+ */
+export const CODE_MATERIALIZE_EXTENSIONS: readonly string[] = [
+  'py', 'ipynb', 'r', 'jl', 'js', 'ts', 'c', 'h', 'cpp', 'hpp', 'cc', 'rs',
+  'go', 'java', 'scala', 'kt', 'cs', 'sh',
+]
+
+/** Whether a file name maps to the code workspace at adoption. */
+export function isCodeMaterializableFile(fileName: string): boolean {
+  const ext = extensionOf(fileName)
+  if (ARCHIVE_EXTENSIONS.has(ext)) return false // archive entries materialize, not the blob
+  return CODE_MATERIALIZE_EXTENSIONS.includes(ext)
+}
 
 /** Script/notebook extensions: importable as code, NEVER auto-executed. */
 const SCRIPT_EXTENSIONS = new Set(['py', 'ipynb', 'r', 'jl', 'js', 'ts', 'c', 'h', 'cpp', 'hpp', 'cc', 'rs', 'go', 'java', 'scala', 'kt', 'cs', 'sh'])
@@ -314,9 +356,12 @@ export interface StaticScanVerdict {
  *  4. static secret patterns in the first 1 MiB (hit → quarantined; the
  *     secret VALUE is never echoed into scan_result/observations);
  *  5. size cap (caller-enforced 413 before bytes land in staging);
- *  6. archive bomb/nesting/symlink/path checks are DEEPER than static scan —
- *     they run at adoption-time code-snapshot extraction (existing walk);
- *     the observation below records that honestly.
+ *  6. archive unpack scanning is the DEEP layer — it runs at scanIntake
+ *     time for zip/tar/tar.gz (archive-scan.ts): path safety (same rule set
+ *     as the workspace store), duplicate/case-collision detection, symlink/
+ *     hardlink/device/FIFO rejection and entry-count/byte/ratio bomb caps.
+ *     The observation below records what static rules can see; the deep
+ *     scan verdict lives in scan_result.archive_extract.
  */
 export function scanIntakeArtifactStatic(fileName: string, mediaType: string, bytes: Uint8Array): StaticScanVerdict {
   const ext = extensionOf(fileName)
@@ -383,8 +428,8 @@ export function scanIntakeArtifactStatic(fileName: string, mediaType: string, by
 
   // Honest notes for allowed material.
   if (ARCHIVE_EXTENSIONS.has(ext)) {
-    warnings.push('archive: path/symlink/duplicate/bomb limits are enforced by the adoption-time code-snapshot extraction walk')
-    observations.push({ detector: 'archive', detector_version: '1', locator: fileName, value: 'archive registered as single blob; extraction limits apply at adoption', warnings: ['archive_extract_pending'] })
+    warnings.push('archive: deep unpack scan (path/symlink/duplicate/bomb limits) runs at scan time; entry materialization happens at adoption')
+    observations.push({ detector: 'archive', detector_version: '1', locator: fileName, value: 'archive registered as single blob; deep unpack scan pending', warnings: ['archive_extract_pending'] })
   }
   if (SCRIPT_EXTENSIONS.has(ext)) {
     warnings.push('script/notebook imports are never auto-executed by the platform')
@@ -624,6 +669,9 @@ export function buildPhaseProposal(input: {
       gaps.push('run_manifest_unverified')
     }
   }
+  // Archive gap: the entries' workspace materialization is pending adoption
+  // (the deep unpack scan ran at scan time; materialization happens after
+  // the adoption transaction commits — research-onboarding.md §6.1).
   const archivePresent = artifacts.some(a => {
     const ext = a.file_name.slice(a.file_name.lastIndexOf('.') + 1).toLowerCase()
     return ARCHIVE_EXTENSIONS.has(ext)
@@ -633,7 +681,11 @@ export function buildPhaseProposal(input: {
   const landing = SAFE_PHASE_LANDING[observedPhase]
   const mappings: ImportMapping[] = artifacts.map(a => ({
     source_artifact_id: a.artifact_id,
+    source_file_name: a.file_name,
     target_kind: artifactKindForFile(a.file_name),
+    target: '',
+    status: 'materialized' as const,
+    reason: 'adopted as project artifact (proposed)',
     note: a.file_name,
   }))
 

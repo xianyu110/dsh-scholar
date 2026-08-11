@@ -38,6 +38,7 @@ export const KernelEventKind = z.enum([
   'project.created',
   'project.transitioned',
   'project.renamed',
+  'project.deleted',
   'gate.created',
   'gate.decided',
   'artifact.registered',
@@ -160,8 +161,21 @@ export const ResearchProject = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   history: z.array(z.string()).default([]),
+  deleted_at: z.string().nullable().default(null),
+  deleted_by: z.string().nullable().default(null),
+  deletion_reason: z.string().nullable().default(null),
 })
 export type ResearchProject = z.infer<typeof ResearchProject>
+
+/** Human-governance receipt for an archived Project tombstone. */
+export const ProjectDeletionReceipt = z.object({
+  project_id: z.string(),
+  deleted_at: z.string(),
+  deleted_by: z.string(),
+  revision: z.number().int().nonnegative(),
+  request_id: z.string(),
+})
+export type ProjectDeletionReceipt = z.infer<typeof ProjectDeletionReceipt>
 
 /**
  * Allowed transitions of the project state machine (v2 §6.2).

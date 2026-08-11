@@ -18,7 +18,8 @@ import {
   buildProjectId, getFixtureProfile, getRunnerProfile, resolveRunnerProfileId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
   type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
-  type IntakeStatus,
+  type IntakeStatus, type ImportMapping,
+  type ProjectDeletionReceipt,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { mkdirMode } from './fs-modes.js'
@@ -34,8 +35,14 @@ import {
   INTAKE_DEFAULT_TTL_MS, INTAKE_STAGED_TTL_MS, INTAKE_DDL, GRILL_TAXONOMY_VERSION, GRILL_QUESTION_REVISION,
   questionsForTargetPhase, requiredQuestionCodes, scanIntakeArtifactStatic, artifactKindForFile,
   isImportableMetricsFile, parseMetricsFileV1, buildPhaseProposal, questionViews,
-  SAFE_PHASE_LANDING, type StaticScanVerdict,
+  SAFE_PHASE_LANDING, isTexMaterializableFile, isCodeMaterializableFile, ARCHIVE_SCAN_EXTENSIONS,
+  INTAKE_ARCHIVE_EXTENSIONS,
+  type StaticScanVerdict,
 } from './intake.js'
+import {
+  ArchiveScanError, scanArchive, extractArchiveEntries, DEFAULT_ARCHIVE_LIMITS,
+  type ArchiveLimits, type ArchiveScanResult,
+} from './archive-scan.js'
 import { TrajectoryStore } from './trajectory.js'
 import { MetricsStore } from './metrics.js'
 
@@ -140,6 +147,13 @@ export function validateUploadFileName(name: string): void {
     // research-package archives (validated by the archive walk instead).
     throw new KernelError(422, 'invalid_file_name', 'upload file name must be a single basename without path separators')
   }
+}
+
+/** Lowercased extension of a file name ('' when none) — shared classifier. */
+function extensionOfFile(fileName: string): string {
+  const base = fileName.slice(fileName.lastIndexOf('/') + 1)
+  const dot = base.lastIndexOf('.')
+  return dot < 0 ? '' : base.slice(dot + 1).toLowerCase()
 }
 
 import { openTexWorkspace, TexError, type TexBuild, type TexDocumentInfo, type TexFileEntry, type TexPreviewPending, type TexSnapshotManifest } from './tex-workspace.js'
@@ -271,6 +285,9 @@ function projectFromRow(row: ProjectRow): ResearchProject {
     created_at: row.created_at,
     updated_at: row.updated_at,
     history: jsonParse(row.history, [] as string[]),
+    deleted_at: row.deleted_at,
+    deleted_by: row.deleted_by,
+    deletion_reason: row.deletion_reason,
   }
 }
 
@@ -585,8 +602,23 @@ export class ResearchKernel {
   /** ONBOARD-01: default Intake session TTL before expireIntakes (7 days). */
   static INTAKE_DEFAULT_TTL_MS = INTAKE_DEFAULT_TTL_MS
 
-  /** ONBOARD-01: default staged-intake-blob TTL for cleanupIntakeStaged. */
+  /**
+   * ONBOARD-01: default staged-intake-blob TTL for cleanupIntakeStaged.
+   */
   static INTAKE_STAGED_TTL_MS = INTAKE_STAGED_TTL_MS
+
+  /**
+   * ONBOARD-01 (research-onboarding.md §4.2): controlled archive unpack
+   * scan limits (archive-scan.ts). Applied at scanIntake (deep scan — a
+   * violation quarantines the artifact) AND re-applied at adoption-time
+   * materialization (a violation there records a `gap`, never fails the
+   * adoption). Static so deployments/tests can override them (same pattern
+   * as the snapshot limits).
+   */
+  static ARCHIVE_MAX_ENTRIES = DEFAULT_ARCHIVE_LIMITS.maxEntries
+  static ARCHIVE_MAX_TOTAL_BYTES = DEFAULT_ARCHIVE_LIMITS.maxTotalBytes
+  static ARCHIVE_MAX_FILE_BYTES = DEFAULT_ARCHIVE_LIMITS.maxFileBytes
+  static ARCHIVE_MAX_RATIO = DEFAULT_ARCHIVE_LIMITS.maxRatio
 
   readonly db: DatabaseSync
   readonly cas: ArtifactCas
@@ -1029,6 +1061,9 @@ export class ResearchKernel {
       created_at: nowIso(),
       updated_at: nowIso(),
       history: ['created'],
+      deleted_at: null,
+      deleted_by: null,
+      deletion_reason: null,
     }
     this.db.prepare(
       `INSERT INTO projects (project_id, name, workspace, mode, status, revision, brief, constraints, execution, integrity, session_id, dsh_workspace_id, created_at, updated_at, history)
@@ -1118,8 +1153,8 @@ export class ResearchKernel {
       after = { updated_at: updatedAt, project_id: projectId }
     }
     const rows = after === null
-      ? this.db.prepare('SELECT * FROM projects ORDER BY updated_at DESC, project_id DESC LIMIT ?').all(cap + 1) as unknown as ProjectRow[]
-      : this.db.prepare('SELECT * FROM projects WHERE (updated_at < ? OR (updated_at = ? AND project_id < ?)) ORDER BY updated_at DESC, project_id DESC LIMIT ?')
+      ? this.db.prepare('SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC, project_id DESC LIMIT ?').all(cap + 1) as unknown as ProjectRow[]
+      : this.db.prepare('SELECT * FROM projects WHERE deleted_at IS NULL AND (updated_at < ? OR (updated_at = ? AND project_id < ?)) ORDER BY updated_at DESC, project_id DESC LIMIT ?')
         .all(after.updated_at, after.updated_at, after.project_id, cap + 1) as unknown as ProjectRow[]
     const hasMore = rows.length > cap
     const page = hasMore ? rows.slice(0, cap) : rows
@@ -1140,6 +1175,19 @@ export class ResearchKernel {
       project_id: string; principal_id: string; tenant_id: string; role: string; created_at: string; updated_at: string
     }>
     return rows
+  }
+
+  /** Role lookup used by Human governance adapters. Deleted projects remain
+   * addressable only when includeDeleted=true so an idempotent delete replay
+   * can still be authenticated without reopening ordinary project reads. */
+  getProjectMemberRole(projectId: string, principalId: string, includeDeleted = false): string | null {
+    const project = this.db.prepare(
+      `SELECT deleted_at FROM projects WHERE project_id = ? ${includeDeleted ? '' : 'AND deleted_at IS NULL'}`,
+    ).get(projectId) as { deleted_at: string | null } | undefined
+    if (project === undefined) return null
+    const member = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND principal_id = ?')
+      .get(projectId, principalId) as { role: string } | undefined
+    return member?.role ?? null
   }
 
   addProjectMember(input: {
@@ -1187,13 +1235,13 @@ export class ResearchKernel {
   }
 
   getProject(projectId: string): ResearchProject {
-    const row = this.db.prepare('SELECT * FROM projects WHERE project_id = ?').get(projectId) as ProjectRow | undefined
+    const row = this.db.prepare('SELECT * FROM projects WHERE project_id = ? AND deleted_at IS NULL').get(projectId) as ProjectRow | undefined
     if (row === undefined) throw new KernelError(404, 'project_not_found', `project ${projectId} not found`)
     return projectFromRow(row)
   }
 
   listProjects(): ResearchProject[] {
-    const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at').all() as unknown as ProjectRow[]
+    const rows = this.db.prepare('SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY created_at').all() as unknown as ProjectRow[]
     return rows.map(projectFromRow)
   }
 
@@ -1268,6 +1316,88 @@ export class ResearchKernel {
     const updated = this.getProject(projectId)
     this.emit(projectId, 'project.transitioned', { from: 'ARCHIVED', to: restored, revision: updated.revision, reason: 'restored' })
     return updated
+  }
+
+  /**
+   * PROJECT-DELETE-01: hide an archived project through an auditable
+   * tombstone. This deliberately preserves the aggregate, memberships,
+   * Outbox, artifacts and shared CAS references for retention/GC safety.
+   */
+  deleteProject(input: {
+    project_id: string
+    expected_revision: number
+    confirm_name: string
+    reason: string
+    deleted_by: string
+    request_id: string
+  }): ProjectDeletionReceipt {
+    const row = this.db.prepare('SELECT * FROM projects WHERE project_id = ?').get(input.project_id) as ProjectRow | undefined
+    if (row === undefined) throw new KernelError(404, 'project_not_found', `project ${input.project_id} not found`)
+    if (row.deleted_at !== null) {
+      if (row.deletion_request_id === input.request_id && row.deleted_by !== null) {
+        return {
+          project_id: row.project_id,
+          deleted_at: row.deleted_at,
+          deleted_by: row.deleted_by,
+          revision: row.revision,
+          request_id: row.deletion_request_id,
+        }
+      }
+      throw new KernelError(404, 'project_not_found', `project ${input.project_id} not found`)
+    }
+    if (row.status !== 'ARCHIVED') {
+      throw new KernelError(409, 'project_not_archived', `project ${input.project_id} must be archived before deletion`)
+    }
+    if (row.revision !== input.expected_revision) {
+      throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_revision}, got ${row.revision}`)
+    }
+    if (input.confirm_name !== row.name) {
+      throw new KernelError(422, 'project_delete_confirmation_invalid', 'project deletion confirmation must exactly match the project name')
+    }
+    const reason = input.reason.trim()
+    if (reason === '') {
+      throw new KernelError(422, 'project_delete_confirmation_invalid', 'project deletion reason must not be empty')
+    }
+    if (input.deleted_by.trim() === '' || input.request_id.trim() === '') {
+      throw new KernelError(422, 'principal_required', 'project deletion requires deleted_by and request_id')
+    }
+    const active = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'retryable')",
+    ).get(row.project_id) as { n: number }
+    if (Number(active.n) > 0) {
+      throw new KernelError(409, 'jobs_running', `project ${row.project_id} still has active jobs`)
+    }
+    const deletedAt = nowIso()
+    return withTransaction(this.db, () => {
+      const result = this.db.prepare(`UPDATE projects
+        SET deleted_at = ?, deleted_by = ?, deletion_reason = ?, deletion_request_id = ?,
+            revision = revision + 1, updated_at = ?, history = ?
+        WHERE project_id = ? AND revision = ? AND deleted_at IS NULL`)
+        .run(
+          deletedAt, input.deleted_by, reason, input.request_id, deletedAt,
+          JSON.stringify([...jsonParse(row.history, [] as string[]), `ARCHIVED->tombstoned (${reason})`]),
+          row.project_id, input.expected_revision,
+        )
+      if (Number(result.changes) !== 1) {
+        throw new KernelError(409, 'revision_conflict', 'project changed while deletion was being committed')
+      }
+      const receipt: ProjectDeletionReceipt = {
+        project_id: row.project_id,
+        deleted_at: deletedAt,
+        deleted_by: input.deleted_by,
+        revision: input.expected_revision + 1,
+        request_id: input.request_id,
+      }
+      this.emit(row.project_id, 'project.deleted', {
+        project_id: row.project_id,
+        revision: receipt.revision,
+        deleted_at: deletedAt,
+        deleted_by: input.deleted_by,
+        reason,
+        request_id: input.request_id,
+      })
+      return receipt
+    })
   }
 
   /** Link a DSH session to a project (design RSP-006). */
@@ -1989,6 +2119,16 @@ export class ResearchKernel {
     return join(this.intakeStagedRoot, intakeId, `${sha256}.part`)
   }
 
+  /** Current archive unpack-scan limits (statics overrideable by tests). */
+  private archiveLimits(): ArchiveLimits {
+    return {
+      maxEntries: ResearchKernel.ARCHIVE_MAX_ENTRIES,
+      maxTotalBytes: ResearchKernel.ARCHIVE_MAX_TOTAL_BYTES,
+      maxFileBytes: ResearchKernel.ARCHIVE_MAX_FILE_BYTES,
+      maxRatio: ResearchKernel.ARCHIVE_MAX_RATIO,
+    }
+  }
+
   private intakeSessionFromRow(row: IntakeSessionRow): IntakeSession {
     return {
       intake_id: row.intake_id,
@@ -2264,7 +2404,15 @@ export class ResearchKernel {
    * ONBOARD-01 scan (research-onboarding.md §4.2): verify every staged
    * artifact's server-side sha256 and run the STATIC security scan
    * (extension allow/deny/quarantine, magic bytes, static secret patterns;
-   * NO AV in this environment — recorded honestly in scan_result). Verdicts:
+   * NO AV in this environment — recorded honestly in scan_result), then the
+   * CONTROLLED ARCHIVE UNPACK SCAN for clean zip/tar/tar.gz artifacts
+   * (archive-scan.ts: path safety, duplicate/case collision, symlink/
+   * hardlink/device/FIFO rejection, entry/byte/ratio bomb caps). A deep-scan
+   * violation quarantines the artifact (fail closed — §4.2 "扫描必须验证");
+   * legitimate-but-unscannable formats (bz2/xz/7z, single-file gzip) are
+   * recorded `unsupported` and stay clean. The unpacked view
+   * (scan_result.archive_extract) feeds adoption-time materialization;
+   * scan_summary aggregates extracted_entries/extracted_bytes. Verdicts:
    * clean | quarantined | rejected. Observations are replaced per scan.
    */
   scanIntake(intakeId: string): IntakeProjection {
@@ -2276,6 +2424,9 @@ export class ResearchKernel {
     let clean = 0
     let quarantined = 0
     let rejected = 0
+    let extractedEntries = 0
+    let extractedBytes = 0
+    let archivesScanned = 0
     this.db.prepare('DELETE FROM intake_observations WHERE intake_id = ?').run(intakeId)
     const insertObservation = this.db.prepare(
       'INSERT INTO intake_observations (observation_id, intake_id, artifact_id, locator, detector, detector_version, value, warnings, trust, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -2293,12 +2444,65 @@ export class ResearchKernel {
         throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} content hash mismatch (recorded ${artifact.sha256}, got ${actualSha})`)
       }
       const verdict = scanIntakeArtifactStatic(artifact.file_name, artifact.media_type, staged)
+      // Deep archive unpack scan for clean zip/tar/tar.gz artifacts.
+      let scanResult: Record<string, unknown> = verdict.scan_result
+      let quarantine = verdict.quarantine
+      const observations = [...verdict.observations]
+      if (verdict.quarantine === 'clean' && ARCHIVE_SCAN_EXTENSIONS.includes(extensionOfFile(artifact.file_name))) {
+        try {
+          const unpacked = scanArchive(staged, artifact.file_name, this.archiveLimits())
+          archivesScanned += 1
+          extractedEntries += unpacked.entries.length
+          extractedBytes += unpacked.extracted_bytes
+          scanResult = {
+            ...verdict.scan_result,
+            archive_extract: {
+              status: 'ok',
+              kind: unpacked.kind,
+              extracted_entries: unpacked.entries.length,
+              extracted_bytes: unpacked.extracted_bytes,
+              entries: unpacked.entries.map(e => ({ path: e.path, size_bytes: e.size_bytes })),
+            },
+          }
+          observations.push({
+            detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
+            value: `${unpacked.kind} archive: ${unpacked.entries.length} entries / ${unpacked.extracted_bytes} bytes`,
+            warnings: ['archive_extract_ok'],
+          })
+        } catch (error) {
+          if (error instanceof ArchiveScanError) {
+            archivesScanned += 1
+            if (error.code === 'archive_gzip_single_file') {
+              // Legitimate single-file gzip (e.g. data.csv.gz): not unpacked
+              // but NOT refused — stays clean and adoptable as a code blob.
+              scanResult = { ...verdict.scan_result, archive_extract: { status: 'unsupported', reason: error.message } }
+              observations.push({
+                detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
+                value: `archive not unpacked: ${error.message}`,
+                warnings: ['archive_extract_unsupported'],
+              })
+            } else {
+              // Fail closed: a path escape / bomb / special entry / corrupt
+              // archive quarantines the artifact until removed or replaced.
+              quarantine = 'quarantined'
+              scanResult = { ...verdict.scan_result, archive_extract: { status: 'rejected', code: error.code, reason: error.message } }
+              observations.push({
+                detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
+                value: `archive scan rejected: ${error.code}`,
+                warnings: ['archive_extract_rejected'],
+              })
+            }
+          } else {
+            throw error
+          }
+        }
+      }
       this.db.prepare('UPDATE intake_artifacts SET quarantine = ?, scan_result = ? WHERE intake_id = ? AND artifact_id = ?')
-        .run(verdict.quarantine, JSON.stringify(verdict.scan_result), intakeId, artifact.artifact_id)
-      if (verdict.quarantine === 'clean') clean += 1
-      else if (verdict.quarantine === 'quarantined') quarantined += 1
+        .run(quarantine, JSON.stringify(scanResult), intakeId, artifact.artifact_id)
+      if (quarantine === 'clean') clean += 1
+      else if (quarantine === 'quarantined') quarantined += 1
       else rejected += 1
-      for (const observation of verdict.observations) {
+      for (const observation of observations) {
         insertObservation.run(
           `obs_${randomUUID().replaceAll('-', '').slice(0, 16)}`, intakeId, artifact.artifact_id,
           observation.locator, observation.detector, observation.detector_version, observation.value,
@@ -2314,6 +2518,10 @@ export class ResearchKernel {
       clean,
       quarantined,
       rejected,
+      // ONBOARD-01 §4.2: unpacked-view totals of the controlled archive scan.
+      archives_scanned: archivesScanned,
+      extracted_entries: extractedEntries,
+      extracted_bytes: extractedBytes,
     }
     this.db.prepare('UPDATE intake_sessions SET scan_summary = ? WHERE intake_id = ?').run(JSON.stringify(scanSummary), intakeId)
     // Questions are always answerable after a scan; when every required
@@ -2479,7 +2687,12 @@ export class ResearchKernel {
    *  - imports metrics/results files as draft (legacy_unverified) Evidence
    *    and logs as log Artifact + ImportedRunObservation — NEVER TerminalLog,
    *    RunSet, verified/accepted Evidence or supported Claim;
-   *  - writes the AdoptionReceipt (pinned revisions + idempotency hash).
+   *  - writes the AdoptionReceipt (pinned revisions + idempotency hash);
+   *  - AFTER the transaction commits, materializes TeX/code files and
+   *    unpacked archive entries into the project TeX document / code
+   *    workspace (+ optional CodeSnapshot) and appends the report to the
+   *    receipt — materialization is best-effort and never rolls back the
+   *    adoption (research-onboarding.md §6.1).
    * The project stays on its kernel state machine status (DRAFT for fresh
    * projects) — adoption never skips the Scope Gate or any other gate.
    * Idempotent: same intake + Idempotency-Key + request hash → same receipt;
@@ -2551,7 +2764,7 @@ export class ResearchKernel {
       throw new KernelError(422, 'artifact_quarantined',
         `intake artifacts are not clean: ${blocked.map(a => `${a.file_name} (${a.quarantine})`).join(', ')} — remove or replace them`)
     }
-    return withTransaction(this.db, () => {
+    const txReceipt = withTransaction(this.db, () => {
       const now = nowIso()
       const createdObjectRefs: string[] = []
       const draftEvidenceRefs: string[] = []
@@ -2632,6 +2845,11 @@ export class ResearchKernel {
         created_object_refs: createdObjectRefs,
         pending_gate_refs: pendingGateRefs,
         draft_evidence_refs: draftEvidenceRefs,
+        // The materialization report is appended AFTER this transaction
+        // commits (best-effort enhancement — research-onboarding.md §6.1);
+        // the transaction itself only records the authoritative import.
+        import_mappings: [],
+        code_snapshot_refs: [],
         idempotency_key: input.idempotency_key ?? null,
         request_hash: input.request_hash ?? '',
         adopted_by: principal,
@@ -2641,14 +2859,277 @@ export class ResearchKernel {
         'UPDATE intake_sessions SET status = ?, receipt_json = ?, revision = revision + 1, updated_at = ? WHERE intake_id = ?',
       ).run('accepted', JSON.stringify(receipt), now, input.intake_id)
       this.appendIntakeAudit(input.intake_id, 'adopted', `adoption ${receipt.adoption_id} (proposal r${proposal.revision})`)
-      // GC the isolated staging files (blobs now live in the real CAS).
-      this.gcIntakeStagedDir(input.intake_id)
       this.emit(session.project_id, 'intake.accepted', {
         intake_id: input.intake_id, project_id: session.project_id, adoption_id: receipt.adoption_id,
         proposal_revision: proposal.revision, artifact_count: artifacts.length,
       })
       return receipt
     })
+    // ── Post-transaction adoption materialization (research-onboarding.md
+    // §6.1) ── TeX files/entries → project TeX document, code files/entries
+    // → project code workspace (+ optional CodeSnapshot). adopt is the
+    // AUTHORITATIVE import; materialization is BEST-EFFORT: failures record
+    // `gap` mappings (or audit entries) and NEVER roll back the adoption.
+    let receipt = txReceipt
+    try {
+      const materialized = this.materializeAdoptionImports({
+        project_id: session.project_id!,
+        intake_id: input.intake_id,
+        artifacts,
+      })
+      receipt = { ...txReceipt, import_mappings: materialized.mappings, code_snapshot_refs: materialized.codeSnapshotRefs }
+      this.db.prepare('UPDATE intake_sessions SET receipt_json = ?, updated_at = ? WHERE intake_id = ?')
+        .run(JSON.stringify(receipt), nowIso(), input.intake_id)
+    } catch (error) {
+      // A materialization bug must never fail an authoritative adoption.
+      this.appendIntakeAudit(input.intake_id, 'materialize', `materialization failed: ${(error as Error).message}`)
+    } finally {
+      // GC the isolated staging files (blobs now live in the real CAS) —
+      // AFTER materialization re-read them from the staging area.
+      this.gcIntakeStagedDir(input.intake_id)
+    }
+    return receipt
+  }
+
+  /**
+   * ONBOARD-01 adoption materialization (research-onboarding.md §6.1) —
+   * runs AFTER the adoption transaction commits; never rolls it back.
+   *
+   * For every adopted artifact the report carries one artifact-level mapping
+   * (status `materialized` — the authoritative import), then:
+   *  - direct TeX files → the project's TeX workspace document
+   *    (tex-workspace `ensureDocument`/`writeFile`, entries at version 1;
+   *    document_id rule: tex-workspace `doc_<uuid12>`, one document per
+   *    project — the existing document is reused, never replaced);
+   *  - direct code files → the project's `code` workspace (workspace-store
+   *    `write` with expected version 0: an existing path CONFLICTS and
+   *    records a gap — no silent overwrite);
+   *  - unpacked archive entries (scan_result.archive_extract.status='ok'):
+   *    TeX entries → TeX document, code entries → code workspace, every
+   *    other entry type → gap `entry_type_not_materialized` (it stays
+   *    inside the adopted archive artifact);
+   *  - unscannable archives (bz2/xz/7z, single-file gzip, pre-deep-scan
+   *    rows) → gap `archive_not_unpacked` / `archive_entries_not_scanned`;
+   *  - when code materialized, an optional CodeSnapshot is generated over
+   *    the code workspace (snapshotCodeArchive workspace semantics);
+   *    snapshot failure is audited — the files remain in the workspace.
+   */
+  private materializeAdoptionImports(input: {
+    project_id: string
+    intake_id: string
+    artifacts: IntakeArtifact[]
+  }): { mappings: ImportMapping[]; codeSnapshotRefs: string[] } {
+    const mappings: ImportMapping[] = []
+    const codeSnapshotRefs: string[] = []
+    let codeWorkspace: { id: string; name: string } | null = null
+    let codeMaterialized = 0
+    for (const artifact of input.artifacts) {
+      const artifactId = artifact.artifact_id
+      // Artifact-level mapping: the authoritative import (already committed).
+      mappings.push({
+        source_artifact_id: artifactId,
+        source_file_name: artifact.file_name,
+        target_kind: artifactKindForFile(artifact.file_name),
+        target: '',
+        status: 'materialized',
+        reason: 'adopted as project artifact',
+        note: '',
+      })
+      const archiveExtract = (artifact.scan_result as Record<string, unknown>).archive_extract as
+        | { status: 'ok'; entries: Array<{ path: string; size_bytes: number }> }
+        | { status: 'rejected' | 'unsupported'; reason?: string }
+        | undefined
+      if (archiveExtract?.status === 'ok') {
+        let staged: Buffer
+        try {
+          staged = readFileSync(this.intakeStagedPath(input.intake_id, artifact.sha256))
+        } catch {
+          for (const entry of archiveExtract.entries) {
+            mappings.push(this.materializationGap(artifactId, entry.path, artifactKindForFile(entry.path), 'staged_bytes_missing'))
+          }
+          continue
+        }
+        for (const entry of archiveExtract.entries) {
+          // Re-extract ONE entry from the staged archive. The scan already
+          // validated path safety + caps; materialization skips the walk
+          // caps (a cap that changed between scan and adopt must fail THIS
+          // entry via the per-entry inflate bound → gap, not the whole
+          // archive) and never fails the adoption itself.
+          let content: Buffer
+          try {
+            const got = extractArchiveEntries(staged, artifact.file_name, [entry.path], this.archiveLimits(), { enforceCaps: false }).get(entry.path)
+            if (got === undefined) {
+              mappings.push(this.materializationGap(artifactId, entry.path, artifactKindForFile(entry.path), 'entry_not_found'))
+              continue
+            }
+            content = got
+          } catch (error) {
+            const code = error instanceof ArchiveScanError ? error.code : 'materialization_error'
+            mappings.push(this.materializationGap(artifactId, entry.path, artifactKindForFile(entry.path),
+              `${code}: ${(error as Error).message}`))
+            continue
+          }
+          if (isTexMaterializableFile(entry.path)) {
+            const result = this.materializeTexEntry(input, artifactId, entry.path, content)
+            mappings.push(result.mapping)
+          } else if (isCodeMaterializableFile(entry.path)) {
+            const result = this.materializeCodeEntry(input, artifactId, entry.path, content, codeWorkspace)
+            codeWorkspace = result.workspace
+            if (result.materialized) codeMaterialized += 1
+            mappings.push(result.mapping)
+          } else {
+            mappings.push(this.materializationGap(artifactId, entry.path, artifactKindForFile(entry.path), 'entry_type_not_materialized'))
+          }
+        }
+      } else if (archiveExtract?.status === 'unsupported' || archiveExtract?.status === 'rejected') {
+        mappings.push(this.materializationGap(artifactId, artifact.file_name, artifactKindForFile(artifact.file_name),
+          `archive_not_unpacked:${archiveExtract.status}`))
+      } else if (INTAKE_ARCHIVE_EXTENSIONS.has(extensionOfFile(artifact.file_name))) {
+        // Staged before the deep scan existed, or a format with no
+        // extractor (bz2/xz/7z): the blob stays an opaque code artifact.
+        mappings.push(this.materializationGap(artifactId, artifact.file_name, artifactKindForFile(artifact.file_name),
+          'archive_entries_not_scanned'))
+      } else if (isTexMaterializableFile(artifact.file_name)) {
+        let content: Buffer
+        try {
+          content = readFileSync(this.intakeStagedPath(input.intake_id, artifact.sha256))
+        } catch {
+          content = Buffer.alloc(0)
+        }
+        mappings.push(this.materializeTexEntry(input, artifactId, artifact.file_name, content).mapping)
+      } else if (isCodeMaterializableFile(artifact.file_name)) {
+        let content: Buffer
+        try {
+          content = readFileSync(this.intakeStagedPath(input.intake_id, artifact.sha256))
+        } catch {
+          content = Buffer.alloc(0)
+        }
+        const result = this.materializeCodeEntry(input, artifactId, artifact.file_name, content, codeWorkspace)
+        codeWorkspace = result.workspace
+        if (result.materialized) codeMaterialized += 1
+        mappings.push(result.mapping)
+      }
+    }
+    // Optional CodeSnapshot over the materialized code workspace
+    // (snapshotCodeArchive workspace semantics — post-adoption code lives
+    // in the project workspace and can be snapshotted directly).
+    if (codeWorkspace !== null && codeMaterialized > 0) {
+      try {
+        const snapshot = this.snapshotCodeArchive(input.project_id, codeWorkspace.id, '',
+          `adopted code from intake ${input.intake_id}`)
+        codeSnapshotRefs.push(snapshot.snapshot_id)
+        this.appendIntakeAudit(input.intake_id, 'materialize',
+          `code snapshot ${snapshot.snapshot_id} generated from workspace ${codeWorkspace.id}`)
+      } catch (error) {
+        this.appendIntakeAudit(input.intake_id, 'materialize',
+          `code snapshot failed (files remain in workspace ${codeWorkspace.id}): ${(error as Error).message}`)
+      }
+    }
+    return { mappings, codeSnapshotRefs }
+  }
+
+  /** One `gap` mapping row (best-effort materialization failure). */
+  private materializationGap(artifactId: string, source: string, kind: string, reason: string): ImportMapping {
+    return {
+      source_artifact_id: artifactId,
+      source_file_name: source,
+      target_kind: kind,
+      target: '',
+      status: 'gap',
+      reason,
+      note: '',
+    }
+  }
+
+  /**
+   * Best-effort TeX materialization of ONE file/entry into the project's
+   * TeX workspace document. Never throws — returns the mapping row.
+   * document_id rule: tex-workspace `ensureDocument` generates
+   * `doc_<uuid12>` (one document per project, reused; root_file = the first
+   * imported .tex root). First writes land at version 1.
+   */
+  private materializeTexEntry(
+    input: { project_id: string; intake_id: string },
+    artifactId: string,
+    source: string,
+    content: Buffer,
+  ): { mapping: ImportMapping; document_id: string | null } {
+    try {
+      const document = this.tex.ensureDocument(input.project_id, source)
+      const text = content.toString('utf8')
+      if (Buffer.from(text, 'utf8').equals(content) === false) {
+        throw new TexError('tex_entry_not_utf8', `${source} is not valid UTF-8 text (TeX materialization is text-only)`)
+      }
+      this.tex.writeFile(document.document_id, source, text, 0)
+      return {
+        mapping: {
+          source_artifact_id: artifactId,
+          source_file_name: source,
+          target_kind: 'tex_document',
+          target: document.document_id,
+          status: 'materialized',
+          reason: `written to TeX document ${document.document_id} at version 1`,
+          note: '',
+        },
+        document_id: document.document_id,
+      }
+    } catch (error) {
+      const code = error instanceof TexError ? error.code : 'materialization_error'
+      return {
+        mapping: this.materializationGap(artifactId, source, 'tex_document', `${code}: ${(error as Error).message}`),
+        document_id: null,
+      }
+    }
+  }
+
+  /**
+   * Best-effort code materialization of ONE file/entry into the project's
+   * code workspace (per-adoption name `intake-<intake suffix>`, kind
+   * 'code'). Text writes use the workspace-store text path (valid UTF-8);
+   * anything else lands as a binary node. Expected version 0 = create-if-
+   * absent: an existing path conflicts (gap) — never a silent overwrite.
+   */
+  private materializeCodeEntry(
+    input: { project_id: string; intake_id: string },
+    artifactId: string,
+    source: string,
+    content: Buffer,
+    existing: { id: string; name: string } | null,
+  ): { mapping: ImportMapping; workspace: { id: string; name: string } | null; materialized: boolean } {
+    try {
+      let workspace = existing
+      if (workspace === null) {
+        const name = `intake-${input.intake_id.slice(-8)}`
+        const info = this.workspaces.ensure(input.project_id, 'code', name)
+        workspace = { id: info.workspace_id, name }
+      }
+      const text = content.toString('utf8')
+      if (Buffer.from(text, 'utf8').equals(content)) {
+        this.workspaces.write(workspace.id, source, text, { version: 0 })
+      } else {
+        this.workspaces.writeBinary(workspace.id, source, content, 'application/octet-stream', { version: 0 })
+      }
+      return {
+        mapping: {
+          source_artifact_id: artifactId,
+          source_file_name: source,
+          target_kind: 'code_workspace',
+          target: `code/${source}`,
+          status: 'materialized',
+          reason: `written to code workspace ${workspace.id}`,
+          note: '',
+        },
+        workspace,
+        materialized: true,
+      }
+    } catch (error) {
+      const code = error instanceof WorkspaceError ? error.code : 'materialization_error'
+      return {
+        mapping: this.materializationGap(artifactId, source, 'code_workspace', `${code}: ${(error as Error).message}`),
+        workspace: existing,
+        materialized: false,
+      }
+    }
   }
 
   private gcIntakeStagedDir(intakeId: string): void {
@@ -2758,6 +3239,7 @@ export class ResearchKernel {
 
   /** Project-scoped artifact lookup (v2 §3.4 isolation). */
   getArtifact(projectId: string, sha256OrId: string): ArtifactRecord {
+    this.getProject(projectId)
     const id = sha256OrId.startsWith('sha256:') ? sha256OrId : `sha256:${sha256OrId}`
     const row = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? AND artifact_id = ?')
       .get(projectId, id) as ArtifactRecord | undefined
@@ -2768,6 +3250,7 @@ export class ResearchKernel {
 
 
   listArtifacts(projectId: string): ArtifactRecord[] {
+    this.getProject(projectId)
     const rows = this.db.prepare('SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as ArtifactRecord[]
     return rows.map(row => ({ ...row, metadata: jsonParse(row.metadata as unknown as string, {}) }))
   }
@@ -5034,13 +5517,26 @@ export class ResearchKernel {
     }
   }
 
-  /** PATH search (prefix/glob — content search not implemented). */
+  /** PATH search (prefix/glob). */
   workspaceSearch(workspaceId: string, query: { prefix?: string; glob?: string }): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[] } {
     try {
       return this.workspaces.search(workspaceId, query)
     } catch (error) {
       if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
       return this.texFacade.search(workspaceId, query)
+    }
+  }
+
+  /** CONTENT search (api-contracts.md §17): linear text scan over the
+   * generic store, with the manuscript facade as the fallback for
+   * `manuscript` workspaces — same bounded semantics on both backends
+   * (text nodes only, per-file/per-result/size caps, no full-text index). */
+  workspaceSearchContent(workspaceId: string, query: import('./workspace-store.js').WorkspaceContentSearchQuery): import('./workspace-store.js').WorkspaceContentSearchResult {
+    try {
+      return this.workspaces.searchContent(workspaceId, query)
+    } catch (error) {
+      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
+      return this.texFacade.searchContent(workspaceId, query)
     }
   }
 

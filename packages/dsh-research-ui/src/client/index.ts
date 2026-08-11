@@ -888,7 +888,14 @@ export function apply(): void {
     let projection: LoadedProjection | null = null
     if (target !== undefined) {
       const fetched = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
-      if (fetched === null || fetched.project === undefined) projection = null
+      if (fetched === null || fetched.project === undefined) {
+        projection = null
+        // A deleted project is absent from the authoritative list and all
+        // ordinary reads return 404. Clear the stale selection so the Start
+        // screen gives the user the next available action instead of leaving
+        // a dead deep link selected.
+        if (!projects.some(project => project.project_id === target)) state.projectId = undefined
+      }
       else {
         state.projectId = fetched.project.project_id
         projection = { ...fetched, project: fetched.project }
@@ -897,7 +904,7 @@ export function apply(): void {
     if (projection !== null && booting) booting = false
     syncTitle(projection?.project?.name)
     renderSidebar(sidebar, projects, state.projectId, (id) => { state.projectId = id; void render() })
-    if (target === undefined) {
+    if (state.projectId === undefined) {
       syncTitle(undefined)
       // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start, §5 P1 ONBOARD-01):
       // the first screen offers exactly three primary actions — 新建研究 /
@@ -974,10 +981,12 @@ export function apply(): void {
       body.replaceChildren(start)
       return
     }
+    const activeTarget = state.projectId
+    if (activeTarget === undefined) return
     if (projection === null) {
       chatDock.hidden = true
       chatDock.replaceChildren()
-      body.replaceChildren(el('div', 'error-banner', t('shell', 'shell.kernelUnreachableProject', { project: target })))
+      body.replaceChildren(el('div', 'error-banner', t('shell', 'shell.kernelUnreachableProject', { project: activeTarget })))
       return
     }
     // dsh-web terminal hygiene: leaving the Terminal tab closes the stream
@@ -1018,21 +1027,22 @@ export function apply(): void {
     }
 
     switch (state.activeTab) {
-      case 'chat': await renderChat(body, chatDock, target); break
-      case 'phase': await renderPhase(body, projection, target); break
-      case 'gates': await renderGates(body, target); break
+      case 'chat': await renderChat(body, chatDock, activeTarget); break
+      case 'phase': await renderPhase(body, projection, activeTarget); break
+      case 'gates': await renderGates(body, activeTarget); break
       case 'runs': renderRuns(body, projection); break
-      case 'terminal': renderTerminal(body, projection, target); break
-      case 'artifacts': await renderArtifacts(body, target); break
-      case 'evidence': await renderEvidence(body, target); break
+      case 'terminal': renderTerminal(body, projection, activeTarget); break
+      case 'artifacts': await renderArtifacts(body, activeTarget); break
+      case 'evidence': await renderEvidence(body, activeTarget); break
       case 'budget': renderBudget(body, projection); break
-      case 'manuscript': renderManuscript(body, projection, target); break
-      case 'trajectory': await renderTrajectory(body, target); break
-      case 'topology': await renderTopology(body, target); break
-      case 'workspace': await renderWorkspace(body, target); break
-      case 'pty': renderPty(body, projection, target); break
+      case 'manuscript': renderManuscript(body, projection, activeTarget); break
+      case 'trajectory': await renderTrajectory(body, activeTarget); break
+      case 'topology': await renderTopology(body, activeTarget); break
+      case 'workspace': await renderWorkspace(body, activeTarget); break
+      case 'pty': renderPty(body, projection, activeTarget); break
     }
-    const stamp = el('div', 'stamp', `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${state.lastError !== undefined ? ` · ⚠ ${state.lastError}` : ''}`)
+    const stampText = `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${state.lastError !== undefined ? ` · ⚠ ${state.lastError}` : ''}`
+    const stamp = el('div', 'stamp', stampText)
     body.appendChild(stamp)
     paintBell()
   }
@@ -1295,4 +1305,3 @@ export function apply(): void {
   }, { once: true })
   document.body.appendChild(host)
 }
-

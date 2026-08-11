@@ -174,12 +174,29 @@ export const GrillAnswerView = GrillQuestion.extend({
 })
 export type GrillAnswerView = z.infer<typeof GrillAnswerView>
 
-/** Explicit mapping of one source artifact to an adopted object (§6.1). */
+/**
+ * Explicit mapping of one source artifact/entry to an adopted object (§6.1).
+ * The proposal's `suggested_mappings` carry the artifact-level mapping;
+ * the AdoptionReceipt's `import_mappings` are the MATERIALIZATION report of
+ * the same imports — every source file maps to a target (project artifact,
+ * TeX document, or code workspace path) with status `materialized` | `gap`
+ * and a reason. `status='gap'` NEVER rolls back the adoption: adopt is the
+ * authoritative import, workspace materialization is best-effort
+ * (research-onboarding.md §6.1).
+ */
 export const ImportMapping = z.object({
   /** Source intake artifact id (sha256:<hex>). */
   source_artifact_id: z.string().min(1),
-  /** Adopted project artifact kind (ArtifactKind union). */
+  /** Source file name (direct artifact) or archive entry path (unpacked view). */
+  source_file_name: z.string().default(''),
+  /** Adopted target kind: ArtifactKind union, or 'tex_document'/'code_workspace'. */
   target_kind: z.string().min(1),
+  /** Target: workspace path (`code/<path>`) or TeX document_id; '' for artifact-level mappings. */
+  target: z.string().default(''),
+  /** Materialization outcome: 'materialized' or 'gap' (best-effort failure). */
+  status: z.enum(['materialized', 'gap']).default('materialized'),
+  /** Stable reason for the status (e.g. `tex_path_conflict`, `entry_type_not_materialized`). */
+  reason: z.string().default(''),
   /** Extra provenance note (never replaces immutable provenance fields). */
   note: z.string().default(''),
 })
@@ -237,6 +254,15 @@ export const AdoptionReceipt = z.object({
   pending_gate_refs: z.array(z.string()).default([]),
   /** Draft evidence ids created from importable metrics/results. */
   draft_evidence_refs: z.array(z.string()).default([]),
+  /**
+   * Materialization report (research-onboarding.md §6.1): one mapping per
+   * adopted artifact + per unpacked archive entry (TeX/code). Written AFTER
+   * the adoption transaction commits — materialization is best-effort and
+   * `status='gap'` entries never fail the adoption.
+   */
+  import_mappings: z.array(ImportMapping).default([]),
+  /** CodeSnapshot ids generated from the materialized code workspace (optional). */
+  code_snapshot_refs: z.array(z.string()).default([]),
   idempotency_key: z.string().nullable().default(null),
   request_hash: z.string().default(''),
   adopted_by: HumanPrincipal,

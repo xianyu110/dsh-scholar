@@ -54,6 +54,9 @@ export function fixtureProject(overrides: Partial<ResearchProject> = {}): Resear
     created_at: NOW,
     updated_at: NOW,
     history: ['created'],
+    deleted_at: null,
+    deleted_by: null,
+    deletion_reason: null,
     ...overrides,
   }
 }

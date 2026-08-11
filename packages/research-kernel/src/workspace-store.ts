@@ -41,8 +41,11 @@
  *   - watch/search: `listSince(revision)` returns the current nodes of every
  *     path mutated after a workspace revision (plus `deleted` tombstones —
  *     the watch/change feed); `search` is PATH matching only (prefix and/or
- *     `*`/`?` glob, `*` does not cross `/`) — content search is NOT
- *     implemented (documented limitation, no full-text index).
+ *     `*`/`?` glob, `*` does not cross `/`); `searchContent(q)` is CONTENT
+ *     matching — a linear UTF-8 line scan over text nodes only (binary
+ *     nodes and non-text media are skipped, NUL-byte magic is a hard skip),
+ *     with per-file match / per-result / per-file-size caps (no full-text
+ *     index — performance is bounded by a linear scan; documented).
  *
  * ── crash recovery (hardening-v0.2-status.md §5 P2, WORK-01) ──────────────────────────────
  *
@@ -72,9 +75,6 @@
  *     bytes are restored and a later scan reconciles cleanly (which clears
  *     the marker). All repairs are idempotent — re-running the scan after a
  *     crash mid-scan converges to the same state.
- *
- *     implemented (documented limitation, no full-text index).
- *
  * ── path safety (execution-runtime.md §4 snapshot-walk contract) ──────────
  *
  * Root-relative POSIX paths only; absolute paths, Windows drive prefixes,
@@ -118,6 +118,60 @@ export const HISTORY_KEEP_VERSIONS = 8
  */
 export const WORKSPACE_MAX_FILE_BYTES = UPLOAD_MAX_FILE_BYTES
 
+// ── content search bounds (WORK-01, api-contracts.md §17) ──────────────────
+// Content search is a LINEAR SCAN with no full-text index (documented —
+// see the class doc and api-contracts.md). These caps keep a single search
+// request bounded: at most 50 matching files, at most 20 matches per file
+// (match_count still reports the file's true total), files larger than
+// 512 KiB are skipped (never partially scanned), and at most 2 searches may
+// be in flight (a simple guard — synchronous scans serialize anyway; the
+// slot protects a future async execution path from unbounded concurrency).
+
+/** Maximum number of matching FILES returned by one content search. */
+export const WORKSPACE_SEARCH_MAX_FILES = 50
+/** Maximum number of match objects returned per file (match_count is the
+ * file's true total, unaffected by this cap). */
+export const WORKSPACE_SEARCH_MAX_MATCHES_PER_FILE = 20
+/** Files larger than this are skipped by content search (never partially
+ * scanned — a match in an unscanned tail must not be reported). */
+export const WORKSPACE_SEARCH_MAX_FILE_BYTES = 512 * 1024
+/** Maximum concurrent content searches (simple non-blocking gate). */
+export const WORKSPACE_SEARCH_MAX_CONCURRENT = 2
+/** Snippets longer than this are centered on the match with '…' markers. */
+export const WORKSPACE_SEARCH_SNIPPET_MAX_LEN = 240
+/** Number of leading bytes inspected for binary NUL-byte magic. */
+export const WORKSPACE_SEARCH_MAGIC_SCAN_BYTES = 8192
+
+/** One content match: 1-based line number + a snippet of that line. */
+export interface WorkspaceContentMatch {
+  line: number
+  snippet: string
+}
+
+/** One matching file. `match_count` is the file's TOTAL matches (the true
+ * count over the whole scanned content); `matches` carries at most
+ * WORKSPACE_SEARCH_MAX_MATCHES_PER_FILE of them. */
+export interface WorkspaceContentHit {
+  path: string
+  match_count: number
+  matches: WorkspaceContentMatch[]
+}
+
+/** Content search input: `q` is the substring to find (non-empty after
+ * trimming; case-insensitive unless `case_sensitive` is true). */
+export interface WorkspaceContentSearchQuery {
+  q: string
+  case_sensitive?: boolean
+}
+
+/** Content search output. `truncated` is true when the file cap
+ * (WORKSPACE_SEARCH_MAX_FILES) cut further matching files. */
+export interface WorkspaceContentSearchResult {
+  info: WorkspaceInfo
+  hits: WorkspaceContentHit[]
+  truncated: boolean
+}
+
 /** Error raised by the workspace store. `code` is the stable wire code. */
 export class WorkspaceError extends Error {
   readonly code: string
@@ -149,9 +203,13 @@ export interface WorkspaceStoreLike {
   /** Watch feed: current nodes of every path mutated after `sinceRevision`,
    * plus paths deleted after it. `sinceRevision >= info.revision` → empty. */
   listSince(workspaceId: string, sinceRevision: number): { info: WorkspaceInfo; nodes: WorkspaceNode[]; deleted: string[] }
-  /** PATH search (prefix and/or `*`/`?` glob — `*` never crosses `/`).
-   * Content search is NOT implemented (documented limitation). */
+  /** PATH search (prefix and/or `*`/`?` glob — `*` never crosses `/`). */
   search(workspaceId: string, query: { prefix?: string; glob?: string }): { info: WorkspaceInfo; nodes: WorkspaceNode[] }
+  /** CONTENT search: linear UTF-8 line scan over text nodes only, with
+   * per-file/per-result/per-size caps (see the constants above; no
+   * full-text index — documented limitation). Binary nodes, non-text media
+   * and NUL-magic bytes are skipped. */
+  searchContent(workspaceId: string, query: WorkspaceContentSearchQuery): WorkspaceContentSearchResult
   /** Rollback read: node bytes at a stored per-path version (history), or
    * null when that version is not retained. */
   readVersion(workspaceId: string, path: string, version: number): WorkspaceNode | null
@@ -227,6 +285,83 @@ export function matchWorkspaceGlob(path: string, glob: string): boolean {
     else re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
   return new RegExp(`^${re}$`).test(path)
+}
+
+// ── content search helpers (shared by the disk store and the TeX facade) ──
+
+/** Media-type allowlist for content search: `text/*` plus the common
+ * structured text types that carry a non-`text/` MIME label. Everything
+ * else (application/octet-stream, image/*, audio/*, video/*, application/
+ * pdf, …) is treated as binary and never scanned. */
+export function isSearchableTextMedia(media: string): boolean {
+  const m = media.toLowerCase()
+  if (m.startsWith('text/')) return true
+  return [
+    'application/json', 'application/xml', 'application/javascript',
+    'application/x-javascript', 'application/yaml', 'application/x-yaml',
+    'application/x-shellscript', 'application/toml', 'application/x-perl',
+    'application/x-ruby', 'application/x-httpd-php', 'application/x-tex',
+  ].includes(m)
+}
+
+/** Binary-magic heuristic: NUL bytes in the first bytes of the content
+ * (a text node whose bytes were replaced by binary data — e.g. a text
+ * write to a `.png` path — is skipped by content search). */
+export function hasBinaryMagic(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.byteLength, WORKSPACE_SEARCH_MAGIC_SCAN_BYTES)
+  for (let i = 0; i < limit; i += 1) {
+    if (bytes[i] === 0) return true
+  }
+  return false
+}
+
+/** Center a long line on the first match with '…' markers. */
+export function makeSearchSnippet(line: string, matchIndex: number, needleLength: number): string {
+  if (line.length <= WORKSPACE_SEARCH_SNIPPET_MAX_LEN) return line
+  const needle = Math.min(needleLength, WORKSPACE_SEARCH_SNIPPET_MAX_LEN - 2)
+  const half = Math.max(0, Math.floor((WORKSPACE_SEARCH_SNIPPET_MAX_LEN - 2 - needle) / 2))
+  const start = Math.max(0, matchIndex - half)
+  const end = Math.min(line.length, matchIndex + needle + half)
+  return `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? '…' : ''}`
+}
+
+/**
+ * Pure line scan of `text` for the substring `q`. Case-insensitive by
+ * default (`case_sensitive: true` for exact matching). UTF-8 safety is the
+ * caller's responsibility (decode with replacement before calling). Returns
+ * the first `maxMatches` matches (1-based line numbers, bounded snippets)
+ * plus the TRUE total match count over the whole text — the caller caps
+ * what it returns, never what it counts.
+ */
+export function scanTextForQuery(
+  text: string,
+  q: string,
+  options: { case_sensitive?: boolean; max_matches?: number } = {},
+): { matches: WorkspaceContentMatch[]; total: number } {
+  const max = options.max_matches ?? WORKSPACE_SEARCH_MAX_MATCHES_PER_FILE
+  const needle = options.case_sensitive ? q : q.toLowerCase()
+  const matches: WorkspaceContentMatch[] = []
+  let total = 0
+  if (q === '') return { matches, total }
+  let pos = 0
+  let lineNo = 1
+  while (pos <= text.length) {
+    const nl = text.indexOf('\n', pos)
+    const end = nl === -1 ? text.length : nl
+    const line = text.slice(pos, end)
+    const hay = options.case_sensitive ? line : line.toLowerCase()
+    let idx = hay.indexOf(needle)
+    if (idx !== -1) {
+      total += 1
+      if (matches.length < max) {
+        matches.push({ line: lineNo, snippet: makeSearchSnippet(line, idx, needle.length) })
+      }
+    }
+    if (nl === -1) break
+    pos = nl + 1
+    lineNo += 1
+  }
+  return { matches, total }
 }
 
 /**
@@ -340,6 +475,8 @@ export class WorkspaceStore implements WorkspaceStoreLike {
   private readonly cas: ArtifactCas
   /** Host root holding every workspace tree + history (`{workspacesRoot}`). */
   readonly workspacesRoot: string
+  /** Content-search concurrency gate (WORKSPACE_SEARCH_MAX_CONCURRENT). */
+  private searchInFlight = 0
 
   constructor(dbPath: string, casRoot: string, workspacesRoot: string) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true })
@@ -359,6 +496,20 @@ export class WorkspaceStore implements WorkspaceStoreLike {
 
   close(): void {
     this.db.close()
+  }
+
+  /** Non-blocking slot acquire for content search (simple mutex — searches
+   * are synchronous today, so at most one slot is ever occupied; the gate
+   * keeps a future async execution path bounded and is honest about the
+   * contract). */
+  private tryAcquireSearchSlot(): boolean {
+    if (this.searchInFlight >= WORKSPACE_SEARCH_MAX_CONCURRENT) return false
+    this.searchInFlight += 1
+    return true
+  }
+
+  private releaseSearchSlot(): void {
+    this.searchInFlight = Math.max(0, this.searchInFlight - 1)
   }
 
   /** The artifact CAS backing binary node references (kernel passes the
@@ -829,8 +980,7 @@ export class WorkspaceStore implements WorkspaceStoreLike {
   }
 
   /** PATH search: prefix and/or `*`/`?` glob over the current tree (AND when
-   * both are given). Content search is NOT implemented (documented
-   * limitation). */
+   * both are given). */
   search(workspaceId: string, query: { prefix?: string; glob?: string }): { info: WorkspaceInfo; nodes: WorkspaceNode[] } {
     const tree = this.tree(workspaceId)
     let nodes = tree.nodes
@@ -843,6 +993,71 @@ export class WorkspaceStore implements WorkspaceStoreLike {
       nodes = nodes.filter(n => matchWorkspaceGlob(n.path, glob))
     }
     return { info: tree.info, nodes }
+  }
+
+  /**
+   * CONTENT search (api-contracts.md §17, acceptance-tests.md §7 ws-search):
+   * linear UTF-8 line scan of TEXT nodes only, in path order.
+   *
+   *   - only nodes with `binary = 0` AND a text-like media type are scanned;
+   *     NUL-byte magic in the leading bytes is a hard skip (a text row whose
+   *     bytes were replaced by binary data);
+   *   - files > WORKSPACE_SEARCH_MAX_FILE_BYTES (512 KiB) are skipped whole
+   *     (never partially scanned — a match in an unscanned tail must not be
+   *     reported);
+   *   - per file: at most WORKSPACE_SEARCH_MAX_MATCHES_PER_FILE (20) matches
+   *     are returned; `match_count` is the file's true total;
+   *   - overall: at most WORKSPACE_SEARCH_MAX_FILES (50) matching files,
+   *     `truncated: true` when the cap cut further files;
+   *   - case-insensitive unless `case_sensitive: true`;
+   *   - UTF-8 tolerance: bytes decode with replacement (invalid sequences
+   *     become U+FFFD — a scan never throws on malformed content);
+   *   - unreadable/tampered files (missing bytes, symlink) are SKIPPED, not
+   *     fatal — read() surfaces integrity issues on demand;
+   *   - a simple non-blocking slot gate (WORKSPACE_SEARCH_MAX_CONCURRENT)
+   *     rejects a search while another is in flight (search_busy).
+   *
+   * No full-text index — performance degrades linearly with workspace size
+   * (documented limitation; an index is a planned enhancement).
+   */
+  searchContent(workspaceId: string, query: WorkspaceContentSearchQuery): WorkspaceContentSearchResult {
+    const q = query.q
+    if (q === undefined || q.trim() === '') {
+      throw new WorkspaceError('invalid_query', 'content search requires a non-empty q')
+    }
+    const info = this.get(workspaceId)
+    if (!this.tryAcquireSearchSlot()) {
+      throw new WorkspaceError('search_busy',
+        `content search is at its concurrency limit (${WORKSPACE_SEARCH_MAX_CONCURRENT}) — retry shortly`)
+    }
+    try {
+      const rows = this.db.prepare('SELECT * FROM workspace_nodes WHERE workspace_id = ? AND binary = 0 ORDER BY path')
+        .all(workspaceId) as unknown as WorkspaceNodeRow[]
+      const hits: WorkspaceContentHit[] = []
+      let truncated = false
+      for (const row of rows) {
+        if (hits.length >= WORKSPACE_SEARCH_MAX_FILES) {
+          truncated = true
+          break
+        }
+        if (row.size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES) continue
+        if (!isSearchableTextMedia(row.media)) continue
+        let bytes: Buffer
+        try {
+          bytes = this.readBytes(workspaceId, row.path, row)
+        } catch {
+          continue // tampered/missing/symlink — read() surfaces it; search skips
+        }
+        if (hasBinaryMagic(bytes)) continue
+        const { matches, total } = scanTextForQuery(bytes.toString('utf8'), q, {
+          case_sensitive: query.case_sensitive,
+        })
+        if (total > 0) hits.push({ path: row.path, match_count: total, matches })
+      }
+      return { info, hits, truncated }
+    } finally {
+      this.releaseSearchSlot()
+    }
   }
 
   /** Rollback read: the node bytes at a stored per-path version (history),

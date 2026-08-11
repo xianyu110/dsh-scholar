@@ -69,7 +69,9 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 - Trajectory 必须区分 Kernel Research Outbox 与展示性的 DSH Session；subagent 以父子拓扑展示并可进入授权 child 查看，one-shot 只读，continuable follow-up 必须 exact-parent 授权且默认脱敏；
 - 主页面只保留 Start、Overview、Workspace、Runs 和 Manuscript 等高频任务；Approvals、Artifacts、Evidence、Budget、Trajectory/Topology 保持深链可达，所有可调项统一进入默认折叠的 Settings；
 - 所有列表、流式日志和 Artifact 读取都执行 Project AuthZ；
+- 项目删除只接受已归档项目，由 PI 经精确名称确认创建可审计 tombstone；普通读取立即隐藏，但共享 CAS、Outbox、Decision 和 retention 证据不得被同步物理删除；
 - Human Gate 使用认证 Principal，Agent 接口中不存在 Gate Decision；
+- DSH 发布兼容性必须用私有 registry 安装的固定真实 `@deepseek-ai/*` 与全新 DSH_HOME 验证；checkout、symlink、fake host 或 file override 不能计 PASS；
 - 所有验收测试必须从公开接口验证行为，不能越过模块接口检查内部实现。
 
 ## 4.1 需求与修复的文档先行规则

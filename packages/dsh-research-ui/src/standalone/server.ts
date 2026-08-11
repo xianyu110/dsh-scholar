@@ -71,6 +71,10 @@ function isPiOnlyWrite(pathname: string): boolean {
   return PI_ONLY_WRITE_ROUTES.some(re => re.test(pathname))
 }
 
+function isProjectDelete(method: string, pathname: string): boolean {
+  return method === 'DELETE' && /^\/v(?:1|2)\/projects\/[^/]+\/?$/.test(pathname)
+}
+
 /** The subset of PI-only routes the KERNEL re-enforces from its own
  * project_members table (defense in depth): the BFF injects its
  * server-derived x-principal-id/x-principal-role on these forwards so the
@@ -1118,7 +1122,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
               return
             }
           }
-          if (memberProjectId !== null && !(await isProjectMember(memberProjectId))) {
+          if (memberProjectId !== null && !(await isProjectMember(memberProjectId)) && !isProjectDelete(method, url.pathname)) {
             sendJson(res, 404, { error: { code: 'project_not_found', message: 'project not found or access denied' } })
             return
           }
@@ -1150,7 +1154,9 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           if (memberProjectId !== null && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
             const role = await projectRole(memberProjectId)
             if (role !== null) {
-              if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && isPiOnlyWrite(url.pathname))) {
+              const projectDelete = isProjectDelete(method, url.pathname)
+              if (role === 'viewer' || role === 'auditor' || (role === 'operator' && projectDelete)
+                || (role === 'researcher' && (isPiOnlyWrite(url.pathname) || projectDelete))) {
                 sendJson(res, 403, { ok: false, error: 'role forbidden' })
                 return
               }
@@ -1338,7 +1344,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // injects its server-derived operator identity on these forwards;
         // the role header is a hint for the kernel's fast path, the kernel
         // membership lookup is the authority.
-        if (options.principal !== null && method === 'POST' && isKernelPiOnlyForward(url.pathname)) {
+        if (options.principal !== null && (method === 'POST' && isKernelPiOnlyForward(url.pathname) || isProjectDelete(method, url.pathname))) {
           proxyHeaders['x-principal-id'] = options.principal
           if (memberProjectId !== null) {
             const role = await projectRole(memberProjectId)

@@ -104,6 +104,12 @@ const createProjectSchema = z.object({
   creator_tenant_id: z.string().optional(),
 })
 
+const deleteProjectSchema = z.object({
+  expected_revision: z.number().int().nonnegative(),
+  confirm_name: z.string(),
+  reason: z.string().min(1),
+}).strict()
+
 const transitionSchema = z.object({
   to: z.string().min(1),
   expected_revision: z.number().int().nonnegative(),
@@ -697,7 +703,8 @@ function fail(res: ServerResponse, error: unknown): void {
       : error.code === 'workspace_version_conflict' || error.code === 'workspace_etag_conflict' || error.code === 'workspace_move_destination_exists' ? 409
         : error.code === 'workspace_file_too_large' ? 413
           : error.code === 'workspace_inconsistent' ? 503
-            : 422
+            : error.code === 'search_busy' ? 429
+              : 422
     send(res, status, { error: errorEnvelope(error.code, error.message) })
   } else if (error instanceof z.ZodError) {
     const issues = error.issues.map(i => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ')
@@ -762,7 +769,15 @@ function isPiOnlyWrite(pathname: string): boolean {
  * when no identity exists at all (archive/unarchive carry no body principal)
  * → 422 principal_required (fail-closed, same pattern as requireIntakePrincipal).
  */
-function requirePiOnly(kernel: ResearchKernel, req: IncomingMessage, res: ServerResponse, projectId: string, body: unknown, action: string): boolean {
+function requirePiOnly(
+  kernel: ResearchKernel,
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string,
+  body: unknown,
+  action: string,
+  options: { allowOperator?: boolean; includeDeleted?: boolean } = {},
+): boolean {
   const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
   let principal = headerPrincipal !== undefined && headerPrincipal !== '' ? headerPrincipal : ''
   if (principal === '') {
@@ -776,13 +791,15 @@ function requirePiOnly(kernel: ResearchKernel, req: IncomingMessage, res: Server
     return false
   }
   if (headerPrincipal !== undefined && headerPrincipal !== '') {
-    const member = kernel.listProjectMembers(projectId).find(m => m.principal_id === principal)
-    if (member === undefined) {
+    const role = kernel.getProjectMemberRole(projectId, principal, options.includeDeleted === true)
+    if (role === null) {
       send(res, 404, { error: errorEnvelope('project_not_found', 'project not found or access denied') })
       return false
     }
-    if (member.role !== 'pi' && member.role !== 'operator') {
-      send(res, 403, { error: errorEnvelope('role_forbidden', `${action} is a PI/operator-only decision; role '${member.role}' is not permitted`) })
+    const allowed = role === 'pi' || (options.allowOperator !== false && role === 'operator')
+    if (!allowed) {
+      const scope = options.allowOperator === false ? 'PI-only' : 'PI/operator-only'
+      send(res, 403, { error: errorEnvelope('role_forbidden', `${action} is a ${scope} decision; role '${role}' is not permitted`) })
       return false
     }
   }
@@ -1003,6 +1020,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (id !== undefined) {
+            // PROJECT-DELETE-01: every ordinary project-scoped route is
+            // hidden by the tombstone. DELETE itself is the sole exception
+            // so an authenticated identical X-Request-Id can replay its
+            // stable receipt after ordinary get/list already return 404.
+            if (!(method === 'DELETE' && sub === undefined)) kernel.getProject(id)
             // WORK-01 (api-contracts.md §17): generic VS Code-style workspace
             // routes, project-scoped so the BFF membership/role checks bind
             // to the PATH project; the kernel additionally pins the workspace
@@ -1103,12 +1125,38 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
                   return
                 }
                 if (method === 'POST' && subSubId === 'search') {
+                  // WORK-01 (api-contracts.md §17): one endpoint, two modes —
+                  //   path:    {prefix?, glob?} (legacy, unchanged);
+                  //   content: {q, case_sensitive?} — q is the substring to
+                  //            find (trimmed non-empty), text nodes only
+                  //            (binary/non-text media skipped), bounded per
+                  //            file/result/size; mutually exclusive with the
+                  //            path filters.
                   const input = z.object({
                     prefix: z.string().min(1).optional(),
                     glob: z.string().min(1).optional(),
+                    // No min() here: empty/whitespace q is rejected below with
+                    // the dedicated invalid_query code (422), uniformly.
+                    q: z.string().optional(),
+                    mode: z.enum(['path', 'content']).optional(),
+                    case_sensitive: z.boolean().optional(),
                   }).strict().parse(body)
+                  const contentMode = input.mode === 'content' || input.q !== undefined
+                  if (contentMode) {
+                    if (input.q === undefined || input.q.trim() === '') {
+                      throw new KernelError(422, 'invalid_query', 'content search requires a non-empty q')
+                    }
+                    if (input.mode === 'path') {
+                      throw new KernelError(422, 'invalid_search_params', "mode='path' cannot carry q — use prefix/glob for path search")
+                    }
+                    if (input.prefix !== undefined || input.glob !== undefined) {
+                      throw new KernelError(422, 'invalid_search_params', 'content search (q/mode=content) cannot be combined with prefix/glob path filters')
+                    }
+                    ok(res, kernel.workspaceSearchContent(subId, { q: input.q, case_sensitive: input.case_sensitive }))
+                    return
+                  }
                   if (input.prefix === undefined && input.glob === undefined) {
-                    throw new KernelError(422, 'missing_params', 'search requires prefix and/or glob')
+                    throw new KernelError(422, 'missing_params', 'search requires prefix and/or glob (path search), or q (content search)')
                   }
                   ok(res, kernel.workspaceSearch(subId, { prefix: input.prefix, glob: input.glob }))
                   return
@@ -1227,6 +1275,15 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             if (method === 'PATCH' && sub === undefined) {
               const input = z.object({ name: z.string().min(1) }).parse(body)
               ok(res, kernel.renameProject(id, input.name))
+              return
+            }
+            if (method === 'DELETE' && sub === undefined) {
+              const input = deleteProjectSchema.parse(body)
+              if (!requirePiOnly(kernel, req, res, id, body, 'project deletion', { allowOperator: false, includeDeleted: true })) return
+              const deletedBy = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : ''
+              const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : ''
+              if (requestId === '') throw new KernelError(422, 'request_id_required', 'project deletion requires X-Request-Id')
+              ok(res, kernel.deleteProject({ project_id: id, ...input, deleted_by: deletedBy, request_id: requestId }))
               return
             }
             if (method === 'POST' && sub === 'archive') {
@@ -2627,8 +2684,9 @@ async function handleV2(ctx: {
     send(res, 403, { error: { code: 'role_required', message: 'invalid x-principal-role; BFF must inject pi|researcher|operator|auditor|viewer' } })
     return
   }
+  const projectDelete = method === 'DELETE' && /^\/v2\/projects\/[^/]+\/?$/.test(url.pathname)
   if (role !== undefined && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-    if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && isPiOnlyWrite(url.pathname))) {
+    if (role === 'viewer' || role === 'auditor' || (role === 'researcher' && (isPiOnlyWrite(url.pathname) || projectDelete))) {
       send(res, 403, { error: { code: 'role_forbidden', message: 'role forbidden for this operation' } })
       return
     }
@@ -2703,6 +2761,15 @@ async function handleV2(ctx: {
   if (id !== undefined && sub === undefined && method === 'GET') {
     memberOr404(id)
     ok(res, kernel.getProject(id))
+    return
+  }
+  if (id !== undefined && sub === undefined && method === 'DELETE') {
+    const input = deleteProjectSchema.parse(body)
+    if (!requirePiOnly(kernel, req, res, id, body, 'project deletion', { allowOperator: false, includeDeleted: true })) return
+    const deletedBy = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : ''
+    const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : ''
+    if (requestId === '') throw new KernelError(422, 'request_id_required', 'project deletion requires X-Request-Id')
+    ok(res, kernel.deleteProject({ project_id: id, ...input, deleted_by: deletedBy, request_id: requestId }))
     return
   }
   if (id !== undefined && sub === 'projection' && method === 'GET') {

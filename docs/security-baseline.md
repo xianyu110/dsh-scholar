@@ -145,6 +145,7 @@ Scholar Connector 只连接 api.openalex.org、api.crossref.org、export.arxiv.o
 ## 12. 供应链
 
 - pnpm lockfile、镜像 digest、Git commit/submodule、数据版本和 TeX image 固定；
+- 私有 `@deepseek-ai/*` 兼容性只接受临时 0600 npm userconfig + 全新 `DSH_HOME` 的真实安装证据；registry token 禁止写入仓库 `.npmrc`、argv、stdout/stderr 或报告；
 - 构建 SBOM、licenses 和 provenance；
 - repository plugin 的 prepare 产物可重现并校验；
 - Release Bundle 包含第三方和 AI usage 声明；
@@ -154,7 +155,7 @@ Scholar Connector 只连接 api.openalex.org、api.crossref.org、export.arxiv.o
 
 Gate、Principal、Project mutation、Intake/Adoption、Job、Terminal/PTY gap、Artifact、Evidence、Workspace/TeX save/build、Trajectory redaction/follow-up、Release 和 self-mod tool call 都可关联 request_id、session_id、event_id。业务审计保存在 Kernel Outbox/DB；DSH Session 只做关联展示。
 
-日志、Artifact、源稿和数据按 Project retention policy 清理。删除先生成审计记录并保证引用完整性；released Bundle 使用不可变 retention。
+日志、Artifact、源稿和数据按 Project retention policy 清理。Project 的交互式删除只允许 PI 对 ARCHIVED 项目创建 tombstone；先生成 `project.deleted` 审计记录并保证引用完整性，正常读取立即隐藏。tombstone 不是物理 purge：Decision、成员、Outbox、Artifact 引用和 released Bundle retention 保留；共享 Blob 仅当所有 Project/Workspace/FileRevision/Bundle 引用均为零且 grace/hold 已结束时由 GC 删除。
 
 ## 14. 阻断验收
 

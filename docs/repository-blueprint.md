@@ -140,6 +140,7 @@ Kernel 不依赖 DSH、UI、Runner 或 Connector。browser client 不导入 Node
   "test": "vitest unit and contract",
   "test:ui": "browser/jsdom + accessibility + i18n",
   "test:security": "blocking security suites",
+  "test:dsh-private": "private-registry install + real DSH host lifecycle (manual/secret-gated)",
   "test:docker": "real container eval",
   "test:golden": "deterministic golden path",
   "test:all": "all blocking suites including TeX and clean-room",
@@ -213,11 +214,13 @@ configs/research-dev-selfmod.cordis.yml 只插入 @deepseek-ai/dsh-tool-cordis�
 
 - pnpm lockfile、构建和类型检查可从 clean checkout 运行；
 - npm pack 或本地 package tarball 包含全部运行资产；
+- 私有 `@deepseek-ai/*` 验收从临时 0600 userconfig 安装到全新 DSH_HOME，不使用 checkout/symlink/fake host/file override；无 credential 时明确登记 NOT_RUN_MANUAL_PENDING；
 - 全新 DSH_HOME 安装成功，不依赖开发 symlink；
 - production composition 无 tool-cordis；开发 overlay 可用且隔离；
 - zh/en 资源完整，无 UI 硬编码；
 - Terminal、TeX、PDF、binary proxy 和 SSE 在 standalone 模式完整验收；
 - Init/Resume/Upload、Grill Me、NextAction、Workspace/PTY、远端 Runner、Settings、Trajectory/Subagent 拓扑在 standalone 模式完整验收；
+- archived 项目可由 PI 经 exact-name 确认删除，UI/Kernel 重启后均不可见；tombstone/Outbox/retention 与共享 CAS 安全通过；
 - 根插件无 browser export/dshClient/HTTP bridge，UI 包无 Cordis host/patch；
 - docs/README.md 的所有文档链接和规范条目可达；
 - hardening 状态没有未实现、部分或已实现未验收的 P0/P1；每个已验收条目绑定当前 commit、CI job 和 acceptance 报告；

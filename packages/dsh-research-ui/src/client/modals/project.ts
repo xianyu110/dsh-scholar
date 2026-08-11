@@ -1,8 +1,9 @@
 import type { Projection } from '../types'
-import { api } from '../api'
+import { api, apiResult } from '../api'
 import { registerOverlayRebuild, t } from '../i18n/index'
 import { state, tabSave } from '../state'
 import { copyText, el, pill, trapFocus } from '../ui'
+import { canDeleteArchivedProject, projectDeleteRequest } from '../project-delete-model'
 /* ─────────────────────────── standalone project creator ─────────────────────────── */
 
 /**
@@ -185,6 +186,99 @@ export function openRenameModal(root: ShadowRoot, projectId: string, currentName
   registerOverlayRebuild(overlay, () => { overlay.remove(); openRenameModal(root, projectId, currentName, onDone) })
   input.focus()
   input.select()
+}
+
+/* ─────────────────────── archived project delete modal ─────────────────────── */
+
+export function openDeleteProjectModal(
+  root: ShadowRoot,
+  project: { project_id: string; name: string; status: string; revision: number },
+  onDeleted: () => void,
+): void {
+  const overlay = el('div', 'overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
+  const modal = el('div', 'modal')
+  modal.style.cssText = 'width:480px;max-width:92vw'
+  modal.setAttribute('role', 'dialog')
+  modal.setAttribute('aria-modal', 'true')
+  modal.setAttribute('aria-label', t('shell', 'shell.deleteProject.title'))
+
+  const header = el('div', 'modal-header', t('shell', 'shell.deleteProject.title'))
+  const closeBtn = el('button', 'hbtn ghost', '×')
+  closeBtn.onclick = () => overlay.remove()
+  header.appendChild(closeBtn)
+  modal.appendChild(header)
+
+  const warning = el('div', 'error-banner', t('shell', 'shell.deleteProject.warning'))
+  warning.style.display = 'block'
+  modal.appendChild(warning)
+  const retention = el('div', 'muted', t('shell', 'shell.deleteProject.retention'))
+  retention.style.cssText = 'margin:8px 0 12px;font-size:11px;line-height:1.5'
+  modal.appendChild(retention)
+
+  const label = el('label', 'section-label', t('shell', 'shell.deleteProject.confirmLabel', { name: project.name }))
+  label.style.cssText = 'display:block;margin:8px 0 4px'
+  const confirmation = document.createElement('input')
+  confirmation.type = 'text'
+  confirmation.placeholder = t('shell', 'shell.deleteProject.confirmPlaceholder')
+  confirmation.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px'
+  modal.append(label, confirmation)
+
+  const reasonLabel = el('label', 'section-label', t('shell', 'shell.deleteProject.reasonLabel'))
+  reasonLabel.style.cssText = 'display:block;margin:10px 0 4px'
+  const reason = document.createElement('textarea')
+  reason.rows = 3
+  reason.placeholder = t('shell', 'shell.deleteProject.reasonPlaceholder')
+  reason.style.cssText = 'width:100%;box-sizing:border-box;resize:vertical;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px'
+  modal.append(reasonLabel, reason)
+
+  const error = el('div', 'error-banner')
+  error.style.cssText = 'display:none;margin-top:10px'
+  modal.appendChild(error)
+  const actions = el('div', 'row')
+  actions.style.cssText = 'justify-content:flex-end;gap:8px;margin-top:14px'
+  const cancel = el('button', 'hbtn', t('budget', 'budget.modal.cancel'))
+  cancel.onclick = () => overlay.remove()
+  const submit = el('button', 'btn reject', t('shell', 'shell.deleteProject.submit'))
+  submit.disabled = true
+  const updateSubmit = (): void => {
+    submit.disabled = !canDeleteArchivedProject(project.status, project.name, confirmation.value, reason.value)
+  }
+  confirmation.oninput = updateSubmit
+  reason.oninput = updateSubmit
+  submit.onclick = async () => {
+    if (!canDeleteArchivedProject(project.status, project.name, confirmation.value, reason.value)) return
+    submit.disabled = true
+    submit.textContent = t('shell', 'shell.deleteProject.deleting')
+    error.style.display = 'none'
+    const request = projectDeleteRequest(project.project_id, project.revision, confirmation.value, reason.value, crypto.randomUUID())
+    const result = await apiResult<{ project_id: string }>(request.path, request.init)
+    if (!result.ok) {
+      error.textContent = t('shell', 'shell.deleteProject.failed', { reason: result.error.code ?? String(result.status) })
+      error.style.display = 'block'
+      submit.textContent = t('shell', 'shell.deleteProject.submit')
+      updateSubmit()
+      return
+    }
+    overlay.remove()
+    onDeleted()
+  }
+  actions.append(cancel, submit)
+  modal.appendChild(actions)
+  overlay.appendChild(modal)
+  root.appendChild(overlay)
+  registerOverlayRebuild(overlay, () => {
+    const confirmValue = confirmation.value
+    const reasonValue = reason.value
+    overlay.remove()
+    openDeleteProjectModal(root, project, onDeleted)
+    // Locale rebuild owns fresh controls; typed destructive confirmation is
+    // intentionally cleared rather than transferred across a dialog reset.
+    void confirmValue
+    void reasonValue
+  })
+  trapFocus(overlay, confirmation)
+  confirmation.focus()
 }
 
 
@@ -374,4 +468,3 @@ export async function openProjectDetailModal(root: ShadowRoot, projectId: string
   exportRow.appendChild(summaryBtn)
   modal.appendChild(exportRow)
 }
-
