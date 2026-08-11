@@ -40,13 +40,25 @@ export function appendTerminalFramesWithLease(
   token: string | null,
   maxLogBytes?: number,
 ): Promise<{ appended: number; last_seq: number }> {
-  const request = (client as unknown as { request: ResearchRequestFn }).request
-  return request('POST', `/v1/jobs/${jobId}/terminal-frames`, {
-    run_id: runId,
-    frames,
-    ...maxLogBytes !== undefined ? { max_log_bytes: maxLogBytes } : {},
-  }, {
-    'x-lease-owner': owner,
-    'x-lease-token': token ?? '',
-  })
+  // The typed ResearchClient has no header-carrying frames method, so this
+  // reuses its private request pipeline. request is bound to the client:
+  // ResearchClient.request reads `this.timeoutMs` — an unbound call crashes
+  // with "Cannot read properties of undefined (reading 'timeoutMs')" and the
+  // frames are silently dropped (the local runner's .catch() masked this;
+  // the fleet server surfaced it as 502 kernel_unreachable).
+  const clientWithRequest = client as unknown as { request: ResearchRequestFn }
+  return clientWithRequest.request.call(
+    clientWithRequest,
+    'POST',
+    `/v1/jobs/${jobId}/terminal-frames`,
+    {
+      run_id: runId,
+      frames,
+      ...maxLogBytes !== undefined ? { max_log_bytes: maxLogBytes } : {},
+    },
+    {
+      'x-lease-owner': owner,
+      'x-lease-token': token ?? '',
+    },
+  ) as Promise<{ appended: number; last_seq: number }>
 }

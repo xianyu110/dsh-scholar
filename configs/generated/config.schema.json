@@ -223,6 +223,38 @@
               "x-dsh-secret": true,
               "x-dsh-env": "DSH_SCHOLAR_SERVICE_TOKEN"
             },
+            "fleet_server_port": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "Fleet server listen port (0 = ephemeral); when provided the runner runs RemoteFleetServer instead of the local claim loop.",
+              "default": 0,
+              "x-dsh-scope": "runner-profile"
+            },
+            "fleet_url": {
+              "type": "string",
+              "description": "Fleet server base URL; when provided the runner runs as a remote fleet agent instead of the local claim loop.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "agent_id": {
+              "type": "string",
+              "description": "Agent identity registered with the fleet server; generated agent-<id> when empty.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "fleet_target_id": {
+              "type": "string",
+              "description": "Opaque target id the agent advertises (exact-match dispatch); defaults to local-docker.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "fleet_public_key": {
+              "type": "string",
+              "description": "Path to the fleet server plan-signing public key PEM; agents refuse unverifiable plans without it (fail closed).",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
             "network": {
               "enum": [
                 "none",

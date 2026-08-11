@@ -9,10 +9,21 @@
  * the public key is registered with the kernel when it exposes
  * POST /v1/runner-keys (skipped with a warning otherwise).
  *
+ * FLEET-01 (docs/remote-runner-wire.md §9 生产接线): the same binary also
+ * serves the two fleet roles — `--fleet-server <port>` runs RemoteFleetServer
+ * (HTTP + JSON wire, x-service-token auth, production must mTLS) and
+ * `--agent <fleet-url>` runs the RemoteRunnerAgentImpl client loop
+ * (register → heartbeat → poll claims → execute → frames/artifacts/complete,
+ * offline spool). The roles are mutually exclusive with each other and with
+ * the local claim loop (`--mode` is local-only); `resolveFleetMode` enforces
+ * this before any cycle starts.
+ *
  * Usage: node lib/bin/runner.js --kernel http://127.0.0.1:7412
  *   [--mode subprocess|docker] [--poll-ms 2000] [--owner <id>]
  *   [--timeout-ms 60000] [--heartbeat-ms 15000] [--cancel-poll-ms 5000]
  *   [--key-file <path>]
+ *   [--fleet-server <port>] | [--agent <fleet-url> [--agent-id <id>]
+ *   [--target-id <id>] [--fleet-public-key <pem-path>]]
  *
  * CONFIG-01: the CLI surface is parsed by the canonical Config Registry
  * (parseCli) — flags, defaults and validation are the registry's single
@@ -23,12 +34,25 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { ResearchClient, KernelApiError } from '@dsh-scholar/research-client'
-import { cancelRun, executeJob, heartbeatLoop, type RunnerMode, type RunnerSigningKey } from '../index.js'
+import {
+  cancelRun,
+  createFleetServer,
+  executeJob,
+  FleetCliConfigError,
+  generateAgentId,
+  heartbeatLoop,
+  resolveFleetMode,
+  resolveTargetId,
+  runFleetAgentMain,
+  startFleetServer,
+  type RunnerMode,
+  type RunnerSigningKey,
+} from '../index.js'
 import { validateConfig, parseCli, generateCliHelp, ConfigRegistryError } from '@dsh-scholar/research-schemas'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(`Runner gateway — durable job scheduler (design §12.6)\nUsage: node lib/bin/runner.js [options]\n\n${generateCliHelp('runner-profile')}`)
+  console.log(`Runner gateway — durable job scheduler (design §12.6) + fleet server/agent (FLEET-01)\nUsage: node lib/bin/runner.js [options]\n\n${generateCliHelp('runner-profile')}`)
   process.exit(0)
 }
 
@@ -65,6 +89,148 @@ try {
 }
 
 const client = new ResearchClient({ endpoint, token, serviceToken })
+
+// ── FLEET-01: fleet 角色互斥判定（local 默认；fleet-server/agent 二选一，
+//    且与本地模式专属 flag --mode 互斥；校验失败 fail fast）。────────────
+let fleetMode: 'local' | 'fleet-server' | 'agent'
+try {
+  fleetMode = resolveFleetMode(cli)
+} catch (error) {
+  console.error(`[runner-gateway] invalid config: ${error instanceof FleetCliConfigError ? error.message : (error as Error).message}`)
+  process.exit(1)
+}
+
+/** SIGINT/SIGTERM → abort signal（fleet 角色用；本地模式保留既有 stopping 语义）。 */
+function fleetShutdownSignal(): AbortSignal {
+  const controller = new AbortController()
+  const onSignal = (): void => {
+    console.error('[runner-gateway] stopping')
+    controller.abort()
+  }
+  process.on('SIGINT', onSignal)
+  process.on('SIGTERM', onSignal)
+  return controller.signal
+}
+
+/**
+ * --fleet-server <port>：RemoteFleetServer（HTTP + JSON wire，x-service-token
+ * 鉴权；生产必须 mTLS——docs/remote-runner-wire.md §3/§9）。kernel client 复用
+ * 本地 runner 同一 ResearchClient 路径（lease/run_id/Manifest 跨 Local/Remote
+ * 一致）；plan 签名密钥 = --key-file 或临时生成的 Ed25519 密钥（公钥打印到
+ * stderr，供 --fleet-public-key 配给 agent）。
+ */
+async function runFleetServerMain(): Promise<void> {
+  const { key: signingKey, publicKeyPem } = loadOrCreateSigningKey(keyFile)
+  const fleet = createFleetServer(client, {
+    owner,
+    signingKey,
+    timeoutMs,
+    leaseTtlSeconds: 300,
+  })
+  const { server, baseUrl } = await startFleetServer(fleet, {
+    port: (cli['runner.fleet_server_port'] as number | undefined) ?? 0,
+    serviceToken,
+  })
+  console.error(`[runner-gateway] fleet server listening on ${baseUrl} (owner=${owner}, kernel=${endpoint})`)
+  console.error(`[runner-gateway] plan signing public key PEM (SPKI) — distribute to agents via --fleet-public-key:\n${publicKeyPem}`)
+  console.error('[runner-gateway] WARNING: x-service-token auth only; production requires mTLS service identity (docs/remote-runner-wire.md §3)')
+  const signal = fleetShutdownSignal()
+  await new Promise<void>(resolve => {
+    signal.addEventListener('abort', () => {
+      server.closeAllConnections()
+      server.close(() => resolve())
+    }, { once: true })
+  })
+  console.error('[runner-gateway] fleet server stopped')
+  process.exit(0)
+}
+
+/**
+ * --agent <fleet-url>：RemoteRunnerAgentImpl 客户端循环（register → heartbeat
+ * → poll claims → 执行 → frames/artifacts/complete；离线有界 spool 复用
+ * AgentOutboundSpool）。plan 验签公钥经 --fleet-public-key 配置（缺省 → 任何
+ * plan 拒绝执行，fail closed）；run_manifest 签名密钥 = --key-file；显式提供
+ * --kernel 时尽力把该公钥注册到对应 kernel（§12.7，非致命——失败仅告警）。
+ */
+async function runFleetAgentMainCli(): Promise<void> {
+  const fleetUrl = cli['runner.fleet_url'] as string
+  let parsedUrl: URL
+  try {
+    parsedUrl = new URL(fleetUrl)
+  } catch {
+    console.error(`[runner-gateway] invalid --agent URL: ${JSON.stringify(fleetUrl)}`)
+    process.exit(1)
+  }
+  const { key: signingKey, publicKeyPem } = loadOrCreateSigningKey(keyFile)
+  const fleetPublicKeyFile = cli['runner.fleet_public_key'] as string | undefined
+  const fleetPublicKey = fleetPublicKeyFile !== undefined && fleetPublicKeyFile !== '' && existsSync(fleetPublicKeyFile)
+    ? readFileSync(fleetPublicKeyFile, 'utf8')
+    : undefined
+  const agentId = (cli['runner.agent_id'] as string | undefined) ?? generateAgentId()
+  const targetId = resolveTargetId(cli['runner.fleet_target_id'] as string | undefined)
+  const runnerVersion = packageVersion()
+
+  // 尽力把 agent 的 manifest 公钥注册到显式指定的 kernel（§12.7）：fleet
+  // 服务端原样转发 complete，kernel 按 runner_keys 验签——未注册 → 422
+  // manifest_key_unknown（fail closed，不静默降级）。非致命：注册失败只告警。
+  if ('runner.kernel' in cli) {
+    await tryRegisterAgentKey(signingKey.keyId, publicKeyPem, 10_000)
+  }
+
+  console.error(`[runner-gateway] agent ${agentId} (target=${targetId}) polling ${parsedUrl.origin}${parsedUrl.pathname} (poll=${pollMs}ms, key=${signingKey.keyId}${fleetPublicKey === undefined ? ', NO fleet public key — plans will be refused (fail closed)' : ''})`)
+  const signal = fleetShutdownSignal()
+  const runs = await runFleetAgentMain({
+    fleetUrl,
+    serviceToken,
+    agentId,
+    targetId,
+    runnerVersion,
+    publicKeyPem: fleetPublicKey,
+    signingKey,
+    pollIntervalMs: pollMs,
+    registerMaxWaitMs: 60_000,
+    signal,
+  })
+  console.error(`[runner-gateway] agent ${agentId} stopped after ${runs} run(s)`)
+  process.exit(0)
+}
+
+if (fleetMode === 'fleet-server') {
+  await runFleetServerMain()
+}
+if (fleetMode === 'agent') {
+  await runFleetAgentMainCli()
+}
+
+/** 尽力注册 agent manifest 公钥（非致命：超时仅告警，绝不 exit——agent 不
+ * 依赖 kernel 在线才能轮询 fleet）。 */
+async function tryRegisterAgentKey(keyId: string, publicKeyPem: string, maxWaitMs: number): Promise<void> {
+  const deadline = Date.now() + maxWaitMs
+  while (Date.now() < deadline) {
+    try {
+      await client.registerRunnerKey({ key_id: keyId, public_key_pem: publicKeyPem })
+      console.error(`[runner-gateway] agent key ${keyId} registered with kernel ${endpoint}`)
+      return
+    } catch (error) {
+      if (error instanceof KernelApiError && error.status === 404) {
+        console.error(`[runner-gateway] warning: kernel has no /v1/runner-keys endpoint — key registration skipped (compat mode)`)
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+  }
+  console.error(`[runner-gateway] warning: agent key ${keyId} not registered with kernel ${endpoint} after ${maxWaitMs}ms — signed-manifest completion may be rejected (register out-of-band via POST /v1/runner-keys)`)
+}
+
+/** runner_ver capability：从本包 package.json 读取（与发布版本一致）。 */
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: unknown }
+    return typeof pkg.version === 'string' && pkg.version !== '' ? pkg.version : '0.1.0'
+  } catch {
+    return '0.1.0'
+  }
+}
 
 /**
  * Load the Ed25519 signing key from --key-file, or generate an ephemeral one

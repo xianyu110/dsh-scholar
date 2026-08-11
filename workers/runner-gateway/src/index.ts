@@ -135,6 +135,19 @@ export {
 } from './execution-target.js'
 export { InMemoryAgentRegistry, localDockerRegistration, type AgentRegistry } from './agent-registry.js'
 export {
+  resolveFleetMode,
+  buildAgentRegistration,
+  startFleetServer,
+  createFleetServer,
+  runFleetAgentMain,
+  resolveTargetId,
+  generateAgentId,
+  FleetCliConfigError,
+  type FleetCliMode,
+  type StartFleetServerOptions,
+  type FleetAgentMainOptions,
+} from './fleet-cli.js'
+export {
   createRemoteRunnerAgent,
   RemoteRunnerAgentError,
   RemoteRunnerAgentNotImplementedError,

@@ -82,6 +82,8 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 Settings → Execution 选择已经登记的 Local Docker 或 Remote Runner profile。页面只显示 target label、capability、health、resources 和 policy；不输入 SSH credential/hostname/任意命令。远端离线时任务明确失败或等待，不会静默改在本机/subprocess 运行。服务端已实现:RUN-REMOTE-01 wire 协议、RemoteFleetServer(注册/心跳/claim/CAS/frames/artifacts/complete,含 service-token 传输等价实现)与 RemoteRunnerAgentImpl(验签、CAS hash 复算、有界 spool、fail-closed);真实 mTLS 证书链与真实远端 sandbox 验收、跨主机网络分区故障注入、Remote PTY 与浏览器 UI 仍属后续阶段。
 
+runner CLI（`node workers/runner-gateway/lib/bin/runner.js`）已接线三个互斥角色（FLEET-01，用法与互斥规则见 remote-runner-wire.md §9）：默认 `--kernel` 本地 claim 循环（既有行为不变）；`--fleet-server <port>` 启动 Fleet 服务端（`--kernel` 指向 job 来源，plan 签名公钥打印到 stderr 供 agent 配置）；`--agent <fleet-url>` 启动远端代理端（`--fleet-public-key` 验签 plan——缺省任何 plan 拒绝执行；`--key-file` 签名 manifest，显式 `--kernel` 时尽力注册公钥）。`--fleet-server` 与 `--agent` 互斥、fleet 角色与 `--mode` 互斥；本地 wire 用 `--service-token` 鉴权（生产必须 mTLS，见 remote-runner-wire.md §3/§9）。
+
 ## 7. Evidence 与 Claim
 
 普通用户或 Agent 可以创建 draft note，但不能创建 accepted Evidence。Analysis Worker 根据合同、匹配 Seed 和 metrics file 生成 Evidence；Evidence 页面显示 provenance、effect、CI、n 和方向。

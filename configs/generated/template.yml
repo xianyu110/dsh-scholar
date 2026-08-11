@@ -86,6 +86,21 @@ runner-profile:
     # Service identity for internal kernel routes.
     # sources: cli/env/file; secret
     service_token: ''
+    # Fleet server listen port (0 = ephemeral); when provided the runner runs RemoteFleetServer instead of the local claim loop.
+    # sources: cli/env/file
+    fleet_server_port: 0
+    # Fleet server base URL; when provided the runner runs as a remote fleet agent instead of the local claim loop.
+    # sources: cli/env/file
+    fleet_url: ''
+    # Agent identity registered with the fleet server; generated agent-<id> when empty.
+    # sources: cli/env/file
+    agent_id: ''
+    # Opaque target id the agent advertises (exact-match dispatch); defaults to local-docker.
+    # sources: cli/env/file
+    fleet_target_id: ''
+    # Path to the fleet server plan-signing public key PEM; agents refuse unverifiable plans without it (fail closed).
+    # sources: cli/env/file
+    fleet_public_key: ''
     # Container network mode; `host` is forbidden by the security floor and `network_policy=none` allows only `none`.
     # sources: file/http/ui; security-floor
     network: none

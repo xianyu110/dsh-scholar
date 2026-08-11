@@ -316,6 +316,55 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     sources: ['cli', 'env', 'file'],
     description: 'Service identity for internal kernel routes.',
   },
+  // ── fleet 模式（FLEET-01，docs/remote-runner-wire.md §9 生产接线）─────────
+  // runner 二进制三个互斥角色：本地 claim 循环（默认）、--fleet-server、
+  // --agent。fleet_server_port/fleet_url 是否出现决定角色；出现时与本地
+  // 模式专属 flag（--mode）互斥（bin 层校验）。
+  {
+    key: 'runner.fleet_server_port',
+    scope: 'runner-profile',
+    schema: ms(65535),
+    default: 0,
+    cli: { flag: 'fleet-server' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Fleet server listen port (0 = ephemeral); when provided the runner runs RemoteFleetServer instead of the local claim loop.',
+  },
+  {
+    key: 'runner.fleet_url',
+    scope: 'runner-profile',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'agent' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Fleet server base URL; when provided the runner runs as a remote fleet agent instead of the local claim loop.',
+  },
+  {
+    key: 'runner.agent_id',
+    scope: 'runner-profile',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'agent-id' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Agent identity registered with the fleet server; generated agent-<id> when empty.',
+  },
+  {
+    key: 'runner.fleet_target_id',
+    scope: 'runner-profile',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'target-id' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Opaque target id the agent advertises (exact-match dispatch); defaults to local-docker.',
+  },
+  {
+    key: 'runner.fleet_public_key',
+    scope: 'runner-profile',
+    schema: z.string(),
+    default: '',
+    cli: { flag: 'fleet-public-key' },
+    sources: ['cli', 'env', 'file'],
+    description: 'Path to the fleet server plan-signing public key PEM; agents refuse unverifiable plans without it (fail closed).',
+  },
   {
     key: 'runner.network',
     scope: 'runner-profile',

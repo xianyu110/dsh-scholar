@@ -194,8 +194,100 @@ address/certificate/SSH bootstrap——连接信息只由服务端 Config/Secret
   （InMemoryFleetTransport 直连服务端处理器 + JSON round-trip；
   FailingFleetTransport 断网/按方法故障注入）；
 - 测试：`tests/unit/remote-wire.test.ts`（15 用例，mock 传输 + HTTP loopback；
-  覆盖 §4/§5 全部语义）与 `tests/unit/remote-fleet.test.ts`（23 用例，接口层）。
+  覆盖 §4/§5 全部语义）、`tests/unit/remote-fleet.test.ts`（23 用例，接口层）
+  与 `tests/unit/fleet-bin.test.ts`（11 用例，真实 HTTP 传输下的 CLI 接线：
+  角色互斥、固定端口绑定、全链 runFleetAgentMain、离线 spool 恢复、
+  无匹配 target 留 pending、appendTerminalFramesWithLease 绑定回归）。
+
+**修复（FLEET-01 接线时发现）**：`kernel-client.ts` 的
+`appendTerminalFramesWithLease` 曾以未绑定方式调用 `client.request`——`this`
+为 undefined，抛 `Cannot read properties of undefined (reading 'timeoutMs')`；
+本地 runner 的 `.catch(() => undefined)` 掩盖为帧静默丢失，fleet 服务端转发
+frames 则表现为 502 `kernel_unreachable`（真实 kernel 全链 e2e 中帧永远无法
+送达）。已改为 `request.call(client, …)` 绑定调用；回归测试见
+`tests/unit/fleet-bin.test.ts`（真实 node:http 接收端断言 lease 头与请求体
+原样送达）。
 
 **剩余（如实记录）**：真实 mTLS 证书链（CA/吊销/轮换）验收、真实远端
 sandbox 隔离验收、跨主机网络分区故障注入、Remote PTY 与浏览器 UI
 （hardening-v0.2-status.md §3 RUN-REMOTE-01）。
+
+## 9. 生产接线（FLEET-01，runner 二进制 CLI）
+
+wire 协议已接入 `runner-gateway` 真实 CLI（`node lib/bin/runner.js`，
+Config Registry runner-profile scope 解析；见 hardening-v0.2-status.md §8
+FLEET-01 行）。三个互斥角色由 flag 决定，同一二进制：
+
+| 角色 | 启动方式 | 行为 |
+|---|---|---|
+| 本地 claim 循环（默认） | `--kernel <url> [--mode subprocess\|docker]` | 既有本地 runner 行为完全不变（§12.6/§12.7） |
+| Fleet 服务端 | `--fleet-server <port>` | RemoteFleetServer：从 kernel 按既有 claimJobs 路径拉取 Job、固定并签名 ExecutionPlan、按 target 分发；wire 挂真实 HTTP 路由（/v1/agents/*） |
+| Fleet 代理端 | `--agent <fleet-url>` | RemoteRunnerAgentImpl 客户端循环：register → heartbeat → poll claims → 执行 → frames/artifacts/complete；离线有界 spool 复用 AgentOutboundSpool |
+
+互斥校验（启动时 fail fast，exit 1）：
+
+- `--fleet-server` 与 `--agent` 不能同时给（一个进程只服务一个角色）；
+- 任一 fleet 角色与 `--mode` 不能同时给（`--mode` 只对本地 claim 循环
+  有意义——远端执行由 agent 侧 executor 决定，计划由 ExecutionPlan 固定）；
+- 未知 flag / 非法值仍由 parseCli/validateConfig 拒绝（CONFIG-01）。
+
+### 9.1 Fleet 服务端（--fleet-server）
+
+~~~bash
+node workers/runner-gateway/lib/bin/runner.js \
+  --fleet-server 7415 \
+  --kernel http://127.0.0.1:7412 \
+  --service-token <svc-token> \
+  --owner fleet-1 \
+  --key-file /path/to/fleet-key.pem
+~~~
+
+- 监听 `127.0.0.1:<port>`（`--fleet-server 0` = 临时端口，stderr 打印实际
+  baseUrl）；生产部署须显式绑定可达接口并在反向代理/TLS 层终止 mTLS；
+- 鉴权：所有 `/v1/agents/*` 路由要求 `x-service-token`（配置 `--service-token`
+  后生效；与 kernel 内部路由同一机制，常数时间比较）。**生产必须替换为
+  mTLS service identity**（§3 生产差异）；
+- 注册表 = agent-registry（InMemoryAgentRegistry）；plan 签名密钥 =
+  `--key-file` 或临时生成的 Ed25519 密钥，**公钥 PEM 打印到 stderr**，供
+  agent 以 `--fleet-public-key` 配置验签；
+- kernel client 复用本地 runner 同一 ResearchClient 路径——lease/run_id/
+  Manifest 跨 Local/Remote 一致；kernel 不可达时任务留 pending（retryable）。
+
+### 9.2 Fleet 代理端（--agent）
+
+~~~bash
+node workers/runner-gateway/lib/bin/runner.js \
+  --agent http://127.0.0.1:7415 \
+  --service-token <svc-token> \
+  --target-id local-docker \
+  --agent-id worker-1 \
+  --fleet-public-key /path/to/fleet-public.pem \
+  --key-file /path/to/agent-key.pem
+~~~
+
+- `--agent-id` 缺省生成 `agent-<8 hex>`；`--target-id` 缺省 `local-docker`
+  （opaque 精确匹配分发）；capability 自动上报（os/arch/runner_ver 取自
+  宿主与包版本，images 空 = 接受任何 Kernel 锁内 digest）；
+- `--fleet-public-key`：服务端签名 ExecutionPlan 的验签公钥 PEM。**缺省 →
+  任何 plan 拒绝执行（fail closed，绝无未验签执行）**；
+- `--key-file`：代理端签名 run_manifest 的 Ed25519 密钥。kernel 按 §12.7
+  验签——显式提供 `--kernel <url>` 时，本进程尽力把该公钥注册到对应 kernel
+  （非致命：失败仅告警，须经 `POST /v1/runner-keys` 带外注册；未注册 →
+  422 manifest_key_unknown，fail closed）；
+- 断网 → 本地有界 spool（§5.3），恢复后按序重放；`--poll-ms` 控制轮询间隔。
+
+### 9.3 本地验收拓扑（无 mTLS 环境，x-service-token 等价实现）
+
+kernel + fleet 服务端 + agent 同机：以同一 `--service-token` 启动三者，
+fleet 服务端打印的公钥存文件后传给 agent `--fleet-public-key`；agent 显式
+`--kernel` 以注册 manifest 公钥。`tests/unit/fleet-bin.test.ts` 以真实
+node:http listener + HttpRemoteFleetTransport 覆盖该拓扑的全链
+（register/heartbeat/claim/执行/frames/artifacts/complete、离线 spool 恢复、
+无匹配 target 留 pending）。
+
+### 9.4 剩余验收条件（如实记录）
+
+真实 mTLS 证书链（CA 签发/吊销/轮换、服务端与客户端证书身份校验）、
+跨主机部署（非 loopback 接口、网络分区故障注入）、真实远端 sandbox 隔离
+验收、Remote PTY 与浏览器 UI——本阶段环境无 CA/第二主机，保持 🌐 状态。
+
