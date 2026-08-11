@@ -54,8 +54,14 @@
                 "isolated-subprocess"
               ],
               "type": "string",
-              "description": "Execution profile of the project.",
+              "description": "Execution profile of the project (v1 enum; superseded by execution.runner_profile_id).",
               "default": "local-docker-cpu",
+              "x-dsh-scope": "project"
+            },
+            "runner_profile_id": {
+              "type": "string",
+              "description": "Opaque registered RunnerProfile id (domain-model.md §2/§9.1): overrides execution.runner_profile when set; unknown ids are rejected 422 runner_profile_unknown at project create and job submit. Job references only this opaque id — docker flags/endpoints never travel in project/job data.",
+              "default": null,
               "x-dsh-scope": "project"
             },
             "network_policy": {

@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
-import { fixtureCorpus, fixtureIdea } from '@dsh-scholar/research-schemas'
+import { fixtureCorpus, fixtureIdea, getRunnerProfile, RUNNER_PROFILE_IDS } from '@dsh-scholar/research-schemas'
 import { materializeCodeSnapshot, unpackCodeSnapshot, buildLatexRunScript, resolveMetricsFileWithin } from '@dsh-scholar/runner-gateway'
 
 /** P0 (acceptance-tests.md §4): the exact digests pinned by configs/runner-profiles/images.lock.json. */
@@ -903,6 +903,72 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
     const h = kernel.heartbeatJob(job.job_id, 'runner-1', ...fencePair(kernel, job.job_id))
     expect(h.heartbeat_at).not.toBeNull()
     const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded' })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
+  it('STORE-06: claim persists only sha256(lease_token); the payload carries no plaintext token', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hash1', kind: 'smoke' })
+    const [claimed] = kernel.claimJobs('runner-1', 60, 8)
+    expect(claimed?.lease_token).toMatch(/^lt_/)
+    // The jobs row stores the sha256 of the token — never the plaintext.
+    const row = kernel.db.prepare('SELECT lease_token_hash, payload FROM jobs WHERE job_id = ?').get(claimed!.job_id) as { lease_token_hash: string; payload: string }
+    expect(row.lease_token_hash).toBe(createHash('sha256').update(claimed!.lease_token!).digest('hex'))
+    expect(row.lease_token_hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(row.lease_token_hash).not.toContain(claimed!.lease_token!)
+    expect(row.payload).not.toContain('__lease_token')
+    expect(row.payload).not.toContain(claimed!.lease_token!)
+    // The public payload surface stays clean too.
+    expect(JSON.stringify(claimed?.payload ?? {})).not.toContain('__lease_token')
+    // Re-fetching the job still surfaces the in-memory token (same process).
+    expect(kernel.getJob(claimed!.job_id).lease_token).toBe(claimed!.lease_token)
+    kernel.close()
+  })
+
+  it('STORE-06: fencing compares sha256(token) against the hash column — old rows with an EMPTY hash still fence via the legacy payload token', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hash2', kind: 'smoke' })
+    const [claimed] = kernel.claimJobs('runner-1', 60, 8)
+    // Simulate a legacy row (claimed by the pre-0014 release): hash column
+    // empty, plaintext token recorded in payload.__lease_token.
+    kernel.db.prepare('UPDATE jobs SET lease_token_hash = NULL, payload = ? WHERE job_id = ?')
+      .run(JSON.stringify({ __lease_token: claimed!.lease_token, note: 'legacy' }), claimed!.job_id)
+    // Heartbeat + complete with the token still pass through the legacy path.
+    const h = kernel.heartbeatJob(job.job_id, 'runner-1', ...fencePair(kernel, job.job_id))
+    expect(h.heartbeat_at).not.toBeNull()
+    // A WRONG token is still rejected on the legacy path (fail-closed).
+    expectKernelError(() => kernel.heartbeatJob(job.job_id, 'runner-1', claimed!.lease_generation ?? 0, 'wrong-token'), 409, 'lease_stale')
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', ...fenceArgs(kernel, job.job_id), status: 'succeeded' })
+    expect(done.status).toBe('succeeded')
+    kernel.close()
+  })
+
+  it('STORE-06: wrong tokens are rejected against the hash column (old and new generations)', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hash3', kind: 'smoke' })
+    const [claim1] = kernel.claimJobs('runner-1', 1, 8)
+    expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
+    const [claim2] = kernel.claimJobs('runner-1', 60, 8)
+    // Stale generation + stale token (old claim) → 409 lease_stale.
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', lease_generation: claim1?.lease_generation ?? 0, lease_token: claim1?.lease_token ?? '' }),
+      409, 'lease_stale',
+    )
+    // Current generation + WRONG token → 409 lease_stale (hash mismatch).
+    expectKernelError(
+      () => kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', lease_generation: claim2?.lease_generation ?? 0, lease_token: 'lt_tampered' }),
+      409, 'lease_stale',
+    )
+    // The re-claim rotated the credential (recovery released the old lease;
+    // the new claim minted a fresh token + generation).
+    expect(claim2?.lease_generation).toBe(2)
+    expect(claim2?.lease_token).not.toBe(claim1?.lease_token)
+    // Current credentials still succeed.
+    const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-1', status: 'succeeded', ...fenceArgs(kernel, job.job_id) })
     expect(done.status).toBe('succeeded')
     kernel.close()
   })
@@ -2529,5 +2595,155 @@ describe('service token auth on internal routes (hardening §4 P0 API-01/EVID-01
       server.close()
       kernel.close()
     }
+  })
+})
+
+describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审计 §4 #8）', () => {
+  it('submitJob 对 secure kinds 注入 opaque runner_profile_id + profile_config_hash（与注册表一致，read-back 保留）', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const job = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'profile-pin-1',
+      kind: 'formal',
+      contract_id: approvedContract(kernel, project.project_id),
+      code_snapshot_id: code.artifact_id,
+      image_digest: NODE_IMAGE_DIGEST,
+    })
+    // 缺省从 v1 enum（local-docker-cpu）映射到同名本机 opaque profile
+    const cpu = getRunnerProfile(RUNNER_PROFILE_IDS.localDockerCpu)!
+    expect(job.payload.runner_profile_id).toBe(cpu.profile_id)
+    expect(job.payload.profile_config_hash).toBe(cpu.config_hash)
+    expect(job.runner_profile_id).toBe(cpu.profile_id)
+    expect(job.profile_config_hash).toBe(cpu.config_hash)
+    // DB read-back（jobFromRow）保留 pin
+    const reloaded = kernel.getJob(job.job_id)
+    expect(reloaded.runner_profile_id).toBe(cpu.profile_id)
+    expect(reloaded.profile_config_hash).toBe(cpu.config_hash)
+    expect(reloaded.payload.profile_config_hash).toBe(cpu.config_hash)
+    // 非 secure kind（echo）不注入 pin（legacy 兼容：runner 跳过校验）
+    const echo = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'profile-pin-echo', kind: 'echo', payload: { message: 'hi' } })
+    expect(echo.payload.runner_profile_id).toBeUndefined()
+    expect(echo.runner_profile_id).toBeNull()
+    kernel.close()
+  })
+
+  it('job 级 runner_profile_id 覆盖 project 级 / enum；project 级 id 被 submit 尊重', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    const gpu = getRunnerProfile(RUNNER_PROFILE_IDS.localDockerGpu)!
+    const job = kernel.submitJob({
+      project_id: project.project_id,
+      idempotency_key: 'profile-pin-gpu',
+      kind: 'formal',
+      contract_id: approvedContract(kernel, project.project_id),
+      code_snapshot_id: code.artifact_id,
+      image_digest: NODE_IMAGE_DIGEST,
+      runner_profile_id: RUNNER_PROFILE_IDS.localDockerGpu,
+    })
+    expect(job.payload.runner_profile_id).toBe(gpu.profile_id)
+    expect(job.payload.profile_config_hash).toBe(gpu.config_hash)
+    // project 级 runner_profile_id 优先于 enum
+    const proj = kernel.createProject({
+      name: 'p2', workspace: '/w2', brief: makeBrief(),
+      execution: { runner_profile_id: RUNNER_PROFILE_IDS.localDockerGpu },
+    })
+    expect(proj.execution.runner_profile_id).toBe(RUNNER_PROFILE_IDS.localDockerGpu)
+    const code2 = codeArtifact(kernel, proj.project_id)
+    const job2 = kernel.submitJob({
+      project_id: proj.project_id,
+      idempotency_key: 'profile-pin-proj',
+      kind: 'formal',
+      contract_id: approvedContract(kernel, proj.project_id),
+      code_snapshot_id: code2.artifact_id,
+      image_digest: NODE_IMAGE_DIGEST,
+    })
+    expect(job2.payload.runner_profile_id).toBe(gpu.profile_id)
+    // job 级 runner_profile_id 覆盖 project 级
+    const job3 = kernel.submitJob({
+      project_id: proj.project_id,
+      idempotency_key: 'profile-pin-override',
+      kind: 'formal',
+      contract_id: approvedContract(kernel, proj.project_id),
+      code_snapshot_id: code2.artifact_id,
+      image_digest: NODE_IMAGE_DIGEST,
+      runner_profile_id: RUNNER_PROFILE_IDS.localDockerCpu,
+    })
+    expect(job3.payload.runner_profile_id).toBe(RUNNER_PROFILE_IDS.localDockerCpu)
+    kernel.close()
+  })
+
+  it('未知 profile id → 422 runner_profile_unknown（job 级与 project 级均 fail closed，零落库）', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const code = codeArtifact(kernel, project.project_id)
+    expectKernelError(
+      () => kernel.submitJob({
+        project_id: project.project_id,
+        idempotency_key: 'profile-unknown',
+        kind: 'formal',
+        contract_id: approvedContract(kernel, project.project_id),
+        code_snapshot_id: code.artifact_id,
+        image_digest: NODE_IMAGE_DIGEST,
+        runner_profile_id: 'profile_nonexistent_v1',
+      }),
+      422, 'runner_profile_unknown',
+    )
+    // createProject 拒绝未登记 id（零落库）
+    expectKernelError(
+      () => kernel.createProject({ name: 'bad', workspace: '/w', brief: makeBrief(), execution: { runner_profile_id: 'profile_nonexistent_v1' } }),
+      422, 'runner_profile_unknown',
+    )
+    expect(kernel.listProjectsPage(50, undefined).items.map(p => p.name)).not.toContain('bad')
+    // legacy enum 之外的裸字符串同样拒绝（opaque id 语义：Job 不携带任意 profile 引用）
+    expectKernelError(
+      () => kernel.submitJob({
+        project_id: project.project_id,
+        idempotency_key: 'profile-enum-like',
+        kind: 'formal',
+        contract_id: approvedContract(kernel, project.project_id),
+        code_snapshot_id: code.artifact_id,
+        image_digest: NODE_IMAGE_DIGEST,
+        runner_profile_id: 'local-docker',
+      }),
+      422, 'runner_profile_unknown',
+    )
+    kernel.close()
+  })
+
+  it('isolated-subprocess 限制：secure kinds 经 profile 解析后 422 container_execution_required', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), execution: { runner_profile: 'isolated-subprocess' } })
+    const code = codeArtifact(kernel, project.project_id)
+    for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
+      expectKernelError(
+        () => kernel.submitJob({ project_id: project.project_id, idempotency_key: `iso-${kind}`, kind, contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST }),
+        422, 'container_execution_required',
+      )
+    }
+    // 显式 opaque isolated 注册表 id 同样拒绝（同一个 profile 语义）
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'iso-opaque', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST, runner_profile_id: RUNNER_PROFILE_IDS.isolatedSubprocess }),
+      422, 'container_execution_required',
+    )
+    // trusted-smoke-fixture（smoke + 显式标记）仍可提交（runner 端受 trusted_fixture 门禁）
+    const smoke = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'iso-smoke', kind: 'smoke', payload: { script: 'echo hi', trusted_fixture: true } })
+    expect(smoke.status).toBe('queued')
+    kernel.close()
+  })
+
+  it('latex-compile 同样固定 project profile pin（texlive digest 不变）', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const doc = kernel.texEnsure(project.project_id)
+    kernel.texWriteFile(doc.document_id, 'paper.tex', '\\begin{document}hi\\end{document}\n')
+    const snap = kernel.texSnapshot(doc.document_id)
+    const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'latex-profile-pin', kind: 'latex-compile', payload: { tex_document_id: doc.document_id, tex_revision: snap.revision } })
+    expect(job.image_digest).toBe(TEXLIVE_IMAGE_DIGEST)
+    expect(job.payload.runner_profile_id).toBe(RUNNER_PROFILE_IDS.localDockerCpu)
+    expect(job.payload.profile_config_hash).toBe(getRunnerProfile(RUNNER_PROFILE_IDS.localDockerCpu)!.config_hash)
+    kernel.close()
   })
 })

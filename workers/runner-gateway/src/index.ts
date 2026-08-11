@@ -20,7 +20,7 @@ import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { JobRecord } from '@dsh-scholar/research-schemas'
-import { buildExecutionPlan, signExecutionPlan, type ExecutionPlan } from '@dsh-scholar/research-schemas'
+import { buildExecutionPlan, computeProfileConfigHash, getRunnerProfile, signExecutionPlan, type ExecutionPlan, type RunnerProfile } from '@dsh-scholar/research-schemas'
 import { LocalDockerAdapter, buildLocalDockerArgs, type DockerExecContext, type RunOutcome } from './execution-target.js'
 import { appendTerminalFramesWithLease } from './kernel-client.js'
 import { canonicalJson, signManifest, type RunnerSigningKey } from './manifest-signing.js'
@@ -715,6 +715,51 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     } }
     throw new Error(`job ${job.job_id} rejected before execution (subprocess mode)`)
   }
+  // domain-model.md §9.1（审计 §4 #8）: secure jobs 由 kernel submitJob 固定
+  // opaque runner profile id + profile config hash（payload.runner_profile_id
+  // + payload.profile_config_hash）。Runner 按注册表复算校验：未知 id 或
+  // hash 不一致 → environment 失败（fail closed，绝不执行——target 不得
+  // 放宽 Job 固定的 profile/config pin）。legacy jobs（无 pin）跳过校验，
+  // 执行路径与现状字节级一致。
+  const payloadProfileId = typeof job.payload.runner_profile_id === 'string' && job.payload.runner_profile_id !== ''
+    ? job.payload.runner_profile_id
+    : null
+  let resolvedProfile: RunnerProfile | null = null
+  if (payloadProfileId !== null) {
+    const pinnedHash = typeof job.payload.profile_config_hash === 'string' && job.payload.profile_config_hash !== ''
+      ? job.payload.profile_config_hash
+      : null
+    const candidate = getRunnerProfile(payloadProfileId)
+    let profileError: string | null = null
+    if (candidate === null) {
+      profileError = `runner profile ${JSON.stringify(payloadProfileId)} is not a registered opaque profile id (domain-model.md §9.1)`
+    } else {
+      const computed = computeProfileConfigHash(candidate)
+      if (pinnedHash === null || computed !== pinnedHash) {
+        profileError = `runner profile ${JSON.stringify(payloadProfileId)} config hash mismatch: job pins ${pinnedHash ?? '(none)'}, registry computes ${computed} (domain-model.md §9.1)`
+      }
+    }
+    if (profileError !== null) {
+      const rejected = await client.completeJob({
+        job_id: job.job_id,
+        owner,
+        status: 'failed',
+        failure_class: 'environment',
+        error: profileError,
+        // §12.6 fencing (P0): a leased job's completion MUST carry the claim's
+        // generation/token or the kernel rejects it (409 lease_stale).
+        lease_generation: job.lease_generation,
+        lease_token: job.lease_token,
+      }).catch(() => null)
+      if (rejected !== null) return { job: rejected, run: {
+        run_id: `run_${randomUUID().slice(0, 12)}`, exit_code: -1,
+        started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+        stdout: '', stderr: '', error: `rejected: ${profileError}`,
+      } }
+      throw new Error(`job ${job.job_id} rejected before execution (runner profile validation)`)
+    }
+    resolvedProfile = candidate
+  }
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-scholar-run-'))
   // Container mode runs as a non-root uid (65534): the workdir and the
   // injected script must be world-traversable/readable for the container
@@ -843,6 +888,9 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     }
     // RUN-REMOTE-01（接口层）：ExecutionPlan 由 Kernel 固定字段派生并签名
     // （有 signingKey 时），target 不得改写（adapter 冻结 + fingerprint 断言）。
+    // domain-model.md §9.1：docker 参数来源 = 注册表 profile 记录（limits/
+    // network/opaque profile_id + config hash pin）；legacy jobs 缺省值
+    // 与现状字节级一致。
     const plan = buildExecutionPlan(job, {
       run_id: runId,
       command,
@@ -856,7 +904,8 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       timeout_ms: timeoutMs,
       config_pin: null,
       target_id: 'local-docker',
-      profile_id: 'local-docker',
+      profile_id: resolvedProfile?.profile_id ?? 'local-docker',
+      profile: resolvedProfile ?? undefined,
     })
     const planForExecution = signingKey !== undefined ? signExecutionPlan(plan, signingKey) : plan
     const dockerTarget = new LocalDockerAdapter({ jobId: job.job_id, dockerRun: runDocker, cancel: cancelRun })

@@ -17,9 +17,12 @@ global:
 
 project:
   execution:
-    # Execution profile of the project.
+    # Execution profile of the project (v1 enum; superseded by execution.runner_profile_id).
     # sources: http/ui/file
     runner_profile: local-docker-cpu
+    # Opaque registered RunnerProfile id (domain-model.md §2/§9.1): overrides execution.runner_profile when set; unknown ids are rejected 422 runner_profile_unknown at project create and job submit. Job references only this opaque id — docker flags/endpoints never travel in project/job data.
+    # sources: http/ui/file
+    runner_profile_id: null
     # Runner network policy; `none` forbids any container network other than none.
     # sources: http/ui/file; security-floor
     network_policy: allowlist

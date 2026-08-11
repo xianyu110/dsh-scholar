@@ -29,6 +29,7 @@
 import { createHash, createPublicKey, sign, verify, type KeyObject } from 'node:crypto'
 import { z } from 'zod'
 import type { JobRecord } from './kernel.js'
+import type { RunnerProfile } from './runner-profile.js'
 
 /** 本地 Docker target 的稳定 opaque id（Kernel/gateway/注册表共用）。 */
 export const LOCAL_DOCKER_TARGET_ID = 'local-docker'
@@ -114,6 +115,12 @@ export const ExecutionPlan = z.object({
   command: z.array(z.string()).default([]),
   /** opaque runner profile id（Config/SecretRef 解析在服务端；Job/UI 只见 opaque id）。 */
   profile_id: z.string().min(1),
+  /**
+   * profile 记录本身的 config hash pin（domain-model.md §9.1：Job 固定
+   * profile/config hash；target 按注册表复算校验，不一致拒绝执行）。
+   * 缺省 null = legacy plan（未固定）。
+   */
+  profile_config_hash: z.string().nullable().default(null),
   /** opaque target id（如 'local-docker' 或远端注册的 target_id）。 */
   target_id: z.string().min(1),
   lease: LeaseBinding,
@@ -228,6 +235,13 @@ export interface BuildExecutionPlanOptions {
   config_pin?: string | null
   target_id?: string
   profile_id?: string
+  /**
+   * 已解析的 RunnerProfile 记录（domain-model.md §9.1）：提供时 plan 的
+   * limits/network/profile_id/profile_config_hash 取自 profile（docker
+   * 参数来源 = profile 记录；缺省与现状一致）。调用方负责先按注册表
+   * 校验 profile_config_hash 一致——不一致不得执行。
+   */
+  profile?: RunnerProfile
   created_at?: string
 }
 
@@ -256,7 +270,9 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
     run_id: options.run_id,
     kind: job.kind,
     command: options.command ?? job.command,
-    profile_id: options.profile_id ?? LOCAL_DOCKER_TARGET_ID,
+    // opaque profile id：显式选项 > 已解析 profile > local-docker target 缺省。
+    profile_id: options.profile_id ?? options.profile?.profile_id ?? LOCAL_DOCKER_TARGET_ID,
+    profile_config_hash: options.profile?.config_hash ?? null,
     target_id: options.target_id ?? LOCAL_DOCKER_TARGET_ID,
     lease: {
       owner: options.lease.owner,
@@ -271,14 +287,16 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
       tex_snapshot: job.kind === 'latex-compile' ? (payload?.tex_snapshot as Record<string, unknown> | undefined) ?? null : null,
     },
     artifact_refs: { data_artifact_ids: dataArtifactIds },
+    // 资源上限与网络策略取自已解析 profile 记录（domain-model.md §9.1：
+    // profile 是 docker 参数来源；缺省值与现状字节级一致）。
     limits: {
       timeout_ms: options.timeout_ms,
-      memory_mb: 1024,
-      cpus: 1,
-      pids: 256,
+      memory_mb: options.profile?.limits.memory_mb ?? 1024,
+      cpus: options.profile?.limits.cpus ?? 1,
+      pids: options.profile?.limits.pids ?? 256,
       max_log_bytes: 32 * 1024 * 1024,
     },
-    network: { policy: 'none' },
+    network: { policy: options.profile?.network_policy ?? 'none' },
     platform: { os: null, arch: null },
     requires: { runner_version: null },
     output_contract: {

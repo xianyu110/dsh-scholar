@@ -3,7 +3,8 @@
  * @module @dsh-scholar/research-kernel
  */
 
-export { ResearchKernel, KernelError, validateUploadFileName, type KernelOptions } from './kernel.js'
+export { ResearchKernel, KernelError, validateUploadFileName, type KernelOptions, type IntegrityScanReport } from './kernel.js'
+export { createStartupBackup, type StartupBackupResult } from './backup.js'
 export { nextActionProjection, legacyNextActionStrings, type NextActionContext, type NextActionJob, type NextActionRoute } from './next-action.js'
 export {
   INTAKE_DDL, GRILL_TAXONOMY_VERSION, GRILL_QUESTION_REVISION, INTAKE_DEFAULT_TTL_MS, INTAKE_STAGED_TTL_MS,
@@ -15,12 +16,13 @@ export {
 export { IMAGES_LOCK, getLockedDigest, validateImageDigest, type ImagesLock, type LockedImageKind, type SecureJobKind } from './images-lock.js'
 export { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
 export { startKernelServer, type KernelServerOptions } from './server.js'
-export { ArtifactCas } from './cas.js'
+export { ArtifactCas, type CasInventoryEntry } from './cas.js'
 export { MetricsStore, HISTOGRAM_BUCKETS, type MetricsSnapshot, type CounterView, type HistogramView, type HistogramBucket, type MetricTags } from './metrics.js'
 export { openDatabase, SCHEMA_VERSION } from './store.js'
 export { runMigrations, MIGRATIONS, checksumOf } from './migrations.js'
 export {
   openPtySessionStore, PtySessionStore, PtyError, NullPtyAdapter,
+  PTY_DDL, PTY_SESSIONS_TABLE_DDL,
   PTY_DEFAULT_IDLE_TTL_S, PTY_DEFAULT_RETENTION_BYTES, PTY_DEFAULT_LEASE_TTL_S,
   type PtyAdapter, type PtySpawnPlan, type PtyControlResult, type PtyAppendResult, type PtySessionRow,
 } from './pty-session.js'

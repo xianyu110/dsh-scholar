@@ -9,6 +9,14 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, statSync, readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
+/** One CAS inventory entry (STORAGE-07): identity + on-disk metadata. */
+export interface CasInventoryEntry {
+  sha256: string
+  size_bytes: number
+  /** ISO-8601 modification time of the blob file. */
+  mod_time: string
+}
+
 export class ArtifactCas {
   readonly root: string
 
@@ -82,6 +90,26 @@ export class ArtifactCas {
     return entries
       .filter(entry => /^[0-9a-f]{64}$/.test(entry) && !entry.endsWith('.tmp-'))
       .sort()
+  }
+
+  /**
+   * STORAGE-07 (storage-migrations.md §8.2/§10): CAS inventory — every blob
+   * with its on-disk size and modification time (ISO). Written by the
+   * startup backup hook into backups/inventory-<ts>.json so a restore can
+   * verify blob count/size/mtime before serving. Blobs that vanish between
+   * list() and stat (concurrent GC) are skipped.
+   */
+  inventory(): CasInventoryEntry[] {
+    const out: CasInventoryEntry[] = []
+    for (const sha of this.list()) {
+      try {
+        const st = statSync(this.pathFor(sha))
+        out.push({ sha256: sha, size_bytes: st.size, mod_time: new Date(st.mtimeMs).toISOString() })
+      } catch {
+        // Blob removed concurrently — skip (a later scan reports it missing).
+      }
+    }
+    return out
   }
 
   /** Delete one blob; missing blobs are a no-op (orphan GC, §6 CAS). */

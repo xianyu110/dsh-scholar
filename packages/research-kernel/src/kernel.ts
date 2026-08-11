@@ -15,7 +15,7 @@ import {
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, getFixtureProfile, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  buildProjectId, getFixtureProfile, getRunnerProfile, resolveRunnerProfileId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
   type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus,
@@ -41,6 +41,28 @@ import { MetricsStore } from './metrics.js'
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
 const ANALYSIS_RESAMPLES = 10_000
+
+/**
+ * STORAGE-07 (storage-migrations.md §10): post-restore integrity scan
+ * report — every artifact record vs its CAS blob (existence, recorded size,
+ * content re-hash) plus unreferenced ("orphan") blobs.
+ */
+export interface IntegrityScanReport {
+  /** Artifact records whose blob is missing from the CAS (or empty). */
+  missing_blobs: Array<{ project_id: string; artifact_id: string; sha256: string }>
+  /** CAS blobs not referenced by any artifact record (GC candidate set). */
+  orphan_blobs: string[]
+  /** Existing blobs whose on-disk size differs from artifacts.size_bytes. */
+  size_mismatch: Array<{ project_id: string; artifact_id: string; sha256: string; recorded_size: number; actual_size: number }>
+  /** Existing blobs whose content re-hashes to a different sha256. */
+  hash_mismatch: Array<{ project_id: string; artifact_id: string; sha256: string; recorded_size: number; actual_size: number }>
+  /** Blob verifications performed (size + hash). */
+  scanned_blobs: number
+  /** Artifact blobs skipped when the scan was limited (limit option). */
+  skipped_blobs: number
+  /** Total CAS blob count at scan time. */
+  total_blobs: number
+}
 
 /**
  * §4 (RUN-02/TEX-02 P0): the TeX build engine is a FIXED enum — never a raw
@@ -257,13 +279,18 @@ function gateFromRow(row: GateRow): Gate {
   }
 }
 
-function jobFromRow(row: JobRow, db: DatabaseSync): JobSpecBound & { run_id: string | null } {
+function jobFromRow(row: JobRow, db: DatabaseSync, tokenOverride?: string | null): JobSpecBound & { run_id: string | null } {
   const payload = jsonParse(row.payload, {} as Record<string, unknown>)
-  // §12.6: the opaque lease token is persisted inside payload.__lease_token
-  // (avoids a schema column); surface it as a first-class field and keep the
-  // public payload clean.
-  const leaseToken = typeof payload.__lease_token === 'string' ? payload.__lease_token : null
-  if (leaseToken !== null) delete payload.__lease_token
+  // §12.6 / STORE-06 (storage-migrations.md §4): the opaque lease token is
+  // NEVER persisted — new claims store only sha256(token) in
+  // jobs.lease_token_hash and keep the plaintext in kernel memory (returned
+  // to the runner on the claim response). `tokenOverride` is that in-memory
+  // plaintext. Legacy rows claimed by the pre-0014 release still carry the
+  // plaintext inside payload.__lease_token (hash column NULL); they are
+  // surfaced the same way for backward-compatible fencing.
+  const legacyToken = typeof payload.__lease_token === 'string' ? payload.__lease_token : null
+  if (legacyToken !== null) delete payload.__lease_token
+  const leaseToken = tokenOverride ?? legacyToken
   // §3.1 / RUN-01 (P0): the durable per-attempt run identity — the runs row
   // of the CURRENT attempt (`attempts`). Runners that only hold the job
   // record (claim response / GET job) can use run_id for manifest, terminal
@@ -291,6 +318,10 @@ function jobFromRow(row: JobRow, db: DatabaseSync): JobSpecBound & { run_id: str
     code_snapshot_id: row.code_snapshot_id,
     data_artifact_ids: Array.isArray(payload.data_artifact_ids) ? payload.data_artifact_ids.map(String) : [],
     image_digest: typeof payload.image_digest === 'string' ? payload.image_digest : '',
+    // domain-model.md §9.1: Job 固定的 opaque profile id + config hash
+    // （kernel submitJob 注入 payload；runner 按注册表复算校验）。
+    runner_profile_id: typeof payload.runner_profile_id === 'string' && payload.runner_profile_id !== '' ? payload.runner_profile_id : null,
+    profile_config_hash: typeof payload.profile_config_hash === 'string' && payload.profile_config_hash !== '' ? payload.profile_config_hash : null,
     output_contract: typeof payload.output_contract === 'object' && payload.output_contract !== null
       ? { metrics: String((payload.output_contract as Record<string, unknown>).metrics ?? '/outputs/metrics.json'), logs: String((payload.output_contract as Record<string, unknown>).logs ?? '/outputs/run.log') }
       : undefined,
@@ -613,6 +644,18 @@ export class ResearchKernel {
    */
   readonly metrics: MetricsStore
 
+  /**
+   * STORE-06 (storage-migrations.md §4): in-memory plaintext lease tokens,
+   * one per currently-claimed job (job_id → token). The database only ever
+   * stores sha256(token) in jobs.lease_token_hash; this map backs the
+   * claim-response surface (the runner receives the plaintext token once)
+   * and is cleared when the lease is released (complete/cancel/expiry
+   * recovery). After a kernel restart it is empty — verification stays
+   * possible via the hash column, but re-fetched jobs no longer carry the
+   * plaintext (the runner holds it from the claim response).
+   */
+  private readonly leaseTokens = new Map<string, string>()
+
   constructor(options: KernelOptions = {}) {
     this.db = openDatabase(options.dbPath ?? ':memory:')
     this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
@@ -901,6 +944,15 @@ export class ResearchKernel {
     if (mode === 'full-auto' && getFixtureProfile(execution.fixture_id ?? '') === null) {
       throw new KernelError(422, 'fixture_required',
         'full-auto projects require execution.fixture_id bound to a REGISTERED FixtureProfile (reconstruction-contracts.md §5); unknown fixture ids are rejected')
+    }
+    // domain-model.md §2/§9.1: Project 只能引用已登记的 opaque RunnerProfile
+    // id。runner_profile_id 显式设置时必须在注册表内——未知 id 422，零落库
+    // （与 fixture_required 同一 fail-closed 姿态）。
+    if (execution.runner_profile_id !== null && execution.runner_profile_id !== '') {
+      if (getRunnerProfile(execution.runner_profile_id) === null) {
+        throw new KernelError(422, 'runner_profile_unknown',
+          `execution.runner_profile_id ${execution.runner_profile_id} is not a registered opaque RunnerProfile id (domain-model.md §9.1)`)
+      }
     }
     const project: ResearchProject = {
       project_id: buildProjectId(),
@@ -1490,6 +1542,72 @@ export class ResearchKernel {
       artifact_id: string; project_id: string; sha256: string
     }>
     return rows.filter(r => !this.cas.has(r.sha256))
+  }
+
+  /**
+   * STORAGE-07 (storage-migrations.md §10): post-restore integrity scan over
+   * the artifacts table vs the CAS. Reports:
+   *
+   *  - missing_blobs — artifact records whose blob is absent/empty (same
+   *    check as scanMissingBlobs);
+   *  - orphan_blobs — CAS blobs referenced by NO artifact record (the
+   *    collectOrphanBlobs candidate set, without deleting);
+   *  - size_mismatch — existing blob whose on-disk size differs from the
+   *    recorded artifacts.size_bytes;
+   *  - hash_mismatch — existing blob whose content re-hashes to a different
+   *    sha256 than the recorded one (tampered/corrupted bytes).
+   *
+   * Blob re-hashing reads every referenced blob; on very large CAS stores
+   * pass `limit` to cap how many blobs are verified (missing/orphan
+   * detection is stat-only and always complete; the remainder is reported
+   * in `skipped_blobs`).
+   */
+  scanIntegrity(opts: { limit?: number } = {}): IntegrityScanReport {
+    const rows = this.db.prepare('SELECT artifact_id, project_id, sha256, size_bytes FROM artifacts').all() as unknown as Array<{
+      artifact_id: string; project_id: string; sha256: string; size_bytes: number
+    }>
+    const referenced = new Set(rows.map(r => r.sha256))
+    const missing_blobs = rows
+      .filter(r => !this.cas.has(r.sha256))
+      .map(r => ({ project_id: r.project_id, artifact_id: r.artifact_id, sha256: r.sha256 }))
+    const orphan_blobs = this.cas.list().filter(sha => !referenced.has(sha))
+    const size_mismatch: IntegrityScanReport['size_mismatch'] = []
+    const hash_mismatch: IntegrityScanReport['hash_mismatch'] = []
+    let scanned = 0
+    for (const r of rows) {
+      if (!this.cas.has(r.sha256)) continue
+      if (opts.limit !== undefined && scanned >= opts.limit) break
+      scanned += 1
+      const path = this.cas.pathFor(r.sha256)
+      let bytes: Buffer
+      try {
+        const st = statSync(path)
+        if (st.size !== r.size_bytes) {
+          size_mismatch.push({
+            project_id: r.project_id, artifact_id: r.artifact_id, sha256: r.sha256,
+            recorded_size: r.size_bytes, actual_size: st.size,
+          })
+        }
+        bytes = readFileSync(path)
+      } catch {
+        continue // blob vanished between has() and read — reported as missing on the next scan
+      }
+      if (createHash('sha256').update(bytes).digest('hex') !== r.sha256) {
+        hash_mismatch.push({
+          project_id: r.project_id, artifact_id: r.artifact_id, sha256: r.sha256,
+          recorded_size: r.size_bytes, actual_size: bytes.byteLength,
+        })
+      }
+    }
+    return {
+      missing_blobs,
+      orphan_blobs,
+      size_mismatch,
+      hash_mismatch,
+      scanned_blobs: scanned,
+      skipped_blobs: Math.max(0, rows.length - scanned),
+      total_blobs: this.cas.list().length,
+    }
   }
 
   // ── identity (api-contracts.md §3 /v2/health) ────────────────────────────
@@ -2952,6 +3070,9 @@ export class ResearchKernel {
     data_artifact_ids?: string[]
     image_digest?: string
     output_contract?: { metrics: string; logs: string }
+    // domain-model.md §9.1: opaque RunnerProfile id（缺省回退 project 级
+    // execution.runner_profile_id，再回退 v1 enum 映射）；未知 id 422。
+    runner_profile_id?: string | null
   }): JobSpecBound {
     const project = this.getProject(input.project_id)
     // reconstruction-contracts.md §5 / security-baseline.md §1: full-auto is
@@ -2969,13 +3090,26 @@ export class ResearchKernel {
     // yields two independent jobs.
     const existing = this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?')
       .get(input.project_id, input.idempotency_key) as JobRow | undefined
-    if (existing !== undefined) return jobFromRow(existing, this.db)
+    if (existing !== undefined) return jobFromRow(existing, this.db, this.leaseTokens.get(existing.job_id) ?? null)
     // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
     // isolated-subprocess is rejected at submission time (kernel layer).
+    // domain-model.md §2/§9.1: Job 只引用已登记的 opaque profile id ——
+    // 显式 runner_profile_id（job 级 > project 级）优先，缺省从 v1 enum
+    // 映射同名本机 profile；未知 id → 422（fail closed，零落库）。解析出的
+    // profile 的 config_hash 与 image digest 一起固定进 Job payload，runner
+    // 按注册表复算校验。
     const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
-    if (SECURE_KINDS.includes(input.kind) && project.execution.runner_profile === 'isolated-subprocess') {
+    // job 级 > project 级 > v1 enum（最后一个恒非空：ExecutionConfig 有默认值）
+    const profileRef = input.runner_profile_id ?? project.execution.runner_profile_id ?? project.execution.runner_profile
+    const resolvedProfileId = resolveRunnerProfileId(profileRef)
+    const runnerProfile = resolvedProfileId !== null ? getRunnerProfile(resolvedProfileId) : null
+    if (runnerProfile === null) {
+      throw new KernelError(422, 'runner_profile_unknown',
+        `runner profile '${profileRef ?? project.execution.runner_profile}' is not a registered opaque profile id (domain-model.md §9.1); jobs reference only registered RunnerProfile ids, never docker flags/endpoints`)
+    }
+    if (SECURE_KINDS.includes(input.kind) && runnerProfile.runner_mode !== 'local-docker') {
       throw new KernelError(422, 'container_execution_required',
-        `job kind ${input.kind} requires a container runner profile (got ${project.execution.runner_profile}); host subprocess is prohibited (v2 §3.2)`)
+        `job kind ${input.kind} requires a container runner profile (got ${runnerProfile.profile_id}); host subprocess is prohibited (v2 §3.2)`)
     }
     // §12 latex-compile binds a frozen TeX snapshot, not a code snapshot.
     if (input.kind === 'latex-compile') {
@@ -3159,6 +3293,13 @@ export class ResearchKernel {
       // contract's metric names (primary + secondary) — injected here so the
       // runner never trusts client-supplied names.
       ...(contractMetricNames !== undefined ? { contract_metrics: contractMetricNames } : {}),
+      // domain-model.md §9.1: secure kinds 固定 opaque runner profile id +
+      // profile 记录 config_hash（与 image digest 同一 pin 语义）——runner
+      // executeJob 按注册表复算比对，不一致 → environment 失败（不执行）。
+      ...(SECURE_KINDS.includes(input.kind) ? {
+        runner_profile_id: runnerProfile.profile_id,
+        profile_config_hash: runnerProfile.config_hash,
+      } : {}),
       image_digest: SECURE_KINDS.includes(input.kind)
         ? validateImageDigest(input.kind as SecureJobKind, digestInput)
         : (input.image_digest ?? ''),
@@ -3183,6 +3324,10 @@ export class ResearchKernel {
       code_snapshot_id: boundCodeSnapshotId,
       data_artifact_ids: input.data_artifact_ids ?? [],
       image_digest: String(payload.image_digest),
+      // domain-model.md §9.1: Job 固定 opaque profile id + config hash
+      // （secure kinds 由上方 payload 注入；其余 kind 为 null）。
+      runner_profile_id: typeof payload.runner_profile_id === 'string' && payload.runner_profile_id !== '' ? payload.runner_profile_id : null,
+      profile_config_hash: typeof payload.profile_config_hash === 'string' && payload.profile_config_hash !== '' ? payload.profile_config_hash : null,
       output_contract: input.output_contract,
       attempts: 0,
       max_attempts: input.max_attempts ?? 3,
@@ -3207,14 +3352,17 @@ export class ResearchKernel {
   getJob(jobId: string): JobSpecBound & { run_id: string | null } {
     const row = this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(jobId) as JobRow | undefined
     if (row === undefined) throw new KernelError(404, 'job_not_found', `job ${jobId} not found`)
-    return jobFromRow(row, this.db)
+    // STORE-06: the in-memory plaintext token (when the lease is live in
+    // this process) rides on the returned record; legacy rows fall back to
+    // their payload.__lease_token.
+    return jobFromRow(row, this.db, this.leaseTokens.get(jobId) ?? null)
   }
 
   listJobs(projectId: string, status?: JobStatus): Array<JobSpecBound & { run_id: string | null }> {
     const rows = status === undefined
       ? this.db.prepare('SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at').all(projectId) as unknown as JobRow[]
       : this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND status = ? ORDER BY created_at').all(projectId, status) as unknown as JobRow[]
-    return rows.map(row => jobFromRow(row, this.db))
+    return rows.map(row => jobFromRow(row, this.db, this.leaseTokens.get(row.job_id) ?? null))
   }
 
   /** §3.1 / RUN-01: durable per-attempt run rows of a project (claim-time
@@ -3246,25 +3394,30 @@ export class ResearchKernel {
       `SELECT * FROM jobs WHERE status = 'queued' OR (status = 'retryable' AND attempts < max_attempts) ORDER BY created_at LIMIT ?`,
     ).all(limit) as unknown as JobRow[]
     const claimed: Array<JobSpecBound & { run_id: string | null }> = []
+    // STORE-06 (storage-migrations.md §4): the claim persists ONLY the
+    // sha256 of the opaque token (jobs.lease_token_hash) — the plaintext
+    // never touches the database, it lives in kernel memory (this.leaseTokens)
+    // and is returned to the runner on the claim response.
     const update = this.db.prepare(
-      `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, lease_generation = COALESCE(lease_generation, 0) + 1, payload = ?, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
+      `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, lease_generation = COALESCE(lease_generation, 0) + 1, lease_token_hash = ?, payload = ?, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
     )
     for (const row of rows) {
       const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
       const payload = jsonParse(row.payload, {} as Record<string, unknown>)
       const leaseToken = `lt_${randomUUID().replaceAll('-', '')}${randomUUID().slice(0, 8)}`
-      payload.__lease_token = leaseToken
       // execution-runtime.md §3 / storage-migrations.md §4: a claim is ONE
-      // transaction — UPDATE jobs (running + lease + generation) and INSERT
-      // runs (durable attempt identity) commit atomically, so a crash
-      // between them can never leave a running job without its run row or
-      // a run row on an unclaimed job. (The tex_builds status sync below
-      // runs AFTER the commit: TexWorkspaceStore owns a separate connection
-      // to the same file, so it must not write inside the kernel txn.)
+      // transaction — UPDATE jobs (running + lease + generation + token
+      // hash) and INSERT runs (durable attempt identity) commit atomically,
+      // so a crash between them can never leave a running job without its
+      // run row or a run row on an unclaimed job. (The tex_builds status
+      // sync below runs AFTER the commit: TexWorkspaceStore owns a separate
+      // connection to the same file, so it must not write inside the kernel
+      // txn.)
       const claimedRow = withTransaction(this.db, () => {
-        const result = update.run(owner, leaseExpires, now, JSON.stringify(payload), now, row.job_id)
+        const result = update.run(owner, leaseExpires, now, sha256Hex(leaseToken), JSON.stringify(payload), now, row.job_id)
         if (Number(result.changes) !== 1) return null
-        const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow, this.db)
+        this.leaseTokens.set(row.job_id, leaseToken)
+        const claimedJob = jobFromRow(this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(row.job_id) as unknown as JobRow, this.db, leaseToken)
         // §3.1 / RUN-01 (Run attempt): every claim records a runs row — the
         // durable per-attempt identity (attempt_no = attempts after claim).
         // run_id is run_<12 hex>; snapshot_sha256 is the CAS sha256 resolved
@@ -3320,10 +3473,38 @@ export class ResearchKernel {
   }
 
   /**
+   * STORE-06 (storage-migrations.md §4): the persisted lease credential of a
+   * job — the sha256 stored in jobs.lease_token_hash (NULL on legacy rows
+   * claimed before migration 0014).
+   */
+  private leaseHashOf(jobId: string): string | null {
+    const row = this.db.prepare('SELECT lease_token_hash FROM jobs WHERE job_id = ?').get(jobId) as { lease_token_hash: string | null } | undefined
+    const hash = row?.lease_token_hash ?? null
+    return hash !== null && hash !== '' ? hash : null
+  }
+
+  /**
+   * STORE-06: fencing comparison for a caller-supplied lease token. The
+   * comparison object is the sha256 of the token (jobs.lease_token_hash) —
+   * the plaintext is never stored. Legacy rows with an empty hash column
+   * (claimed by the pre-0014 release, token recorded in
+   * payload.__lease_token) fall back to the legacy plaintext comparison so
+   * fencing keeps working on rows that were not migrated/backfilled.
+   */
+  private leaseTokenMatches(jobId: string, job: JobRecord, provided: string | null | undefined): boolean {
+    if (provided === undefined || provided === null) return false
+    const hash = this.leaseHashOf(jobId)
+    if (hash !== null) return hash === sha256Hex(provided)
+    return job.lease_token !== null && job.lease_token === provided
+  }
+
+  /**
    * Renew a lease (heartbeat); rejects when owned by another instance.
    * §12.6: when `generation`/`token` are provided the lease is fenced —
    * both must match the CURRENT lease, otherwise 409 `lease_stale`.
    * Legacy callers that pass neither keep the old owner-only check.
+   * STORE-06: the token half of the fence compares sha256(provided) against
+   * jobs.lease_token_hash (legacy rows fall back to the payload token).
    */
   heartbeatJob(jobId: string, owner: string, generation?: number | null, token?: string | null, leaseTtlSeconds = 300): JobRecord {
     const job = this.getJob(jobId)
@@ -3335,12 +3516,12 @@ export class ResearchKernel {
     // stale, not "unfenced" (no owner-only compatibility pass).
     if (job.lease_owner !== null && (generation === undefined || generation === null || token === undefined || token === null)) {
       throw new KernelError(409, 'lease_stale',
-        `job ${jobId} heartbeat missing lease fencing fields: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}`)
+        `job ${jobId} heartbeat missing lease fencing fields: expected generation ${job.lease_generation ?? 'n/a'} token hash ${this.leaseHashOf(jobId) ?? 'n/a'}`)
     }
     if ((generation !== undefined && generation !== null) || (token !== undefined && token !== null)) {
-      if (job.lease_generation !== (generation ?? null) || job.lease_token !== (token ?? null)) {
+      if (job.lease_generation !== (generation ?? null) || !this.leaseTokenMatches(jobId, job, token)) {
         throw new KernelError(409, 'lease_stale',
-          `job ${jobId} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${generation ?? 'n/a'} token ${token ?? 'n/a'}`)
+          `job ${jobId} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token hash ${this.leaseHashOf(jobId) ?? 'n/a'}, got generation ${generation ?? 'n/a'} token ${token ?? 'n/a'}`)
       }
     }
     const now = nowIso()
@@ -3352,9 +3533,15 @@ export class ResearchKernel {
 
   /** Recover stale leases after a runner crash (design §9.3). */
   recoverExpiredLeases(now = Date.now()): number {
+    // STORE-06: recovered leases drop their in-memory plaintext token — the
+    // next claim issues a fresh token (generation bumps) and a new hash.
+    const stale = this.db.prepare(
+      "SELECT job_id FROM jobs WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
+    ).all(new Date(now).toISOString()) as Array<{ job_id: string }>
     const result = this.db.prepare(
       `UPDATE jobs SET status = 'retryable', lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
     ).run(nowIso(), new Date(now).toISOString())
+    for (const s of stale) this.leaseTokens.delete(s.job_id)
     const changes = Number(result.changes)
     // OBS-01: lease expiry counter accumulates the recovered-job count.
     if (changes > 0) this.metrics.count('lease.expiry', undefined, changes)
@@ -3390,13 +3577,16 @@ export class ResearchKernel {
     }
     // §12.6 strict lease fencing (P0): completion of a leased job MUST carry
     // the current generation AND token — missing fields are rejected 409.
+    // STORE-06: the token half of the fence compares sha256(provided)
+    // against jobs.lease_token_hash (legacy rows fall back to the payload
+    // token when the hash column is empty).
     if ((input.lease_generation === undefined || input.lease_generation === null) || (input.lease_token === undefined || input.lease_token === null)) {
       throw new KernelError(409, 'lease_stale',
-        `job ${input.job_id} completion missing lease fencing fields: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}`)
+        `job ${input.job_id} completion missing lease fencing fields: expected generation ${job.lease_generation ?? 'n/a'} token hash ${this.leaseHashOf(input.job_id) ?? 'n/a'}`)
     }
-    if (job.lease_generation !== input.lease_generation || job.lease_token !== input.lease_token) {
+    if (job.lease_generation !== input.lease_generation || !this.leaseTokenMatches(input.job_id, job, input.lease_token)) {
       throw new KernelError(409, 'lease_stale',
-        `job ${input.job_id} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got generation ${input.lease_generation ?? 'n/a'} token ${input.lease_token ?? 'n/a'}`)
+        `job ${input.job_id} lease is stale: expected generation ${job.lease_generation ?? 'n/a'} token hash ${this.leaseHashOf(input.job_id) ?? 'n/a'}, got generation ${input.lease_generation ?? 'n/a'} token ${input.lease_token ?? 'n/a'}`)
     }
     // RUN-01 (P0): a SUCCEEDED completion MUST carry a RunManifest — a real
     // run that finished without one is a protocol violation, not a success
@@ -3496,6 +3686,10 @@ export class ResearchKernel {
     }
     // OBS-01: completion counter tagged with the terminal status constant.
     this.metrics.count('job.completed', { status: input.status })
+    // STORE-06: the lease is released — drop the in-memory plaintext token
+    // (the returned record was fetched before this, so it still carries the
+    // token exactly like the pre-0014 release did).
+    this.leaseTokens.delete(input.job_id)
     return jobRecord
   }
 
@@ -3603,6 +3797,9 @@ export class ResearchKernel {
     }
     this.db.prepare('UPDATE jobs SET status = ?, error = ?, lease_owner = NULL, updated_at = ? WHERE job_id = ?')
       .run('cancelled', reason ? `cancelled by ${actor}: ${reason}` : `cancelled by ${actor}`, nowIso(), jobId)
+    // STORE-06: cancellation releases the lease — the in-memory plaintext
+    // token must not survive it (the returned record has lease_token null).
+    this.leaseTokens.delete(jobId)
     // §12.1 (TEX-03): cancelling a latex-compile job finalizes its tex_builds
     // row (queued/running → cancelled) so build history never shows a
     // cancelled job with a live build.
@@ -3669,9 +3866,12 @@ export class ResearchKernel {
         throw new KernelError(409, 'lease_stale',
           `job ${input.jobId} terminal frames must carry BOTH lease owner and token (got owner=${String(input.owner)} token=${String(input.lease_token)})`)
       }
-      if (input.owner !== job.lease_owner || input.lease_token !== job.lease_token) {
+      // STORE-06: the token half of the fence compares sha256(provided)
+      // against jobs.lease_token_hash (legacy rows fall back to the payload
+      // token when the hash column is empty).
+      if (input.owner !== job.lease_owner || !this.leaseTokenMatches(input.jobId, job, input.lease_token)) {
         throw new KernelError(409, 'lease_stale',
-          `job ${input.jobId} terminal frames lease mismatch: expected owner ${job.lease_owner ?? 'n/a'} token ${job.lease_token ?? 'n/a'}, got owner ${input.owner} token ${input.lease_token}`)
+          `job ${input.jobId} terminal frames lease mismatch: expected owner ${job.lease_owner ?? 'n/a'} token hash ${this.leaseHashOf(input.jobId) ?? 'n/a'}, got owner ${input.owner} token ${input.lease_token}`)
       }
     }
     const maxBytes = input.maxLogBytes ?? ResearchKernel.TERMINAL_DEFAULT_MAX_BYTES
@@ -4209,7 +4409,10 @@ export class ResearchKernel {
         profile: session.profile,
         target: session.target,
         config_hash: session.config_hash,
-        lease_token: session.lease_token,
+        // STORE-06: the spawn plan always receives the freshly-minted
+        // plaintext token (createSession pins it in memory; the fallback is
+        // unreachable for a just-created session).
+        lease_token: session.lease_token ?? '',
       })
       if (!result.ok) {
         this.pty.closeSession(session.pty_session_id, 'adapter_failed')

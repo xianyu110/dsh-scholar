@@ -81,6 +81,10 @@ export interface JobRow {
   heartbeat_at: string | null
   /** §12.6 lease fencing: bumped on every claim; stale generations are rejected. */
   lease_generation: number | null
+  /** STORE-06 (storage-migrations.md §4): sha256 of the opaque claim token
+   * (migration 0014); NULL on legacy rows — the plaintext token is never
+   * persisted. */
+  lease_token_hash: string | null
   /** §12.2 JobSpec binding (SCH-EXEC-002): CAS code snapshot id, if any. */
   code_snapshot_id: string | null
   attempts: number

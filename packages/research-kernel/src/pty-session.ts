@@ -35,7 +35,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
@@ -139,11 +139,14 @@ const nowIso = (): string => new Date().toISOString()
 const nowMs = (): number => Date.now()
 
 /**
- * Table DDL — parity copy of migration 0011 (the store opens its own WAL
- * connection, exactly like tex-workspace.ts; CREATE IF NOT EXISTS keeps both
- * connections in sync on databases created by either path).
+ * pty_sessions table DDL — exported so migration 0014 can rebuild the legacy
+ * plaintext-token shape to THIS shape (STORE-06, storage-migrations.md §4):
+ * the opaque lease token is persisted ONLY as its sha256
+ * (`lease_token_hash`); `lease_token` is a nullable legacy column (rows
+ * created by the pre-0014 release keep their values for audit; new sessions
+ * store NULL and hold the plaintext token in kernel memory only).
  */
-export const PTY_DDL = `
+export const PTY_SESSIONS_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS pty_sessions (
   pty_session_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
@@ -157,7 +160,10 @@ CREATE TABLE IF NOT EXISTS pty_sessions (
   config_hash TEXT NOT NULL,
   state TEXT NOT NULL,
   generation INTEGER NOT NULL,
-  lease_token TEXT NOT NULL,
+  -- STORE-06: sha256 of the opaque lease token; the plaintext token is never
+  -- persisted (legacy rows carry their old plaintext in lease_token below).
+  lease_token TEXT,
+  lease_token_hash TEXT NOT NULL DEFAULT '',
   lease_expires_at TEXT,
   idle_ttl_s INTEGER NOT NULL,
   retention_bytes INTEGER NOT NULL,
@@ -174,6 +180,16 @@ CREATE TABLE IF NOT EXISTS pty_sessions (
   CHECK (state IN ('open','attached','detached','closed')),
   CHECK (preset IN ('sh','bash','zsh','fish'))
 );
+`
+
+/**
+ * Table DDL — parity copy of migration 0011 (the store opens its own WAL
+ * connection, exactly like tex-workspace.ts; CREATE IF NOT EXISTS keeps both
+ * connections in sync on databases created by either path). Migration 0014
+ * rebuilds legacy-shaped pty_sessions tables to this exact shape.
+ */
+export const PTY_DDL = `
+${PTY_SESSIONS_TABLE_DDL}
 CREATE INDEX IF NOT EXISTS idx_pty_sessions_project ON pty_sessions(project_id);
 -- Append-only frame ledger: control frames (client_seq) + output frames
 -- (server_seq). client_seq is UNIQUE per session — the idempotency key.
@@ -205,7 +221,11 @@ export interface PtySessionRow {
   config_hash: string
   state: string
   generation: number
-  lease_token: string
+  /** Legacy plaintext lease token — NULL for sessions opened after 0014
+   * (the token then lives in kernel memory only; see STORE-06). */
+  lease_token: string | null
+  /** sha256 of the opaque lease token (STORE-06); '' when unknown. */
+  lease_token_hash: string
   lease_expires_at: string | null
   idle_ttl_s: number
   retention_bytes: number
@@ -256,7 +276,9 @@ export class PtySessionStore {
       config_hash: row.config_hash,
       state: row.state as PtySession['state'],
       generation: row.generation,
-      lease_token: row.lease_token,
+      // STORE-06: the plaintext token is only present on legacy rows; new
+      // sessions (hash-only storage) surface null after a kernel restart.
+      lease_token: row.lease_token ?? null,
       lease_expires_at: row.lease_expires_at,
       idle_ttl_s: row.idle_ttl_s,
       retention_bytes: row.retention_bytes,
@@ -306,6 +328,10 @@ export class PtySessionStore {
     adapter_id?: string
   }): PtySession {
     const at = nowIso()
+    // STORE-06 (storage-migrations.md §4): only the sha256 of the lease
+    // token is persisted; the plaintext token is returned to the caller and
+    // kept in kernel memory (legacy `lease_token` column stays NULL).
+    const leaseToken = `lease_${randomBytes(16).toString('hex')}`
     const session: PtySession = {
       pty_session_id: `pty_${randomUUID().replaceAll('-', '').slice(0, 12)}`,
       principal_id: principal.principal_id,
@@ -319,7 +345,7 @@ export class PtySessionStore {
       config_hash: opts.config_hash,
       state: 'open',
       generation: 1,
-      lease_token: `lease_${randomBytes(16).toString('hex')}`,
+      lease_token: leaseToken,
       lease_expires_at: new Date(nowMs() + (opts.lease_ttl_s ?? PTY_DEFAULT_LEASE_TTL_S) * 1000).toISOString(),
       idle_ttl_s: opts.idle_ttl_s ?? request.idle_ttl_s ?? PTY_DEFAULT_IDLE_TTL_S,
       retention_bytes: opts.retention_bytes ?? request.retention_bytes ?? PTY_DEFAULT_RETENTION_BYTES,
@@ -336,12 +362,13 @@ export class PtySessionStore {
     }
     this.db.prepare(`INSERT INTO pty_sessions (
       pty_session_id, project_id, workspace_id, principal_id, tenant_id, profile, target, preset, cwd, config_hash,
-      state, generation, lease_token, lease_expires_at, idle_ttl_s, retention_bytes, retained_from_seq,
+      state, generation, lease_token, lease_token_hash, lease_expires_at, idle_ttl_s, retention_bytes, retained_from_seq,
       last_client_seq, last_event_seq, total_bytes, dropped_bytes, adapter_id, open_at, last_activity_at, closed_at, close_reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(session.pty_session_id, session.project_id, session.workspace_id, session.principal_id, session.tenant_id,
         session.profile, session.target, session.preset, session.cwd, session.config_hash,
-        session.state, session.generation, session.lease_token, session.lease_expires_at, session.idle_ttl_s,
+        session.state, session.generation, null, createHash('sha256').update(leaseToken).digest('hex'),
+        session.lease_expires_at, session.idle_ttl_s,
         session.retention_bytes, session.retained_from_seq, session.last_client_seq, session.last_event_seq,
         session.total_bytes, session.dropped_bytes, session.adapter_id, session.open_at, session.last_activity_at,
         session.closed_at, session.close_reason)

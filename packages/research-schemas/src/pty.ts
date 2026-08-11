@@ -80,8 +80,12 @@ export const PtySession = z.object({
   state: PtyState.default('open'),
   /** Bumped on every attach/detach — reconnect uses generation + after_seq. */
   generation: z.number().int().nonnegative().default(1),
-  /** Session lease (PTY-01): opaque token + expiry, pinned at open. */
-  lease_token: z.string().min(1),
+  /** Session lease (PTY-01): opaque token + expiry, pinned at open.
+   * STORE-06 (storage-migrations.md §4): only the sha256 of the token is
+   * persisted (pty_sessions.lease_token_hash); the plaintext is returned at
+   * open and kept in kernel memory, so a session read back after a kernel
+   * restart surfaces null. */
+  lease_token: z.string().min(1).nullable(),
   lease_expires_at: z.string().nullable().default(null),
   /** Idle TTL (seconds) — from the Config Schema when not provided. */
   idle_ttl_s: z.number().int().positive().default(900),

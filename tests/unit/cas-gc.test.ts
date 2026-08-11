@@ -92,4 +92,65 @@ describe('CAS orphan GC + blob scan', () => {
     expect(() => kernel.cas.put('original bytes')).toThrowError(/blob corruption/)
     kernel.close()
   })
+
+  it('scanIntegrity (STORAGE-07): reports missing/orphan/size/hash mismatches and heals after repair', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const intact = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'intact bytes' })
+    const vanished = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'vanished bytes' })
+    const tampered = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'tamper me bytes' })
+    // Baseline: clean scan.
+    expect(kernel.scanIntegrity()).toEqual({
+      missing_blobs: [], orphan_blobs: [], size_mismatch: [], hash_mismatch: [],
+      scanned_blobs: 3, skipped_blobs: 0, total_blobs: 3,
+    })
+    // 1) missing blob (deleted file) + 2) orphan blob (never referenced).
+    rmSync(join(kernel.cas.root, vanished.sha256), { force: true })
+    const orphanSha = kernel.cas.put('orphan for scan').sha256
+    // 3) tampered blob: same-size content swap → hash mismatch.
+    const tamperedPath = join(kernel.cas.root, tampered.sha256)
+    writeFileSync(tamperedPath, 'TAMPERED! bytes') // same length, different bytes
+    // 4) size mismatch: truncated blob (different size).
+    const sizePath = join(kernel.cas.root, intact.sha256)
+    writeFileSync(sizePath, 'small')
+    const report = kernel.scanIntegrity()
+    expect(report.missing_blobs).toHaveLength(1)
+    expect(report.missing_blobs[0]).toEqual({ project_id: project.project_id, artifact_id: vanished.artifact_id, sha256: vanished.sha256 })
+    expect(report.orphan_blobs).toContain(orphanSha)
+    expect(report.orphan_blobs).not.toContain(intact.sha256)
+    const hashBad = report.hash_mismatch.find(m => m.sha256 === tampered.sha256)
+    expect(hashBad).toBeDefined()
+    expect(hashBad!.artifact_id).toBe(tampered.artifact_id)
+    const sizeBad = report.size_mismatch.find(m => m.sha256 === intact.sha256)
+    expect(sizeBad).toBeDefined()
+    expect(sizeBad!.recorded_size).toBe(Buffer.byteLength('intact bytes'))
+    expect(sizeBad!.actual_size).toBe(Buffer.byteLength('small'))
+    // Healing: restore the correct bytes at each content address (the
+    // same-size tampered blob must be removed first — put only re-verifies
+    // size on existing blobs, which is exactly why the scan re-hashes).
+    kernel.cas.put('vanished bytes')
+    rmSync(join(kernel.cas.root, intact.sha256), { force: true })
+    kernel.cas.put('intact bytes')
+    rmSync(join(kernel.cas.root, tampered.sha256), { force: true })
+    kernel.cas.put('tamper me bytes')
+    kernel.cas.remove(orphanSha)
+    const healed = kernel.scanIntegrity()
+    expect(healed.missing_blobs).toEqual([])
+    expect(healed.orphan_blobs).toEqual([])
+    expect(healed.size_mismatch).toEqual([])
+    expect(healed.hash_mismatch).toEqual([])
+    kernel.close()
+  })
+
+  it('scanIntegrity limit caps blob re-verification and reports skipped_blobs', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    for (let i = 0; i < 5; i++) kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: `blob content ${i}` })
+    const report = kernel.scanIntegrity({ limit: 2 })
+    expect(report.scanned_blobs).toBe(2)
+    expect(report.skipped_blobs).toBe(3)
+    expect(report.total_blobs).toBe(5)
+    expect(report.missing_blobs).toEqual([])
+    kernel.close()
+  })
 })

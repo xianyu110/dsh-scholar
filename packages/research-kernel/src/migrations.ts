@@ -12,13 +12,13 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { PTY_DDL } from './pty-session.js'
+import { PTY_DDL, PTY_SESSIONS_TABLE_DDL } from './pty-session.js'
 import { WORKSPACE_DDL } from './workspace-store.js'
 import { INTAKE_DDL } from './intake.js'
 import { TRAJECTORY_DDL } from './trajectory.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -472,14 +472,141 @@ const legacyV1Import = (db: DatabaseSync, report: MigrationReport): void => {
 }
 
 /**
+ * FROZEN terminal-DDL snapshot executed by migration 0003 (STORE-08,
+ * storage-migrations.md §8.1). 0003's checksum must bind the DDL it ACTUALLY
+ * executes — the shared TERMINAL_DDL/TEX_DDL constants evolve with new
+ * capabilities (each delta arrives as its own migration), so a released
+ * migration can never reference them by name. The canonical body of 0003
+ * embeds THIS text; shared-constant evolution therefore cannot silently
+ * change what a released migration does, nor invalidate the checksums
+ * recorded on existing databases.
+ *
+ * Freeze rule: this snapshot is the TeX/terminal shape at the time 0003 was
+ * released (0010/0011/0012/0013 later brought tex_preview_pending, pty/
+ * workspace, intake and trajectory tables on top of it). It is NEVER edited
+ * in place — schema growth goes through new migrations + the live stores'
+ * own CREATE IF NOT EXISTS convergence (tex-workspace.ts / pty-session.ts).
+ */
+const TERMINAL_DDL_0003 = `
+CREATE TABLE IF NOT EXISTS terminal_frames (
+  job_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  stream_seq INTEGER,
+  channel TEXT,
+  text TEXT,
+  byte_offset INTEGER,
+  byte_length INTEGER,
+  frame_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  lease_generation INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, run_id, seq),
+  FOREIGN KEY (job_id) REFERENCES jobs(job_id),
+  CHECK (frame_kind IN ('chunk','gap','exit')),
+  CHECK (channel IS NULL OR channel IN ('stdout','stderr')),
+  CHECK (
+    (frame_kind = 'chunk' AND channel IS NOT NULL AND stream_seq IS NOT NULL AND text IS NOT NULL AND byte_offset IS NOT NULL AND byte_length IS NOT NULL)
+    OR
+    (frame_kind IN ('gap','exit') AND channel IS NULL AND stream_seq IS NULL AND text IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_terminal_job_seq ON terminal_frames(job_id, seq);
+CREATE TABLE IF NOT EXISTS terminal_retention (
+  job_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  retained_from_seq INTEGER NOT NULL DEFAULT 1,
+  total_bytes INTEGER NOT NULL DEFAULT 0,
+  dropped_bytes INTEGER NOT NULL DEFAULT 0,
+  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  PRIMARY KEY (job_id, run_id)
+);
+`
+
+/** FROZEN TeX-DDL snapshot executed by migration 0003 (see TERMINAL_DDL_0003
+ * for the freeze rule — STORE-08, storage-migrations.md §8.1). */
+const TEX_DDL_0003 = `
+CREATE TABLE IF NOT EXISTS tex_documents (
+  document_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  root_file TEXT NOT NULL DEFAULT 'paper.tex',
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tex_files (
+  document_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (document_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_tex_files_doc ON tex_files(document_id);
+CREATE TABLE IF NOT EXISTS tex_snapshots (
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  manifest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (document_id, revision)
+);
+-- TEX-01 (§4 row 95): frozen, materializable snapshot bytes (parity with the
+-- tex-workspace SCHEMA — the Runner compiles these revision-scoped bytes).
+CREATE TABLE IF NOT EXISTS tex_snapshot_files (
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  PRIMARY KEY (document_id, revision, path)
+);
+CREATE INDEX IF NOT EXISTS idx_tex_snapshot_files_doc ON tex_snapshot_files(document_id, revision);
+CREATE TABLE IF NOT EXISTS tex_builds (
+  build_id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  root_file TEXT NOT NULL,
+  job_id TEXT,
+  status TEXT NOT NULL,
+  diagnostics TEXT NOT NULL DEFAULT '[]',
+  pdf_artifact TEXT,
+  log_artifact TEXT,
+  -- TEX-03 (§4 row 96 / execution-runtime.md §12.1): preview flag +
+  -- supersede linkage for live preview builds (parity with tex-workspace.ts).
+  preview INTEGER NOT NULL DEFAULT 0,
+  superseded_by TEXT,
+  superseded_at TEXT,
+  created_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tex_builds_doc ON tex_builds(document_id);
+-- TEX-03: durable debounced preview request (survives kernel restarts).
+CREATE TABLE IF NOT EXISTS tex_preview_pending (
+  document_id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL,
+  root_file TEXT NOT NULL,
+  engine TEXT NOT NULL DEFAULT 'pdflatex',
+  debounce_ms INTEGER NOT NULL DEFAULT 800,
+  requested_at TEXT NOT NULL
+);
+`
+
+/**
  * 0003 — terminal/TeX/i18n capabilities for databases that were created by
  * the early v2 preview code (SCHEMA_VERSION=1 with implicit column fixes).
  * Idempotent: terminal + TeX tables are CREATE IF NOT EXISTS, and column
  * additions check existence first. On current databases this is a no-op.
+ *
+ * STORE-08: the executed DDL is the FROZEN snapshot above (never the shared
+ * TERMINAL_DDL/TEX_DDL constants), and the canonical `body` embeds that
+ * snapshot text — so the recorded checksum binds the actual DDL and shared
+ * constant evolution cannot weaken the "released migrations are immutable"
+ * guarantee.
  */
 const terminalTexCapabilities = (db: DatabaseSync, report: MigrationReport): void => {
-  db.exec(TERMINAL_DDL)
-  db.exec(TEX_DDL)
+  db.exec(TERMINAL_DDL_0003)
+  db.exec(TEX_DDL_0003)
   ensureColumn(db, 'evidence', 'provenance_status', "TEXT NOT NULL DEFAULT 'legacy_unverified'")
   ensureColumn(db, 'decisions', 'principal_id', 'TEXT')
   ensureColumn(db, 'decisions', 'principal_tenant_id', 'TEXT')
@@ -755,6 +882,94 @@ const trajectoryAndTopologyTables = (db: DatabaseSync, report: MigrationReport):
 }
 
 /**
+ * 0014 — STORE-06 (storage-migrations.md §4 / domain-model §10.1): lease
+ * tokens are stored as sha256 hashes, never plaintext.
+ *
+ *  - jobs gains `lease_token_hash TEXT`; rows claimed by the PREVIOUS
+ *    release carry the plaintext token inside payload.__lease_token, and
+ *    0014 backfills the hash from it (existing data is otherwise untouched)
+ *    so hash-based fencing covers every leased row.
+ *  - pty_sessions is REBUILT (same copy→verify→rename pattern as 0009 for
+ *    runs): the released shape had `lease_token TEXT NOT NULL` (plaintext at
+ *    rest). The new shape (PTY_SESSIONS_TABLE_DDL, shared with
+ *    pty-session.ts) makes the plaintext column nullable — legacy rows keep
+ *    their values for audit, with the hash backfilled from them — and adds
+ *    `lease_token_hash TEXT NOT NULL DEFAULT ''`, populated at open time.
+ *    New sessions persist ONLY the hash; the plaintext token lives in
+ *    kernel memory and is handed to the caller at open.
+ *
+ * Additive + idempotent: fresh databases already carry both shapes (0011
+ * executes the CURRENT PTY_DDL, and the pty store does the same on its own
+ * connection), so every step detects its precondition before acting.
+ */
+const leaseTokenHashing = (db: DatabaseSync, report: MigrationReport): void => {
+  // jobs: additive hash column + backfill from the legacy payload token.
+  ensureColumn(db, 'jobs', 'lease_token_hash', 'TEXT')
+  const legacyRows = db.prepare("SELECT job_id, payload FROM jobs WHERE lease_token_hash IS NULL AND payload LIKE '%__lease_token%'")
+    .all() as unknown as Array<{ job_id: string; payload: string }>
+  const updateHash = db.prepare('UPDATE jobs SET lease_token_hash = ? WHERE job_id = ?')
+  let jobsBackfilled = 0
+  for (const row of legacyRows) {
+    let token: string | null = null
+    try {
+      const parsed = JSON.parse(row.payload) as { __lease_token?: unknown }
+      if (typeof parsed.__lease_token === 'string' && parsed.__lease_token !== '') token = parsed.__lease_token
+    } catch {
+      // Malformed payload — leave the hash NULL (fencing falls back to the
+      // legacy payload-token comparison, which stays a mismatch-free no-op
+      // for rows that never carried a token).
+    }
+    if (token !== null) {
+      updateHash.run(sha256(token), row.job_id)
+      jobsBackfilled += 1
+    }
+  }
+  // pty_sessions: rebuild only when the legacy plaintext-NOT NULL shape is
+  // present (fresh databases already carry PTY_SESSIONS_TABLE_DDL).
+  const ptyCols = db.prepare(`PRAGMA table_info('pty_sessions')`).all() as unknown as Array<{ name: string }>
+  let ptyRebuilt = 0
+  if (!ptyCols.some(c => c.name === 'lease_token_hash')) {
+    const legacyPty = db.prepare(
+      `SELECT pty_session_id, project_id, workspace_id, principal_id, tenant_id, profile, target, preset, cwd, config_hash,
+              state, generation, lease_token, lease_expires_at, idle_ttl_s, retention_bytes, retained_from_seq,
+              last_client_seq, last_event_seq, total_bytes, dropped_bytes, adapter_id, open_at, last_activity_at, closed_at, close_reason
+       FROM pty_sessions`,
+    ).all() as unknown as Array<{
+      pty_session_id: string; project_id: string; workspace_id: string; principal_id: string; tenant_id: string
+      profile: string; target: string; preset: string; cwd: string; config_hash: string
+      state: string; generation: number; lease_token: string | null
+      lease_expires_at: string | null; idle_ttl_s: number; retention_bytes: number; retained_from_seq: number
+      last_client_seq: number; last_event_seq: number; total_bytes: number; dropped_bytes: number
+      adapter_id: string; open_at: string; last_activity_at: string; closed_at: string | null; close_reason: string | null
+    }>
+    db.exec('DROP TABLE IF EXISTS pty_sessions_new')
+    db.exec(PTY_SESSIONS_TABLE_DDL.replace('CREATE TABLE IF NOT EXISTS pty_sessions', 'CREATE TABLE pty_sessions_new'))
+    const insert = db.prepare(`INSERT INTO pty_sessions_new (
+      pty_session_id, project_id, workspace_id, principal_id, tenant_id, profile, target, preset, cwd, config_hash,
+      state, generation, lease_token, lease_token_hash, lease_expires_at, idle_ttl_s, retention_bytes, retained_from_seq,
+      last_client_seq, last_event_seq, total_bytes, dropped_bytes, adapter_id, open_at, last_activity_at, closed_at, close_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    for (const r of legacyPty) {
+      const token = typeof r.lease_token === 'string' && r.lease_token !== '' ? r.lease_token : null
+      insert.run(
+        r.pty_session_id, r.project_id, r.workspace_id, r.principal_id, r.tenant_id, r.profile, r.target, r.preset,
+        r.cwd, r.config_hash, r.state, r.generation, r.lease_token,
+        token !== null ? sha256(token) : '', r.lease_expires_at, r.idle_ttl_s, r.retention_bytes, r.retained_from_seq,
+        r.last_client_seq, r.last_event_seq, r.total_bytes, r.dropped_bytes, r.adapter_id, r.open_at,
+        r.last_activity_at, r.closed_at, r.close_reason,
+      )
+    }
+    db.exec('DROP TABLE pty_sessions')
+    db.exec('ALTER TABLE pty_sessions_new RENAME TO pty_sessions')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_pty_sessions_project ON pty_sessions(project_id)')
+    ptyRebuilt = legacyPty.length
+  }
+  if (report.rows === undefined) report.rows = {}
+  report.rows.jobs_lease_token_hash_backfilled = jobsBackfilled
+  report.rows.pty_sessions_rebuilt = ptyRebuilt
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -775,7 +990,11 @@ export const MIGRATIONS: Migration[] = [
   {
     id: '0003_terminal_tex_i18n_capabilities',
     description: 'Terminal/TeX tables + v2 columns for early v2-preview databases',
-    body: terminalTexCapabilities.toString(),
+    // STORE-08 (storage-migrations.md §8.1): the canonical body is the up
+    // source PLUS the frozen inline DDL snapshot the migration executes —
+    // the checksum binds the actual DDL, and the shared TERMINAL_DDL/TEX_DDL
+    // constants can evolve without invalidating recorded checksums.
+    body: `${terminalTexCapabilities.toString()}\n\n${TERMINAL_DDL_0003}\n${TEX_DDL_0003}`,
     up: terminalTexCapabilities,
   },
   {
@@ -837,6 +1056,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'TRAJ-01/SUBAGENT-01: child_links/child_history/child_followups + events(project_id,event_seq,event_id) index (trajectory projection & subagent topology)',
     body: trajectoryAndTopologyTables.toString(),
     up: trajectoryAndTopologyTables,
+  },
+  {
+    id: '0014_lease_token_hash',
+    description: 'STORE-06: jobs.lease_token_hash (+ backfill from legacy payload token) + pty_sessions rebuild with lease_token_hash (no plaintext lease tokens at rest)',
+    body: leaseTokenHashing.toString(),
+    up: leaseTokenHashing,
   },
 ]
 

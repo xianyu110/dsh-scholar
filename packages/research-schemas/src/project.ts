@@ -86,7 +86,16 @@ export type BudgetConstraints = z.infer<typeof BudgetConstraints>
 
 /** Execution profile of a project (design §6.2). */
 export const ExecutionConfig = z.object({
+  /** v1 兼容 enum（domain-model.md §2）：迁移后由 runner_profile_id 取代并映射同名本机 profile。 */
   runner_profile: z.enum(['local-docker-gpu', 'local-docker-cpu', 'isolated-subprocess']).default('local-docker-cpu'),
+  /**
+   * domain-model.md §2/§9.1: opaque RunnerProfile 注册表 id（如
+   * profile_local_docker_cpu_v1）。设置后优先于 runner_profile enum；
+   * null 时从 enum 映射同名本机 profile。未知 id 在 project create 与
+   * job submit 均 422 runner_profile_unknown——Project/Job 只能引用已登记的
+   * opaque profile id，不能携带 docker flags / endpoint。
+   */
+  runner_profile_id: z.string().nullable().default(null),
   network_policy: z.enum(['allowlist', 'none']).default('allowlist'),
   artifact_store: z.enum(['local-cas']).default('local-cas'),
   /**

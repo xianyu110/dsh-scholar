@@ -10,9 +10,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { openDatabase, SCHEMA_VERSION, runMigrations, MIGRATIONS } from '@dsh-scholar/research-kernel'
+import { openDatabase, SCHEMA_VERSION, runMigrations, MIGRATIONS, checksumOf } from '@dsh-scholar/research-kernel'
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/databases/v1-kernel.db', import.meta.url))
+
+/** Baseline migration count at load — the rollback test appends a failing
+ * migration; afterEach restores this exact set. */
+const BASELINE_MIGRATIONS = MIGRATIONS.length
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
@@ -30,7 +34,7 @@ function tableInfo(db: DatabaseSync, table: string): Array<{ name: string; pk: n
 describe('explicit migrations', () => {
   afterEach(() => {
     // The rollback test appends a failing migration; always restore.
-    while (MIGRATIONS.length > 13) MIGRATIONS.pop()
+    while (MIGRATIONS.length > BASELINE_MIGRATIONS) MIGRATIONS.pop()
   })
 
   it('opens with WAL + foreign_keys + bounded busy_timeout (storage-migrations.md §2)', () => {
@@ -47,13 +51,13 @@ describe('explicit migrations', () => {
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(12)
+    expect(SCHEMA_VERSION).toBe(13)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('12')
+    expect(meta.schema_version).toBe('13')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash'])
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
@@ -64,9 +68,13 @@ describe('explicit migrations', () => {
     // 0011 (PTY-01/WORK-01): the pty + workspace tables carry the interface
     // layer columns (state machine, client_seq idempotency, retention).
     const ptySessionCols = tableInfo(db, 'pty_sessions').map(c => c.name)
-    for (const c of ['pty_session_id', 'principal_id', 'workspace_id', 'profile', 'target', 'preset', 'cwd', 'config_hash', 'state', 'generation', 'lease_token', 'idle_ttl_s', 'retention_bytes', 'retained_from_seq', 'last_client_seq', 'last_event_seq', 'closed_at']) {
+    for (const c of ['pty_session_id', 'principal_id', 'workspace_id', 'profile', 'target', 'preset', 'cwd', 'config_hash', 'state', 'generation', 'lease_token', 'lease_token_hash', 'idle_ttl_s', 'retention_bytes', 'retained_from_seq', 'last_client_seq', 'last_event_seq', 'closed_at']) {
       expect(ptySessionCols, `pty_sessions.${c}`).toContain(c)
     }
+    // 0014 (STORE-06): jobs carries the lease-token hash column (the
+    // plaintext token is never persisted — payload.__lease_token is gone).
+    const jobCols = tableInfo(db, 'jobs').map(c => c.name)
+    expect(jobCols).toContain('lease_token_hash')
     const workspaceNodeCols = tableInfo(db, 'workspace_nodes').map(c => c.name)
     for (const c of ['workspace_id', 'path', 'version', 'binary', 'media', 'size_bytes', 'content', 'blob_sha256', 'content_hash']) {
       expect(workspaceNodeCols, `workspace_nodes.${c}`).toContain(c)
@@ -98,7 +106,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('12')
+    expect(version).toBe('13')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -142,7 +150,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('12')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('13')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -191,8 +199,8 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(13)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('12')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(14)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('13')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -217,7 +225,7 @@ describe('explicit migrations', () => {
     db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run()
     runMigrations(db)
     // Version bumped; outbox columns re-added by the new migration.
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('12')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('13')
     const cols = tableInfo(db, 'events').map(c => c.name)
     for (const c of outboxCols) expect(cols).toContain(c)
     // Existing rows get default envelope values + a stable backfilled seq.
@@ -234,6 +242,102 @@ describe('explicit migrations', () => {
     expect(post.event_seq).toBe(3)
     expect(post.aggregate_type).toBe('project')
     expect(post.aggregate_id).toBe('p1')
+    db.close()
+  })
+
+  it('0014 (STORE-06): legacy rows get lease_token_hash backfilled from payload.__lease_token', () => {
+    // Simulate a database produced by the PREVIOUS release (schema v12, no
+    // lease_token_hash): open with the current code, then rewind the jobs
+    // table + migration record + schema_version to the old shape.
+    const db = openDatabase(':memory:')
+    db.prepare(`INSERT INTO jobs (job_id, project_id, idempotency_key, kind, command, payload, status, lease_owner, lease_expires_at, lease_generation, attempts, max_attempts, created_at, updated_at)
+      VALUES (?, ?, ?, 'smoke', '[]', ?, 'running', 'legacy-runner', '2026-02-01T00:00:00.000Z', 1, 1, 3, ?, ?)`)
+      .run('job_legacy_lease', 'p1', 'legacy-key', JSON.stringify({ __lease_token: 'lt_legacysecret', data: 1 }), '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    db.exec("DELETE FROM schema_migrations WHERE id = '0014_lease_token_hash'")
+    db.exec('ALTER TABLE jobs DROP COLUMN lease_token_hash')
+    db.prepare("UPDATE meta SET value = '12' WHERE key = 'schema_version'").run()
+    runMigrations(db)
+    // Column exists and the legacy plaintext token was hashed in place —
+    // existing data (including the payload itself) is otherwise untouched.
+    const row = db.prepare('SELECT lease_token_hash, payload FROM jobs WHERE job_id = ?').get('job_legacy_lease') as { lease_token_hash: string; payload: string }
+    expect(row.lease_token_hash).toBe(sha256('lt_legacysecret'))
+    expect(row.lease_token_hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.parse(row.payload)).toEqual({ __lease_token: 'lt_legacysecret', data: 1 })
+    // Rows without a token keep NULL (no hash to derive).
+    db.prepare(`INSERT INTO jobs (job_id, project_id, idempotency_key, kind, command, payload, status, attempts, max_attempts, created_at, updated_at)
+      VALUES (?, ?, ?, 'smoke', '[]', '{}', 'queued', 0, 3, ?, ?)`)
+      .run('job_never_claimed', 'p1', 'other-key', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    const never = db.prepare('SELECT lease_token_hash FROM jobs WHERE job_id = ?').get('job_never_claimed') as { lease_token_hash: string | null }
+    expect(never.lease_token_hash).toBeNull()
+    db.close()
+  })
+
+  it('0014 (STORE-06): legacy pty_sessions (plaintext NOT NULL) rebuild with lease_token_hash and nullable plaintext', () => {
+    const db = openDatabase(':memory:')
+    // Rewind pty_sessions to the pre-0014 shape (plaintext NOT NULL, no
+    // hash column) and drop the 0014 record.
+    db.exec('DROP TABLE pty_sessions')
+    db.exec(`CREATE TABLE pty_sessions (
+      pty_session_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+      principal_id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '', profile TEXT NOT NULL,
+      target TEXT NOT NULL, preset TEXT NOT NULL, cwd TEXT NOT NULL, config_hash TEXT NOT NULL,
+      state TEXT NOT NULL, generation INTEGER NOT NULL, lease_token TEXT NOT NULL,
+      lease_expires_at TEXT, idle_ttl_s INTEGER NOT NULL, retention_bytes INTEGER NOT NULL,
+      retained_from_seq INTEGER NOT NULL DEFAULT 0, last_client_seq INTEGER NOT NULL DEFAULT 0,
+      last_event_seq INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER NOT NULL DEFAULT 0,
+      dropped_bytes INTEGER NOT NULL DEFAULT 0, adapter_id TEXT NOT NULL DEFAULT 'none',
+      open_at TEXT NOT NULL, last_activity_at TEXT NOT NULL, closed_at TEXT, close_reason TEXT,
+      CHECK (state IN ('open','attached','detached','closed')), CHECK (preset IN ('sh','bash','zsh','fish'))
+    )`)
+    db.prepare(`INSERT INTO pty_sessions (pty_session_id, project_id, workspace_id, principal_id, tenant_id, profile, target, preset, cwd, config_hash, state, generation, lease_token, lease_expires_at, idle_ttl_s, retention_bytes, open_at, last_activity_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('pty_legacy1', 'p1', 'ws1', 'pi1', 't1', 'local-docker-cpu', 'tgt', 'bash', 'scratch', 'sha256:deadbeef', 'open', 1, 'lease_legacysecret', '2026-02-01T00:00:00.000Z', 900, 1048576, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    db.exec("DELETE FROM schema_migrations WHERE id = '0014_lease_token_hash'")
+    db.prepare("UPDATE meta SET value = '12' WHERE key = 'schema_version'").run()
+    runMigrations(db)
+    // Rebuilt shape: hash column populated from the legacy plaintext, which
+    // is preserved (existing data untouched).
+    const cols = tableInfo(db, 'pty_sessions').map(c => c.name)
+    expect(cols).toContain('lease_token_hash')
+    const row = db.prepare('SELECT lease_token, lease_token_hash FROM pty_sessions WHERE pty_session_id = ?').get('pty_legacy1') as { lease_token: string; lease_token_hash: string }
+    expect(row.lease_token).toBe('lease_legacysecret')
+    expect(row.lease_token_hash).toBe(sha256('lease_legacysecret'))
+    // The new shape accepts NULL plaintext + hash-only writes (the post-0014
+    // store path) and keeps the project index.
+    db.prepare(`INSERT INTO pty_sessions (pty_session_id, project_id, workspace_id, principal_id, tenant_id, profile, target, preset, cwd, config_hash, state, generation, lease_token, lease_token_hash, lease_expires_at, idle_ttl_s, retention_bytes, open_at, last_activity_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 900, 1048576, ?, ?)`)
+      .run('pty_new1', 'p1', 'ws1', 'pi1', 't1', 'local-docker-cpu', 'tgt', 'bash', 'scratch', 'sha256:deadbeef', 'open', 1, sha256('lease_freshsecret'), '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    const newRow = db.prepare('SELECT lease_token, lease_token_hash FROM pty_sessions WHERE pty_session_id = ?').get('pty_new1') as { lease_token: string | null; lease_token_hash: string }
+    expect(newRow.lease_token).toBeNull()
+    expect(newRow.lease_token_hash).toBe(sha256('lease_freshsecret'))
+    const idx = db.prepare(`PRAGMA index_list('pty_sessions')`).all() as Array<{ name: string }>
+    expect(idx.some(i => i.name === 'idx_pty_sessions_project')).toBe(true)
+    db.close()
+  })
+
+  it('STORE-08: 0003 checksum binds a FROZEN inline DDL snapshot (shared TEX_DDL evolution cannot invalidate released checksums)', () => {
+    const m = MIGRATIONS.find(x => x.id === '0003_terminal_tex_i18n_capabilities')
+    expect(m).toBeDefined()
+    // The canonical body embeds the inline DDL text the migration executes —
+    // it never references the shared TERMINAL_DDL/TEX_DDL constants by name.
+    expect(m!.body).toContain('CREATE TABLE IF NOT EXISTS tex_documents')
+    expect(m!.body).toContain('CREATE TABLE IF NOT EXISTS tex_snapshot_files')
+    expect(m!.body).toContain('CREATE TABLE IF NOT EXISTS tex_preview_pending')
+    expect(m!.body).not.toMatch(/db\.exec\((TERMINAL_DDL|TEX_DDL)\)/)
+    // The recorded checksum is a pure function of id + frozen inline text:
+    // editing the SHARED constant (or any other external text) cannot change
+    // it, so checksums recorded on existing databases stay valid — while any
+    // edit to the released body itself changes the checksum (immutability is
+    // enforced, not weakened).
+    expect(checksumOf(m!)).toBe(sha256(`${m!.id}\n${m!.body}`))
+    expect(checksumOf({ ...m!, body: m!.body + '\n-- shared TEX_DDL evolved elsewhere\n' })).not.toBe(checksumOf(m!))
+    expect(checksumOf({ ...m!, body: m!.body.replace('tex_files', 'tex_files_x') })).not.toBe(checksumOf(m!))
+    // And the frozen snapshot is what 0003 executes on a fresh database:
+    // the tables it alone provides exist after a full migration run.
+    const db = openDatabase(':memory:')
+    const snapshotTables = tableInfo(db, 'tex_snapshot_files').map(c => c.name)
+    expect(snapshotTables.length).toBeGreaterThan(0)
+    expect(tableInfo(db, 'tex_preview_pending').length).toBeGreaterThan(0)
     db.close()
   })
 

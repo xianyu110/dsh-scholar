@@ -38,6 +38,8 @@ import {
   AgentClaimRequest as AgentClaimRequestSchema,
   AgentRegisterRequest as AgentRegisterRequestSchema,
   buildExecutionPlan,
+  computeProfileConfigHash,
+  getRunnerProfile,
   isTargetAvailable,
   LOCAL_DOCKER_TARGET_ID,
   matchesTargetCapability,
@@ -58,6 +60,7 @@ import {
   type JobRecord,
   type PlanSigningKey,
   type RemoteAgentRegistration,
+  type RunnerProfile,
   type RemoteArtifactFinalizeRequest,
   type RemoteArtifactFinalizeResponse,
   type RemoteArtifactStageRequest,
@@ -645,6 +648,30 @@ export class RemoteFleetServer {
     const image = typeof payload?.image_digest === 'string' && payload.image_digest !== ''
       ? payload.image_digest
       : (job.kind === 'latex-compile' ? 'texlive/texlive:latest' : 'node:22-alpine')
+    // domain-model.md §9.1: secure jobs 固定 opaque profile id + config hash。
+    // 服务端按注册表复算校验——未知 id / hash 不一致 → retryable 环境错误
+    // （任务留在 pending，绝不带病分发到远端 target）。legacy jobs 无 pin，
+    // plan 保持既有形状。
+    let resolvedProfile: RunnerProfile | null = null
+    const payloadProfileId = typeof payload?.runner_profile_id === 'string' && payload.runner_profile_id !== ''
+      ? payload.runner_profile_id
+      : null
+    if (payloadProfileId !== null) {
+      const pinnedHash = typeof payload?.profile_config_hash === 'string' && payload.profile_config_hash !== ''
+        ? payload.profile_config_hash
+        : null
+      const candidate = getRunnerProfile(payloadProfileId)
+      if (candidate === null) {
+        throw new FleetServerError(422, 'runner_profile_unknown',
+          `job ${job.job_id} pins unknown runner profile ${JSON.stringify(payloadProfileId)} (domain-model.md §9.1)`, true)
+      }
+      const computed = computeProfileConfigHash(candidate)
+      if (pinnedHash === null || computed !== pinnedHash) {
+        throw new FleetServerError(409, 'profile_config_hash_mismatch',
+          `job ${job.job_id} profile config hash mismatch: job pins ${pinnedHash ?? '(none)'}, registry computes ${computed} (domain-model.md §9.1)`, true)
+      }
+      resolvedProfile = candidate
+    }
     const plan = buildExecutionPlan(job, {
       run_id: runId,
       lease: {
@@ -656,7 +683,8 @@ export class RemoteFleetServer {
       image_digest: image,
       timeout_ms: this.timeoutMs,
       target_id: targetId,
-      profile_id: targetId,
+      profile_id: resolvedProfile?.profile_id ?? targetId,
+      profile: resolvedProfile ?? undefined,
     })
     // plan 由 fleet 服务端固定并签名；未配置签名密钥时保持未签名（生产必须配置）。
     return this.signingKey !== undefined ? signExecutionPlan(plan, this.signingKey) : plan

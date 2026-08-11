@@ -96,6 +96,11 @@ export const JobSpecBinding = z.object({
     metrics: z.string().default('/outputs/metrics.json'),
     logs: z.string().default('/outputs/run.log'),
   }).optional(),
+  // domain-model.md §9.1: Job 固定 opaque runner profile id + profile 记录
+  // config hash（kernel submitJob 注入 payload；runner 按注册表复算校验，
+  // 不一致 → environment 失败不执行）。缺省 null = legacy job（无 pin）。
+  runner_profile_id: z.string().nullable().default(null),
+  profile_config_hash: z.string().nullable().default(null),
 })
 export type JobSpecBinding = z.infer<typeof JobSpecBinding>
 

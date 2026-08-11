@@ -11,17 +11,31 @@
  */
 
 import { basename, dirname, join, resolve } from 'node:path'
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { ResearchKernel } from '../kernel.js'
 import { startKernelServer } from '../server.js'
 import { LocalPtyAdapter } from '../pty-local.js'
+import { createStartupBackup } from '../backup.js'
 import { validateConfig, parseCli, generateCliHelp, ConfigRegistryError } from '@dsh-scholar/research-schemas'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(`Research Kernel — sidecar process (design §9.1)\nUsage: node lib/bin/kernel.js [options]\n\n${generateCliHelp('kernel')}`)
   process.exit(0)
+}
+
+// STORAGE-07 (storage-migrations.md §8.2): opt-in pre-migration backup +
+// CAS inventory hook. --backup-on-start (stripped before the Config
+// Registry parses the CLI — the registry owns the kernel.* keys, this flag
+// is a bin-level operator switch) or DSH_SCHOLAR_BACKUP_ON_START=1, default
+// OFF. The backup runs BEFORE the kernel opens/migrates the database, so it
+// captures the pre-migration state (restore target if a migration fails).
+const backupOnStart = argv.includes('--backup-on-start')
+  || /^(1|true|yes)$/i.test(process.env.DSH_SCHOLAR_BACKUP_ON_START ?? '')
+if (backupOnStart) {
+  const flagIdx = argv.indexOf('--backup-on-start')
+  if (flagIdx !== -1) argv.splice(flagIdx, 1)
 }
 
 let cli: Record<string, unknown>
@@ -69,6 +83,24 @@ try {
 } catch (error) {
   console.error(`[research-kernel] invalid config: ${error instanceof ConfigRegistryError ? error.message : (error as Error).message}`)
   process.exit(1)
+}
+
+// STORAGE-07: pre-migration backup + CAS inventory (opt-in, see above).
+// Fails loudly when requested — an explicit operator request must never
+// silently no-op. A brand-new database (no file yet) is skipped with a
+// notice: there is nothing to back up on first boot.
+if (backupOnStart) {
+  if (existsSync(dbPath)) {
+    try {
+      const backup = createStartupBackup({ dbPath, casRoot, instanceId: `kernel-${process.pid}` })
+      console.error(`[research-kernel] backup created: ${backup.backup_path} (${backup.blob_count} CAS blobs, ${backup.blob_bytes} bytes; inventory ${backup.inventory_path})`)
+    } catch (error) {
+      console.error(`[research-kernel] backup failed (--backup-on-start): ${(error as Error).message}`)
+      process.exit(1)
+    }
+  } else {
+    console.error('[research-kernel] --backup-on-start: no existing database — backup skipped (first boot)')
+  }
 }
 
 const kernel = new ResearchKernel({ dbPath, casRoot, serviceToken })
