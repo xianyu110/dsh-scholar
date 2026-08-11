@@ -13,6 +13,7 @@ import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 import { selectedSkillNames } from './skills.js'
+import { paperRefFromToken } from '@dsh-scholar/research-schemas'
 
 export interface CommandContext {
   client: ResearchClient
@@ -57,7 +58,7 @@ const RESEARCH_HELP = 'DSH Research OS — direct slash commands:\n'
   + '  /claims [project_id]   claim ledger state (counts + claim events)\n'
   + '  /survey <query>        multi-source search + frozen CorpusSnapshot\n'
   + '  /ideas                 list IdeaCards (generate via idea_create tool)\n'
-  + '  /reproduce [json]      prepare + run Baseline reproduction (isolated)\n'
+  + '  /reproduce <doi|arxiv|paper-artifact-id>   create/resume a PaperReproductionSpec (wizard)\n'
   + '  /contract <json>       pre-register an ExperimentContract\n'
   + '  /run [kind] [json]     submit a durable runner job\n'
   + '  /evidence <json>       ingest a statistical EvidenceItem\n'
@@ -76,7 +77,7 @@ const DIRECT_COMMANDS = [
   ['claims', 'Show the claim ledger state', '[project_id]'],
   ['survey', 'Run a multi-source literature survey', '<query>'],
   ['ideas', 'List project IdeaCards', ''],
-  ['reproduce', 'Start a baseline paper reproduction', '[json]'],
+  ['reproduce', 'Create/resume a PaperReproductionSpec', '<doi|arxiv|paper-artifact-id> [json]'],
   ['contract', 'Pre-register an ExperimentContract', '<json>'],
   ['run', 'Submit a durable runner job', '[kind] [json]'],
   ['evidence', 'Ingest a statistical EvidenceItem', '<json>'],
@@ -187,30 +188,61 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
           }
 
           case 'reproduce': {
+            // REPRO-01 (docs/reproduction-contracts.md §1): the first-level
+            // /reproduce <doi|arxiv|paper-artifact-id> entry creates or
+            // resumes a PaperReproductionSpec and opens the Chat-driven
+            // reproduction wizard — it does NOT submit a generic baseline
+            // Job (a generic baseline Job is not paper reproduction).
             const project = await requireProject(client, sessionId, undefined)
             const { json, positional } = jsonArg(rest)
             const data = briefFromJson(json)
-            const command = Array.isArray(data?.command) ? data.command.map(String)
-              : positional !== '' ? positional.split(/\s+/)
-                : []
-            const idem = String(data?.idempotency_key ?? `baseline-${Date.now()}`)
-            const job = await client.submitJob({
+            const token = positional.split(/\s+/)[0] ?? ''
+            let paperRef
+            try {
+              if (token !== '') {
+                paperRef = paperRefFromToken(token)
+              } else if (data?.paper_artifact_id !== undefined) {
+                paperRef = paperRefFromToken(String(data.paper_artifact_id))
+              } else if (data?.doi !== undefined) {
+                paperRef = paperRefFromToken(String(data.doi))
+              } else if (data?.arxiv_id !== undefined) {
+                paperRef = paperRefFromToken(String(data.arxiv_id))
+              } else {
+                return { kind: 'error' as const, text: '/reproduce <doi|arxiv|paper-artifact-id> [<json>] — a DOI (10.xxxx/...), an arXiv id (2401.12345 or arXiv:2401.12345) or a scanned-PDF artifact id (sha256:<hex>) is required' }
+              }
+            } catch (error) {
+              return { kind: 'error' as const, text: `/reproduce: ${(error as Error).message}` }
+            }
+            const claims = Array.isArray(data?.claims) && data.claims.length > 0
+              ? data.claims.map((claim: unknown) => typeof claim === 'string' ? { claim_ref: claim } : claim)
+              : [{ claim_ref: 'paper-primary', statement: 'paper primary reported results (to be extracted by the reproduction wizard)' }]
+            const idem = String(data?.idempotency_key ?? `reproduce-${paperRef.doi ?? paperRef.arxiv_id ?? paperRef.artifact_id ?? 'spec'}`)
+            const spec = await client.createReproductionSpec({
               project_id: project.project_id,
+              paper_ref: paperRef,
+              source_locator: data?.source_locator !== undefined ? String(data.source_locator) : undefined,
+              source_artifact_id: paperRef.artifact_id ?? (data?.source_artifact_id !== undefined ? String(data.source_artifact_id) : null),
+              reproduction_level: data?.reproduction_level !== undefined ? String(data.reproduction_level) : 'baseline_official',
+              claims_to_reproduce: claims,
+              // REPRO-01 §2.1: a git source must pin the EXACT commit (a
+              // branch/tag is not executable); a snapshot source references
+              // an already-materialized immutable CodeSnapshot.
+              code_source: data?.code_snapshot_id !== undefined
+                ? { kind: 'snapshot', code_snapshot_id: String(data.code_snapshot_id) }
+                : data?.repo !== undefined && data?.commit !== undefined
+                  ? { kind: 'git', repo_url: String(data.repo), commit: String(data.commit), license: data?.license !== undefined ? String(data.license) : '' }
+                  : null,
+              data_inputs: Array.isArray(data?.data_inputs) ? data.data_inputs : [],
+              execution_binding: data?.runner_profile_id !== undefined && data?.target_id !== undefined
+                ? { runner_profile_id: String(data.runner_profile_id), target_id: String(data.target_id) }
+                : null,
+              environment_lock: typeof data?.environment_lock === 'object' && data.environment_lock !== null ? data.environment_lock : undefined,
+              expected_outputs: Array.isArray(data?.expected_outputs) ? data.expected_outputs.map(String) : [],
+              metric_comparators: Array.isArray(data?.metric_comparators) ? data.metric_comparators : [],
               idempotency_key: idem,
-              kind: 'baseline',
-              command,
-              payload: {
-                message: '/reproduce',
-                repo: data?.repo !== undefined ? String(data.repo) : undefined,
-                commit: data?.commit !== undefined ? String(data.commit) : undefined,
-                expected_metrics: data?.expected_metrics,
-                tolerance: data?.tolerance,
-                ...(data ?? {}),
-              },
-              contract_id: data?.contract_id !== undefined ? String(data.contract_id) : null,
             })
-            const text = `Baseline reproduction job **${job.job_id}** [${job.kind}] submitted (${job.status}, idempotency ${idem}).\n\n`
-              + `The runner gateway executes it in isolation; the RunManifest records commit, environment, hashes and metrics deviation.`
+            const text = `PaperReproductionSpec **${spec.spec_id}** created (rev ${spec.revision}, status ${spec.status}) for ${spec.paper_ref.doi ?? spec.paper_ref.arxiv_id ?? spec.paper_ref.artifact_id} in project ${project.project_id}.\n\n`
+              + `Next: confirm the reproduction plan (claims/code/data/environment/metric comparators) — then an attempt runs on the bound runner/target, and only a persisted ReproducibilityReport with all required checks passing counts as reproduced. Exit 0 alone is NOT a pass.`
             return { kind: 'success' as const, text }
           }
 

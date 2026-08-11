@@ -3218,3 +3218,226 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
     kernel.close()
   })
 })
+
+describe('INIT-GRILL-02 v2 name-only Init (init-grill-upload-models.md §1/§2)', () => {
+  /** v2 name-only create over HTTP with the BFF-style identity headers. */
+  async function httpCreate(base: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+    return fetch(`${base}/v2/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'ik-default', 'x-principal-id': 'pi-1', ...headers },
+      body: JSON.stringify(body),
+    })
+  }
+
+  it('POST /v2/projects name-only → DRAFT + collecting + active Init Intake + PI membership + budget, NO Scope Gate', async () => {
+    const kernel = freshKernel()
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const response = await httpCreate(`http://127.0.0.1:${port}`, { name: '  My research  ' })
+      expect(response.status).toBe(201)
+      const out = (await response.json()) as {
+        project: { project_id: string; name: string; status: string; brief_status: string; brief: { problem: string; scope: string } }
+        intake: { intake_id: string; status: string; source_label: string }
+        membership: Array<{ role: string }>
+      }
+      expect(out.project.name).toBe('My research') // trimmed
+      expect(out.project.status).toBe('DRAFT')
+      expect(out.project.brief_status).toBe('collecting')
+      // brief 字段在 collecting 期间使用明确标记的内部占位值。
+      expect(out.project.brief.problem).toBe('[collecting]')
+      expect(out.project.brief.scope).toBe('[collecting]')
+      expect(out.intake.source_label).toBe('project-init')
+      expect(['draft', 'uploading', 'scanning', 'needs_input', 'grilling', 'proposal_ready', 'awaiting_human']).toContain(out.intake.status)
+      expect(out.membership.some(m => m.role === 'pi')).toBe(true)
+      // 不得创建 Scope Gate。
+      expect(kernel.listGates(out.project.project_id)).toHaveLength(0)
+      // 默认 Budget 存在。
+      expect(kernel.getBudget(out.project.project_id).model_cost_usd).toBe(0)
+      // workspace/安全/runner 用服务端安全默认（无浏览器可控字段）。
+      expect(kernel.getProject(out.project.project_id).execution.runner_profile_id).toBeNull()
+      kernel.close()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('Idempotency-Key and Human Principal are REQUIRED (422 fail closed)', async () => {
+    const kernel = freshKernel()
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const noIdem = await fetch(`${base}/v2/projects`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'x' }),
+      })
+      expect(noIdem.status).toBe(422)
+      expect(((await noIdem.json()) as { error: { code: string } }).error.code).toBe('idempotency_key_required')
+      const noPrincipal = await fetch(`${base}/v2/projects`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'ik-p' }, body: JSON.stringify({ name: 'x' }),
+      })
+      expect(noPrincipal.status).toBe(422)
+      expect(((await noPrincipal.json()) as { error: { code: string } }).error.code).toBe('principal_required')
+      // name 去空白后为空 / 超长 → 422 validation_error。
+      const emptyName = await httpCreate(base, { name: '   ' })
+      expect(emptyName.status).toBe(422)
+      const longName = await httpCreate(base, { name: 'x'.repeat(121) })
+      expect(longName.status).toBe(422)
+      kernel.close()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('same idempotency key + same request hash replays the SAME project/intake; different hash is 409', async () => {
+    const kernel = freshKernel()
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const first = await httpCreate(base, { name: 'Replay' }, { 'idempotency-key': 'ik-replay' })
+      expect(first.status).toBe(201)
+      const one = (await first.json()) as { project: { project_id: string }; intake: { intake_id: string } }
+      const replay = await httpCreate(base, { name: 'Replay' }, { 'idempotency-key': 'ik-replay' })
+      expect(replay.status).toBe(201)
+      const two = (await replay.json()) as { project: { project_id: string }; intake: { intake_id: string } }
+      expect(two.project.project_id).toBe(one.project.project_id)
+      expect(two.intake.intake_id).toBe(one.intake.intake_id)
+      // 同 key 不同请求 hash → 409 idempotency_conflict。
+      const conflict = await httpCreate(base, { name: 'Different Name' }, { 'idempotency-key': 'ik-replay' })
+      expect(conflict.status).toBe(409)
+      expect(((await conflict.json()) as { error: { code: string } }).error.code).toBe('idempotency_conflict')
+      kernel.close()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('collecting 项目 NextAction 只指向 intake_answer/intake_resume，无 scope_gate_submit/gate_decide', async () => {
+    const kernel = freshKernel()
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const created = await httpCreate(base, { name: 'Next' }, { 'idempotency-key': 'ik-next' })
+      const out = (await created.json()) as { project: { project_id: string } }
+      const projection = kernel.projectProjection(out.project.project_id)
+      expect(projection.project.brief_status).toBe('collecting')
+      const codes = projection.next_actions_v2.map(a => a.code)
+      // 契约：collecting 项目 NextAction 只能指向 intake_answer/intake_resume。
+      expect(codes.every(c => c === 'intake_resume' || c === 'intake_answer' || c === 'intake_scan' || c === 'intake_propose' || c === 'intake_adopt')).toBe(true)
+      expect(codes).toContain('intake_resume')
+      expect(codes).not.toContain('scope_gate_submit')
+      expect(codes).not.toContain('gate_decide')
+      kernel.close()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('Grill 确定性状态机：固定问题顺序、每次一个当前问题、answer 后推进、全部答完 ready_to_confirm', async () => {
+    const kernel = freshKernel()
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const created = await httpCreate(base, { name: 'Grill' }, { 'idempotency-key': 'ik-grill' })
+      const out = (await created.json()) as { project: { project_id: string } }
+      const projectId = out.project.project_id
+      const ORDER = ['brief.problem', 'brief.scope', 'brief.questions', 'brief.primary_metrics', 'brief.target_outputs', 'brief.constraints', 'brief.material_context']
+      const seen: string[] = []
+      for (;;) {
+        const projection = (await (await fetch(`${base}/v2/projects/${projectId}/grill`)).json()) as {
+          question: { question_code: string; question_revision: number; required: boolean } | null
+          ready_to_confirm: boolean
+        }
+        if (projection.question === null) break
+        seen.push(projection.question.question_code)
+        expect(projection.question.question_revision).toBe(1)
+        expect(projection.question.required).toBe(true)
+        const answer = await fetch(`${base}/v2/projects/${projectId}/grill/answers`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-principal-id': 'pi-1' },
+          body: JSON.stringify({ question_code: projection.question.question_code, question_revision: 1, value: `answer for ${projection.question.question_code}` }),
+        })
+        expect(answer.status).toBe(200)
+      }
+      expect(seen).toEqual(ORDER)
+      const final = (await (await fetch(`${base}/v2/projects/${projectId}/grill`)).json()) as {
+        ready_to_confirm: boolean
+        brief_preview: { problem: string; scope: string }
+      }
+      expect(final.ready_to_confirm).toBe(true)
+      expect(final.brief_preview.problem).toBe('answer for brief.problem')
+      expect(final.brief_preview.scope).toBe('answer for brief.scope')
+      kernel.close()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('只有 PI 的显式确认事务创建且只创建一个 pending Scope Gate；非 PI 403', async () => {
+    const kernel = freshKernel()
+    const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
+    const { server, port } = await startKernelServer({ kernel, port: 0 })
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const created = await httpCreate(base, { name: 'Confirm' }, { 'idempotency-key': 'ik-confirm' })
+      const out = (await created.json()) as { project: { project_id: string } }
+      const projectId = out.project.project_id
+      // 答完全部必答问题。
+      const ORDER = ['brief.problem', 'brief.scope', 'brief.questions', 'brief.primary_metrics', 'brief.target_outputs', 'brief.constraints', 'brief.material_context']
+      for (const code of ORDER) {
+        await fetch(`${base}/v2/projects/${projectId}/grill/answers`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-principal-id': 'pi-1' },
+          body: JSON.stringify({ question_code: code, question_revision: 1, value: `a:${code}` }),
+        })
+      }
+      const projection = (await (await fetch(`${base}/v2/projects/${projectId}/grill`)).json()) as { ready_to_confirm: boolean; project_revision: number; intake_revision: number }
+      expect(projection.ready_to_confirm).toBe(true)
+      // 非 PI（researcher）→ 403 role_forbidden（BFF 注入角色，内核复检）。
+      const researcher = await fetch(`${base}/v2/projects/${projectId}/grill/confirm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'ik-confirm-2', 'x-principal-id': 'pi-1', 'x-principal-role': 'researcher' },
+        body: JSON.stringify({ expected_project_revision: projection.project_revision, expected_intake_revision: projection.intake_revision }),
+      })
+      expect(researcher.status).toBe(403)
+      // PI 确认 → 写入 canonical Brief、brief_status=confirmed、唯一 pending Scope Gate。
+      const confirm = await fetch(`${base}/v2/projects/${projectId}/grill/confirm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'ik-confirm-3', 'x-principal-id': 'pi-1', 'x-principal-role': 'pi' },
+        body: JSON.stringify({ expected_project_revision: projection.project_revision, expected_intake_revision: projection.intake_revision }),
+      })
+      expect(confirm.status).toBe(200)
+      const result = (await confirm.json()) as { project: { brief_status: string; brief: { problem: string } }; gate: { gate_id: string; type: string; status: string } }
+      expect(result.project.brief_status).toBe('confirmed')
+      expect(result.project.brief.problem).toBe('a:brief.problem')
+      expect(result.gate.type).toBe('scope')
+      expect(result.gate.status).toBe('pending')
+      const gates = kernel.listGates(projectId)
+      expect(gates).toHaveLength(1)
+      // 再次确认 → 409 scope_gate_exists。
+      const again = await fetch(`${base}/v2/projects/${projectId}/grill/confirm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'ik-confirm-4', 'x-principal-id': 'pi-1', 'x-principal-role': 'pi' },
+        body: JSON.stringify({ expected_project_revision: projection.project_revision + 1, expected_intake_revision: projection.intake_revision + 1 }),
+      })
+      expect(again.status).toBe(409)
+      // 确认后 NextAction 回到 scope_gate_submit（Gate 已存在）。
+      const after = kernel.projectProjection(projectId)
+      expect(after.next_actions_v2.some(a => a.code === 'scope_gate_submit')).toBe(true)
+      kernel.close()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('v1 完整创建仍是兼容 adapter（createProject 不因 name-only 流程消失）', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'v1 legacy', workspace: '/w', brief: makeBrief() })
+    expect(project.brief_status).toBe('confirmed')
+    expect(kernel.listGates(project.project_id)).toHaveLength(0)
+    kernel.close()
+  })
+})

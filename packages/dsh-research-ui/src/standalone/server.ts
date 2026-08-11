@@ -65,6 +65,8 @@ const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
   /(?:^|\/)intake\/[^/]+\/adopt(?:\/|$)/,
   /(?:^|\/)archive(?:\/|$)/,
   /(?:^|\/)unarchive(?:\/|$)/,
+  // INIT-GRILL-02 §2: Grill confirm 是 PI-only（与 kernel 表逐字同步）。
+  /(?:^|\/)grill\/confirm(?:\/|$)/,
 ]
 
 function isPiOnlyWrite(pathname: string): boolean {
@@ -1185,10 +1187,16 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // uploads are rejected here with 413 before reaching the kernel.
         const incomingContentType = req.headers['content-type']
         const isMultipart = typeof incomingContentType === 'string' && incomingContentType.trim().toLowerCase().startsWith('multipart/form-data')
+        // CHUNK-01 (init-grill-upload-models.md §3): chunked upload append is
+        // a RAW-BYTES PUT (application/octet-stream) whose Content-Range and
+        // X-Chunk-SHA256 headers must survive the proxy — treated like
+        // multipart (original content-type + Buffer body, no UTF-8 round-trip).
+        const isChunkAppend = method === 'PUT' && /^\/v1\/projects\/[^/]+\/intake\/[^/]+\/upload-sessions\/[^/]+\/chunks$/.test(url.pathname)
         let body: string | Buffer | undefined
         if (method !== 'GET' && method !== 'HEAD') {
-          if (isMultipart) {
-            const read = await readBodyBytes(req, UPLOAD_MAX_BODY_BYTES)
+          if (isMultipart || isChunkAppend) {
+            // Chunk cap: the kernel's hard chunk max is 32 MiB (+ envelope).
+            const read = await readBodyBytes(req, isChunkAppend ? 32 * 1024 * 1024 + 4096 : UPLOAD_MAX_BODY_BYTES)
             if (read.tooLarge) {
               sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
               return
@@ -1218,8 +1226,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // trusted on any surface: on /v1 the standalone enforces membership
         // itself, and on /v2 the identity headers below are overwritten with
         // the server-derived principal/role (never taken from the client).
-        const proxyHeaders: Record<string, string> = isMultipart
-          ? { 'content-type': incomingContentType, accept: 'application/json' }
+        const proxyHeaders: Record<string, string> = isMultipart || isChunkAppend
+          ? { 'content-type': incomingContentType ?? 'application/octet-stream', accept: 'application/json' }
           : { 'content-type': 'application/json', accept: 'application/json' }
         // §5 P0-1 (hardening API-01/SIDE-01): the BFF's OWN kernel bearer
         // (0600 dataDir/kernel-token) — the kernel demands it on every
@@ -1239,6 +1247,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         for (const name of ['idempotency-key', 'x-request-id', 'x-pty-lease']) {
           const value = req.headers[name]
           if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
+        }
+        // CHUNK-01: chunk protocol headers pass through (the kernel validates
+        // offset contiguity + per-chunk sha256; the BFF never reads them).
+        if (isChunkAppend) {
+          const contentRange = req.headers['content-range']
+          const chunkSha = req.headers['x-chunk-sha256']
+          if (typeof contentRange === 'string' && contentRange !== '') proxyHeaders['content-range'] = contentRange
+          if (typeof chunkSha === 'string' && chunkSha !== '') proxyHeaders['x-chunk-sha256'] = chunkSha
         }
         // API-01 v2 identity forwarding: on /v2/* the BFF injects the
         // loopback operator identity (x-principal-id) plus the role it

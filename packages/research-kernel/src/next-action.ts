@@ -78,6 +78,21 @@ export interface NextActionIntake {
   artifact_count: number
 }
 
+/** Minimal reproduction view the projection needs (subset of
+ *  PaperReproductionSpec + attempt/report counts; fed by the kernel's
+ *  reproductionProjectionFor). Absent for legacy callers — the projection
+ *  then keeps the pre-reproduction baseline_reproduce semantics. */
+export interface NextActionReproduction {
+  spec_id: string
+  status: string
+  revision: number
+  attempt_count: number
+  report_count: number
+  /** 'pass' | 'fail' | 'blocked' | 'inconclusive' | null (no report yet). */
+  latest_report_status: string | null
+  has_running_attempt: boolean
+}
+
 /** Authoritative state inputs the projection derives actions from. */
 export interface NextActionContext {
   project: ResearchProject
@@ -93,6 +108,9 @@ export interface NextActionContext {
   /** Active intake sessions of the project (ONBOARD-01 overlay; absent when
    *  the caller has no intake view — legacy callers stay compatible). */
   intakes?: NextActionIntake[]
+  /** Paper reproduction specs (REPRO-01 overlay; absent for legacy
+   *  callers — baseline_reproduce then keeps its job-based semantics). */
+  reproductions?: NextActionReproduction[]
 }
 
 /** UI tab / operation path an action maps to. */
@@ -152,6 +170,16 @@ function approvedContract(contracts: ExperimentContract[]): ExperimentContract |
 
 function succeededJob(jobs: NextActionJob[], kinds: readonly string[]): boolean {
   return jobs.some(j => kinds.includes(j.kind) && j.status === 'succeeded')
+}
+
+/** REPRO-01: a persisted reproduction report in status=pass exists. */
+function reproductionPassed(ctx: NextActionContext): boolean {
+  return (ctx.reproductions ?? []).some(r => r.latest_report_status === 'pass')
+}
+
+/** REPRO-01: the project has reproduction specs (overlay context present). */
+function hasReproduction(ctx: NextActionContext): boolean {
+  return (ctx.reproductions ?? []).length > 0
 }
 
 /** Base per-status action(s) — the phase's primary next step (GUIDE-01). */
@@ -232,7 +260,13 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
         label: 'Reproduce baseline in isolated runner',
         reason: 'the approved idea needs a reproducible baseline before the experiment contract can bind to it',
         route: 'runs',
-        state: succeededJob(jobs, ['baseline']) ? 'done' : (contract !== null ? 'ready' : 'blocked'),
+        // REPRO-01 (docs/reproduction-contracts.md §3): exit 0 is execution
+        // succeeded — only a PERSISTED reproduction report in status=pass
+        // makes the action done. A reproduction spec without a passing
+        // report keeps it ready/blocked even when a legacy baseline job
+        // succeeded; without any reproduction view (legacy callers) the
+        // job-based semantics are preserved.
+        state: reproductionPassed(ctx) ? 'done' : (hasReproduction(ctx) ? (contract !== null ? 'ready' : 'blocked') : (succeededJob(jobs, ['baseline']) ? 'done' : (contract !== null ? 'ready' : 'blocked'))),
         required: contract !== null ? true : ['approved_contract'],
         required_by: 'agent',
         capability: 'researcher',
@@ -261,7 +295,9 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
             ? 'run the baseline reproduction bound to the approved contract'
             : 'cannot run the baseline until the Experiment Contract is approved',
           route: 'runs',
-          state: baselineDone ? 'done' : (contract !== null ? 'ready' : 'blocked'),
+          // REPRO-01: done ONLY with a persisted pass report; a reproduction
+          // spec without a passing report keeps the action ready/blocked.
+          state: reproductionPassed(ctx) ? 'done' : (hasReproduction(ctx) ? (contract !== null ? 'ready' : 'blocked') : (baselineDone ? 'done' : (contract !== null ? 'ready' : 'blocked'))),
           required: contract !== null ? true : ['approved_contract'],
           required_by: 'agent',
           capability: 'researcher',
@@ -628,6 +664,119 @@ function intakeOverlay(ctx: NextActionContext): BaseActionSpec[] {
   return actions
 }
 
+/** 
+ * REPRO-01 overlay (docs/reproduction-contracts.md §5): per-spec guidance
+ * through the reproduction wizard — reproduction_plan_confirm (draft spec,
+ * human), reproduction_run (confirmed spec, no attempt yet), 
+ * reproduction_compare (attempt in flight/executed, no persisted report),
+ * reproduction_report_review (a report exists, not pass), and
+ * reproduction_retry_or_repair (fail/inconclusive report → ready; blocked
+ * report → blocked with the concrete missing environment gap). A passing
+ * report emits NOTHING here — the base baseline_reproduce action turns
+ * `done` (contract §3: only a persisted report in status=pass does). All
+ * overlays are non-blocking like job_retry/intake overlays.
+ */
+function reproductionOverlay(ctx: NextActionContext): BaseActionSpec[] {
+  const { project } = ctx
+  const actions: BaseActionSpec[] = []
+  for (const repro of ctx.reproductions ?? []) {
+    const refs: NextActionRef[] = [
+      { kind: 'reproduction_spec', id: repro.spec_id },
+      { kind: 'project', id: project.project_id },
+    ]
+    if (repro.status === 'draft') {
+      actions.push({
+        code: 'reproduction_plan_confirm',
+        label: `Confirm reproduction plan ${repro.spec_id}`,
+        reason: `reproduction spec ${repro.spec_id} is draft — a Human confirms the plan/contract before any attempt starts`,
+        route: 'runs',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: repro.revision,
+        refs,
+        blocking: false,
+      })
+      continue
+    }
+    if (repro.status === 'confirmed' && repro.attempt_count === 0 && repro.latest_report_status === null) {
+      actions.push({
+        code: 'reproduction_run',
+        label: `Run reproduction ${repro.spec_id}`,
+        reason: `reproduction spec ${repro.spec_id} is confirmed — execute the attempt on the bound runner/target`,
+        route: 'runs',
+        state: 'ready',
+        required: true,
+        required_by: 'agent',
+        revision: repro.revision,
+        refs,
+        blocking: false,
+      })
+      continue
+    }
+    if (repro.has_running_attempt && repro.report_count === 0) {
+      actions.push({
+        code: 'reproduction_compare',
+        label: `Compare + report reproduction ${repro.spec_id}`,
+        reason: `an attempt of reproduction spec ${repro.spec_id} is running — compare paper targets and the clean-room vs formal run, then persist the report`,
+        route: 'runs',
+        state: 'ready',
+        required: true,
+        required_by: 'agent',
+        revision: repro.revision,
+        refs,
+        blocking: false,
+      })
+      continue
+    }
+    if (repro.latest_report_status === 'fail' || repro.latest_report_status === 'inconclusive') {
+      actions.push({
+        code: 'reproduction_retry_or_repair',
+        label: `Repair or retry reproduction ${repro.spec_id}`,
+        reason: `reproduction spec ${repro.spec_id} has a persisted report in status '${repro.latest_report_status}' — out-of-tolerance is a scientific result, not code_error; repair inputs or start a new attempt`,
+        route: 'runs',
+        state: 'ready',
+        required: true,
+        required_by: 'agent',
+        revision: repro.revision,
+        refs,
+        blocking: false,
+      })
+      continue
+    }
+    if (repro.latest_report_status === 'blocked') {
+      actions.push({
+        code: 'reproduction_retry_or_repair',
+        label: `Unblock reproduction ${repro.spec_id}`,
+        reason: `reproduction spec ${repro.spec_id} is blocked (e.g. a clean-room cannot satisfy an acquisition recipe) — the block was NOT silently skipped`,
+        route: 'runs',
+        state: 'blocked',
+        required: ['reproduction_environment'],
+        required_by: 'agent',
+        revision: repro.revision,
+        refs,
+        blocking: false,
+      })
+      continue
+    }
+    if (repro.report_count > 0 && repro.latest_report_status !== 'pass') {
+      actions.push({
+        code: 'reproduction_report_review',
+        label: `Review reproduction report for ${repro.spec_id}`,
+        reason: `reproduction spec ${repro.spec_id} has a persisted report in status '${repro.latest_report_status}' — review the comparison details`,
+        route: 'runs',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: repro.revision,
+        refs,
+        blocking: false,
+      })
+    }
+  }
+  return actions
+}
+
 /**
  * GUIDE-01 authoritative projection: deterministic structured actions for
  * the current project state. Pure — no DB, no side effects, never throws.
@@ -635,7 +784,7 @@ function intakeOverlay(ctx: NextActionContext): BaseActionSpec[] {
  */
 export function nextActionProjection(ctx: NextActionContext): NextAction[] {
   const base = baseActions(ctx)
-  const overlays = [...gateOverlay(ctx), ...jobOverlay(ctx), ...intakeOverlay(ctx)]
+  const overlays = [...gateOverlay(ctx), ...jobOverlay(ctx), ...intakeOverlay(ctx), ...reproductionOverlay(ctx)]
   return [...base, ...overlays].map(spec => action(ctx.project.project_id, spec))
 }
 

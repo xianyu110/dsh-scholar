@@ -347,6 +347,75 @@ OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H
 R=$(printf '%s' "$OUT" | tail -1)
 [[ "$R" == "200" ]] && ok "owner + correct lease control -> 200" || bad "owner control expected 200, got HTTP $R"
 
+
+# ── REPRO-01 (docs/reproduction-contracts.md §4): reproduction API + verifier
+# service identity + cross-project AuthZ (HTTP integration) ────────────────
+
+echo "== REPRO-01 reproduction-spec/report HTTP surface =="
+# Creator principal becomes the first PI member (createProject creator path),
+# so v2 routes with x-principal-id resolve membership for the same principal.
+REPRO_PI="repro-pi"
+REPRO_PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"repro-http\",\"workspace\":\"/w/repro\",\"creator_principal_id\":\"$REPRO_PI\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+[[ "$REPRO_PROJ" == rsp_* ]] && ok "reproduction project $REPRO_PROJ created (creator PI member)" || bad "reproduction project creation failed: $REPRO_PROJ"
+
+# POST /v2/projects/{id}/reproduction-specs — 422 without a principal.
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -d '{"paper_ref":{"doi":"10.48550/arXiv.2401.12345"},"claims_to_reproduce":[{"claim_ref":"c1"}]}' "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-specs")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "422" && "$C" == "principal_required" ]] && ok "POST reproduction-specs without principal -> 422 principal_required" || bad "spec-create no-principal expected 422, got HTTP $R ($C)"
+
+# Invalid paper ref -> 422 invalid_paper_ref (zero rows).
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H "x-principal-id: $REPRO_PI" -d '{"paper_ref":{"doi":"nope"},"claims_to_reproduce":[{"claim_ref":"c1"}]}' "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-specs")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "422" && "$C" == "invalid_paper_ref" ]] && ok "POST reproduction-specs with bad DOI -> 422 invalid_paper_ref" || bad "bad-DOI expected 422 invalid_paper_ref, got HTTP $R ($C)"
+
+# Valid create -> 201 with spec_id/status=draft.
+SPEC_JSON=$(curl -s -X POST -H 'content-type: application/json' -H "x-principal-id: $REPRO_PI" -d '{"paper_ref":{"doi":"10.48550/arXiv.2401.12345"},"claims_to_reproduce":[{"claim_ref":"c1","locator":"Table 2"}]}' "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-specs")
+SPEC_ID=$(printf '%s' "$SPEC_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).spec_id||''))")
+SPEC_STATUS=$(printf '%s' "$SPEC_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status||''))")
+[[ "$SPEC_ID" == repro_* && "$SPEC_STATUS" == "draft" ]] && ok "POST reproduction-specs (DOI) -> 201 $SPEC_ID status=draft" || bad "spec create expected 201 draft, got id='$SPEC_ID' status='$SPEC_STATUS'"
+
+# Confirm the spec (PATCH revision CAS), then start an attempt (201 + lease token).
+OUT=$(curl -s -w '\n%{http_code}' -X PATCH -H 'content-type: application/json' -H "x-principal-id: $REPRO_PI" -d '{"expected_revision":1,"patch":{"status":"confirmed"}}' "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-specs/$SPEC_ID")
+R=$(printf '%s' "$OUT" | tail -1)
+[[ "$R" == "200" ]] && ok "PATCH reproduction-specs/{spec} confirm -> 200" || bad "spec confirm expected 200, got HTTP $R"
+OUT=$(curl -s -w '\n%{http_code}' -X PATCH -H 'content-type: application/json' -H "x-principal-id: $REPRO_PI" -d '{"expected_revision":1,"patch":{"status":"confirmed"}}' "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-specs/$SPEC_ID")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "409" && "$C" == "reproduction_revision_conflict" ]] && ok "PATCH with stale revision -> 409 reproduction_revision_conflict" || bad "stale PATCH expected 409, got HTTP $R ($C)"
+
+AT_JSON=$(curl -s -X POST -H 'content-type: application/json' -H "x-principal-id: $REPRO_PI" -d '{"reason":"hardening http attempt"}' "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-specs/$SPEC_ID/attempts")
+AT_ID=$(printf '%s' "$AT_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const o=JSON.parse(d);console.log(o.attempt?.attempt_id||'')})")
+AT_GEN=$(printf '%s' "$AT_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const o=JSON.parse(d);console.log(o.generation||'')})")
+AT_LEASE=$(printf '%s' "$AT_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const o=JSON.parse(d);console.log(o.lease_token||'')})")
+[[ "$AT_ID" == repa_* && "$AT_GEN" == "1" && "${#AT_LEASE}" == "48" ]] && ok "POST reproduction-specs/{spec}/attempts -> 201 attempt $AT_ID gen 1 + lease token" || bad "attempt start expected 201, got id='$AT_ID' gen='$AT_GEN' lease='${#AT_LEASE}'"
+
+# Verifier report surface: service token + verifier principal fencing.
+REP_PATH="/internal/reproduction-attempts/$AT_ID/reports"
+REP_BODY="{\"attempt_generation\":$AT_GEN,\"lease_token\":\"$AT_LEASE\",\"paper_refs\":[\"10.48550/arXiv.2401.12345\"],\"claim_refs\":[\"c1\"],\"status\":\"pass\",\"preflight\":{\"ok\":true,\"checks\":[\"digest pinned\"],\"blocked\":false,\"reason\":\"\"},\"runtime_verified\":{\"exit_code\":0,\"execution_succeeded\":true,\"run_manifest_signed\":true,\"lease_fenced\":true},\"environment\":{},\"run_manifest_refs\":[\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"paper_comparisons\":{},\"run_comparisons\":{},\"checks\":[{\"check_id\":\"metric:m1\",\"kind\":\"metric\",\"name\":\"mAP\",\"status\":\"pass\",\"required\":true,\"detail\":\"ok\"}],\"missing_outputs\":[],\"extra_outputs\":[],\"failure_class\":null,\"stable_error_code\":\"\",\"retryable\":false,\"generated_by\":\"reproduction-verifier\",\"tool_versions\":{\"verifier\":\"hardening-1.0\"}}"
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H 'x-service-principal: verifier' -d "$REP_BODY" "http://127.0.0.1:$PORT$REP_PATH")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "403" && "$C" == "service_token_required" ]] && ok "internal report without x-service-token -> 403 service_token_required" || bad "report no-token expected 403 service_token_required, got HTTP $R ($C)"
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -H 'x-service-principal: analysis-worker' -d "$REP_BODY" "http://127.0.0.1:$PORT$REP_PATH")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "403" && "$C" == "service_identity_required" ]] && ok "internal report with non-verifier principal -> 403 service_identity_required" || bad "report bad-principal expected 403, got HTTP $R ($C)"
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -H 'x-service-principal: verifier' -d "$REP_BODY" "http://127.0.0.1:$PORT$REP_PATH")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "201" ]] && ok "internal report with token + verifier -> 201" || bad "report ok expected 201, got HTTP $R ($C)"
+REP_ID=$(printf '%s' "$OUT" | sed '$d' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).report_id||'')}catch(e){console.log('')}})")
+REP_HASH=$(printf '%s' "$OUT" | sed '$d' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).report_hash||'')}catch(e){console.log('')}})")
+[[ "$REP_ID" == repr_* && "${#REP_HASH}" == "64" ]] && ok "report 201 carries report_id + 64-hex report_hash (CAS)" || bad "report payload missing report_id/hash: id='$REP_ID' hash='${#REP_HASH}'"
+# Wrong lease token on a fresh report attempt -> 409 lease_stale.
+OUT=$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" -H 'x-service-principal: verifier' -d "${REP_BODY/\"$AT_LEASE\"/\"wrong-token\"}" "http://127.0.0.1:$PORT$REP_PATH")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "409" && "$C" == "lease_stale" ]] && ok "internal report with wrong lease token -> 409 lease_stale" || bad "report wrong-lease expected 409 lease_stale, got HTTP $R ($C)"
+# GET report in-project 200; cross-project 404 (no enumeration).
+OUT=$(curl -s -w '\n%{http_code}' -H "x-principal-id: $REPRO_PI" "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ/reproduction-reports/$REP_ID")
+R=$(printf '%s' "$OUT" | tail -1)
+[[ "$R" == "200" ]] && ok "GET v2 reproduction-reports/{report} in-project -> 200" || bad "GET report expected 200, got HTTP $R"
+REPRO_PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"repro-http-2\",\"workspace\":\"/w/repro2\",\"creator_principal_id\":\"$REPRO_PI\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+OUT=$(curl -s -w '\n%{http_code}' -H "x-principal-id: $REPRO_PI" "http://127.0.0.1:$PORT/v2/projects/$REPRO_PROJ2/reproduction-reports/$REP_ID")
+R=$(printf '%s' "$OUT" | tail -1); C=$(printf '%s' "$OUT" | sed '$d' | code_of)
+[[ "$R" == "404" && "$C" == "reproduction_report_not_found" ]] && ok "GET report cross-project -> 404 reproduction_report_not_found" || bad "cross-project report expected 404, got HTTP $R ($C)"
+
 kill "$RUNNER_PID" "$KERNEL_PID" 2>/dev/null || true
 rm -rf "$WORK"
 echo "hardening-tests: $PASS passed, $FAIL failed"

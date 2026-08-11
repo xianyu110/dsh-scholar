@@ -12,7 +12,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, type PtySession } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, type PtySession } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -514,6 +514,32 @@ async function handleIntakeArtifactUpload(req: IncomingMessage, res: ServerRespo
 }
 
 /**
+ * CHUNK-01 (init-grill-upload-models.md §3, api-contracts.md §16
+ * artifact-stages): append ONE raw chunk to an upload session. The body is
+ * the raw chunk bytes (bounded by the session's chunk_size); `Content-Range:
+ * bytes <start>-<end>[/<total>]` and `X-Chunk-SHA256` headers drive the
+ * protocol — `start == committed_offset` appends, older same-byte/hash
+ * ranges replay with `replayed=true`, gaps/overlaps/total mismatches are
+ * 409, hash mismatches 422. Bytes land ONLY in the isolated intake staging.
+ */
+async function handleChunkAppend(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel, projectId: string, intakeId: string, uploadId: string): Promise<void> {
+  // Cross-project scope guard: 404 unless the intake belongs to the route
+  // project (the session itself is re-scoped by intakeId in the kernel).
+  kernel.assertIntakeInProject(intakeId, projectId)
+  const contentRange = req.headers['content-range']
+  if (typeof contentRange !== 'string' || contentRange === '') {
+    throw new KernelError(422, 'invalid_content_range', 'chunk append requires a Content-Range header (bytes <start>-<end>[/<total>])')
+  }
+  const chunkSha256 = req.headers['x-chunk-sha256']
+  if (typeof chunkSha256 !== 'string' || chunkSha256 === '') {
+    throw new KernelError(422, 'invalid_chunk_hash_header', 'chunk append requires an X-Chunk-SHA256 header')
+  }
+  const body = await readBodyBytes(req, kernel.intakeChunkSizeBytes + 4096)
+  const result = kernel.appendUploadChunk(intakeId, uploadId, { bytes: body, contentRange, chunkSha256 })
+  send(res, 200, result)
+}
+
+/**
  * WORK-01 (api-contracts.md §17): multipart binary upload into a workspace
  * node — same staged-capsule pipeline as UPLOAD-01 (one file part ≤ 32 MiB,
  * server-side sha256 via writeBinary, path safety inside the kernel), but
@@ -603,6 +629,20 @@ const intakeRejectSchema = z.object({
   principal: HumanPrincipal,
 }).strict()
 
+/** CHUNK-01 (init-grill-upload-models.md §3): batch chunked upload begin. */
+const uploadSessionBeginSchema = z.object({
+  file_name: z.string().min(1).max(512),
+  media_type: z.string().max(256).optional(),
+  expected_size: z.number().int().nonnegative(),
+  expected_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  chunk_size: z.number().int().positive().optional(),
+}).strict()
+
+/** MODEL-01 (init-grill-upload-models.md §4): provider create/update/delete. */
+const providerDeleteSchema = z.object({
+  expected_revision: z.number().int().positive(),
+}).strict()
+
 /**
  * GOV-01 fail-closed pattern for intake Human actions: a request without an
  * authenticated `principal.principal_id` is 422 principal_required BEFORE
@@ -645,6 +685,7 @@ const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string 
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/verified$/, label: 'evidence/verified' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/[^/]+\/accept$/, label: 'evidence/accept' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/contracts\/[^/]+\/approve$/, label: 'contracts/approve' },
+  { method: 'POST', re: /^\/internal\/reproduction-attempts\/[^/]+\/reports$/, label: 'reproduction/reports' },
 ]
 
 function isServiceRoute(method: string, pathname: string): boolean {
@@ -784,6 +825,9 @@ const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
   /(?:^|\/)intake\/[^/]+\/adopt(?:\/|$)/,
   /(?:^|\/)archive(?:\/|$)/,
   /(?:^|\/)unarchive(?:\/|$)/,
+  // INIT-GRILL-02 §2: Grill confirm 是 PI-only 显式确认事务（写入 canonical
+  // Brief + 创建唯一 Scope Gate）—— researcher/viewer/auditor 一律 403。
+  /(?:^|\/)grill\/confirm(?:\/|$)/,
 ]
 
 function isPiOnlyWrite(pathname: string): boolean {
@@ -961,6 +1005,37 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     }
   }
   const [version, resource, id, sub, subId, subSubId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
+  // REPRO-01 (docs/reproduction-contracts.md §4): POST
+  // /internal/reproduction-attempts/{attempt}/reports — verifier service
+  // identity (x-service-token gate above + x-service-principal: verifier
+  // here). The public surface can never ingest a report. Routed before the
+  // v1/v2 version gate because the path carries no API version prefix.
+  if (version === 'internal' && resource === 'reproduction-attempts' && id !== undefined && sub === 'reports' && method === 'POST') {
+    void readJson(req, 8 * 1024 * 1024).then(async (body) => {
+      try {
+        const servicePrincipal = typeof req.headers['x-service-principal'] === 'string' ? req.headers['x-service-principal'] : ''
+        if (servicePrincipal !== 'verifier') {
+          send(res, 403, { error: errorEnvelope('service_identity_required', 'reproduction report ingestion requires x-service-principal: verifier') })
+          return
+        }
+        const input = ReproductionReportInput.parse(body)
+        const report = kernel.reportReproductionAttempt({
+          attempt_id: id,
+          service_principal: servicePrincipal,
+          request_id: currentRequestId,
+          attempt_generation: input.attempt_generation,
+          lease_token: input.lease_token,
+          report: input,
+          idempotency_key: typeof req.headers['idempotency-key'] === 'string' && req.headers['idempotency-key'] !== '' ? req.headers['idempotency-key'] : undefined,
+          request_hash: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
+        })
+        send(res, 201, report)
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
   if (version !== 'v1' && version !== 'v2') {
     send(res, 404, { error: { code: 'not_found', message: 'unknown api version' } })
     return
@@ -978,6 +1053,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     void handleIntakeArtifactUpload(req, res, kernel, id, subId).catch((error: unknown) => fail(res, error))
     return
   }
+  // CHUNK-01 (init-grill-upload-models.md §3): chunked upload append — raw
+  // bytes body + Content-Range / X-Chunk-SHA256 headers. Routed before
+  // readJson like the multipart handlers.
+  if (method === 'PUT' && version === 'v1' && resource === 'projects' && id !== undefined && sub === 'intake' && subId !== undefined
+      && subSubId === 'upload-sessions' && parts[6] !== undefined && parts[7] === 'chunks') {
+    void handleChunkAppend(req, res, kernel, id, subId, parts[6]).catch((error: unknown) => fail(res, error))
+    return
+  }
   // WORK-01 (api-contracts.md §17): binary workspace asset upload —
   // multipart, same caps/parser as UPLOAD-01, bytes land on the workspace
   // tree (server-side sha256 binding). Routed before readJson (raw body).
@@ -988,10 +1071,14 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   if (version === 'v2') {
     void readJson(req, requestBodyCap(method, version, resource, id, sub)).then(async (body) => {
       try {
-        await handleV2({ req, res, method, url, id, sub, subId, body, kernel, configPin })
+        await handleV2({ req, res, method, url, id, sub, subId, subSubId, body, kernel, configPin })
       } catch (error) {
         if (error instanceof KernelError) send(res, error.status, { error: { code: error.code, message: error.message } })
-        else {
+        else if (error instanceof z.ZodError) {
+          // INIT-GRILL-02 §1: v2 契约校验失败（如 name 去空白后 1–120）→
+          // 稳定的 422 validation_error，绝不 500。
+          send(res, 422, { error: { code: 'validation_error', message: error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ') } })
+        } else {
           console.error(`[kernel] v2 handler error: ${(error as Error).message}`)
           send(res, 500, { error: { code: 'internal_error', message: 'internal error' } })
         }
@@ -1040,6 +1127,40 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           send(res, 404, { error: { code: 'not_found', message: 'unknown config resource' } })
+          return
+        }
+        case 'providers': {
+          // MODEL-01 (init-grill-upload-models.md §4 / api-contracts.md §19):
+          // instance/global Provider registry. Responses are redacted —
+          // credential carries metadata + available only, never a secret value.
+          const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
+          if (method === 'GET' && id === undefined) {
+            ok(res, kernel.listProviders().map(p => kernel.providerView(p)))
+            return
+          }
+          if (method === 'POST' && id === undefined) {
+            const input = ProviderCreateInput.parse(body)
+            send(res, 201, kernel.providerView(kernel.registerProvider({ ...input, created_by: headerPrincipal ?? '' })))
+            return
+          }
+          if (id !== undefined) {
+            if (method === 'GET') {
+              ok(res, kernel.providerView(kernel.getProvider(id)))
+              return
+            }
+            if (method === 'PATCH') {
+              const input = ProviderUpdateInput.parse(body)
+              ok(res, kernel.providerView(kernel.updateProvider(id, { ...input, updated_by: headerPrincipal ?? '' })))
+              return
+            }
+            if (method === 'DELETE') {
+              const input = providerDeleteSchema.parse(body)
+              kernel.deleteProvider(id, input.expected_revision)
+              ok(res, { ok: true })
+              return
+            }
+          }
+          send(res, 404, { error: { code: 'not_found', message: 'unknown provider route' } })
           return
         }
         case 'projects': {
@@ -1220,6 +1341,24 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               }
               break
             }
+            // MODEL-01 (init-grill-upload-models.md §4 / api-contracts.md §19
+            // model-bindings): project submits only opaque provider/model ID;
+            // the kernel validates provider+model+catalog capability and
+            // snapshots provider revision/config hash.
+            if (sub === 'model-binding') {
+              const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
+              if (method === 'GET') {
+                ok(res, kernel.getProjectModelBinding(id))
+                return
+              }
+              if (method === 'PUT' || method === 'POST') {
+                const input = ProjectModelBindingInput.parse(body)
+                ok(res, kernel.setProjectModelBinding(id, { ...input, updated_by: headerPrincipal ?? '' }))
+                return
+              }
+              send(res, 404, { error: { code: 'not_found', message: 'unknown model-binding route' } })
+              return
+            }
             // ONBOARD-01 (research-onboarding.md / api-contracts.md §16):
             // intake sessions are project-scoped on this surface — every
             // route re-resolves the intake under the path project (cross-
@@ -1255,6 +1394,29 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
                 }
                 if (method === 'POST' && action === 'scan') {
                   ok(res, kernel.scanIntake(subId))
+                  return
+                }
+                if (method === 'POST' && action === 'upload-sessions' && segments[6] === undefined) {
+                  // CHUNK-01: begin a batch chunked upload session (quota reserved).
+                  const input = uploadSessionBeginSchema.parse(body)
+                  const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
+                  send(res, 201, kernel.beginUploadSession(subId, { ...input, principal_id: headerPrincipal }))
+                  return
+                }
+                if (method === 'GET' && action === 'upload-sessions' && segments[6] === undefined) {
+                  // CHUNK-01: list sessions (offset/expiry — refresh/断线续传).
+                  ok(res, kernel.listUploadSessions(subId))
+                  return
+                }
+                if (method === 'POST' && action === 'upload-sessions' && segments[6] !== undefined && segments[7] === 'finalize') {
+                  // CHUNK-01: finalize — server recomputes size/sha256, registers the IntakeArtifact.
+                  ok(res, kernel.finalizeUploadSession(subId, segments[6]!))
+                  return
+                }
+                if ((method === 'POST' && action === 'upload-sessions' && segments[6] !== undefined && segments[7] === 'abort')
+                    || (method === 'DELETE' && action === 'upload-sessions' && segments[6] !== undefined)) {
+                  // CHUNK-01: abort — idempotent (DELETE alias per api-contracts §16).
+                  ok(res, kernel.abortUploadSession(subId, segments[6]!))
                   return
                 }
                 if (method === 'GET' && action === 'questions') {
@@ -2695,11 +2857,12 @@ async function handleV2(ctx: {
   id?: string
   sub?: string
   subId?: string
+  subSubId?: string
   body: unknown
   kernel: ResearchKernel
   configPin?: string
 }): Promise<void> {
-  const { req, res, method, url, id, sub, subId, body, kernel, configPin } = ctx
+  const { req, res, method, url, id, sub, subId, subSubId, body, kernel, configPin } = ctx
   const principal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
   // API-01 role capabilities: the BFF injects x-principal-role from ITS OWN
   // membership lookup (client-supplied values are never trusted). When
@@ -2907,6 +3070,111 @@ async function handleV2(ctx: {
     }).parse(body)
     const project = kernel.transition(id, input.to as never, input.expected_revision, input.reason)
     ok(res, project)
+    return
+  }
+  // REPRO-01 (docs/reproduction-contracts.md §4): reproduction v2 surface.
+  // Every route resolves the project id in the path FIRST (memberOr404) —
+  // all other ids (spec/attempt/report) are project-scoped afterwards, so a
+  // cross-project id is the same 404 as an unknown one (no enumeration).
+  if (id !== undefined && sub === 'reproduction-specs' && subId === undefined && method === 'POST') {
+    memberOr404(id)
+    if (principal === undefined || principal.trim() === '') {
+      send(res, 422, { error: { code: 'principal_required', message: 'reproduction spec creation requires an authenticated Human Principal' } })
+      return
+    }
+    const input = z.object({
+      paper_ref: z.unknown(),
+      source_locator: z.string().optional(),
+      source_artifact_id: z.string().nullable().optional(),
+      reproduction_level: z.string().optional(),
+      claims_to_reproduce: z.array(z.unknown()).optional(),
+      code_source: z.unknown().nullable().optional(),
+      data_inputs: z.array(z.unknown()).optional(),
+      execution_binding: z.unknown().nullable().optional(),
+      environment_lock: z.unknown().optional(),
+      expected_outputs: z.array(z.string()).optional(),
+      metric_comparators: z.array(z.unknown()).optional(),
+      idempotency_key: z.string().optional(),
+    }).parse(body)
+    const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
+    const spec = kernel.createReproductionSpec({
+      project_id: id,
+      owner: { principal_id: principal, auth_method: 'dsh-session' },
+      paper_ref: input.paper_ref as never,
+      source_locator: input.source_locator,
+      source_artifact_id: input.source_artifact_id,
+      reproduction_level: input.reproduction_level as never,
+      claims_to_reproduce: (input.claims_to_reproduce ?? []) as never,
+      code_source: input.code_source as never,
+      data_inputs: input.data_inputs as never,
+      execution_binding: input.execution_binding as never,
+      environment_lock: input.environment_lock as never,
+      expected_outputs: input.expected_outputs,
+      metric_comparators: input.metric_comparators as never,
+      idempotency_key: input.idempotency_key,
+      request_hash: requestHash,
+    })
+    send(res, 201, spec)
+    return
+  }
+  if (id !== undefined && sub === 'reproduction-specs' && subId === undefined && method === 'GET') {
+    memberOr404(id)
+    ok(res, kernel.listReproductionSpecs(id))
+    return
+  }
+  if (id !== undefined && sub === 'reproduction-specs' && subId !== undefined && subSubId === undefined && method === 'GET') {
+    memberOr404(id)
+    ok(res, kernel.getReproductionSpec(id, subId))
+    return
+  }
+  if (id !== undefined && sub === 'reproduction-specs' && subId !== undefined && subSubId === undefined && method === 'PATCH') {
+    memberOr404(id)
+    const input = z.object({
+      expected_revision: z.number().int().nonnegative(),
+      patch: z.record(z.unknown()),
+    }).parse(body)
+    ok(res, kernel.updateReproductionSpec(id, subId, {
+      expected_revision: input.expected_revision,
+      patch: input.patch as never,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'reproduction-specs' && subId !== undefined && subSubId === 'attempts' && method === 'POST') {
+    memberOr404(id)
+    const input = z.object({
+      submitter_principal: z.string().optional(),
+      reason: z.string().optional(),
+      job_id: z.string().nullable().optional(),
+      run_id: z.string().nullable().optional(),
+      code_snapshot_id: z.string().nullable().optional(),
+      approved_contract_version: z.number().int().nonnegative().nullable().optional(),
+      idempotency_key: z.string().optional(),
+    }).parse(body)
+    const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
+    // The submitter Principal is the BFF-injected x-principal-id (client
+    // body values are never trusted); the body field is an internal-caller
+    // fallback mirroring the v2 job route.
+    const started = kernel.startReproductionAttempt(id, subId, {
+      submitter_principal: principal ?? input.submitter_principal ?? '',
+      reason: input.reason,
+      job_id: input.job_id,
+      run_id: input.run_id,
+      code_snapshot_id: input.code_snapshot_id,
+      approved_contract_version: input.approved_contract_version,
+      idempotency_key: input.idempotency_key,
+      request_hash: requestHash,
+    })
+    send(res, 201, started)
+    return
+  }
+  if (id !== undefined && sub === 'reproduction-attempts' && subId !== undefined && method === 'GET') {
+    memberOr404(id)
+    ok(res, kernel.getReproductionAttempt(id, subId))
+    return
+  }
+  if (id !== undefined && sub === 'reproduction-reports' && subId !== undefined && method === 'GET') {
+    memberOr404(id)
+    ok(res, kernel.getReproductionReport(id, subId))
     return
   }
   send(res, 404, { error: { code: 'not_found', message: 'unknown v2 route' } })

@@ -5,6 +5,11 @@ import { CHAT_COMMANDS } from './modals/commands'
 import { openCommandHistoryModal, openGlobalSearchModal, openSessionSearchModal } from './modals/search'
 import { CHAT_MAX, chatClear, chatPersist, chatPush, chatSessionArchive, chatSessionClose, chatSessionEnsure, chatSessionNew, chatSessionRename, chatSessionSelect, chatSessionsPersist, chatSyncActive, favCommands, historyPush, state, tabSave } from './state'
 import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast } from './ui'
+import {
+  browserTransport, chatAttachmentRef, driveUpload, enqueueFiles, fileByteProvider, markHashed,
+  pauseItem, registerByteProvider, resumeItem, retryItem, sha256Hex, unregisterByteProvider,
+  type UploadQueueItem,
+} from './chunked-upload'
 export let dragSessionId: string | null = null
 
 /**
@@ -1732,6 +1737,153 @@ export async function renderChat(
   }
   // dsh-web composer toolbar: markdown quick-inserts at the cursor.
   const toolbar = el('div', 'chat-composer-tools')
+  // INIT-GRILL-02 §2/§3: 附件按钮/拖拽/粘贴 → 同一 active Intake 的批量
+  // 分块队列。消息只保存 attachment/stage ref；scan/OCR 与 Human 确认前
+  // 不写 Project Artifact。队列状态机在 chunked-upload.ts（PURE，已测）；
+  // 浏览器视觉（真实拖拽/粘贴观感）NOT_RUN_MANUAL_PENDING。
+  const attachBtn = el('button', 'hbtn', '📎')
+  attachBtn.title = t('shell', 'shell.chat.attachTitle')
+  attachBtn.setAttribute('aria-label', t('shell', 'shell.chat.attachTitle'))
+  attachBtn.style.cssText = 'padding:1px 8px;font-size:10px'
+  const attachInput = document.createElement('input')
+  attachInput.type = 'file'
+  attachInput.multiple = true
+  attachInput.style.display = 'none'
+  const queueStrip = el('div', 'chat-composer-tools')
+  queueStrip.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:10px;margin-bottom:4px'
+  queueStrip.style.display = 'none'
+  let queueItems: UploadQueueItem[] = []
+  const filesById = new Map<string, File>()
+  const transport = browserTransport()
+  const renderQueue = (): void => {
+    queueStrip.replaceChildren()
+    if (queueItems.length === 0) { queueStrip.style.display = 'none'; return }
+    queueStrip.style.display = 'flex'
+    for (const item of queueItems) {
+      // 状态符号 + 文件名 + 百分比；状态名是机器值（title 原样，非 chrome）。
+      const marker = item.state === 'failed' ? '✗' : item.state === 'ready' ? '✓' : item.state === 'paused' ? '⏸' : item.state === 'uploading' ? '⏳' : '•'
+      const pct = item.fileSize > 0 ? Math.round((item.committedOffset / item.fileSize) * 100) : 0
+      const chipText = `${marker} ${item.fileName}${item.committedOffset < item.fileSize ? ` ${pct}%` : ''}`
+      const chip = el('span', 'artifact-kind', chipText)
+      chip.title = item.lastError ?? item.state
+      const actions = el('span')
+      if (item.state === 'uploading' || item.state === 'queued') {
+        const p = el('button', 'hbtn', '⏸')
+        p.title = t('shell', 'shell.chat.attachPause')
+        p.style.cssText = 'padding:0 4px;font-size:9px'
+        p.onclick = () => { queueItems = queueItems.map(x => x.fileId === item.fileId ? pauseItem(x) : x); pushRef(item); renderQueue() }
+        actions.appendChild(p)
+      } else if (item.state === 'paused') {
+        const r = el('button', 'hbtn', '▶')
+        r.title = t('shell', 'shell.chat.attachResume')
+        r.style.cssText = 'padding:0 4px;font-size:9px'
+        r.onclick = () => {
+          const resumed = resumeItem(item)
+          queueItems = queueItems.map(x => x.fileId === item.fileId ? resumed : x)
+          renderQueue()
+          void driveUpload(resumed, transport, { readBytes: (fid, s, e) => fileByteProvider(filesById).read(fid, s, e), onState: onUploadState }).then(fin => { queueItems = queueItems.map(x => x.fileId === fin.fileId ? fin : x); pushRef(fin); renderQueue() })
+        }
+        actions.appendChild(r)
+      } else if (item.state === 'failed' && item.retryCount < 3) {
+        const r = el('button', 'hbtn', '↻')
+        r.title = t('shell', 'shell.chat.attachRetry')
+        r.style.cssText = 'padding:0 4px;font-size:9px'
+        r.onclick = () => {
+          const retried = retryItem(item)
+          queueItems = queueItems.map(x => x.fileId === item.fileId ? retried : x)
+          renderQueue()
+          void driveUpload(retried, transport, { readBytes: (fid, s, e) => fileByteProvider(filesById).read(fid, s, e), onState: onUploadState }).then(fin => { queueItems = queueItems.map(x => x.fileId === fin.fileId ? fin : x); pushRef(fin); renderQueue() })
+        }
+        actions.appendChild(r)
+      }
+      chip.appendChild(actions)
+      queueStrip.appendChild(chip)
+    }
+  }
+  const pushRef = (item: UploadQueueItem): void => {
+    const ref = chatAttachmentRef(item)
+    if (ref === null) return
+    const idx = state.chatMessages.findIndex(m => m.attachment?.upload_id === ref.upload_id)
+    if (idx >= 0) {
+      state.chatMessages[idx] = { ...state.chatMessages[idx]!, attachment: ref }
+      chatPersist()
+    } else {
+      chatPush('user', `📎 ${item.fileName}`, undefined, ref)
+    }
+  }
+  const onUploadState = (item: UploadQueueItem): void => {
+    queueItems = queueItems.map(x => x.fileId === item.fileId ? item : x)
+    pushRef(item)
+    renderQueue()
+  }
+  const attachFiles = async (files: File[]): Promise<void> => {
+    if (projectId === '' || projectId === undefined) {
+      showToast(rootHost(), t('shell', 'shell.chat.attachNoProject'))
+      return
+    }
+    const intakes = await api<Array<{ intake_id?: string; status?: string }>>(`/v1/projects/${encodeURIComponent(projectId)}/intake`)
+    const active = intakes?.find(i => ['draft', 'uploading', 'scanning', 'needs_input', 'grilling', 'proposal_ready', 'awaiting_human'].includes(i.status ?? ''))
+    if (active === undefined || active.intake_id === undefined) {
+      showToast(rootHost(), t('shell', 'shell.chat.attachNoIntake'))
+      return
+    }
+    const items = enqueueFiles(files.map(f => ({ name: f.name, size: f.size, type: f.type })))
+    queueItems.push(...items)
+    renderQueue()
+    for (const item of items) {
+      const file = files[items.indexOf(item)]
+      if (file === undefined) continue
+      filesById.set(item.fileId, file)
+      registerByteProvider(item.fileId, fileByteProvider(filesById))
+      let hashed = item
+      try {
+        hashed = markHashed(item, await sha256Hex(new Uint8Array(await file.arrayBuffer())))
+      } catch (error) {
+        queueItems = queueItems.map(x => x.fileId === item.fileId ? { ...x, state: 'failed' as const, lastError: (error as Error).message } : x)
+        renderQueue()
+        continue
+      }
+      hashed = { ...hashed, intakeId: active.intake_id, projectId }
+      queueItems = queueItems.map(x => x.fileId === item.fileId ? hashed : x)
+      const fin = await driveUpload(hashed, transport, {
+        readBytes: (fid, s, e) => fileByteProvider(filesById).read(fid, s, e),
+        onState: onUploadState,
+        shouldContinue: (cur) => !queueItems.some(q => q.fileId === cur.fileId && q.state === 'paused'),
+      })
+      unregisterByteProvider(item.fileId)
+      queueItems = queueItems.map(x => x.fileId === item.fileId ? fin : x)
+      pushRef(fin)
+      if (fin.state === 'failed') {
+        chatPush('error', t('shell', 'shell.chat.attachFailed', { name: fin.fileName, reason: fin.lastError ?? 'unknown' }))
+      } else if (fin.state === 'scanning') {
+        chatPush('assistant', t('shell', 'shell.chat.attachStaged', { name: fin.fileName }))
+      }
+      renderQueue()
+    }
+  }
+  attachBtn.onclick = () => attachInput.click()
+  attachInput.onchange = () => {
+    const picked = [...(attachInput.files ?? [])]
+    attachInput.value = ''
+    if (picked.length > 0) void attachFiles(picked)
+  }
+  const composerDropTarget = composer
+  composerDropTarget.ondragover = (event) => { event.preventDefault(); composer.style.borderColor = 'var(--accent)' }
+  composerDropTarget.ondragleave = () => { composer.style.borderColor = '' }
+  composerDropTarget.ondrop = (event) => {
+    event.preventDefault()
+    composer.style.borderColor = ''
+    const dropped = [...(event.dataTransfer?.files ?? [])]
+    if (dropped.length > 0) void attachFiles(dropped)
+  }
+  input.onpaste = (event) => {
+    const pasted = [...(event.clipboardData?.files ?? [])]
+    if (pasted.length > 0) {
+      event.preventDefault()
+      void attachFiles(pasted)
+    }
+  }
+  document.body.appendChild(attachInput)
   const mkBtn = (label: string, title: string): HTMLButtonElement => {
     const b = el('button', 'hbtn', label)
     b.title = title
@@ -1757,7 +1909,8 @@ export async function renderChat(
   const listBtn = mkBtn('•', t('shell', 'shell.chat.toolList'))
   listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
   if (modelSelect !== undefined) toolbar.appendChild(modelSelect)
-  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, clear)
+  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, attachBtn, clear)
+  composerRow.insertBefore(queueStrip, composer)
   const composerActions = el('div', 'chat-composer-actions')
   composerActions.append(toolbar, send)
   composer.appendChild(composerActions)

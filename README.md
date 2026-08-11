@@ -70,7 +70,7 @@ bash scripts/start-standalone-ui.sh
 /ideas
 /gates [project_id]
 /jobs [project_id]
-/reproduce [json]
+/reproduce <doi|arxiv|paper-artifact-id>
 /contract <json>
 /run <kind> <json>
 /evidence <json>

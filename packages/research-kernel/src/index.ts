@@ -5,7 +5,14 @@
 
 export { ResearchKernel, KernelError, validateUploadFileName, type KernelOptions, type IntegrityScanReport } from './kernel.js'
 export { createStartupBackup, type StartupBackupResult } from './backup.js'
-export { nextActionProjection, legacyNextActionStrings, INTAKE_ACTIVE_STATUSES, type NextActionContext, type NextActionJob, type NextActionIntake, type NextActionRoute } from './next-action.js'
+export { nextActionProjection, legacyNextActionStrings, INTAKE_ACTIVE_STATUSES, type NextActionContext, type NextActionJob, type NextActionIntake, type NextActionReproduction, type NextActionRoute } from './next-action.js'
+export { REPRODUCTION_DDL, reproductionCanonicalJson, reproductionSha256 } from './reproduction.js'
+export {
+  compareMetric, compareMetrics, compareTable, compareTables, compareFigure, compareFigures, compareManuscript,
+  comparisonGroupChecks, evaluateReportStatus, suggestFailureClass,
+  type MetricActual, type TableExpected, type TableActual, type FigureExpected, type FigureActual,
+  type ManuscriptExpected, type ManuscriptActual,
+} from './reproduction-compare.js'
 export {
   INTAKE_DDL, GRILL_TAXONOMY_VERSION, GRILL_QUESTION_REVISION, INTAKE_DEFAULT_TTL_MS, INTAKE_STAGED_TTL_MS,
   GRILL_QUESTION_BANK, questionsForTargetPhase, requiredQuestionCodes, scanIntakeArtifactStatic,

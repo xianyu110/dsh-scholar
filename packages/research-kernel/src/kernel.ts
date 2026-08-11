@@ -5,8 +5,11 @@
  * @module @dsh-scholar/research-kernel/kernel
  */
 
-import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from 'node:crypto'
-import { chmodSync, lstatSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, createPublicKey, randomBytes, randomUUID, verify, type KeyObject } from 'node:crypto'
+import {
+  chmodSync, closeSync, createReadStream, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync,
+  realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync,
+} from 'node:fs'
 import { join, relative, sep, dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
@@ -20,8 +23,21 @@ import {
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus, type ImportMapping,
   type ProjectDeletionReceipt,
+  type ProviderDescriptor, type ProviderCreateInput, type ProviderUpdateInput, type SecretRef,
+  type ProjectModelBinding, type ProjectModelBindingInput, type BindingPurpose,
+  type UploadSession, type UploadSessionView, type ChunkAppendResult, type UploadSessionBeginInput,
+  parseContentRange,
+  CHUNKED_UPLOAD_DEFAULT_CHUNK_BYTES, CHUNKED_UPLOAD_MAX_CHUNK_BYTES,
+  INTAKE_UPLOAD_QUOTA_DEFAULT_BYTES, INTAKE_UPLOAD_QUOTA_MAX_BYTES, CHUNKED_UPLOAD_SESSION_TTL_MS,
+  // REPRO-01 (docs/reproduction-contracts.md): paper reproduction schemas —
+  // PaperReproductionSpec / ReproductionAttempt / ReproducibilityReport wire
+  // shapes and the spec status transition table.
+  REPRODUCTION_SPEC_TRANSITIONS, PaperReproductionSpec, ReproductionAttempt, ReproductionReportInput, ReproducibilityReport,
+  type ClaimToReproduce, type CodeSource, type DataSource, type EnvironmentLock, type ExecutionBinding,
+  type MetricComparator, type PaperRef, type ReproductionLevel, type ReproductionSpecStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
+import { reproductionCanonicalJson, reproductionSha256 } from './reproduction.js'
 import { mkdirMode } from './fs-modes.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { openPtySessionStore, NullPtyAdapter, PtyError, type PtyAdapter, type PtyAppendResult, type PtyControlResult, type PtySessionStore } from './pty-session.js'
@@ -36,7 +52,7 @@ import {
   questionsForTargetPhase, requiredQuestionCodes, scanIntakeArtifactStatic, artifactKindForFile,
   isImportableMetricsFile, parseMetricsFileV1, buildPhaseProposal, questionViews,
   SAFE_PHASE_LANDING, isTexMaterializableFile, isCodeMaterializableFile, ARCHIVE_SCAN_EXTENSIONS,
-  INTAKE_ARCHIVE_EXTENSIONS,
+  INTAKE_ARCHIVE_EXTENSIONS, SECRET_SCAN_BYTES,
   type StaticScanVerdict,
 } from './intake.js'
 import {
@@ -45,6 +61,11 @@ import {
 } from './archive-scan.js'
 import { TrajectoryStore } from './trajectory.js'
 import { MetricsStore } from './metrics.js'
+import {
+  validateSecretRefInput, validateProviderBaseUrl, providerConfigHash, providerRedacted,
+  secretRefAvailable, parseProviderModels, type ProviderUrlAllowlist,
+} from './provider.js'
+import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -78,6 +99,43 @@ export interface IntegrityScanReport {
  * whitelist before generating any command line.
  */
 export const TEX_ENGINES: readonly string[] = ['pdflatex', 'lualatex', 'xelatex', 'bibtex', 'biber']
+
+/**
+ * CHUNK-01: upper bound for reading a staged file fully into memory for the
+ * controlled deep archive unpack scan. Bigger archives record
+ * `archive_extract.status='too_large'` (honest) — the entry/byte/ratio
+ * limits are re-applied at adoption-time materialization anyway.
+ */
+const ARCHIVE_DEEP_SCAN_MAX_BYTES = 256 * 1024 * 1024
+
+/** Stream a file and return its sha256 (bounded memory — multi-GiB safe). */
+function hashFileStreaming(path: string): string {
+  const hash = createHash('sha256')
+  const fd = openSync(path, 'r')
+  try {
+    const buffer = Buffer.alloc(1024 * 1024)
+    let read = 0
+    while ((read = readSync(fd, buffer, 0, buffer.byteLength, null)) > 0) {
+      hash.update(buffer.subarray(0, read))
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return hash.digest('hex')
+}
+
+/** Read at most `maxBytes` from the start of a file (bounded memory). */
+function readFileHead(path: string, maxBytes: number): Buffer {
+  const fd = openSync(path, 'r')
+  try {
+    const size = Math.min(maxBytes, fstatSync(fd).size)
+    const buffer = Buffer.alloc(size)
+    if (size > 0) readSync(fd, buffer, 0, size, 0)
+    return buffer
+  } finally {
+    closeSync(fd)
+  }
+}
 
 /** §4 (TEX-02): shell metacharacters that must never appear in a TeX build
  * path (mirrors the runner's materializeTexWorkspace rule). */
@@ -214,6 +272,29 @@ export interface KernelOptions {
    * corruption to survive the open.
    */
   recoverWorkspacesOnOpen?: boolean
+  /**
+   * CHUNK-01 (init-grill-upload-models.md §3): per-chunk size for batch
+   * chunked uploads. Default 8 MiB; instance may tighten; hard max
+   * 32 MiB (CHUNKED_UPLOAD_MAX_CHUNK_BYTES).
+   */
+  intakeChunkSizeBytes?: number
+  /**
+   * CHUNK-01: per-Intake reserved upload quota. Default 2 GiB
+   * (INTAKE_UPLOAD_QUOTA_DEFAULT_BYTES); hard max 10 GiB
+   * (INTAKE_UPLOAD_QUOTA_MAX_BYTES).
+   */
+  intakeQuotaBytes?: number
+  /**
+   * MODEL-01: server-side secret root for `file`-scheme SecretRef
+   * availability checks. Absent → file refs report available=false (honest).
+   * Never echoed to the browser beyond the boolean.
+   */
+  secretRoot?: string | null
+  /**
+   * MODEL-01: base-URL allowlist for provider registration (SSRF fail
+   * closed). Defaults: https only, DNS hosts must be allowlisted.
+   */
+  providerUrlAllowlist?: ProviderUrlAllowlist
 }
 
 /** Error carrying an HTTP status for the API adapter. */
@@ -496,6 +577,55 @@ interface IntakeQuestionRow {
   answered_at: string | null
 }
 
+/** Row shapes for the CHUNK-01 batch chunked-upload tables. */
+interface UploadSessionRow {
+  upload_id: string
+  intake_id: string
+  project_id: string
+  file_name: string
+  media_type: string
+  expected_size: number
+  expected_sha256: string | null
+  chunk_size: number
+  committed_offset: number
+  status: string
+  finalized_sha256: string | null
+  created_by_principal: string
+  created_at: string
+  updated_at: string
+  expires_at: string
+}
+
+interface UploadChunkRow {
+  upload_id: string
+  offset: number
+  size: number
+  sha256: string
+}
+
+/** Row shapes for the MODEL-01 provider registry. */
+interface ModelProviderRow {
+  provider_id: string
+  display_name: string
+  kind: string
+  base_url: string
+  enabled: number
+  capabilities: string
+  credential_json: string
+  revision: number
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+interface ModelProviderModelRow {
+  provider_id: string
+  model_id: string
+  display_name: string | null
+  capabilities: string
+  model_revision: number
+}
+
 function eventFromRow(row: OutboxEventRow): KernelEvent {
   return {
     event_id: row.event_id,
@@ -610,6 +740,21 @@ export class ResearchKernel {
    */
   static INTAKE_STAGED_TTL_MS = INTAKE_STAGED_TTL_MS
 
+  /** CHUNK-01: default chunk size for batch chunked uploads (8 MiB). */
+  static CHUNKED_UPLOAD_DEFAULT_CHUNK_BYTES = CHUNKED_UPLOAD_DEFAULT_CHUNK_BYTES
+
+  /** CHUNK-01: hard cap for one chunk (32 MiB). */
+  static CHUNKED_UPLOAD_MAX_CHUNK_BYTES = CHUNKED_UPLOAD_MAX_CHUNK_BYTES
+
+  /** CHUNK-01: default per-Intake reserved upload quota (2 GiB). */
+  static INTAKE_UPLOAD_QUOTA_DEFAULT_BYTES = INTAKE_UPLOAD_QUOTA_DEFAULT_BYTES
+
+  /** CHUNK-01: hard cap for the per-Intake quota (10 GiB). */
+  static INTAKE_UPLOAD_QUOTA_MAX_BYTES = INTAKE_UPLOAD_QUOTA_MAX_BYTES
+
+  /** CHUNK-01: open chunked-upload stage retention floor (≥24 h). */
+  static CHUNKED_UPLOAD_SESSION_TTL_MS = CHUNKED_UPLOAD_SESSION_TTL_MS
+
   /**
    * ONBOARD-01 (research-onboarding.md §4.2): controlled archive unpack
    * scan limits (archive-scan.ts). Applied at scanIntake (deep scan — a
@@ -701,6 +846,14 @@ export class ResearchKernel {
   readonly previewDebounceMs: number
   /** §12.1 (TEX-03): auto-trigger previews on every workspace write. */
   readonly previewAutoTrigger: boolean
+  /** CHUNK-01: negotiated per-chunk size for batch chunked uploads. */
+  readonly intakeChunkSizeBytes: number
+  /** CHUNK-01: per-Intake reserved upload quota. */
+  readonly intakeQuotaBytes: number
+  /** MODEL-01: secret root for file-scheme SecretRef availability (null = none). */
+  readonly secretRoot: string | null
+  /** MODEL-01: provider base-URL allowlist (SSRF fail closed). */
+  readonly providerUrlAllowlist: ProviderUrlAllowlist
   /** §12.1 (TEX-03): in-flight debounce timers, one per document. */
   private readonly previewTimers = new Map<string, NodeJS.Timeout>()
   /**
@@ -735,6 +888,18 @@ export class ResearchKernel {
    * plaintext (the runner holds it from the claim response).
    */
   private readonly leaseTokens = new Map<string, string>()
+  /**
+   * REPRO-01 (docs/reproduction-contracts.md §2.3): in-memory plaintext lease
+   * tokens for reproduction ATTEMPTS (attempt_id → token). The database only
+   * stores sha256(token) in reproduction_attempts.lease_token_hash; this map
+   * backs the start-attempt response (the caller receives the plaintext
+   * token once) and is cleared when the attempt is reported. After a kernel
+   * restart it is empty — report-time fencing still verifies via the hash
+   * column, but an idempotent start-attempt replay after a restart returns
+   * `lease_token: null` (the caller must hold the token from its original
+   * start).
+   */
+  private readonly reproductionLeaseTokens = new Map<string, string>()
 
   constructor(options: KernelOptions = {}) {
     // MIG-V1 (0017): the migration runner receives the CAS root so legacy
@@ -784,6 +949,20 @@ export class ResearchKernel {
     // durable, so any request that survived a restart is re-armed below.
     this.previewDebounceMs = options.previewDebounceMs ?? TEX_PREVIEW_DEBOUNCE_MS_DEFAULT
     this.previewAutoTrigger = options.previewAutoTrigger ?? false
+    // CHUNK-01 (init-grill-upload-models.md §3): chunk size default 8 MiB,
+    // hard max 32 MiB; intake quota default 2 GiB, hard max 10 GiB. An
+    // instance may only TIGHTEN these (a too-large value is clamped down).
+    this.intakeChunkSizeBytes = Math.min(
+      options.intakeChunkSizeBytes ?? ResearchKernel.CHUNKED_UPLOAD_DEFAULT_CHUNK_BYTES,
+      ResearchKernel.CHUNKED_UPLOAD_MAX_CHUNK_BYTES,
+    )
+    this.intakeQuotaBytes = Math.min(
+      options.intakeQuotaBytes ?? ResearchKernel.INTAKE_UPLOAD_QUOTA_DEFAULT_BYTES,
+      ResearchKernel.INTAKE_UPLOAD_QUOTA_MAX_BYTES,
+    )
+    // MODEL-01: secret root for file-scheme SecretRef availability.
+    this.secretRoot = options.secretRoot ?? null
+    this.providerUrlAllowlist = options.providerUrlAllowlist ?? {}
     // CONFIG-01: pin the effective runtime config through the registry. The
     // registry validates the values (unknown keys / floor violations throw
     // here — fail fast at construction) and returns the one-way sha256 pin.
@@ -813,6 +992,9 @@ export class ResearchKernel {
       const timer = setInterval(() => {
         try {
           this.ptySweepIdle()
+          // CHUNK-01: GC expired open upload sessions (≥24h) alongside the
+          // PTY sweep — a sweep failure must never take the kernel down.
+          this.cleanupUploadSessions()
         } catch {
           // A sweep failure must never take the kernel down.
         }
@@ -2696,67 +2878,99 @@ export class ResearchKernel {
     )
     for (const artifact of artifacts) {
       const partPath = this.intakeStagedPath(intakeId, artifact.sha256)
-      let staged: Buffer
+      let stat: ReturnType<typeof statSync>
       try {
-        staged = readFileSync(partPath)
+        stat = statSync(partPath)
       } catch {
         throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} staged bytes are missing — re-upload (stage GC?)`)
       }
-      const actualSha = createHash('sha256').update(staged).digest('hex')
-      if (actualSha !== artifact.sha256 || staged.byteLength !== artifact.size_bytes) {
+      // CHUNK-01 (init-grill-upload-models.md §3): files staged through the
+      // batch chunked pipeline may exceed the 32 MiB whole-file cap (up to
+      // the per-Intake quota). Hash verification streams the file; the
+      // static scan runs on a bounded head; the controlled deep archive
+      // scan reads the full buffer only up to ARCHIVE_DEEP_SCAN_MAX_BYTES
+      // (larger archives record `too_large` and stay clean — honest note).
+      let staged: Buffer | null = null
+      let actualSha: string
+      if (stat.size <= ResearchKernel.UPLOAD_MAX_FILE_BYTES) {
+        try {
+          staged = readFileSync(partPath)
+        } catch {
+          throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} staged bytes are missing — re-upload (stage GC?)`)
+        }
+        actualSha = createHash('sha256').update(staged).digest('hex')
+      } else {
+        actualSha = hashFileStreaming(partPath)
+      }
+      if (actualSha !== artifact.sha256 || stat.size !== artifact.size_bytes) {
         throw new KernelError(422, 'stage_corrupted', `intake artifact ${artifact.file_name} content hash mismatch (recorded ${artifact.sha256}, got ${actualSha})`)
       }
-      const verdict = scanIntakeArtifactStatic(artifact.file_name, artifact.media_type, staged)
+      const scanBytes = staged ?? readFileHead(partPath, SECRET_SCAN_BYTES)
+      const verdict = scanIntakeArtifactStatic(artifact.file_name, artifact.media_type, scanBytes, stat.size)
       // Deep archive unpack scan for clean zip/tar/tar.gz artifacts.
       let scanResult: Record<string, unknown> = verdict.scan_result
       let quarantine = verdict.quarantine
       const observations = [...verdict.observations]
       if (verdict.quarantine === 'clean' && ARCHIVE_SCAN_EXTENSIONS.includes(extensionOfFile(artifact.file_name))) {
-        try {
-          const unpacked = scanArchive(staged, artifact.file_name, this.archiveLimits())
-          archivesScanned += 1
-          extractedEntries += unpacked.entries.length
-          extractedBytes += unpacked.extracted_bytes
-          scanResult = {
-            ...verdict.scan_result,
-            archive_extract: {
-              status: 'ok',
-              kind: unpacked.kind,
-              extracted_entries: unpacked.entries.length,
-              extracted_bytes: unpacked.extracted_bytes,
-              entries: unpacked.entries.map(e => ({ path: e.path, size_bytes: e.size_bytes })),
-            },
-          }
+        if (staged === null && stat.size > ARCHIVE_DEEP_SCAN_MAX_BYTES) {
+          // CHUNK-01: deep unpack scanning a multi-hundred-MiB archive in
+          // memory is out of scope for the static pipeline — record
+          // `too_large` honestly (the entry/byte/ratio limits are
+          // re-applied at adoption-time materialization anyway).
+          scanResult = { ...verdict.scan_result, archive_extract: { status: 'too_large', reason: `archive is ${stat.size} bytes > ${ARCHIVE_DEEP_SCAN_MAX_BYTES}; deep unpack scan deferred to adoption-time materialization` } }
           observations.push({
             detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
-            value: `${unpacked.kind} archive: ${unpacked.entries.length} entries / ${unpacked.extracted_bytes} bytes`,
-            warnings: ['archive_extract_ok'],
+            value: 'archive deep scan skipped (too large for the static pipeline)',
+            warnings: ['archive_deep_scan_deferred'],
           })
-        } catch (error) {
-          if (error instanceof ArchiveScanError) {
+        } else {
+          const archiveBytes = staged ?? readFileSync(partPath)
+          try {
+            const unpacked = scanArchive(archiveBytes, artifact.file_name, this.archiveLimits())
             archivesScanned += 1
-            if (error.code === 'archive_gzip_single_file') {
-              // Legitimate single-file gzip (e.g. data.csv.gz): not unpacked
-              // but NOT refused — stays clean and adoptable as a code blob.
-              scanResult = { ...verdict.scan_result, archive_extract: { status: 'unsupported', reason: error.message } }
-              observations.push({
-                detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
-                value: `archive not unpacked: ${error.message}`,
-                warnings: ['archive_extract_unsupported'],
-              })
-            } else {
-              // Fail closed: a path escape / bomb / special entry / corrupt
-              // archive quarantines the artifact until removed or replaced.
-              quarantine = 'quarantined'
-              scanResult = { ...verdict.scan_result, archive_extract: { status: 'rejected', code: error.code, reason: error.message } }
-              observations.push({
-                detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
-                value: `archive scan rejected: ${error.code}`,
-                warnings: ['archive_extract_rejected'],
-              })
+            extractedEntries += unpacked.entries.length
+            extractedBytes += unpacked.extracted_bytes
+            scanResult = {
+              ...verdict.scan_result,
+              archive_extract: {
+                status: 'ok',
+                kind: unpacked.kind,
+                extracted_entries: unpacked.entries.length,
+                extracted_bytes: unpacked.extracted_bytes,
+                entries: unpacked.entries.map(e => ({ path: e.path, size_bytes: e.size_bytes })),
+              },
             }
-          } else {
-            throw error
+            observations.push({
+              detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
+              value: `${unpacked.kind} archive: ${unpacked.entries.length} entries / ${unpacked.extracted_bytes} bytes`,
+              warnings: ['archive_extract_ok'],
+            })
+          } catch (error) {
+            if (error instanceof ArchiveScanError) {
+              archivesScanned += 1
+              if (error.code === 'archive_gzip_single_file') {
+                // Legitimate single-file gzip (e.g. data.csv.gz): not unpacked
+                // but NOT refused — stays clean and adoptable as a code blob.
+                scanResult = { ...verdict.scan_result, archive_extract: { status: 'unsupported', reason: error.message } }
+                observations.push({
+                  detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
+                  value: `archive not unpacked: ${error.message}`,
+                  warnings: ['archive_extract_unsupported'],
+                })
+              } else {
+                // Fail closed: a path escape / bomb / special entry / corrupt
+                // archive quarantines the artifact until removed or replaced.
+                quarantine = 'quarantined'
+                scanResult = { ...verdict.scan_result, archive_extract: { status: 'rejected', code: error.code, reason: error.message } }
+                observations.push({
+                  detector: 'archive_extract', detector_version: '1', locator: artifact.file_name,
+                  value: `archive scan rejected: ${error.code}`,
+                  warnings: ['archive_extract_rejected'],
+                })
+              }
+            } else {
+              throw error
+            }
           }
         }
       }
@@ -3496,6 +3710,623 @@ export class ResearchKernel {
       try {
         if (readdirSync(dir).length === 0) rmdirSync(dir)
       } catch { /* raced */ }
+    }
+    return removed
+  }
+
+  // ── Model Provider registry (MODEL-01, init-grill-upload-models.md §4) ──
+
+  private providerModels(providerId: string): ModelProviderModelRow[] {
+    return this.db.prepare('SELECT * FROM model_provider_models WHERE provider_id = ? ORDER BY model_id').all(providerId) as unknown as ModelProviderModelRow[]
+  }
+
+  private providerFromRow(row: ModelProviderRow): ProviderDescriptor {
+    const models = this.providerModels(row.provider_id)
+    return {
+      provider_id: row.provider_id,
+      display_name: row.display_name,
+      kind: row.kind as ProviderDescriptor['kind'],
+      base_url: row.base_url,
+      enabled: row.enabled === 1,
+      capabilities: jsonParse(row.capabilities, ['chat']) as ProviderDescriptor['capabilities'],
+      models: models.map(m => ({
+        model_id: m.model_id,
+        display_name: m.display_name ?? undefined,
+        capabilities: jsonParse(m.capabilities, ['chat']) as ProviderDescriptor['models'][number]['capabilities'],
+        revision: m.model_revision,
+      })),
+      revision: row.revision,
+      credential: jsonParse(row.credential_json, { scheme: 'file', name: '' }) as SecretRef,
+      created_by: row.created_by,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }
+  }
+
+  /** MODEL-01: opaque provider lookup（404 provider_unknown）。 */
+  getProvider(providerId: string): ProviderDescriptor {
+    const row = this.db.prepare('SELECT * FROM model_providers WHERE provider_id = ?').get(providerId) as ModelProviderRow | undefined
+    if (row === undefined) throw new KernelError(404, 'provider_unknown', `model provider ${providerId} is not registered`)
+    return this.providerFromRow(row)
+  }
+
+  /** MODEL-01: instance/global provider list（浏览器响应经 redacted 脱敏）。 */
+  listProviders(): ProviderDescriptor[] {
+    const rows = this.db.prepare('SELECT * FROM model_providers ORDER BY provider_id').all() as unknown as ModelProviderRow[]
+    return rows.map(row => this.providerFromRow(row))
+  }
+
+  /**
+   * MODEL-01: 浏览器响应形态 —— credential 只含 metadata + available 布尔，
+   * 绝不返回 secret value（本 kernel 从不存储 value）。
+   */
+  providerView(provider: ProviderDescriptor): ReturnType<typeof providerRedacted> {
+    return providerRedacted(provider, this.secretRoot)
+  }
+
+  /** MODEL-01: SecretRef 可用性（file scheme 存在性检查；keyring/vault false）。 */
+  secretRefAvailable(ref: SecretRef): boolean {
+    return secretRefAvailable(ref, this.secretRoot)
+  }
+
+  /** MODEL-01: canonical config hash（绑定/运行中任务快照 revision+hash）。 */
+  providerHash(provider: ProviderDescriptor): string {
+    return providerConfigHash(provider)
+  }
+
+  /**
+   * MODEL-01: register an instance/global Provider（api-contracts.md §19
+   * model-providers）。SecretRef 严格 schema（value/token/password 字段
+   * → 422 secret_value_forbidden）；base URL 服务端 SSRF/scheme 校验
+   * （非法 scheme/userinfo/私有网段/未 allowlist 主机 fail closed）。
+   */
+  registerProvider(input: ProviderCreateInput & { created_by?: string }): ProviderDescriptor {
+    validateSecretRefInput(input.credential)
+    validateProviderBaseUrl(input.base_url, this.providerUrlAllowlist)
+    const existing = this.db.prepare('SELECT provider_id FROM model_providers WHERE provider_id = ?').get(input.provider_id)
+    if (existing !== undefined) {
+      throw new KernelError(409, 'provider_exists', `model provider ${input.provider_id} already exists`)
+    }
+    const models = parseProviderModels(input.models)
+    for (const model of models) {
+      for (const capability of model.capabilities) {
+        if (!input.capabilities.includes(capability)) {
+          throw new KernelError(422, 'provider_capability_missing',
+            `model ${model.model_id} declares capability '${capability}' which the provider does not`)
+        }
+      }
+    }
+    const now = nowIso()
+    const descriptor: ProviderDescriptor = {
+      provider_id: input.provider_id,
+      display_name: input.display_name,
+      kind: input.kind ?? 'custom',
+      base_url: input.base_url,
+      enabled: input.enabled ?? true,
+      capabilities: input.capabilities,
+      models,
+      revision: 1,
+      credential: input.credential,
+      created_by: input.created_by ?? '',
+      created_at: now,
+      updated_at: now,
+    }
+    return withTransaction(this.db, () => {
+      this.db.prepare(
+        `INSERT INTO model_providers (provider_id, display_name, kind, base_url, enabled, capabilities, credential_json, revision, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        descriptor.provider_id, descriptor.display_name, descriptor.kind, descriptor.base_url,
+        descriptor.enabled ? 1 : 0, JSON.stringify(descriptor.capabilities), JSON.stringify(descriptor.credential),
+        descriptor.revision, descriptor.created_by, descriptor.created_at, descriptor.updated_at,
+      )
+      for (const model of descriptor.models) {
+        this.db.prepare(
+          'INSERT INTO model_provider_models (provider_id, model_id, display_name, capabilities, model_revision) VALUES (?, ?, ?, ?, ?)',
+        ).run(descriptor.provider_id, model.model_id, model.display_name ?? null, JSON.stringify(model.capabilities), model.revision)
+      }
+      return descriptor
+    })
+  }
+
+  /**
+   * MODEL-01: Provider 修改使用 revision CAS（expected_revision 不匹配 →
+   * 409 provider_revision_conflict）。修改不影响已快照的运行中任务。
+   */
+  updateProvider(providerId: string, input: ProviderUpdateInput & { updated_by?: string }): ProviderDescriptor {
+    const current = this.getProvider(providerId)
+    if (input.expected_revision !== current.revision) {
+      throw new KernelError(409, 'provider_revision_conflict',
+        `provider ${providerId} revision ${current.revision} does not match expected ${input.expected_revision}`)
+    }
+    const next: ProviderDescriptor = {
+      ...current,
+      display_name: input.display_name ?? current.display_name,
+      kind: input.kind ?? current.kind,
+      base_url: input.base_url ?? current.base_url,
+      enabled: input.enabled ?? current.enabled,
+      capabilities: input.capabilities ?? current.capabilities,
+      models: input.models !== undefined ? parseProviderModels(input.models) : current.models,
+      credential: input.credential ?? current.credential,
+    }
+    validateSecretRefInput(next.credential)
+    validateProviderBaseUrl(next.base_url, this.providerUrlAllowlist)
+    for (const model of next.models) {
+      for (const capability of model.capabilities) {
+        if (!next.capabilities.includes(capability)) {
+          throw new KernelError(422, 'provider_capability_missing',
+            `model ${model.model_id} declares capability '${capability}' which the provider does not`)
+        }
+      }
+    }
+    next.revision = current.revision + 1
+    next.updated_at = nowIso()
+    return withTransaction(this.db, () => {
+      this.db.prepare(
+        `UPDATE model_providers SET display_name = ?, kind = ?, base_url = ?, enabled = ?, capabilities = ?, credential_json = ?, revision = ?, updated_at = ? WHERE provider_id = ?`,
+      ).run(
+        next.display_name, next.kind, next.base_url, next.enabled ? 1 : 0, JSON.stringify(next.capabilities),
+        JSON.stringify(next.credential), next.revision, next.updated_at, providerId,
+      )
+      this.db.prepare('DELETE FROM model_provider_models WHERE provider_id = ?').run(providerId)
+      for (const model of next.models) {
+        this.db.prepare(
+          'INSERT INTO model_provider_models (provider_id, model_id, display_name, capabilities, model_revision) VALUES (?, ?, ?, ?, ?)',
+        ).run(providerId, model.model_id, model.display_name ?? null, JSON.stringify(model.capabilities), model.revision)
+      }
+      return next
+    })
+  }
+
+  /**
+   * MODEL-01: delete（revision CAS）。引用该 provider 的项目绑定被清除
+   * （绑定是软引用快照，provider 删除后失效 —— 显式、可审计）。
+   */
+  deleteProvider(providerId: string, expectedRevision: number): void {
+    const current = this.getProvider(providerId)
+    if (expectedRevision !== current.revision) {
+      throw new KernelError(409, 'provider_revision_conflict',
+        `provider ${providerId} revision ${current.revision} does not match expected ${expectedRevision}`)
+    }
+    withTransaction(this.db, () => {
+      this.db.prepare('DELETE FROM model_provider_models WHERE provider_id = ?').run(providerId)
+      this.db.prepare('DELETE FROM model_providers WHERE provider_id = ?').run(providerId)
+      // Clear bindings that referenced the deleted provider (fail closed:
+      // a binding to a missing provider must never be served as valid).
+      this.db.prepare(
+        `UPDATE projects SET binding_provider_id = NULL, binding_model_id = NULL, binding_purpose = NULL,
+           binding_provider_revision = NULL, binding_config_hash = NULL, binding_revision = 0,
+           binding_updated_by = '', binding_updated_at = NULL
+         WHERE binding_provider_id = ?`,
+      ).run(providerId)
+    })
+  }
+
+  /** MODEL-01: 项目 Model Binding 读取（无绑定 → null）。 */
+  getProjectModelBinding(projectId: string): ProjectModelBinding | null {
+    const project = this.getProject(projectId)
+    const row = this.db.prepare(
+      'SELECT binding_provider_id, binding_model_id, binding_purpose, binding_provider_revision, binding_config_hash, binding_revision, binding_updated_by, binding_updated_at FROM projects WHERE project_id = ?',
+    ).get(projectId) as {
+      binding_provider_id: string | null
+      binding_model_id: string | null
+      binding_purpose: string | null
+      binding_provider_revision: number | null
+      binding_config_hash: string | null
+      binding_revision: number
+      binding_updated_by: string | null
+      binding_updated_at: string | null
+    } | undefined
+    if (row === undefined || row.binding_provider_id === null || row.binding_provider_id === '') return null
+    return {
+      project_id: projectId,
+      purpose: row.binding_purpose as BindingPurpose,
+      provider_id: row.binding_provider_id,
+      model_id: row.binding_model_id ?? '',
+      provider_revision: row.binding_provider_revision ?? 0,
+      provider_config_hash: row.binding_config_hash ?? '',
+      revision: row.binding_revision,
+      updated_by: row.binding_updated_by ?? '',
+      updated_at: row.binding_updated_at ?? project.updated_at,
+    }
+  }
+
+  /**
+   * MODEL-01: 项目只提交 opaque provider/model ID（api-contracts.md §19
+   * model-bindings）。校验 provider 存在且 enabled、模型在 provider 目录、
+   * provider/model 声明匹配 purpose 的能力；快照 provider revision + config
+   * hash（运行中任务固定创建时 revision/hash）。绑定自身 revision CAS。
+   */
+  setProjectModelBinding(projectId: string, input: ProjectModelBindingInput & { updated_by?: string }): ProjectModelBinding {
+    this.getProject(projectId)
+    const provider = this.getProvider(input.provider_id)
+    if (!provider.enabled) {
+      throw new KernelError(422, 'provider_disabled', `model provider ${input.provider_id} is disabled`)
+    }
+    const model = provider.models.find(m => m.model_id === input.model_id)
+    if (model === undefined) {
+      throw new KernelError(422, 'model_unknown', `model ${input.model_id} is not in provider ${input.provider_id} catalog`)
+    }
+    const capability = input.purpose
+    if (!provider.capabilities.includes(capability) && !model.capabilities.includes(capability)) {
+      throw new KernelError(422, 'provider_capability_missing',
+        `provider ${input.provider_id} / model ${input.model_id} do not declare capability '${capability}'`)
+    }
+    const existing = this.getProjectModelBinding(projectId)
+    if (input.expected_revision !== undefined && existing !== null && input.expected_revision !== existing.revision) {
+      throw new KernelError(409, 'binding_revision_conflict',
+        `project ${projectId} model binding revision ${existing.revision} does not match expected ${input.expected_revision}`)
+    }
+    const now = nowIso()
+    const binding: ProjectModelBinding = {
+      project_id: projectId,
+      purpose: input.purpose,
+      provider_id: input.provider_id,
+      model_id: input.model_id,
+      provider_revision: provider.revision,
+      provider_config_hash: this.providerHash(provider),
+      revision: (existing?.revision ?? 0) + 1,
+      updated_by: input.updated_by ?? '',
+      updated_at: now,
+    }
+    this.db.prepare(
+      `UPDATE projects SET binding_provider_id = ?, binding_model_id = ?, binding_purpose = ?,
+         binding_provider_revision = ?, binding_config_hash = ?, binding_revision = ?,
+         binding_updated_by = ?, binding_updated_at = ? WHERE project_id = ?`,
+    ).run(
+      binding.provider_id, binding.model_id, binding.purpose, binding.provider_revision,
+      binding.provider_config_hash, binding.revision, binding.updated_by, binding.updated_at, projectId,
+    )
+    return binding
+  }
+
+  // ── CHUNK-01: batch chunked upload sessions (init-grill-upload-models.md §3) ──
+
+  private uploadSessionFromRow(row: UploadSessionRow): UploadSession {
+    return {
+      upload_id: row.upload_id,
+      intake_id: row.intake_id,
+      project_id: row.project_id,
+      file_name: row.file_name,
+      media_type: row.media_type,
+      expected_size: row.expected_size,
+      expected_sha256: row.expected_sha256,
+      chunk_size: row.chunk_size,
+      committed_offset: row.committed_offset,
+      status: row.status as UploadSession['status'],
+      finalized_sha256: row.finalized_sha256,
+      created_by: row.created_by_principal,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      expires_at: row.expires_at,
+    }
+  }
+
+  private getUploadSessionRow(uploadId: string, intakeId?: string): UploadSessionRow {
+    const row = intakeId === undefined
+      ? this.db.prepare('SELECT * FROM upload_sessions WHERE upload_id = ?').get(uploadId) as UploadSessionRow | undefined
+      : this.db.prepare('SELECT * FROM upload_sessions WHERE upload_id = ? AND intake_id = ?').get(uploadId, intakeId) as UploadSessionRow | undefined
+    if (row === undefined) {
+      throw new KernelError(404, 'upload_session_not_found', `upload session ${uploadId} not found${intakeId === undefined ? '' : ` in intake ${intakeId}`}`)
+    }
+    return row
+  }
+
+  private uploadSessionPartPath(intakeId: string, uploadId: string): string {
+    return uploadStagedPath(this.intakeStagedRoot, intakeId, uploadId)
+  }
+
+  /** CHUNK-01: open upload sessions of one intake（断线/刷新后续传查询）。 */
+  listUploadSessions(intakeId: string): UploadSessionView[] {
+    this.getIntakeSessionRow(intakeId)
+    const rows = this.db.prepare('SELECT * FROM upload_sessions WHERE intake_id = ? ORDER BY created_at').all(intakeId) as unknown as UploadSessionRow[]
+    return rows.map(row => ({
+      upload_id: row.upload_id,
+      intake_id: row.intake_id,
+      file_name: row.file_name,
+      media_type: row.media_type,
+      expected_size: row.expected_size,
+      expected_sha256: row.expected_sha256,
+      chunk_size: row.chunk_size,
+      committed_offset: row.committed_offset,
+      status: row.status as UploadSessionView['status'],
+      finalized_sha256: row.finalized_sha256,
+      expires_at: row.expires_at,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }))
+  }
+
+  /**
+   * CHUNK-01 begin: 事务性创建上传会话并预留配额（默认单 Intake 2 GiB、
+   * 硬上限 10 GiB；超限 413 upload_quota_exceeded）。会话绑定 intake、
+   * project、Principal、文件名、media type、expected size/hash、chunk
+   * 上限与 expiry（≥24h）。扫描前字节只写入隔离 intake staging。
+   */
+  beginUploadSession(intakeId: string, input: UploadSessionBeginInput & { principal_id?: string }): UploadSession {
+    const row = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(row)
+    this.assertIntakeMutable(session)
+    this.assertIntakeNotExpired(session)
+    validateUploadFileName(input.file_name)
+    const chunkSize = Math.max(1, Math.min(
+      input.chunk_size ?? this.intakeChunkSizeBytes,
+      this.intakeChunkSizeBytes,
+    ))
+    // 配额预留：开放会话 expected_size + 已 staged artifact 之和 ≤ quota。
+    const openSessions = this.db.prepare(
+      "SELECT expected_size FROM upload_sessions WHERE intake_id = ? AND status = 'open'",
+    ).all(intakeId) as unknown as Array<{ expected_size: number }>
+    const stagedArtifacts = this.db.prepare(
+      "SELECT size_bytes FROM intake_artifacts WHERE intake_id = ? AND quarantine = 'staged'",
+    ).all(intakeId) as unknown as Array<{ size_bytes: number }>
+    const quota = intakeQuotaCheck({
+      quotaBytes: this.intakeQuotaBytes,
+      openSessions,
+      stagedArtifacts,
+      additionalBytes: input.expected_size,
+    })
+    if (quota.exceeded) {
+      throw new KernelError(413, 'upload_quota_exceeded',
+        `intake upload quota exceeded: ${quota.used + input.expected_size} bytes > ${quota.limit} (per-Intake reserved quota)`)
+    }
+    const now = nowIso()
+    const uploadId = randomId('upl')
+    const upload: UploadSession = {
+      upload_id: uploadId,
+      intake_id: intakeId,
+      project_id: row.project_id ?? '',
+      file_name: input.file_name,
+      media_type: input.media_type ?? 'application/octet-stream',
+      expected_size: input.expected_size,
+      expected_sha256: input.expected_sha256 ?? null,
+      chunk_size: chunkSize,
+      committed_offset: 0,
+      status: 'open',
+      finalized_sha256: null,
+      created_by: input.principal_id ?? '',
+      created_at: now,
+      updated_at: now,
+      expires_at: new Date(Date.now() + ResearchKernel.CHUNKED_UPLOAD_SESSION_TTL_MS).toISOString(),
+    }
+    try {
+      mkdirMode(join(this.intakeStagedRoot, intakeId), 0o700)
+    } catch { /* already exists */ }
+    return withTransaction(this.db, () => {
+      this.db.prepare(
+        `INSERT INTO upload_sessions (upload_id, intake_id, project_id, file_name, media_type, expected_size, expected_sha256,
+           chunk_size, committed_offset, status, created_by_principal, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        upload.upload_id, upload.intake_id, upload.project_id, upload.file_name, upload.media_type,
+        upload.expected_size, upload.expected_sha256, upload.chunk_size, 0, 'open',
+        upload.created_by, upload.created_at, upload.updated_at, upload.expires_at,
+      )
+      return upload
+    })
+  }
+
+  /**
+   * CHUNK-01 append: `Content-Range: bytes <start>-<end>[/<total>]` +
+   * `X-Chunk-SHA256`，body 为原始字节。`start == committed_offset` 才追加；
+   * 旧范围同字节/hash 重放成功（replayed=true）；gap、overlap 不同内容或
+   * total 不同返回 409；hash 不匹配 422；chunk 超上限 413。
+   */
+  appendUploadChunk(intakeId: string, uploadId: string, input: {
+    bytes: Uint8Array
+    contentRange: string
+    chunkSha256: string
+  }): ChunkAppendResult {
+    const row = this.getUploadSessionRow(uploadId, intakeId)
+    if (row.status !== 'open') {
+      throw new KernelError(409, 'upload_session_closed', `upload session ${uploadId} is ${row.status} — no more chunks accepted`)
+    }
+    const range = parseContentRange(input.contentRange)
+    if (range === null) {
+      throw new KernelError(422, 'invalid_content_range', `malformed Content-Range '${input.contentRange}' (expected 'bytes <start>-<end>[/<total>]')`)
+    }
+    if (!/^[0-9a-f]{64}$/.test(input.chunkSha256)) {
+      throw new KernelError(422, 'invalid_chunk_hash_header', 'X-Chunk-SHA256 must be a 64-hex sha256')
+    }
+    const len = input.bytes.byteLength
+    if (range.end !== range.start + len - 1) {
+      throw new KernelError(422, 'chunk_range_mismatch',
+        `Content-Range end ${range.end} does not match body length (start ${range.start}, ${len} bytes)`)
+    }
+    if (range.total !== null && range.total !== row.expected_size) {
+      throw new KernelError(409, 'chunk_total_mismatch',
+        `Content-Range total ${range.total} does not match expected_size ${row.expected_size}`)
+    }
+    if (len > row.chunk_size) {
+      throw new KernelError(413, 'chunk_too_large',
+        `chunk is ${len} bytes > session chunk_size ${row.chunk_size}`)
+    }
+    if (range.end >= row.expected_size) {
+      throw new KernelError(422, 'chunk_beyond_size',
+        `chunk end ${range.end} is beyond expected_size ${row.expected_size}`)
+    }
+    const actualSha = createHash('sha256').update(Buffer.from(input.bytes)).digest('hex')
+    if (actualSha !== input.chunkSha256) {
+      throw new KernelError(422, 'chunk_hash_mismatch',
+        `chunk sha256 does not match X-Chunk-SHA256 (server computed ${actualSha})`)
+    }
+    if (range.start < row.committed_offset) {
+      // 旧范围重放：同 offset 同字节/hash → 成功且 replayed=true。
+      const existing = this.db.prepare('SELECT size, sha256 FROM upload_chunks WHERE upload_id = ? AND offset = ?')
+        .get(uploadId, range.start) as { size: number; sha256: string } | undefined
+      if (existing !== undefined && existing.size === len && existing.sha256 === actualSha) {
+        return { upload_id: uploadId, committed_offset: row.committed_offset, replayed: true }
+      }
+      throw new KernelError(409, 'chunk_overlap_conflict',
+        `chunk at offset ${range.start} overlaps committed data with different content (committed_offset ${row.committed_offset})`)
+    }
+    if (range.start > row.committed_offset) {
+      throw new KernelError(409, 'chunk_gap',
+        `chunk starts at ${range.start} but committed_offset is ${row.committed_offset} — chunks must be contiguous`)
+    }
+    // start === committed_offset：顺序追加。
+    const partPath = this.uploadSessionPartPath(intakeId, uploadId)
+    try {
+      mkdirMode(join(this.intakeStagedRoot, intakeId), 0o700)
+      const fd = openSync(partPath, row.committed_offset === 0 ? 'w' : 'r+', 0o600)
+      try {
+        writeSync(fd, Buffer.from(input.bytes), 0, len, row.committed_offset)
+        chmodSync(partPath, 0o600)
+      } finally {
+        closeSync(fd)
+      }
+    } catch (error) {
+      throw new KernelError(500, 'stage_write_failed', `upload session staged write failed: ${(error as Error).message}`)
+    }
+    return withTransaction(this.db, () => {
+      this.db.prepare('INSERT INTO upload_chunks (upload_id, offset, size, sha256) VALUES (?, ?, ?, ?)')
+        .run(uploadId, range.start, len, actualSha)
+      const committed = range.end + 1
+      this.db.prepare('UPDATE upload_sessions SET committed_offset = ?, updated_at = ? WHERE upload_id = ?')
+        .run(committed, nowIso(), uploadId)
+      return { upload_id: uploadId, committed_offset: committed, replayed: false }
+    })
+  }
+
+  /**
+   * CHUNK-01 finalize: 只在 offset 等于 expected size 时进行；服务端流式
+   * 重算完整 size/SHA-256（不一致 422 且不产生 IntakeArtifact）。成功后
+   * 在隔离 intake staging 注册 IntakeArtifact（sha256 命名 .part，
+   * quarantine=staged）并将会话标记 finalized；重复 finalize 返回同一
+   * artifact（幂等）。
+   */
+  finalizeUploadSession(intakeId: string, uploadId: string): IntakeArtifact {
+    const row = this.getUploadSessionRow(uploadId, intakeId)
+    if (row.status === 'finalized' && row.finalized_sha256 !== null) {
+      const existing = this.db.prepare('SELECT * FROM intake_artifacts WHERE intake_id = ? AND artifact_id = ?')
+        .get(intakeId, `sha256:${row.finalized_sha256}`) as IntakeArtifactRow | undefined
+      if (existing !== undefined) {
+        return {
+          intake_id: existing.intake_id,
+          artifact_id: existing.artifact_id,
+          file_name: existing.file_name,
+          media_type: existing.media_type,
+          size_bytes: existing.size_bytes,
+          sha256: existing.sha256,
+          quarantine: existing.quarantine as IntakeArtifact['quarantine'],
+          scan_result: jsonParse(existing.scan_result, {}),
+          created_at: existing.created_at,
+        }
+      }
+      throw new KernelError(422, 'stage_corrupted', `upload session ${uploadId} finalized but its artifact is missing — re-upload`)
+    }
+    if (row.status !== 'open') {
+      throw new KernelError(409, 'upload_session_closed', `upload session ${uploadId} is ${row.status} — cannot finalize`)
+    }
+    const sessionRow = this.getIntakeSessionRow(intakeId)
+    const session = this.intakeSessionFromRow(sessionRow)
+    this.assertIntakeMutable(session)
+    this.assertIntakeNotExpired(session)
+    if (row.committed_offset !== row.expected_size) {
+      throw new KernelError(422, 'chunk_incomplete',
+        `upload session ${uploadId} has ${row.committed_offset}/${row.expected_size} bytes — finalize requires the full expected size`)
+    }
+    const partPath = this.uploadSessionPartPath(intakeId, uploadId)
+    let actualSize: number
+    let actualSha: string
+    try {
+      actualSize = statSync(partPath).size
+    } catch {
+      throw new KernelError(422, 'stage_corrupted', `upload session ${uploadId} staged bytes are missing — re-upload (stage GC?)`)
+    }
+    actualSha = hashFileStreaming(partPath)
+    if (actualSize !== row.expected_size) {
+      throw new KernelError(422, 'chunk_size_mismatch',
+        `finalized size ${actualSize} does not match expected_size ${row.expected_size} — no IntakeArtifact produced`)
+    }
+    if (row.expected_sha256 !== null && actualSha !== row.expected_sha256) {
+      throw new KernelError(422, 'chunk_hash_mismatch',
+        `finalized sha256 does not match expected_sha256 — no IntakeArtifact produced`)
+    }
+    const artifactId = `sha256:${actualSha}`
+    const artifactTarget = this.intakeStagedPath(intakeId, actualSha)
+    const now = nowIso()
+    return withTransaction(this.db, () => {
+      const existing = this.db.prepare('SELECT * FROM intake_artifacts WHERE intake_id = ? AND artifact_id = ?')
+        .get(intakeId, artifactId) as IntakeArtifactRow | undefined
+      if (existing === undefined) {
+        try {
+          mkdirMode(join(this.intakeStagedRoot, intakeId), 0o700)
+          if (artifactTarget !== partPath) {
+            try { unlinkSync(artifactTarget) } catch { /* first write */ }
+            renameSync(partPath, artifactTarget)
+          }
+        } catch (error) {
+          throw new KernelError(500, 'stage_write_failed', `intake staged promote failed: ${(error as Error).message}`)
+        }
+        const artifact: IntakeArtifact = {
+          artifact_id: artifactId,
+          intake_id: intakeId,
+          file_name: row.file_name,
+          media_type: row.media_type,
+          size_bytes: actualSize,
+          sha256: actualSha,
+          quarantine: 'staged',
+          scan_result: {},
+          created_at: now,
+        }
+        this.db.prepare(
+          'INSERT INTO intake_artifacts (intake_id, artifact_id, file_name, media_type, size_bytes, sha256, quarantine, scan_result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(intakeId, artifactId, artifact.file_name, artifact.media_type, artifact.size_bytes, artifact.sha256, artifact.quarantine, '{}', now)
+        this.setIntakeStatus(intakeId, 'uploading', sessionRow.status, 'artifact_staged')
+        this.db.prepare('UPDATE upload_sessions SET status = ?, finalized_sha256 = ?, updated_at = ? WHERE upload_id = ?')
+          .run('finalized', actualSha, now, uploadId)
+        return artifact
+      }
+      // 幂等重放：artifact 已存在（重复 finalize / 内容去重）。
+      this.db.prepare('UPDATE upload_sessions SET status = ?, finalized_sha256 = ?, updated_at = ? WHERE upload_id = ?')
+        .run('finalized', actualSha, now, uploadId)
+      return {
+        intake_id: existing.intake_id,
+        artifact_id: existing.artifact_id,
+        file_name: existing.file_name,
+        media_type: existing.media_type,
+        size_bytes: existing.size_bytes,
+        sha256: existing.sha256,
+        quarantine: existing.quarantine as IntakeArtifact['quarantine'],
+        scan_result: jsonParse(existing.scan_result, {}),
+        created_at: existing.created_at,
+      }
+    })
+  }
+
+  /** CHUNK-01 abort：幂等；删除会话行 + chunk 行 + staging 字节（释放配额）。
+   * 会话已不存在（重复 abort / 已被 GC）时同样返回 ok —— 幂等 no-op。 */
+  abortUploadSession(intakeId: string, uploadId: string): { ok: true } {
+    const row = this.db.prepare('SELECT upload_id FROM upload_sessions WHERE upload_id = ? AND intake_id = ?')
+      .get(uploadId, intakeId) as { upload_id: string } | undefined
+    if (row !== undefined) {
+      withTransaction(this.db, () => {
+        this.db.prepare('DELETE FROM upload_chunks WHERE upload_id = ?').run(uploadId)
+        this.db.prepare('DELETE FROM upload_sessions WHERE upload_id = ?').run(uploadId)
+      })
+    }
+    try { unlinkSync(this.uploadSessionPartPath(intakeId, uploadId)) } catch { /* already gone */ }
+    return { ok: true }
+  }
+
+  /**
+   * CHUNK-01 GC：过期（≥24h）开放会话 —— 删除行 + staging 字节，释放
+   * 配额。由 kernel 常驻 sweep 定时器调用（与 PTY idle sweep 同周期），
+   * 也可按需手动触发。返回回收的会话数。
+   */
+  cleanupUploadSessions(now = Date.now()): number {
+    const expired = this.db.prepare(
+      "SELECT upload_id, intake_id FROM upload_sessions WHERE status = 'open' AND expires_at < ?",
+    ).all(new Date(now).toISOString()) as unknown as Array<{ upload_id: string; intake_id: string }>
+    let removed = 0
+    for (const item of expired) {
+      withTransaction(this.db, () => {
+        this.db.prepare('DELETE FROM upload_chunks WHERE upload_id = ?').run(item.upload_id)
+        this.db.prepare('DELETE FROM upload_sessions WHERE upload_id = ?').run(item.upload_id)
+      })
+      try { unlinkSync(this.uploadSessionPartPath(item.intake_id, item.upload_id)) } catch { /* already gone */ }
+      removed += 1
     }
     return removed
   }
@@ -6571,6 +7402,510 @@ export class ResearchKernel {
     }
   }
 
+  // ── paper reproduction (docs/reproduction-contracts.md §2/§4) ────────────
+
+  /** Shared ref validation for spec create/update: paper ref format, paper
+   *  artifact/snapshot/data artifacts belong to THIS project (cross-project
+   *  refs are 422/404 — no enumeration), code snapshots exist, execution
+   *  binding uses a REGISTERED opaque runner profile + non-empty target id,
+   *  and digest-pinned environment locks are well-formed. External
+   *  metadata/full text fetched from the paper ref is never trusted here. */
+  private validateReproductionRefs(projectId: string, refs: {
+    paper_ref?: PaperRef | null
+    code_source?: CodeSource | null
+    data_inputs?: DataSource[]
+    execution_binding?: ExecutionBinding | null
+    source_artifact_id?: string | null
+  }): void {
+    if (refs.paper_ref !== undefined && refs.paper_ref !== null) {
+      const parsed = PaperReproductionSpec.shape.paper_ref.safeParse(refs.paper_ref)
+      if (!parsed.success) {
+        throw new KernelError(422, 'invalid_paper_ref', `invalid paper reference: ${parsed.error.issues.map(i => i.message).join('; ')}`)
+      }
+      if (refs.paper_ref.artifact_id !== undefined) {
+        // Scanned-PDF paper artifact: must be registered in THIS project.
+        this.getArtifact(projectId, refs.paper_ref.artifact_id)
+      }
+    }
+    if (refs.source_artifact_id !== undefined && refs.source_artifact_id !== null && refs.source_artifact_id !== '') {
+      this.getArtifact(projectId, refs.source_artifact_id)
+    }
+    if (refs.code_source !== undefined && refs.code_source !== null) {
+      if (refs.code_source.kind === 'snapshot') {
+        const snapshot = this.getCodeSnapshot(refs.code_source.code_snapshot_id)
+        if (snapshot.project_id !== projectId) {
+          throw new KernelError(422, 'code_snapshot_foreign',
+            `code snapshot ${refs.code_source.code_snapshot_id} belongs to another project (cross-project code is rejected)`)
+        }
+      }
+      // git sources: the zod schema pins the exact commit (branch/tag is not
+      // executable) — the materialization into an immutable CodeSnapshot is
+      // a separate verifier step (contract §2.1).
+    }
+    for (const data of refs.data_inputs ?? []) {
+      if (data.kind === 'artifact') this.getArtifact(projectId, data.artifact_id)
+      // recipe sources carry acquisition_recipe + expected_sha256 (zod) — a
+      // clean-room that cannot satisfy them is blocked at report time, never
+      // silently skipped.
+    }
+    if (refs.execution_binding !== undefined && refs.execution_binding !== null) {
+      if (getRunnerProfile(refs.execution_binding.runner_profile_id) === null) {
+        throw new KernelError(422, 'runner_profile_unknown',
+          `runner profile ${refs.execution_binding.runner_profile_id} is not registered (typed opaque profile ids only)`)
+      }
+    }
+  }
+
+  /** Row → PaperReproductionSpec (body is canonical JSON). */
+  private reproductionSpecFromRow(row: { body: string }): PaperReproductionSpec {
+    return PaperReproductionSpec.parse(JSON.parse(row.body) as unknown)
+  }
+
+  /** Parse a spec-shaped object, mapping zod failures to a stable 422 (the
+   *  HTTP layer never leaks zod internals for reproduction inputs). */
+  private parseReproductionSpec(value: unknown): PaperReproductionSpec {
+    const parsed = PaperReproductionSpec.safeParse(value)
+    if (!parsed.success) {
+      throw new KernelError(422, 'invalid_paper_ref',
+        `invalid reproduction spec: ${parsed.error.issues.map(i => i.message).join('; ')}`)
+    }
+    return parsed.data
+  }
+
+  /**
+   * REPRO-01 §2.1/§4: create (or idempotently restore) a PaperReproductionSpec.
+   * Validates the paper ref format, non-empty claims and every code/data/
+   * binding ref; stores the canonical spec JSON; emits
+   * `reproduction.spec.created`. Same Idempotency-Key + request hash replays
+   * the SAME spec, a different hash is 409.
+   */
+  createReproductionSpec(input: {
+    project_id: string
+    owner: { principal_id: string; tenant_id?: string; auth_method?: string }
+    paper_ref: PaperRef
+    source_locator?: string
+    source_artifact_id?: string | null
+    reproduction_level?: ReproductionLevel
+    claims_to_reproduce: ClaimToReproduce[]
+    code_source?: CodeSource | null
+    data_inputs?: DataSource[]
+    execution_binding?: ExecutionBinding | null
+    environment_lock?: EnvironmentLock
+    expected_outputs?: string[]
+    metric_comparators?: MetricComparator[]
+    idempotency_key?: string
+    request_hash?: string
+  }): PaperReproductionSpec {
+    this.getProject(input.project_id)
+    if (input.owner === undefined || input.owner === null || input.owner.principal_id.trim() === '') {
+      throw new KernelError(422, 'principal_required', 'createReproductionSpec requires an owner Principal')
+    }
+    if (!Array.isArray(input.claims_to_reproduce) || input.claims_to_reproduce.length === 0) {
+      throw new KernelError(422, 'claims_required', 'createReproductionSpec requires at least one claim to reproduce')
+    }
+    // Idempotency-Key replay (project-scoped like jobs/intake).
+    if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+      const existing = this.db.prepare('SELECT * FROM reproduction_specs WHERE project_id = ? AND idempotency_key = ?')
+        .get(input.project_id, input.idempotency_key) as { body: string; request_hash: string | null } | undefined
+      if (existing !== undefined) {
+        if (existing.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict',
+            `reproduction idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        return this.reproductionSpecFromRow(existing)
+      }
+    }
+    this.validateReproductionRefs(input.project_id, {
+      paper_ref: input.paper_ref,
+      code_source: input.code_source ?? null,
+      data_inputs: input.data_inputs,
+      execution_binding: input.execution_binding ?? null,
+      source_artifact_id: input.source_artifact_id ?? null,
+    })
+    const now = nowIso()
+    const spec = this.parseReproductionSpec({
+      spec_id: randomId('repro'),
+      schema_version: 1,
+      project_id: input.project_id,
+      owner: {
+        principal_id: input.owner.principal_id,
+        tenant_id: input.owner.tenant_id ?? '',
+        auth_method: input.owner.auth_method ?? '',
+      },
+      paper_ref: input.paper_ref,
+      source_locator: input.source_locator ?? '',
+      source_artifact_id: input.source_artifact_id ?? (input.paper_ref.artifact_id ?? null),
+      reproduction_level: input.reproduction_level ?? 'baseline_official',
+      claims_to_reproduce: input.claims_to_reproduce,
+      code_source: input.code_source ?? null,
+      data_inputs: input.data_inputs ?? [],
+      execution_binding: input.execution_binding ?? null,
+      environment_lock: input.environment_lock ?? {},
+      expected_outputs: input.expected_outputs ?? [],
+      metric_comparators: input.metric_comparators ?? [],
+      revision: 1,
+      status: 'draft',
+      created_at: now,
+      updated_at: now,
+    })
+    this.db.prepare(`INSERT INTO reproduction_specs
+        (spec_id, project_id, schema_version, owner_principal, body, revision, status, idempotency_key, request_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(spec.spec_id, spec.project_id, spec.schema_version, JSON.stringify(spec.owner), JSON.stringify(spec),
+        spec.revision, spec.status, input.idempotency_key ?? null, input.request_hash ?? '', spec.created_at, spec.updated_at)
+    this.emit(spec.project_id, 'reproduction.spec.created', { spec_id: spec.spec_id, project_id: spec.project_id, revision: spec.revision, status: spec.status })
+    return spec
+  }
+
+  /** REPRO-01 §4: project-scoped spec lookup — unknown/foreign → 404. */
+  getReproductionSpec(projectId: string, specId: string): PaperReproductionSpec {
+    this.getProject(projectId)
+    const row = this.db.prepare('SELECT * FROM reproduction_specs WHERE spec_id = ? AND project_id = ?')
+      .get(specId, projectId) as { body: string } | undefined
+    if (row === undefined) throw new KernelError(404, 'reproduction_spec_not_found', `reproduction spec ${specId} not found in project ${projectId}`)
+    return this.reproductionSpecFromRow(row)
+  }
+
+  listReproductionSpecs(projectId: string): PaperReproductionSpec[] {
+    this.getProject(projectId)
+    const rows = this.db.prepare('SELECT * FROM reproduction_specs WHERE project_id = ? ORDER BY created_at')
+      .all(projectId) as unknown as Array<{ body: string }>
+    return rows.map(row => this.reproductionSpecFromRow(row))
+  }
+
+  /**
+   * REPRO-01 §4: revision-CAS update of a spec — patch fields are merged and
+   * re-validated (paper ref format, refs, status transition table); a stale
+   * expected_revision is 409, an illegal status transition is 422. Terminal
+   * `completed` is only reachable via a recorded report.
+   */
+  updateReproductionSpec(projectId: string, specId: string, input: {
+    expected_revision: number
+    patch: {
+      paper_ref?: PaperRef
+      source_locator?: string
+      source_artifact_id?: string | null
+      reproduction_level?: ReproductionLevel
+      claims_to_reproduce?: ClaimToReproduce[]
+      code_source?: CodeSource | null
+      data_inputs?: DataSource[]
+      execution_binding?: ExecutionBinding | null
+      environment_lock?: EnvironmentLock
+      expected_outputs?: string[]
+      metric_comparators?: MetricComparator[]
+      status?: ReproductionSpecStatus
+    }
+  }): PaperReproductionSpec {
+    const row = this.db.prepare('SELECT * FROM reproduction_specs WHERE spec_id = ? AND project_id = ?')
+      .get(specId, projectId) as { body: string; revision: number } | undefined
+    if (row === undefined) throw new KernelError(404, 'reproduction_spec_not_found', `reproduction spec ${specId} not found in project ${projectId}`)
+    if (row.revision !== input.expected_revision) {
+      throw new KernelError(409, 'reproduction_revision_conflict',
+        `expected reproduction spec revision ${input.expected_revision}, got ${row.revision}`)
+    }
+    const current = this.reproductionSpecFromRow(row)
+    const merged = this.parseReproductionSpec({ ...current, ...input.patch, updated_at: nowIso() })
+    if (input.patch.status !== undefined && input.patch.status !== current.status) {
+      const allowed = REPRODUCTION_SPEC_TRANSITIONS[current.status]
+      if (!allowed.includes(input.patch.status)) {
+        throw new KernelError(422, 'reproduction_status_conflict',
+          `reproduction spec status transition ${current.status} → ${input.patch.status} is not allowed (draft → confirmed → completed|blocked via report; any → failed|blocked|archived)`)
+      }
+    }
+    this.validateReproductionRefs(projectId, {
+      paper_ref: input.patch.paper_ref ?? current.paper_ref,
+      code_source: input.patch.code_source !== undefined ? input.patch.code_source : current.code_source,
+      data_inputs: input.patch.data_inputs ?? current.data_inputs,
+      execution_binding: input.patch.execution_binding !== undefined ? input.patch.execution_binding : current.execution_binding,
+      source_artifact_id: input.patch.source_artifact_id !== undefined ? input.patch.source_artifact_id : current.source_artifact_id,
+    })
+    const updated = { ...merged, revision: current.revision + 1, updated_at: nowIso() }
+    const next = this.parseReproductionSpec(updated)
+    const result = this.db.prepare('UPDATE reproduction_specs SET body = ?, revision = ?, status = ?, updated_at = ? WHERE spec_id = ? AND project_id = ? AND revision = ?')
+      .run(JSON.stringify(next), next.revision, next.status, next.updated_at, specId, projectId, input.expected_revision)
+    if (Number(result.changes) !== 1) {
+      throw new KernelError(409, 'reproduction_revision_conflict', 'reproduction spec changed while updating (CAS race)')
+    }
+    this.emit(projectId, 'reproduction.spec.updated', { spec_id: specId, project_id: projectId, revision: next.revision, status: next.status })
+    return next
+  }
+
+  /**
+   * REPRO-01 §2.3/§4: start one reproduction attempt — pins the spec
+   * revision, allocates generation 1 + a fresh lease token (hash at rest,
+   * plaintext returned once), records the submitter Principal and emits
+   * `reproduction.attempt.started`. A draft spec cannot start (409
+   * spec_not_confirmed); idempotent replay returns the SAME attempt.
+   */
+  startReproductionAttempt(projectId: string, specId: string, input: {
+    submitter_principal: string
+    reason?: string
+    job_id?: string | null
+    run_id?: string | null
+    code_snapshot_id?: string | null
+    approved_contract_version?: number | null
+    idempotency_key?: string
+    request_hash?: string
+  }): { attempt: ReproductionAttempt; generation: number; lease_token: string | null } {
+    const spec = this.getReproductionSpec(projectId, specId)
+    if (spec.status === 'draft') {
+      throw new KernelError(409, 'spec_not_confirmed', `reproduction spec ${specId} is 'draft' — confirm the reproduction plan before starting an attempt`)
+    }
+    if (spec.status === 'archived') {
+      throw new KernelError(409, 'spec_archived', `reproduction spec ${specId} is archived`)
+    }
+    if (input.submitter_principal === undefined || input.submitter_principal.trim() === '') {
+      throw new KernelError(422, 'principal_required', 'startReproductionAttempt requires a submitter Principal')
+    }
+    if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+      const existing = this.db.prepare('SELECT * FROM reproduction_attempts WHERE project_id = ? AND idempotency_key = ?')
+        .get(projectId, input.idempotency_key) as { body: string; request_hash: string | null } | undefined
+      if (existing !== undefined) {
+        if (existing.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict',
+            `reproduction attempt idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        const attempt = ReproductionAttempt.parse(JSON.parse(existing.body) as unknown)
+        return { attempt, generation: attempt.generation, lease_token: this.reproductionLeaseTokens.get(attempt.attempt_id) ?? null }
+      }
+    }
+    const now = nowIso()
+    const token = randomBytes(24).toString('hex')
+    const attempt = ReproductionAttempt.parse({
+      attempt_id: randomId('repa'),
+      spec_id: spec.spec_id,
+      project_id: projectId,
+      generation: 1,
+      status: 'running',
+      spec_revision: spec.revision,
+      approved_contract_version: input.approved_contract_version ?? null,
+      job_id: input.job_id ?? null,
+      run_id: input.run_id ?? null,
+      code_snapshot_id: input.code_snapshot_id ?? (spec.code_source !== null && spec.code_source.kind === 'snapshot' ? spec.code_source.code_snapshot_id : null),
+      data_pins: spec.data_inputs.filter(d => d.kind === 'artifact').map(d => d.artifact_id),
+      environment_pins: {
+        image_digest: spec.environment_lock.image_digest ?? '',
+        runner_profile_id: spec.environment_lock.runner_profile_id ?? spec.execution_binding?.runner_profile_id ?? '',
+        target_id: spec.environment_lock.target_id ?? spec.execution_binding?.target_id ?? '',
+        effective_config_hash: spec.environment_lock.effective_config_hash ?? '',
+      },
+      run_manifest_refs: [],
+      submitter_principal: input.submitter_principal,
+      reason: input.reason ?? '',
+      created_at: now,
+      updated_at: now,
+    })
+    this.db.prepare(`INSERT INTO reproduction_attempts
+        (attempt_id, spec_id, project_id, generation, status, spec_revision, body, lease_token_hash, submitter_principal, reason, idempotency_key, request_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(attempt.attempt_id, attempt.spec_id, attempt.project_id, attempt.generation, attempt.status, attempt.spec_revision,
+        JSON.stringify(attempt), createHash('sha256').update(token).digest('hex'),
+        attempt.submitter_principal, attempt.reason, input.idempotency_key ?? null, input.request_hash ?? '', attempt.created_at, attempt.updated_at)
+    this.reproductionLeaseTokens.set(attempt.attempt_id, token)
+    this.emit(projectId, 'reproduction.attempt.started', {
+      attempt_id: attempt.attempt_id, spec_id: attempt.spec_id, project_id: projectId,
+      generation: attempt.generation, spec_revision: attempt.spec_revision, status: attempt.status,
+    })
+    return { attempt, generation: attempt.generation, lease_token: token }
+  }
+
+  /** REPRO-01 §4: project-scoped attempt lookup — unknown/foreign → 404. */
+  getReproductionAttempt(projectId: string, attemptId: string): ReproductionAttempt {
+    this.getProject(projectId)
+    const row = this.db.prepare('SELECT * FROM reproduction_attempts WHERE attempt_id = ? AND project_id = ?')
+      .get(attemptId, projectId) as { body: string } | undefined
+    if (row === undefined) throw new KernelError(404, 'reproduction_attempt_not_found', `reproduction attempt ${attemptId} not found in project ${projectId}`)
+    return ReproductionAttempt.parse(JSON.parse(row.body) as unknown)
+  }
+
+  listReproductionAttempts(projectId: string, specId?: string): ReproductionAttempt[] {
+    this.getProject(projectId)
+    const rows = specId === undefined
+      ? this.db.prepare('SELECT * FROM reproduction_attempts WHERE project_id = ? ORDER BY created_at').all(projectId)
+      : this.db.prepare('SELECT * FROM reproduction_attempts WHERE project_id = ? AND spec_id = ? ORDER BY created_at').all(projectId, specId)
+    return (rows as unknown as Array<{ body: string }>).map(row => ReproductionAttempt.parse(JSON.parse(row.body) as unknown))
+  }
+
+  /**
+   * REPRO-01 §2.3/§4: record the immutable ReproducibilityReport — the
+   * verifier service identity path (x-service-principal: verifier + service
+   * token at the HTTP layer). Fenced by attempt generation + lease token
+   * hash; the report body goes into the CAS and the row keeps body_hash +
+   * cas_ref. The attempt becomes `reported` and the spec moves to
+   * `completed` (or `blocked` when the report is blocked). Same
+   * Idempotency-Key + request hash replays the SAME report, a different hash
+   * is 409. exit 0 is execution_succeeded — the report status decides.
+   */
+  reportReproductionAttempt(input: {
+    attempt_id: string
+    service_principal: string
+    request_id: string
+    attempt_generation: number
+    lease_token: string
+    report: ReproductionReportInput
+    idempotency_key?: string
+    request_hash?: string
+  }): ReproducibilityReport {
+    if (input.service_principal !== 'verifier') {
+      throw new KernelError(403, 'service_identity_required',
+        'reproduction report ingestion requires x-service-principal: verifier')
+    }
+    const row = this.db.prepare('SELECT * FROM reproduction_attempts WHERE attempt_id = ?')
+      .get(input.attempt_id) as { body: string; spec_id: string; project_id: string; generation: number; lease_token_hash: string; status: string } | undefined
+    if (row === undefined) throw new KernelError(404, 'reproduction_attempt_not_found', `reproduction attempt ${input.attempt_id} not found`)
+    const attempt = ReproductionAttempt.parse(JSON.parse(row.body) as unknown)
+    // Fencing: generation + lease token hash (STORE-06 pattern — hash column
+    // is the authority; the plaintext token exists only in the caller's
+    // hands and the in-memory map).
+    if (input.attempt_generation !== row.generation) {
+      throw new KernelError(409, 'lease_stale', `reproduction attempt ${input.attempt_id} has generation ${row.generation}, got ${input.attempt_generation}`)
+    }
+    if (row.lease_token_hash !== '' && createHash('sha256').update(input.lease_token).digest('hex') !== row.lease_token_hash) {
+      throw new KernelError(409, 'lease_stale', `reproduction attempt ${input.attempt_id} lease token mismatch`)
+    }
+    if (row.lease_token_hash === '') {
+      throw new KernelError(409, 'lease_stale', `reproduction attempt ${input.attempt_id} has no lease token (never started by the kernel)`)
+    }
+    // Idempotency replay is checked BEFORE the attempt-status gate: a
+    // duplicate delivery of an already-reported attempt must return the
+    // SAME report (replay semantics), not a 409 on the terminal status.
+    if (input.idempotency_key !== undefined && input.idempotency_key !== '') {
+      const existing = this.db.prepare('SELECT * FROM reproduction_reports WHERE idempotency_key = ?')
+        .get(input.idempotency_key) as { body_hash: string; cas_ref: string; request_hash: string | null; report_id: string; spec_id: string; attempt_id: string } | undefined
+      if (existing !== undefined) {
+        if (existing.request_hash !== (input.request_hash ?? '')) {
+          throw new KernelError(409, 'idempotency_conflict',
+            `reproduction report idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        return this.readReproductionReportBlob(existing)
+      }
+    }
+    if (!['running', 'succeeded', 'failed', 'blocked'].includes(attempt.status)) {
+      throw new KernelError(409, 'attempt_not_reportable',
+        `reproduction attempt ${input.attempt_id} is '${attempt.status}'; only running/succeeded/failed/blocked attempts accept a report`)
+    }
+    const now = nowIso()
+    const report = ReproducibilityReport.parse({
+      report_id: randomId('repr'),
+      spec_id: attempt.spec_id,
+      attempt_id: attempt.attempt_id,
+      project_id: attempt.project_id,
+      paper_refs: input.report.paper_refs,
+      claim_refs: input.report.claim_refs,
+      status: input.report.status,
+      preflight: input.report.preflight,
+      runtime_verified: input.report.runtime_verified,
+      environment: input.report.environment,
+      run_manifest_refs: input.report.run_manifest_refs,
+      paper_comparisons: input.report.paper_comparisons,
+      run_comparisons: input.report.run_comparisons,
+      checks: input.report.checks,
+      missing_outputs: input.report.missing_outputs,
+      extra_outputs: input.report.extra_outputs,
+      failure_class: input.report.failure_class,
+      stable_error_code: input.report.stable_error_code,
+      retryable: input.report.retryable,
+      generated_by: input.report.generated_by,
+      tool_versions: input.report.tool_versions,
+      created_at: now,
+    })
+    // The CAS body IS the canonical JSON (sorted top-level keys) so the
+    // content hash is stable and equals the row's body_hash.
+    const body = reproductionCanonicalJson(report as unknown as Record<string, unknown>)
+    const bodyHash = reproductionSha256(report as unknown as Record<string, unknown>)
+    const stored = this.cas.put(body)
+    if (stored.sha256 !== bodyHash) {
+      throw new KernelError(500, 'report_hash_mismatch', 'reproduction report CAS hash does not match the canonical body hash')
+    }
+    const casRef = `sha256:${stored.sha256}`
+    const storedReport = { ...report, report_hash: bodyHash, cas_ref: casRef }
+    this.db.prepare(`INSERT INTO reproduction_reports
+        (report_id, spec_id, attempt_id, project_id, status, body_hash, cas_ref, idempotency_key, request_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(storedReport.report_id, storedReport.spec_id, storedReport.attempt_id, storedReport.project_id, storedReport.status,
+        bodyHash, casRef, input.idempotency_key ?? null, input.request_hash ?? '', now, now)
+    const reportedAttempt = ReproductionAttempt.parse({ ...attempt, status: 'reported', updated_at: now })
+    this.db.prepare('UPDATE reproduction_attempts SET status = ?, body = ?, updated_at = ? WHERE attempt_id = ?')
+      .run('reported', JSON.stringify(reportedAttempt), now, attempt.attempt_id)
+    // Source/material links: the report ref + every signed RunManifest ref.
+    const link = this.db.prepare('INSERT OR IGNORE INTO reproduction_links (spec_id, kind, ref, created_at) VALUES (?, ?, ?, ?)')
+    link.run(attempt.spec_id, 'report', casRef, now)
+    for (const manifestRef of storedReport.run_manifest_refs) {
+      link.run(attempt.spec_id, 'run_manifest', manifestRef, now)
+    }
+    // Spec lifecycle: completed unless the report is blocked (blocked is
+    // NEVER silently skipped — the spec stays blocked).
+    const specRow = this.db.prepare('SELECT * FROM reproduction_specs WHERE spec_id = ?')
+      .get(attempt.spec_id) as { body: string; revision: number } | undefined
+    if (specRow !== undefined) {
+      const spec = this.reproductionSpecFromRow(specRow)
+      const nextStatus: ReproductionSpecStatus = storedReport.status === 'blocked' ? 'blocked' : 'completed'
+      const next = this.parseReproductionSpec({ ...spec, status: nextStatus, revision: spec.revision + 1, updated_at: now })
+      this.db.prepare('UPDATE reproduction_specs SET body = ?, revision = ?, status = ?, updated_at = ? WHERE spec_id = ? AND revision = ?')
+        .run(JSON.stringify(next), next.revision, next.status, next.updated_at, attempt.spec_id, spec.revision)
+    }
+    this.reproductionLeaseTokens.delete(attempt.attempt_id)
+    this.emit(attempt.project_id, 'reproduction.report.recorded', {
+      report_id: storedReport.report_id, attempt_id: attempt.attempt_id, spec_id: attempt.spec_id,
+      project_id: attempt.project_id, status: storedReport.status, report_hash: bodyHash, cas_ref: casRef,
+    })
+    return storedReport
+  }
+
+  /** Read a stored report back from the CAS by its row. */
+  private readReproductionReportBlob(row: { body_hash: string; cas_ref: string; report_id: string }): ReproducibilityReport {
+    const blob = this.cas.read(row.body_hash)
+    const report = ReproducibilityReport.parse(JSON.parse(blob.toString('utf8')) as unknown)
+    if (createHash('sha256').update(blob).digest('hex') !== row.body_hash) {
+      throw new KernelError(500, 'report_corrupted', `reproduction report ${row.report_id} blob hash mismatch (CAS integrity)`)
+    }
+    return { ...report, report_hash: row.body_hash, cas_ref: row.cas_ref }
+  }
+
+  /** REPRO-01 §4: project-scoped report lookup — unknown/foreign → 404. */
+  getReproductionReport(projectId: string, reportId: string): ReproducibilityReport {
+    this.getProject(projectId)
+    const row = this.db.prepare('SELECT * FROM reproduction_reports WHERE report_id = ? AND project_id = ?')
+      .get(reportId, projectId) as { body_hash: string; cas_ref: string; report_id: string } | undefined
+    if (row === undefined) throw new KernelError(404, 'reproduction_report_not_found', `reproduction report ${reportId} not found in project ${projectId}`)
+    return this.readReproductionReportBlob(row)
+  }
+
+  listReproductionReports(projectId: string, specId?: string): ReproducibilityReport[] {
+    this.getProject(projectId)
+    const rows = specId === undefined
+      ? this.db.prepare('SELECT * FROM reproduction_reports WHERE project_id = ? ORDER BY created_at').all(projectId)
+      : this.db.prepare('SELECT * FROM reproduction_reports WHERE project_id = ? AND spec_id = ? ORDER BY created_at').all(projectId, specId)
+    return (rows as unknown as Array<{ body_hash: string; cas_ref: string; report_id: string }>)
+      .map(row => this.readReproductionReportBlob(row))
+  }
+
+  /** Reproduction view for the NextAction projection (GUIDE-01 overlay). */
+  reproductionProjectionFor(projectId: string): Array<{
+    spec_id: string
+    status: ReproductionSpecStatus
+    revision: number
+    attempt_count: number
+    report_count: number
+    latest_report_status: 'pass' | 'fail' | 'blocked' | 'inconclusive' | null
+    has_running_attempt: boolean
+  }> {
+    return this.listReproductionSpecs(projectId).map(spec => {
+      const attempts = this.listReproductionAttempts(projectId, spec.spec_id)
+      const reports = this.listReproductionReports(projectId, spec.spec_id)
+      const latest = reports.length > 0 ? reports[reports.length - 1]!.status : null
+      return {
+        spec_id: spec.spec_id,
+        status: spec.status,
+        revision: spec.revision,
+        attempt_count: attempts.length,
+        report_count: reports.length,
+        latest_report_status: latest,
+        has_running_attempt: attempts.some(a => a.status === 'running'),
+      }
+    })
+  }
+
   // ── projection (design §4.2 Projection API) ──────────────────────────────
 
   projectProjection(projectId: string): {
@@ -6622,6 +7957,11 @@ export class ResearchKernel {
         target_phase: session.target_phase,
         artifact_count: Number((this.db.prepare('SELECT COUNT(*) AS n FROM intake_artifacts WHERE intake_id = ?').get(session.intake_id) as { n: number }).n),
       })),
+      // REPRO-01 (docs/reproduction-contracts.md §5): reproduction overlay —
+      // the baseline_reproduce action is only `done` with a persisted report
+      // in status=pass; fail/inconclusive/blocked reports project
+      // reproduction_retry_or_repair (never done).
+      reproductions: this.reproductionProjectionFor(projectId),
     })
     const nextActions = legacyNextActionStrings(nextActionsV2)
     return {

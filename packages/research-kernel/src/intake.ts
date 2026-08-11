@@ -45,7 +45,7 @@ export const INTAKE_STAGED_TTL_MS = 24 * 60 * 60 * 1000
 export const INTAKE_MAX_FILE_BYTES = 32 * 1024 * 1024
 
 /** Static scan cap: only the first MiB is pattern-scanned (bounded cost). */
-const SECRET_SCAN_BYTES = 1024 * 1024
+export const SECRET_SCAN_BYTES = 1024 * 1024
 
 /** Intake DDL — additive, idempotent, isolated from business tables. */
 export const INTAKE_DDL = `
@@ -363,11 +363,15 @@ export interface StaticScanVerdict {
  *     The observation below records what static rules can see; the deep
  *     scan verdict lives in scan_result.archive_extract.
  */
-export function scanIntakeArtifactStatic(fileName: string, mediaType: string, bytes: Uint8Array): StaticScanVerdict {
+export function scanIntakeArtifactStatic(fileName: string, mediaType: string, bytes: Uint8Array, totalBytes?: number): StaticScanVerdict {
   const ext = extensionOf(fileName)
   const warnings: string[] = []
   const observations: StaticScanVerdict['observations'] = []
   const base = { scanner: 'static-rules-v1', av_available: false }
+  // CHUNK-01: for batch chunked uploads the static scan runs on the bounded
+  // head while `totalBytes` carries the REAL file size (the size observation
+  // must never misreport a multi-GiB file as 1 MiB).
+  const sizeBytes = totalBytes ?? bytes.byteLength
 
   if (INTAKE_DENY_EXTENSIONS.includes(ext)) {
     return {
@@ -435,7 +439,9 @@ export function scanIntakeArtifactStatic(fileName: string, mediaType: string, by
     warnings.push('script/notebook imports are never auto-executed by the platform')
     observations.push({ detector: 'script', detector_version: '1', locator: fileName, value: 'script material imported as code; no auto-execution', warnings: ['script_never_auto_execute'] })
   }
-  observations.push({ detector: 'size', detector_version: '1', locator: fileName, value: `${bytes.byteLength} bytes (<= ${INTAKE_MAX_FILE_BYTES})`, warnings: [] })
+  observations.push({ detector: 'size', detector_version: '1', locator: fileName, value: sizeBytes > INTAKE_MAX_FILE_BYTES
+    ? `${sizeBytes} bytes (batch chunked upload; per-Intake quota applies)`
+    : `${sizeBytes} bytes (<= ${INTAKE_MAX_FILE_BYTES})`, warnings: [] })
   return {
     quarantine: 'clean',
     scan_result: { ...base, extension: ext, magic: magicRule?.check ?? null, media_type_hint: mediaType, verdict: 'clean', warnings },

@@ -8,7 +8,8 @@
 import type {
   AdoptionReceipt, ArtifactRecord, Claim, CorpusSnapshot, Decision, EvidenceItem, ExperimentContract, Gate,
   GrillAnswerInput, GrillAnswerView, HumanPrincipal, IdeaCard, IntakeArtifact, IntakeProjection, IntakeSession,
-  JobRecord, KernelEvent, ObservedPhase, PhaseProposal, ProjectDeletionReceipt, ResearchProject, RunnerKey, SessionLink,
+  JobRecord, KernelEvent, ObservedPhase, PaperRef, PaperReproductionSpec, PhaseProposal, ProjectDeletionReceipt,
+  ReproductionAttempt, ReproductionReportInput, ReproducibilityReport, ResearchProject, RunnerKey, SessionLink,
 } from '@dsh-scholar/research-schemas'
 
 export class KernelUnavailableError extends Error {
@@ -136,6 +137,81 @@ export class ResearchClient {
 
   health(): Promise<{ ok: boolean; instance: string }> {
     return this.request('GET', '/v1/health')
+  }
+
+  // ── paper reproduction (docs/reproduction-contracts.md §4) ───────────────
+
+  /** REPRO-01: create (or idempotently restore) a PaperReproductionSpec. */
+  createReproductionSpec(input: {
+    project_id: string
+    paper_ref: PaperRef
+    source_locator?: string
+    source_artifact_id?: string | null
+    reproduction_level?: string
+    claims_to_reproduce?: unknown[]
+    code_source?: unknown | null
+    data_inputs?: unknown[]
+    execution_binding?: unknown | null
+    environment_lock?: unknown
+    expected_outputs?: string[]
+    metric_comparators?: unknown[]
+    idempotency_key?: string
+  }): Promise<PaperReproductionSpec> {
+    return this.request('POST', `/v2/projects/${input.project_id}/reproduction-specs`, input)
+  }
+
+  listReproductionSpecs(projectId: string): Promise<PaperReproductionSpec[]> {
+    return this.request('GET', `/v2/projects/${projectId}/reproduction-specs`)
+  }
+
+  getReproductionSpec(projectId: string, specId: string): Promise<PaperReproductionSpec> {
+    return this.request('GET', `/v2/projects/${projectId}/reproduction-specs/${specId}`)
+  }
+
+  /** REPRO-01: revision-CAS patch of a spec (stale revision → 409). */
+  updateReproductionSpec(projectId: string, specId: string, input: {
+    expected_revision: number
+    patch: Record<string, unknown>
+  }): Promise<PaperReproductionSpec> {
+    return this.request('PATCH', `/v2/projects/${projectId}/reproduction-specs/${specId}`, input)
+  }
+
+  /** REPRO-01: start one attempt — returns attempt + generation + lease
+   *  token (the token is the caller's fencing credential for the report). */
+  startReproductionAttempt(projectId: string, specId: string, input: {
+    submitter_principal?: string
+    reason?: string
+    job_id?: string | null
+    run_id?: string | null
+    code_snapshot_id?: string | null
+    approved_contract_version?: number | null
+    idempotency_key?: string
+  }): Promise<{ attempt: ReproductionAttempt; generation: number; lease_token: string | null }> {
+    return this.request('POST', `/v2/projects/${projectId}/reproduction-specs/${specId}/attempts`, input)
+  }
+
+  getReproductionAttempt(projectId: string, attemptId: string): Promise<ReproductionAttempt> {
+    return this.request('GET', `/v2/projects/${projectId}/reproduction-attempts/${attemptId}`)
+  }
+
+  /**
+   * REPRO-01 §4: verifier service path — record the immutable report on an
+   * attempt. Only reachable with the service token (x-service-token) plus
+   * x-service-principal: verifier; the report is fenced by the attempt
+   * generation + lease token from startReproductionAttempt.
+   */
+  reportReproductionAttempt(attemptId: string, input: ReproductionReportInput & {
+    idempotency_key?: string
+  }): Promise<ReproducibilityReport> {
+    const { idempotency_key: idem, ...report } = input
+    return this.request('POST', `/internal/reproduction-attempts/${attemptId}/reports`, report, {
+      'x-service-principal': 'verifier',
+      ...(idem !== undefined && idem !== '' ? { 'idempotency-key': idem } : {}),
+    })
+  }
+
+  getReproductionReport(projectId: string, reportId: string): Promise<ReproducibilityReport> {
+    return this.request('GET', `/v2/projects/${projectId}/reproduction-reports/${reportId}`)
   }
 
   // ── projects ─────────────────────────────────────────────────────────────

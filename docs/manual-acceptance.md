@@ -89,16 +89,18 @@
 
 ## 6. 2026-08-12 新增人工队列：Init / Upload / Models
 
-以下场景开发期不接真实环境，统一标记 `NOT_RUN_MANUAL_PENDING`：
+以下场景开发期不接真实环境，统一标记 `NOT_RUN_MANUAL_PENDING`（代码侧实现与自动证据见 hardening §3 INIT-GRILL-02 / CHUNK-01 / MODEL-01 行与 acceptance-tests.md §22/§23 标注，2026-08-12）：
 
 1. `MANUAL-INIT-GRILL-I18N`：zh/en 浏览器仅输入 project name 创建；逐题 answer/edit/skip/unknown；中途刷新/换浏览器恢复；确认前零 Gate，PI confirm 后唯一 Gate；语言切换不丢输入，所有下一步/aria 正确。
-2. `MANUAL-UPLOAD-2G`：至少 50 个混合材料与一个跨 8 MiB 边界文件；暂停、断网、刷新、重放同 chunk、gap/错误 hash；完成后 hash/页数一致；在可控环境分别验证 2 GiB 默认拒绝和配置到 10 GiB 的边界，保留服务端/浏览器报告但不上传材料内容。
+2. `MANUAL-UPLOAD-2G`：至少 50 个混合材料与一个跨 8 MiB 边界文件；暂停、断网、刷新、重放同 chunk、gap/错误 hash；完成后 hash/页数一致；在可控环境分别验证 2 GiB 默认拒绝和配置到 10 GiB 的边界，保留服务端/浏览器报告但不上传材料内容。队列每文件独立显示 hashing/queued/uploading/paused/scanning/needs-input/ready/quarantined/failed，队列级显示总配额/进度/失败数与下一步；Chat 附件（按钮/拖拽/粘贴）进入同一 active Intake 队列且消息只保存 attachment/stage ref（浏览器观感与真实断网重连属本项）。
 3. `MANUAL-PROVIDER-SECRET`：接私有测试 Provider，创建/编辑/禁用与 restart；确认 SecretRef 明文不出浏览器、argv、日志、Trajectory/Bundle；验证非法 URL/redirect/DNS/proxy；项目选择只提交 ID，运行固定 revision/hash。
 4. `MANUAL-OCR-PROVENANCE`：多页 PDF、扫描图片、中英混合、低置信度与 Provider 失败；无显式模型时不发请求、不回退；结果逐项显示 source/page/confidence，Grill 确认前不进入 Brief/Gate/Evidence。
 
 每次 FAIL 先把 error code、重现条件和关闭验收补回 `init-grill-upload-models.md`、`acceptance-tests.md` 与 hardening，再修代码。
 
 ## 7. 论文复现、实验环境与 Session Terminal 人工队列
+
+> 2026-08-12 实现轮注记：REPRO-01 代码侧已闭环（spec/attempt/report 存储与 API、纯比较器、verifier service identity、NextAction done 语义、`/reproduce` 一级命令——证据 tests/unit/reproduction.test.ts 33/33、migration 0022、run-hardening-tests.sh REPRO-01 HTTP 段；详见 hardening-v0.2-status.md §3 REPRO-01 行与 acceptance-tests.md §23 场景注记）。以下队列全部保留为真实环境验收（`NOT_RUN_MANUAL_PENDING`）。
 
 1. `MANUAL-REPRO-PAPER`：用 DOI、arXiv 和扫描 PDF 各建一次 `/reproduce`；上传官方代码/数据并核对 source locator、commit/CodeSnapshot、license、environment pin；在真实本机 Docker 运行，比较论文目标指标/表/图并生成 Report。exit 0 + 指标越界必须显示 fail/inconclusive。
 2. `MANUAL-REPRO-REMOTE-SSH`：Settings 以 SecretRef 登记两台远端 SSH Runner，验证 known-host/credential/health/revision/hash；选择 target A 执行并中途断网/重启；确认同 attempt 不落到本机/B，显式新 attempt 才可改 target。日志/浏览器/argv/Bundle 零 secret。

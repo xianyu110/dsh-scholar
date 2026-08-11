@@ -1,7 +1,7 @@
 /** Shared UI state + localStorage persistence (preferences, favourites,
  * notifications, chat sessions, terminal seq). Panels/modals read & write
  * the mutable `state` object; persistence helpers own their storage keys. */
-import type { ChatMessage, ChatSession, NotifEntry, TerminalLine } from './types'
+import type { ChatAttachmentRef, ChatMessage, ChatSession, NotifEntry, TerminalLine } from './types'
 import { ACCENTS, el, rootHost, trapFocus } from './ui'
 import { getLocale, registerOverlayRebuild, t } from './i18n/index'
 // UI-SIMPLE-01: the canonical tab key set lives in the pure nav model
@@ -456,9 +456,10 @@ export function chatClear(): void {
   chatPersist()
 }
 
-export function chatPush(role: ChatMessage['role'], text: string, quote?: { index: number; text: string }): void {
+export function chatPush(role: ChatMessage['role'], text: string, quote?: { index: number; text: string }, attachment?: ChatAttachmentRef): void {
   const msg: ChatMessage = { role, text, time: new Date().toLocaleTimeString(getLocale()) }
   if (quote !== undefined) msg.quote = quote
+  if (attachment !== undefined) msg.attachment = attachment
   state.chatMessages.push(msg)
   // dsh-web session unread: bump every session other than the active one
   // (assistant replies that land while the user is elsewhere).

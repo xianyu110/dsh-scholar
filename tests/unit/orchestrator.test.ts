@@ -56,6 +56,8 @@ interface FakeKernelProject {
   project_id: string
   status: string
   pending_gates?: Array<{ gate_id: string; type: string; title: string; status: string }>
+  /** INIT-GRILL-02: collecting name-only projects must never get an auto Gate. */
+  brief_status?: 'collecting' | 'confirmed'
 }
 
 interface FakeKernelHandle {
@@ -88,7 +90,7 @@ function startFakeKernel(projects: FakeKernelProject[], failGates = false): Prom
       if (parts[0] === 'v1' && parts[1] === 'projects' && parts.length === 4 && parts[3] === 'projection' && req.method === 'GET') {
         const project = projects.find(p => p.project_id === decodeURIComponent(parts[2] ?? ''))
         if (project === undefined) return send(404, { error: { code: 'project_not_found', message: 'nope' } })
-        return send(200, { project: { project_id: project.project_id, status: project.status }, pending_gates: project.pending_gates ?? [] })
+        return send(200, { project: { project_id: project.project_id, status: project.status, brief_status: project.brief_status ?? 'confirmed' }, pending_gates: project.pending_gates ?? [] })
       }
       if (parts[0] === 'v1' && parts[1] === 'projects' && parts.length === 4 && parts[3] === 'gates' && req.method === 'POST') {
         if (failGates) return send(500, { error: { code: 'internal', message: 'kernel boom' } })
@@ -305,6 +307,25 @@ describe('Engine — poll loop over the fake Kernel', () => {
       expect(result.details[0]?.planned[0]?.type).toBe('scope-gate')
       expect(fake.requests.filter(r => r.method === 'POST')).toHaveLength(0)
       expect(engine.store.list()).toHaveLength(0)
+      engine.close()
+    } finally {
+      await fake.close()
+    }
+  })
+
+  it('INIT-GRILL-02: a collecting name-only project gets NO automatic Scope Gate (planned 0, zero gate writes)', async () => {
+    const fake = await startFakeKernel([{ project_id: 'rsp_collecting', status: 'DRAFT', brief_status: 'collecting' }])
+    try {
+      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath() })
+      const result = await engine.pollOnce()
+      expect(result.planned).toBe(0)
+      expect(result.executed).toBe(0)
+      expect(fake.requests.filter(r => r.method === 'POST')).toHaveLength(0)
+      expect(engine.store.list()).toHaveLength(0)
+      // 即使再轮询也不会补 Gate（decideActions 对 collecting 恒定返回 []）。
+      const second = await engine.pollOnce()
+      expect(second.planned).toBe(0)
+      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(0)
       engine.close()
     } finally {
       await fake.close()

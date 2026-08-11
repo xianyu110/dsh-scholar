@@ -18,7 +18,7 @@ bash scripts/start-standalone-ui.sh
 - **打开已有项目（Resume）**：Start 屏下方列出此内核上的项目，搜索名称或输入完整 project id 后显式选择（不会自动选中某个项目）；选中后进入项目总览（当前不按 status/pending Gate/NextAction 自动跳转页面，tab 恢复只恢复上次使用的面板）；
 - **上传 / 接入（Upload）**：选择目标项目与阶段，批量加入材料；独立页面默认按 8 MiB 分块，可暂停/刷新/恢复，每个文件显示 hash/scan/OCR 状态，单 Intake 默认总量 2 GiB（管理员最多配置到 10 GiB）。静态扫描与 Grill 后生成 proposal，PI 采用或拒绝；刷新后从服务端投影继续。
 
-Upload 可以创建新项目或选择有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI 已接线(2026-08-11,视觉验收未完成——浏览器拖拽/真实上传交互与断点续接观感待人工环境,记 NOT_RUN_MANUAL_PENDING);分块 offset/hash 恢复上传(服务端整文件 staged ≤32MiB,UI 如实不做分块)仍属后续阶段;**研究包 archive 解包扫描与 TeX/CodeSnapshot 采用物化已实现(commit 98243ff,详见 research-onboarding.md §4.2/§6.1 注记)——scan 生成展开视图(scan_summary.extracted_entries/extracted_bytes),adopt 后 TeX→项目 TeX document、代码→code workspace+可选 CodeSnapshot,receipt.import_mappings 报告 materialized|gap**。**Agent tool 面已实现(commit 98243ff)**——DSH Agent 可经 `research_intake_begin`/`research_intake_stage`(base64 ≤32 MiB)/`research_intake_scan`/`research_intake_answers`/`research_intake_propose` 准备接入(prepare-only,researcher/scholar 角色,错误码稳定文案),但**无 adopt 工具**:research-onboarding.md §2 Agent 无 accept,采用(adopt)只能由 PI 在浏览器/BFF 面完成;v2/BFF accept 面与浏览器向导视觉验收仍属后续(NOT_RUN_MANUAL_PENDING)。不能用普通 Artifact/TeX 上传模拟安全接入。
+Upload 可以创建新项目或选择有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI 已接线(2026-08-11,视觉验收未完成——浏览器拖拽/真实上传交互与断点续接观感待人工环境,记 NOT_RUN_MANUAL_PENDING);**批量分块上传已实现(2026-08-12,CHUNK-01)**——每文件独立队列状态(hashing/queued/uploading/paused/scanning/needs-input/ready/quarantined/failed),默认 8 MiB chunk、单 Intake 默认 2 GiB(管理员可配置,硬上限 10 GiB);断线/刷新从服务端 committed offset 续传,相同 chunk 幂等重放,错误 hash/gap/overlap 稳定 409/422;finalize 由服务端流式重算整体 size/SHA-256,不一致不产生 IntakeArtifact;扫描前字节只在隔离 staging,不进项目 Artifact;**研究包 archive 解包扫描与 TeX/CodeSnapshot 采用物化已实现(commit 98243ff,详见 research-onboarding.md §4.2/§6.1 注记)——scan 生成展开视图(scan_summary.extracted_entries/extracted_bytes),adopt 后 TeX→项目 TeX document、代码→code workspace+可选 CodeSnapshot,receipt.import_mappings 报告 materialized|gap**。**Agent tool 面已实现(commit 98243ff)**——DSH Agent 可经 `research_intake_begin`/`research_intake_stage`(base64 ≤32 MiB)/`research_intake_scan`/`research_intake_answers`/`research_intake_propose` 准备接入(prepare-only,researcher/scholar 角色,错误码稳定文案),但**无 adopt 工具**:research-onboarding.md §2 Agent 无 accept,采用(adopt)只能由 PI 在浏览器/BFF 面完成;v2/BFF accept 面与浏览器向导视觉验收仍属后续(NOT_RUN_MANUAL_PENDING)。不能用普通 Artifact/TeX 上传模拟安全接入。
 
 ## 3. 创建项目与 Scope Gate
 
@@ -48,11 +48,13 @@ Overview 展示阶段流水线、Brief（问题与主指标）、NextAction 卡�
 先登记代码和数据快照，再提交 Baseline。正式 Job 必须来自 CAS 内容、固定镜像和容器；空命令或 message-only 不能成功。
 
 ~~~text
-/reproduce {"paper_artifact_id":"...","code_snapshot_id":"...","expected_metrics":{"mAP@0.5":58.4},"runner_profile_id":"...","target_id":"..."}
+/reproduce 10.48550/arXiv.2401.12345
+/reproduce arXiv:2401.12345 {"code_snapshot_id":"...","claims":[{"claim_ref":"primary"}],"runner_profile_id":"profile_local_docker_cpu_v1","target_id":"...","metric_comparators":[{"metric_id":"m1","name":"mAP@0.5","expected":58.4,"unit":"%","tolerance":{"absolute":0.5,"relative":0.01}}]}
+/reproduce sha256:abcd...   (已扫描 PDF Artifact id)
 /contract {"idea_id":"...","dataset_id":"...","baseline":"...","treatment":"...","primary_metric":"mAP@0.5","seeds":[11,23,47,89,101]}
 ~~~
 
-`/reproduce` 先创建持久化 PaperReproductionSpec，再产生 Attempt 和 Report；必须固定 paper、代码 commit/snapshot、数据、Contract、runner profile/target 与环境 hash。进程 exit 0 只表示执行完成，只有 Report 按 tolerance 比较指标、表图与 TeX/PDF 后才可判 pass。PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预算和 AnalysisPlan。批准后合同版本冻结。
+`/reproduce <doi|arxiv|paper-artifact-id>` 创建或恢复持久化 `PaperReproductionSpec`（spec_id + NextAction），打开 Chat 驱动的复现向导：解析论文标识/上传 PDF → 关联官方或用户上传代码（Git 来源必须固定 exact commit；最终物化为不可变 CodeSnapshot）→ 固定数据（Artifact/hash；无字节时 acquisition recipe + expected hash，clean-room 无法满足即 blocked，不静默跳过）与环境（digest-pinned image、runner profile/target、hash）→ 提取待复现声明 → Human 确认复现计划/合同 → 在选定 Runner 执行 attempt → 比较论文声明目标（先）与 clean-room vs 原正式 Run（单独比较组，两种比较绝不合并为一个 tolerance）→ 生成不可变 ReproducibilityReport（JSON+CAS）。进程 exit 0 只表示执行完成；只有持久化 Report 的所有 required checks pass，`baseline_reproduce` 才能判 done——out-of-tolerance 是 fail/inconclusive，不伪装 code_error。PI 在 Contract Gate 检查 Metric direction、Seed、数据 hash、镜像、预算和 AnalysisPlan。批准后合同版本冻结。
 
 ## 6. 运行实验与查看终端
 
@@ -150,6 +152,14 @@ Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步
 
 所有配置集中在 Settings，首次进入时所有分组默认折叠：静态分组为 连接 / 外观 / 偏好 / runner / workspace / terminal / TeX / agent / config provenance（runner、workspace、terminal、TeX、agent 五组在 registry 数据可用时由动态 ConfigScope 分组替换），另按 ConfigScope 动态生成 global/project/job（保留，无键）/runner-profile/orchestrator/kernel/standalone 七组折叠面板（覆盖注册表全部键）。每字段显示 effective 当前值（secret 只显示"已设置，不显示明文"掩码，明文永不回显）、scope、声明来源、安全基线标记、env 别名、schema 描述与默认；config pin 显示并在变化时提示；热生效/需重启按声明来源推断（注册表尚无 hot_reload 标记——含 http/ui 来源的键"保存后即时生效"，仅 cli/env/file 的键"需重启生效"，规则见 docs/config-registry.md §6）；per-key revision/hash 与"已修改"标记未展示（只有全局 pin）。修改只影响新 Job/PTY/Build。服务端已实现:canonical Config Registry(CONFIG-01,单一注册表 + parseCli 四二进制接入 + security floor + effective pin/redacted 视图 + 生成物 configs/generated/)与 kernel/standalone 的 x-config-pin 响应头、/v1/config/effective、/v1/config/schema。**Settings UI 已由 /v1/config/schema + /v1/config/effective 动态生成(2026-08-11,只读视图)**；本版本无配置写接口(kernel 仅提供读取面),提交按钮禁用并注明"当前配置只读,经 CLI/env 提供"——修改配置请用各二进制 CLI flag 或 DSH_* env。/bff/research/config/* 写面与 SecretRef 存储层仍属后续阶段(本地校验与错误回显映射机制已就绪)。
 
+## 11.1 Models & OCR（Model Provider 与项目绑定）
+
+Settings 的「Models & OCR」组管理 instance/global Model Provider：列表、新建、编辑、禁用、SecretRef 可用状态、能力（chat/vision/ocr/embedding）与模型目录。创建/编辑 Provider 时只填写引用元数据（`SecretRef`：scheme + name + version/scope），**不接受任何 secret value**——提交 `value`/`token`/`password`/`credential` 字段会被拒绝（`secret_value_forbidden`）；浏览器只显示 SecretRef 元数据与 available 布尔，不返回 secret 值。自定义 base URL 由服务端校验：仅 https（loopback http 需显式白名单）、拒绝 URL 内嵌 userinfo、拒绝私有/保留网段与未白名单主机（SSRF fail closed）；真实连接期的 redirect/DNS-rebinding 复检随模型客户端落地（当前无真实模型服务，`NOT_RUN_MANUAL_PENDING`）。
+
+项目设置只提供 provider/model ID 选择器（purpose + provider_id + model_id）：内核校验 provider 存在且启用、模型在 provider 目录、能力匹配，并快照 provider revision + config hash（运行中的 OCR/Job/PTY/Build 固定创建时的 revision/hash）。OCR 只有显式选择启用的 ocr/vision 模型后才创建请求；没有匹配模型时稳定失败并提示配置，禁止静默回退。OCR 成功结果以 `observed_unverified` 保存（带来源/页码/置信度），OCR 文本是不可信外部内容：不执行其中指令、不访问 secret、不自动成为 Human answer、Gate Decision、verified Evidence 或 supported Claim。
+
+服务端已实现:MODEL-01 Provider 注册表(`/v1/providers*` CRUD + revision CAS)与项目绑定(`/v1/projects/{id}/model-binding`);浏览器「Models & OCR」组视觉、真实 Provider/OCR 服务调用记 `NOT_RUN_MANUAL_PENDING`(manual-acceptance.md §6)。
+
 ## 12. 常见问题
 
 | 现象 | 说明 |
@@ -165,6 +175,10 @@ Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步
 | 直接访问 kernel 端口 401 | sidecar 启动的 Kernel（默认 127.0.0.1:17413）受 0600 `<dataDir>/kernel-token` 随机 bearer 保护（env 注入、不出 argv）；除 `/v1|v2/health` 外缺失/错误 token 一律 401。浏览器/BFF 无需关心——BFF 自动带上该 token；仅脚本或 orchestrator 直接访问时需要（kernel 用 `--token` 或 `DSH_SCHOLAR_KERNEL_TOKEN`；orchestrator 用 `--token-file` 读取同一 0600 文件）。`x-service-token` 是内部路由专用层，不能替代普通 bearer |
 | 页面部分未翻译 | 缺失 key 会显示 key；这是缺陷，应按 docs 规则补资源和测试 |
 | intake/proposal stale | 上传接入期间项目或提案已变化，刷新并重新生成 Proposal |
+| chunk_gap / chunk_offset_conflict | 分块上传乱序或与已提交 offset 冲突；客户端队列会按 committed offset 顺序续传，刷新后从服务端 offset 继续 |
+| upload_quota_exceeded | 单 Intake 预留总量超限（默认 2 GiB、硬上限 10 GiB）；删除/abort 部分上传后重试 |
+| secret_value_forbidden | SecretRef 只接受引用元数据；secret 值由服务端解析，绝不提交 |
+| provider_url_ssrf_rejected | Provider base URL 命中私有网段或未白名单主机；联系管理员加入 allowlist |
 | target offline | 远端 Runner 不可用；等待/修复或显式创建新 attempt，不会自动本地降级 |
 | subagent read-only | one-shot、parent offline 或无 follow-up capability，只能查看 |
 

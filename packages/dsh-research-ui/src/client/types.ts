@@ -275,6 +275,21 @@ export interface ChatMessage {
   quote?: { index: number; text: string }
   /** dsh-web pin: starred messages surface in a 📌 section at the top. */
   pinned?: boolean
+  /**
+   * INIT-GRILL-02 §2: chat 消息只保存 attachment/stage ref —— 附件进入同一
+   * active Intake 的批量分块队列；消息本体不携带文件字节。
+   */
+  attachment?: ChatAttachmentRef
+}
+
+/** Chat 消息携带的附件/stage 引用（不携带字节；状态跟随队列）。 */
+export interface ChatAttachmentRef {
+  kind: 'intake-upload'
+  upload_id: string
+  intake_id: string
+  project_id: string
+  file_name: string
+  state: 'queued' | 'uploading' | 'paused' | 'staged' | 'ready' | 'quarantined' | 'failed'
 }
 
 export interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean; unread?: number; pinned?: boolean }

@@ -16,10 +16,13 @@ import { PTY_DDL, PTY_SESSIONS_TABLE_DDL } from './pty-session.js'
 import { WORKSPACE_DDL } from './workspace-store.js'
 import { INTAKE_DDL } from './intake.js'
 import { TRAJECTORY_DDL } from './trajectory.js'
+import { PROVIDER_DDL } from './provider.js'
+import { CHUNKED_UPLOAD_DDL } from './chunked-upload.js'
+import { REPRODUCTION_DDL } from './reproduction.js'
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 18
+export const SCHEMA_VERSION = 19
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1128,6 +1131,53 @@ const projectBriefStatus = (db: DatabaseSync, report: MigrationReport): void => 
 }
 
 /**
+ * 0021 — INIT-GRILL-02 §3/§4（init-grill-upload-models.md）：批量分块上传
+ * 会话（upload_sessions/upload_chunks）与 Model Provider 注册表
+ * （model_providers/model_provider_models）+ 项目绑定列。Additive +
+ * idempotent：全新数据库直接携带本 DDL；存量库经 ensureColumn 补项目
+ * 绑定列（provider 绑定为 NULL = 未绑定）。
+ */
+const providerAndChunkedUpload = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(PROVIDER_DDL)
+  db.exec(CHUNKED_UPLOAD_DDL)
+  // Project Model Binding（只存 opaque provider_id/model_id + 快照）。
+  ensureColumn(db, 'projects', 'binding_provider_id', 'TEXT')
+  ensureColumn(db, 'projects', 'binding_model_id', 'TEXT')
+  ensureColumn(db, 'projects', 'binding_purpose', 'TEXT')
+  ensureColumn(db, 'projects', 'binding_provider_revision', 'INTEGER')
+  ensureColumn(db, 'projects', 'binding_config_hash', 'TEXT')
+  ensureColumn(db, 'projects', 'binding_revision', "INTEGER NOT NULL DEFAULT 0")
+  ensureColumn(db, 'projects', 'binding_updated_by', 'TEXT')
+  ensureColumn(db, 'projects', 'binding_updated_at', 'TEXT')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.model_providers = Number((db.prepare('SELECT COUNT(*) AS n FROM model_providers').get() as { n: number }).n)
+  report.rows.upload_sessions = Number((db.prepare('SELECT COUNT(*) AS n FROM upload_sessions').get() as { n: number }).n)
+  report.rows.projects_bound = Number((db.prepare(
+    'SELECT COUNT(*) AS n FROM projects WHERE binding_provider_id IS NOT NULL AND trim(binding_provider_id) != \'\'',
+  ).get() as { n: number }).n)
+}
+
+/**
+ * 0022 — REPRO-01 (docs/reproduction-contracts.md §2/§4): the paper
+ * reproduction aggregate — reproduction_specs (PaperReproductionSpec rows,
+ * revision-CAS'd), reproduction_attempts (generation/lease fencing, token
+ * hash only at rest), reproduction_reports (immutable report: the body lives
+ * in the CAS, the row keeps body_hash + cas_ref) and reproduction_links
+ * (source/material links: paper artifact, code snapshots, data artifacts,
+ * contracts, run manifests, reports). Additive + idempotent (CREATE IF NOT
+ * EXISTS); fresh databases get the tables here, existing databases converge
+ * on re-open.
+ */
+const reproductionTables = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(REPRODUCTION_DDL)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.reproduction_specs = Number((db.prepare('SELECT COUNT(*) AS n FROM reproduction_specs').get() as { n: number }).n)
+  report.rows.reproduction_attempts = Number((db.prepare('SELECT COUNT(*) AS n FROM reproduction_attempts').get() as { n: number }).n)
+  report.rows.reproduction_reports = Number((db.prepare('SELECT COUNT(*) AS n FROM reproduction_reports').get() as { n: number }).n)
+  report.rows.reproduction_links = Number((db.prepare('SELECT COUNT(*) AS n FROM reproduction_links').get() as { n: number }).n)
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -1248,6 +1298,18 @@ export const MIGRATIONS: Migration[] = [
     description: 'INIT-GRILL-02: additive collecting/confirmed Research Brief lifecycle',
     body: projectBriefStatus.toString(),
     up: projectBriefStatus,
+  },
+  {
+    id: '0021_provider_chunked_upload',
+    description: 'INIT-GRILL-02 §3/§4: upload_sessions/upload_chunks (batch chunked upload) + model_providers/model_provider_models (Model Provider registry) + projects model-binding columns',
+    body: `${providerAndChunkedUpload.toString()}\n\n${PROVIDER_DDL}\n${CHUNKED_UPLOAD_DDL}`,
+    up: providerAndChunkedUpload,
+  },
+  {
+    id: '0022_reproduction_contracts',
+    description: 'REPRO-01 (docs/reproduction-contracts.md §2/§4): reproduction_specs / reproduction_attempts / reproduction_reports + reproduction_links (source/material links; report body lives in the CAS — the row keeps hash + ref)',
+    body: reproductionTables.toString(),
+    up: reproductionTables,
   },
 ]
 

@@ -80,6 +80,14 @@ export const KernelEventKind = z.enum([
   // project_id/document_id/path/revision (+ request_id/session_id when the
   // caller provided them). Version conflicts (409) emit nothing.
   'tex.file.saved',
+  // REPRO-01 (docs/reproduction-contracts.md): paper reproduction lifecycle
+  // events — spec created/updated, attempt started, immutable report
+  // recorded. Payloads carry ids/revisions/status only (never report bytes —
+  // the report body lives in the CAS).
+  'reproduction.spec.created',
+  'reproduction.spec.updated',
+  'reproduction.attempt.started',
+  'reproduction.report.recorded',
 ])
 export type KernelEventKind = z.infer<typeof KernelEventKind>
 
