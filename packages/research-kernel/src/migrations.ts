@@ -16,9 +16,10 @@ import { PTY_DDL, PTY_SESSIONS_TABLE_DDL } from './pty-session.js'
 import { WORKSPACE_DDL } from './workspace-store.js'
 import { INTAKE_DDL } from './intake.js'
 import { TRAJECTORY_DDL } from './trajectory.js'
+import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 13
+export const SCHEMA_VERSION = 15
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -26,12 +27,28 @@ export interface MigrationReport {
   notes?: string[]
 }
 
+/**
+ * Runtime context handed to a migration's `up` step (beyond the connection).
+ * Only migrations that need it read it; released migrations ignore it, so the
+ * optional shape never changes their behavior or checksum.
+ */
+export interface MigrationContext {
+  /**
+   * CAS root (migration 0017): lets a migration materialize legacy log text
+   * as real content-addressed blobs instead of leaving phantom references.
+   * Absent when the caller opened the database without a CAS root — 0017
+   * then records a plain marker and never creates an artifact row that would
+   * reference a missing blob.
+   */
+  casRoot?: string
+}
+
 export interface Migration {
   id: string
   description: string
   /** Canonical source text for the checksum (SQL text, or the `up` source). */
   body: string
-  up: (db: DatabaseSync, report: MigrationReport) => void
+  up: (db: DatabaseSync, report: MigrationReport, ctx?: MigrationContext) => void
 }
 
 function sha256(text: string): string {
@@ -970,6 +987,198 @@ const leaseTokenHashing = (db: DatabaseSync, report: MigrationReport): void => {
 }
 
 /**
+ * 0016 — v2 shape alignment (domain-model.md §5/§6/§8/§9/§16): additive
+ * columns for the v2-shape group. Both columns are additive + idempotent:
+ * legacy rows keep NULL / DEFAULT 0 and read back unchanged; fresh databases
+ * already carry the columns via 0001's initial schema? No — 0001 is frozen,
+ * so the columns are only added here; the kernel write paths fill them for
+ * new rows. Nothing is backfilled: old rows honestly read NULL / 0.
+ *
+ *  - jobs.created_by_principal_id TEXT — durable submitter identity
+ *    (domain-model.md §9); NULL = legacy/internal rows.
+ *  - budget.storage_bytes INTEGER NOT NULL DEFAULT 0 — storage accounting
+ *    (domain-model.md §16); 0 = legacy rows that predate storage metering.
+ */
+const v2ShapeAlignment = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'jobs', 'created_by_principal_id', 'TEXT')
+  ensureColumn(db, 'budget', 'storage_bytes', 'INTEGER NOT NULL DEFAULT 0')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.jobs_created_by_principal_id = Number((db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE created_by_principal_id IS NOT NULL").get() as { n: number }).n)
+  report.rows.budget_storage_bytes_rows = Number((db.prepare("SELECT COUNT(*) AS n FROM budget WHERE storage_bytes > 0").get() as { n: number }).n)
+}
+
+/** 0017 (MIG-V1) helper: does a run-manifest JSON text carry a non-empty signature? */
+function manifestHasSignature(manifestJson: string): boolean {
+  try {
+    const manifest = JSON.parse(manifestJson) as { signature?: unknown }
+    return typeof manifest.signature === 'string' && manifest.signature !== ''
+  } catch {
+    return false
+  }
+}
+
+/** 0017 (MIG-V1) helper: deterministic final-log text for a legacy v1 job. */
+function composeLegacyLog(
+  job: { job_id: string; kind: string; created_at: string; updated_at: string },
+  payload: Record<string, unknown>,
+): string {
+  const lines: string[] = [
+    `=== dsh-scholar legacy run (job ${job.job_id}, kind ${job.kind}) ===`,
+    `created: ${job.created_at}`,
+    `updated: ${job.updated_at}`,
+  ]
+  const stdout = typeof payload.stdout === 'string' && payload.stdout !== '' ? payload.stdout : null
+  const stderr = typeof payload.stderr === 'string' && payload.stderr !== '' ? payload.stderr : null
+  const output = typeof payload.output === 'string' && payload.output !== '' ? payload.output : null
+  if (stdout !== null) lines.push('', '--- stdout ---', stdout)
+  if (stderr !== null) lines.push('', '--- stderr ---', stderr)
+  if (output !== null) lines.push('', '--- output ---', output)
+  return `${lines.join('\n')}\n`
+}
+
+/**
+ * 0017 — MIG-V1 (storage-migrations.md §9, final audit §4 #6): the three
+ * remaining v1-migration steps. Implemented as an INDEPENDENT migration
+ * appended AFTER 0002 — editing 0002 in place would break its released
+ * checksum (§8.1) — so 0001–0016 stay byte-identical. Additive + idempotent:
+ * every step detects its precondition before acting, so fresh databases,
+ * v1-imported databases and databases from older releases converge here
+ * without re-marking anything.
+ *
+ *  - synthetic_fixture — jobs.synthetic_fixture INTEGER NOT NULL DEFAULT 0.
+ *    v1 message-only fixture runs (echo/smoke: no real execution, output
+ *    lives inline) are marked 1 so audits/statistics can separate fixture
+ *    runs from real experiments. The backfill only touches pre-0017 rows
+ *    (kind match + still 0); new echo/smoke jobs are written with 1 by
+ *    submitJob and non-fixture new rows stay 0.
+ *  - unsigned_legacy — jobs.signature_status TEXT (legacy-only column; new
+ *    rows keep NULL and stay governed by runs.signature_status). v1
+ *    manifests predate signed-manifest enforcement (requireSignedManifest
+ *    defaulted on later), so jobs whose run_manifest is present but unsigned
+ *    — and non-fixture jobs that succeeded without ANY manifest (RUN-01's
+ *    run_manifest_required postdates them) — are marked 'legacy_unsigned':
+ *    once "必签 Manifest" defaults on, old data is never misread as a NEW
+ *    violation. runs rows finalized 'unsigned' before 0017 (or left
+ *    'pending' with an unsigned manifest — an inconsistent legacy shape) are
+ *    re-marked the same way; post-0017 runs keep 'pending'/'signed'/'unsigned'.
+ *  - legacy log → final log Artifact — jobs.legacy_log_artifact TEXT. v1
+ *    stored the one-shot stdout/stderr inline in jobs.payload (string keys
+ *    'stdout'/'stderr'/'output'); 0017 turns it into a final log Artifact
+ *    (kind='log', real CAS blob, text/plain, metadata legacy_log:true) with
+ *    the reference recorded on the job — NO terminal frames are fabricated
+ *    (§9 "不伪造 terminal frames"). When the CAS root is unavailable
+ *    (runMigrations/openDatabase without casRoot) the job is marked
+ *    'legacy:in-payload' instead of materializing an artifact row that would
+ *    reference a missing blob (integrity scans would report it).
+ */
+const v1LegacyMarks = (db: DatabaseSync, report: MigrationReport, ctx?: MigrationContext): void => {
+  // ── §9 synthetic_fixture: v1 message-only fixture runs (echo/smoke). ──
+  ensureColumn(db, 'jobs', 'synthetic_fixture', 'INTEGER NOT NULL DEFAULT 0')
+  const syntheticBackfilled = Number(db.prepare(
+    "UPDATE jobs SET synthetic_fixture = 1 WHERE kind IN ('echo','smoke') AND synthetic_fixture = 0",
+  ).run().changes)
+
+  // ── §9 unsigned_legacy: manifests predating signed-manifest enforcement. ──
+  ensureColumn(db, 'jobs', 'signature_status', 'TEXT')
+  const markJob = db.prepare('UPDATE jobs SET signature_status = ? WHERE job_id = ?')
+  let jobsMarked = 0
+  // (a) jobs whose run_manifest is present but unsigned (every v1 manifest
+  // predates signing; status scope avoids queued/running rows).
+  const unsignedManifests = db.prepare(
+    "SELECT job_id, run_manifest FROM jobs WHERE signature_status IS NULL AND run_manifest IS NOT NULL AND trim(run_manifest) != '' AND status IN ('succeeded','failed')",
+  ).all() as unknown as Array<{ job_id: string; run_manifest: string }>
+  for (const row of unsignedManifests) {
+    if (!manifestHasSignature(row.run_manifest)) {
+      markJob.run('legacy_unsigned', row.job_id)
+      jobsMarked += 1
+    }
+  }
+  // (b) non-fixture jobs that succeeded without ANY manifest — RUN-01's
+  // run_manifest_required postdates them (echo/smoke are exempt by design).
+  const noManifestSucceeded = db.prepare(
+    "SELECT job_id FROM jobs WHERE signature_status IS NULL AND status = 'succeeded' AND kind NOT IN ('echo','smoke') AND (run_manifest IS NULL OR trim(run_manifest) = '')",
+  ).all() as unknown as Array<{ job_id: string }>
+  for (const row of noManifestSucceeded) {
+    markJob.run('legacy_unsigned', row.job_id)
+    jobsMarked += 1
+  }
+  // (c) runs: every row finalized 'unsigned' (or left 'pending' with an
+  // unsigned manifest) before 0017 predates the default-on signing regime.
+  const markRun = db.prepare('UPDATE runs SET signature_status = ? WHERE run_id = ?')
+  let runsMarked = Number(db.prepare(
+    "UPDATE runs SET signature_status = 'legacy_unsigned' WHERE signature_status = 'unsigned'",
+  ).run().changes)
+  const pendingManifests = db.prepare(
+    "SELECT run_id, manifest_json FROM runs WHERE signature_status = 'pending' AND manifest_json IS NOT NULL AND trim(manifest_json) != ''",
+  ).all() as unknown as Array<{ run_id: string; manifest_json: string }>
+  for (const row of pendingManifests) {
+    if (!manifestHasSignature(row.manifest_json)) {
+      markRun.run('legacy_unsigned', row.run_id)
+      runsMarked += 1
+    }
+  }
+
+  // ── §9 one-shot v1 logs → final log Artifact (never fake terminal frames). ──
+  ensureColumn(db, 'jobs', 'legacy_log_artifact', 'TEXT')
+  const cas = ctx?.casRoot !== undefined && ctx.casRoot !== '' ? new ArtifactCas(ctx.casRoot) : null
+  const now = new Date().toISOString()
+  const logJobs = db.prepare(
+    "SELECT job_id, project_id, kind, payload, created_at, updated_at FROM jobs WHERE legacy_log_artifact IS NULL AND (payload LIKE '%stdout%' OR payload LIKE '%stderr%' OR payload LIKE '%output%')",
+  ).all() as unknown as Array<{
+    job_id: string; project_id: string; kind: string; payload: string; created_at: string; updated_at: string
+  }>
+  const insertLogArtifact = db.prepare(
+    `INSERT OR IGNORE INTO artifacts (artifact_id, project_id, kind, size_bytes, sha256, metadata, media_type, file_name, created_at)
+     VALUES (?, ?, 'log', ?, ?, ?, 'text/plain; charset=utf-8', ?, ?)`,
+  )
+  const setLogRef = db.prepare('UPDATE jobs SET legacy_log_artifact = ? WHERE job_id = ?')
+  let materialized = 0
+  let markers = 0
+  for (const row of logJobs) {
+    let payload: Record<string, unknown>
+    try {
+      payload = JSON.parse(row.payload) as Record<string, unknown>
+    } catch {
+      // Malformed payload — nothing to convert (the row stays unmarked).
+      continue
+    }
+    const stdout = typeof payload.stdout === 'string' && payload.stdout !== '' ? payload.stdout : null
+    const stderr = typeof payload.stderr === 'string' && payload.stderr !== '' ? payload.stderr : null
+    const output = typeof payload.output === 'string' && payload.output !== '' ? payload.output : null
+    if (stdout === null && stderr === null && output === null) continue
+    const text = composeLegacyLog(row, payload)
+    const sha = createHash('sha256').update(text, 'utf8').digest('hex')
+    const at = row.updated_at ?? row.created_at ?? now
+    if (cas !== null) {
+      // Content-addressed blob + project-scoped artifact row (same semantics
+      // as registerArtifact: INSERT OR IGNORE keeps re-runs idempotent and
+      // identical content in the same project shares one artifact).
+      cas.put(text)
+      insertLogArtifact.run(`sha256:${sha}`, row.project_id, Buffer.byteLength(text, 'utf8'), sha,
+        JSON.stringify({
+          legacy_log: true, source: 'v1 payload', job_id: row.job_id, kind: row.kind,
+          migrated_by: '0017_v1_legacy_marks',
+        }),
+        `legacy-run-${row.job_id}.log`, at)
+      setLogRef.run(`sha256:${sha}`, row.job_id)
+      materialized += 1
+    } else {
+      // No CAS root — record the marker only (a phantom artifact row would
+      // poison the STORAGE-07 integrity scan with a missing blob).
+      setLogRef.run('legacy:in-payload', row.job_id)
+      markers += 1
+    }
+  }
+
+  if (report.rows === undefined) report.rows = {}
+  report.rows.jobs_synthetic_fixture_backfilled = syntheticBackfilled
+  report.rows.jobs_legacy_unsigned_marked = jobsMarked
+  report.rows.runs_legacy_unsigned_marked = runsMarked
+  report.rows.legacy_log_artifacts_materialized = materialized
+  report.rows.legacy_log_markers = markers
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -1063,6 +1272,20 @@ export const MIGRATIONS: Migration[] = [
     body: leaseTokenHashing.toString(),
     up: leaseTokenHashing,
   },
+  {
+    id: '0016_v2_shape_alignment',
+    description: 'v2 shape: jobs.created_by_principal_id + budget.storage_bytes (additive, idempotent; domain-model §5/§6/§8/§9/§16)',
+    body: v2ShapeAlignment.toString(),
+    up: v2ShapeAlignment,
+  },
+  {
+    id: '0017_v1_legacy_marks',
+    description: 'MIG-V1: v1 legacy marks — jobs.synthetic_fixture (echo/smoke backfill), jobs/runs signature_status=legacy_unsigned, legacy payload log → final log Artifact (CAS) with no terminal frames (storage-migrations.md §9)',
+    // STORE-08 rule: the canonical body binds what the migration ACTUALLY
+    // executes — the up source PLUS the two helper functions it relies on.
+    body: `${v1LegacyMarks.toString()}\n\n${manifestHasSignature.toString()}\n${composeLegacyLog.toString()}`,
+    up: v1LegacyMarks,
+  },
 ]
 
 /**
@@ -1071,8 +1294,12 @@ export const MIGRATIONS: Migration[] = [
  * transaction with a recorded checksum + report), then bump schema_version.
  * Fails loudly on a checksum mismatch, a version ahead of the code, or any
  * failed step (the failed step is rolled back).
+ *
+ * `casRoot` (optional) lets migrations materialize real CAS blobs (0017's
+ * legacy log → final log Artifact step); callers that open the database
+ * without a CAS root get the marker-only fallback.
  */
-export function runMigrations(db: DatabaseSync, log?: (line: string) => void): void {
+export function runMigrations(db: DatabaseSync, log?: (line: string) => void, casRoot?: string): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1107,7 +1334,7 @@ export function runMigrations(db: DatabaseSync, log?: (line: string) => void): v
     const report: MigrationReport = {}
     db.exec('BEGIN IMMEDIATE')
     try {
-      m.up(db, report)
+      m.up(db, report, { casRoot })
       insertMigration.run(m.id, expected, new Date().toISOString(), JSON.stringify(report))
       db.exec('COMMIT')
     } catch (error) {

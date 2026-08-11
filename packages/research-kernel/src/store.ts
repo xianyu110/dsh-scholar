@@ -14,8 +14,10 @@ import { runMigrations, SCHEMA_VERSION } from './migrations.js'
 
 export { SCHEMA_VERSION }
 
-/** Open (or create) the kernel database at `path` (`:memory:` allowed). */
-export function openDatabase(path: string, log?: (line: string) => void): DatabaseSync {
+/** Open (or create) the kernel database at `path` (`:memory:` allowed). The
+ * optional `casRoot` is forwarded to the migration runner so 0017 can
+ * materialize legacy log blobs into the content-addressed store. */
+export function openDatabase(path: string, log?: (line: string) => void, casRoot?: string): DatabaseSync {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new DatabaseSync(path)
   db.exec('PRAGMA journal_mode = WAL')
@@ -27,7 +29,7 @@ export function openDatabase(path: string, log?: (line: string) => void): Databa
   db.exec('PRAGMA busy_timeout = 5000')
   // storage-migrations.md §8: explicit ordered migrations (checksummed,
   // idempotent, transactional); schema_version only bumps after success.
-  runMigrations(db, log)
+  runMigrations(db, log, casRoot)
   return db
 }
 
@@ -85,6 +87,9 @@ export interface JobRow {
    * (migration 0014); NULL on legacy rows — the plaintext token is never
    * persisted. */
   lease_token_hash: string | null
+  /** v2 shape (domain-model.md §9, migration 0016): durable submitter
+   * principal; NULL on legacy rows and internal submissions. */
+  created_by_principal_id: string | null
   /** §12.2 JobSpec binding (SCH-EXEC-002): CAS code snapshot id, if any. */
   code_snapshot_id: string | null
   attempts: number

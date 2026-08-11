@@ -314,6 +314,9 @@ function jobFromRow(row: JobRow, db: DatabaseSync, tokenOverride?: string | null
     heartbeat_at: row.heartbeat_at,
     lease_generation: row.lease_generation ?? null,
     lease_token: leaseToken,
+    // v2 shape (domain-model.md §9): durable submitter principal; NULL for
+    // legacy rows (migration 0016).
+    created_by_principal_id: row.created_by_principal_id ?? null,
     // §12.2 JobSpec binding (SCH-EXEC-002): code snapshot materialized from CAS.
     code_snapshot_id: row.code_snapshot_id,
     data_artifact_ids: Array.isArray(payload.data_artifact_ids) ? payload.data_artifact_ids.map(String) : [],
@@ -657,8 +660,12 @@ export class ResearchKernel {
   private readonly leaseTokens = new Map<string, string>()
 
   constructor(options: KernelOptions = {}) {
-    this.db = openDatabase(options.dbPath ?? ':memory:')
-    this.cas = new ArtifactCas(options.casRoot ?? join(process.cwd(), '.research-cas'))
+    // MIG-V1 (0017): the migration runner receives the CAS root so legacy
+    // log text can be materialized as real content-addressed blobs (with a
+    // final log Artifact row) instead of phantom references.
+    const casRoot = options.casRoot ?? join(process.cwd(), '.research-cas')
+    this.db = openDatabase(options.dbPath ?? ':memory:', undefined, casRoot)
+    this.cas = new ArtifactCas(casRoot)
     this.stagedUploadsRoot = join(this.cas.root, 'staged-uploads')
     mkdirSync(this.stagedUploadsRoot, { recursive: true })
     // ONBOARD-01: isolated intake staging area (sibling dir — the upload
@@ -1377,6 +1384,43 @@ export class ResearchKernel {
           } else if (project.status !== mapping.to) {
             throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
           }
+        } else if (gate.type === 'idea') {
+          // v2 shape (domain-model.md §6): an Idea must be bound to a frozen
+          // Corpus snapshot of the SAME project before its Gate can approve.
+          // The binding is read from the CARD (payload.idea_id), not from the
+          // gate payload, so legacy cards (no corpus_snapshot_id) and
+          // payload-less idea gates pass through unchanged (old-read
+          // compatible). When the card DOES carry a snapshot id the snapshot
+          // must exist (422 idea_corpus_unknown) and belong to the gate's
+          // project (422 idea_corpus_foreign, cross-project never approved).
+          const ideaId = typeof gate.payload.idea_id === 'string' ? gate.payload.idea_id : undefined
+          if (ideaId !== undefined) {
+            let card: IdeaCard | undefined
+            try {
+              card = this.getIdea(ideaId)
+            } catch {
+              card = undefined
+            }
+            const corpusSnapshotId = card?.corpus_snapshot_id ?? null
+            if (corpusSnapshotId !== null && corpusSnapshotId !== '') {
+              let snapshot: CorpusSnapshot
+              try {
+                snapshot = this.getCorpusSnapshot(corpusSnapshotId)
+              } catch {
+                throw new KernelError(422, 'idea_corpus_unknown',
+                  `idea ${ideaId} references corpus snapshot ${corpusSnapshotId} which does not exist — an Idea Gate cannot approve against an unfrozen corpus (domain-model.md §6)`)
+              }
+              if (snapshot.project_id !== gate.project_id) {
+                throw new KernelError(422, 'idea_corpus_foreign',
+                  `idea ${ideaId} references corpus snapshot ${corpusSnapshotId} of project ${snapshot.project_id}, not gate project ${gate.project_id} (cross-project corpus binding is rejected)`)
+              }
+            }
+          }
+          if (project.status === mapping.from) {
+            project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
+          } else if (project.status !== mapping.to) {
+            throw new KernelError(422, 'gate_state_mismatch', `gate ${gate.gate_id} (${gate.type}) cannot approve from ${project.status}`)
+          }
         } else if (project.status === mapping.from) {
           project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
         } else if (project.status === mapping.to) {
@@ -1461,25 +1505,29 @@ export class ResearchKernel {
 
   getBudget(projectId: string): BudgetRecord {
     const row = this.db.prepare('SELECT * FROM budget WHERE project_id = ?').get(projectId) as BudgetRecord | undefined
-    return row ?? { project_id: projectId, model_cost_usd: 0, gpu_hours: 0, api_requests: 0, updated_at: nowIso() }
+    return row ?? { project_id: projectId, model_cost_usd: 0, gpu_hours: 0, api_requests: 0, storage_bytes: 0, updated_at: nowIso() }
   }
 
-  recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number }): BudgetRecord {
+  recordUsage(projectId: string, usage: { model_cost_usd?: number; gpu_hours?: number; api_requests?: number; storage_bytes?: number }): BudgetRecord {
     // v2 §7.6: budget increment + limit check + block state + outbox in ONE transaction.
     return withTransaction(this.db, () => {
       const project = this.getProject(projectId)
       const current = this.getBudget(projectId)
+      // v2 shape (domain-model.md §16): storage_bytes increments atomically
+      // with the other counters; legacy ledger rows (column added by
+      // migration 0016) read back 0.
       const next: BudgetRecord = {
         project_id: projectId,
         model_cost_usd: current.model_cost_usd + (usage.model_cost_usd ?? 0),
         gpu_hours: current.gpu_hours + (usage.gpu_hours ?? 0),
         api_requests: current.api_requests + (usage.api_requests ?? 0),
+        storage_bytes: current.storage_bytes + (usage.storage_bytes ?? 0),
         updated_at: nowIso(),
       }
       this.db.prepare(
-        'INSERT INTO budget (project_id, model_cost_usd, gpu_hours, api_requests, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET model_cost_usd = excluded.model_cost_usd, gpu_hours = excluded.gpu_hours, api_requests = excluded.api_requests, updated_at = excluded.updated_at',
-      ).run(projectId, next.model_cost_usd, next.gpu_hours, next.api_requests, next.updated_at)
-      this.emit(projectId, 'budget.updated', { model_cost_usd: next.model_cost_usd, gpu_hours: next.gpu_hours })
+        'INSERT INTO budget (project_id, model_cost_usd, gpu_hours, api_requests, storage_bytes, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET model_cost_usd = excluded.model_cost_usd, gpu_hours = excluded.gpu_hours, api_requests = excluded.api_requests, storage_bytes = excluded.storage_bytes, updated_at = excluded.updated_at',
+      ).run(projectId, next.model_cost_usd, next.gpu_hours, next.api_requests, next.storage_bytes, next.updated_at)
+      this.emit(projectId, 'budget.updated', { model_cost_usd: next.model_cost_usd, gpu_hours: next.gpu_hours, storage_bytes: next.storage_bytes })
       // Hard limit check: crossing a limit stops the project into BLOCKED_GATE.
       if (project.status !== 'BLOCKED_GATE' && project.status !== 'FAILED' && project.status !== 'STOPPED') {
         const exceeded: string[] = []
@@ -2688,6 +2736,10 @@ export class ResearchKernel {
       idea_id: buildIdeaId(),
       project_id: input.project_id,
       version: 1,
+      // v2 shape (domain-model.md §6): optional frozen-corpus binding —
+      // validated by the Idea Gate decision (422 idea_corpus_unknown /
+      // idea_corpus_foreign); legacy cards default to null.
+      corpus_snapshot_id: input.corpus_snapshot_id ?? null,
       title: input.title,
       hypothesis: input.hypothesis,
       scientific_gap: input.scientific_gap,
@@ -2814,14 +2866,37 @@ export class ResearchKernel {
     passages?: Passage[]
     citation_edges?: CorpusSnapshot['citation_edges']
     external_claims?: CorpusSnapshot['external_claims']
+    /** v2 shape (domain-model.md §5): per-source status; any source failure
+     * must be recorded here instead of silently dropping the query. */
+    source_status?: CorpusSnapshot['source_status']
   }): CorpusSnapshot {
     this.getProject(input.project_id)
+    // v2 shape (domain-model.md §5): every passage carries the sha256 of its
+    // text — "new-write required": the kernel always fills it on snapshot
+    // writes and the verification step below rejects any passage that would
+    // land without a non-empty content hash (old rows without the field
+    // still parse on read — old-read compatible).
+    const passages = (input.passages ?? []).map((passage) => ({
+      ...passage,
+      content_hash: createHash('sha256').update(passage.text, 'utf8').digest('hex'),
+    }))
+    for (const passage of passages) {
+      const parsed = Passage.safeParse(passage)
+      if (!parsed.success || parsed.data.content_hash === undefined || parsed.data.content_hash === '') {
+        throw new KernelError(422, 'passage_content_hash_required',
+          `passage ${passage.passage_id} (${passage.paper_id}) would land without a content hash — the kernel computes sha256(text) on every snapshot write (domain-model.md §5)`)
+      }
+    }
     const snapshot: CorpusSnapshot = {
       snapshot_id: `corpus_snap_${randomUUID().slice(0, 8)}`,
       project_id: input.project_id,
+      // v2 shape (domain-model.md §5): explicit payload schema version +
+      // per-source retrieval status (defaults keep legacy readers intact).
+      schema_version: 1,
+      source_status: input.source_status ?? 'complete',
       queries: input.queries,
       papers: input.papers,
-      passages: input.passages ?? [],
+      passages,
       citation_edges: input.citation_edges ?? [],
       external_claims: input.external_claims ?? [],
       quality: {
@@ -3073,6 +3148,11 @@ export class ResearchKernel {
     // domain-model.md §9.1: opaque RunnerProfile id（缺省回退 project 级
     // execution.runner_profile_id，再回退 v1 enum 映射）；未知 id 422。
     runner_profile_id?: string | null
+    // v2 shape (domain-model.md §9): durable submitter principal, persisted
+    // to jobs.created_by_principal_id. The server layer resolves it from the
+    // BFF-injected x-principal-id header (never client body trust); internal
+    // callers may omit it → NULL.
+    created_by_principal_id?: string | null
   }): JobSpecBound {
     const project = this.getProject(input.project_id)
     // reconstruction-contracts.md §5 / security-baseline.md §1: full-auto is
@@ -3328,6 +3408,9 @@ export class ResearchKernel {
       // （secure kinds 由上方 payload 注入；其余 kind 为 null）。
       runner_profile_id: typeof payload.runner_profile_id === 'string' && payload.runner_profile_id !== '' ? payload.runner_profile_id : null,
       profile_config_hash: typeof payload.profile_config_hash === 'string' && payload.profile_config_hash !== '' ? payload.profile_config_hash : null,
+      // v2 shape (domain-model.md §9): durable submitter principal (server
+      // resolves it from x-principal-id; internal submissions → NULL).
+      created_by_principal_id: input.created_by_principal_id ?? null,
       output_contract: input.output_contract,
       attempts: 0,
       max_attempts: input.max_attempts ?? 3,
@@ -3336,14 +3419,21 @@ export class ResearchKernel {
       created_at: nowIso(),
       updated_at: nowIso(),
     }
+    // MIG-V1 (0017, storage-migrations.md §9): echo/smoke are the in-process
+    // FIXTURE kinds (echo executes nothing, §3.2 invariant 1; smoke is a
+    // trusted fixture) — new fixture jobs are written with
+    // synthetic_fixture=1 so audits/statistics can separate fixture runs
+    // from real experiments (legacy rows were backfilled by 0017).
+    const syntheticFixture = input.kind === 'echo' || input.kind === 'smoke' ? 1 : 0
     this.db.prepare(
-      `INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at, code_snapshot_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at, code_snapshot_id, created_by_principal_id, synthetic_fixture)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       job.job_id, job.project_id, job.contract_id, job.idempotency_key, job.kind, JSON.stringify(job.command),
       JSON.stringify(job.payload), job.status, job.failure_class, job.lease_owner, job.lease_expires_at,
       job.heartbeat_at, job.attempts, job.max_attempts, job.run_manifest === null ? null : JSON.stringify(job.run_manifest),
-      job.error, job.created_at, job.updated_at, job.code_snapshot_id,
+      job.error, job.created_at, job.updated_at, job.code_snapshot_id, job.created_by_principal_id,
+      syntheticFixture,
     )
     this.emit(input.project_id, 'job.submitted', { job_id: job.job_id, kind: job.kind, idempotency_key: input.idempotency_key })
     return job

@@ -451,3 +451,19 @@ REL-01 自动化场景（tests/security/run-release-bundle-tests.sh）：
 - backup-on-start-hook（STORAGE-07，storage-migrations.md §8.2/§10）：`--backup-on-start`/`DSH_SCHOLAR_BACKUP_ON_START=1` 在迁移前对 dataDir/backups/ 生成 `kernel-<ts>.db`（VACUUM INTO，0600，可打开、含迁移前 schema_version）与 `inventory-<ts>.json`（0600，每个 blob sha256+size+mod_time，与 CAS 逐字节一致）；库不存在（首启）跳过并注明；备份失败 loud fail——tests/unit/backup.test.ts + bin/kernel.ts 冒烟；
 - scan-integrity-report（STORAGE-07，storage-migrations.md §10）：`scanIntegrity()` 返回 `{missing_blobs, orphan_blobs, size_mismatch, hash_mismatch, scanned_blobs, skipped_blobs, total_blobs}`——删除 blob → missing、无引用 blob → orphan、同长篡改字节 → hash_mismatch、截断 → size_mismatch、`limit` 限量复验并报告 skipped、修复后自愈——tests/unit/cas-gc.test.ts；
 - migration-0003-checksum-frozen（STORE-08，storage-migrations.md §8.1）：0003 的 checksum 绑定冻结的内联 DDL 快照（body 含 tex_documents/tex_snapshot_files/tex_preview_pending 文本、不含共享 TERMINAL_DDL/TEX_DDL 引用）；共享常量演进不影响 0003 校验（checksum 为 id+body 纯函数），对 body 的任何编辑都改变 checksum（immutability 兜底）——tests/unit/migrations.test.ts。
+
+## 18. v2 形状对齐组新增场景（2026-08，domain-model.md §5/§6/§8/§9/§16，审计报告 §4 #9）
+
+- corpus-snapshot-v2-shape：`snapshotCorpus` 写入 `schema_version=1` + `source_status='complete'`（默认）并持久化读回；显式 `source_status='pending'` 记录来源失败；旧快照行（无两字段）经 `CorpusSnapshot` schema 解析回退默认值（旧读兼容）——tests/unit/v2-shape.test.ts；
+- passage-content-hash-forced：快照写入时每条 passage 强制 `content_hash = sha256(text)`（调用方提供的 hash 被覆盖，客户端不可声明）；验证步骤要求非空；存储读回全为非空 64-hex；无 content_hash 的旧 passage 仍可解析（新写必填、旧读兼容）——tests/unit/v2-shape.test.ts；
+- idea-gate-corpus-bound：card 携带同项目 `corpus_snapshot_id` → Idea Gate 批准；snapshot 不存在 → 422 `idea_corpus_unknown`（Gate 保持 pending、项目状态不动）；跨项目 snapshot → 422 `idea_corpus_foreign`；无该字段的旧卡与无 idea_id payload 的 idea gate 原样放行（兼容）——tests/unit/v2-shape.test.ts；
+- artifact-kind-tex-extension：`registerArtifact`/HTTP artifact 路由接受 `tex-source|bib|compile-log|compile-aux` 并回读；非法 kind 仍 422 `invalid_kind`；旧 kind（log/data 等）不受影响（tests/unit/v2-shape.test.ts）；runner latex-compile 完成路径以 `compile-log`/`compile-aux` 注册 TeX 日志与 aux/bbl/blg/fls 打包（PDF 保持 `pdf`），既有 tex-build/tex-preview/tex-kernel 套件不破坏（`bash evals/latex-compile-e2e.sh`）；
+- job-created-by-principal：`submitJob` 持久化 `created_by_principal_id`（getJob/listJobs/原始列读回）；HTTP 作业路由以 BFF 注入的 `x-principal-id` 为提交者（body 覆写仅供内部调用方），两者皆缺 → NULL；旧行 NULL 兼容——tests/unit/v2-shape.test.ts；
+- budget-storage-bytes：`recordUsage({storage_bytes})` 在事务内与 model_cost_usd/gpu_hours/api_requests 原子累计并读回；HTTP budget 路由接受 `storage_bytes`；legacy budget 行读回 0（默认值）——tests/unit/v2-shape.test.ts；
+- migration-0016-v2-shape：jobs 追加 `created_by_principal_id TEXT`、budget 追加 `storage_bytes INTEGER NOT NULL DEFAULT 0`（幂等、不动旧迁移 checksum、SCHEMA_VERSION 14）；既有 v1 fixture 导入在 0016 下仍数据完整——tests/unit/migrations.test.ts。
+
+## 19. v1 迁移补 3 步新增场景（2026-08，MIG-V1，migration 0017_v1_legacy_marks / SCHEMA_VERSION 15，审计报告 §4 #6）
+
+- v1-fixture-three-marks（storage-migrations.md §9）：v1 fixture 库迁移后——echo/smoke 旧作业 `synthetic_fixture=1`（非 fixture 旧行保持 0）；run_manifest 无签名的旧作业与 succeeded 且无 manifest 的非 fixture 旧作业 `signature_status='legacy_unsigned'`；payload 内联 stdout/stderr 的旧作业获得 final log Artifact（`kind='log'` Artifact 行 + 真实 CAS blob + `jobs.legacy_log_artifact='sha256:<hex>'`，blob 内容与记录 sha256 逐字节一致、media_type/file_name/legacy metadata 齐备），不产生任何 terminal_frames——tests/unit/migrations.test.ts；
+- migration-0017-idempotent（storage-migrations.md §8.5/§9）：重复打开幂等（无重复标记、无重复 Artifact、SCHEMA_VERSION 15）；rewind 重跑 0017 只补旧行——signed/pending 运行、签名 manifest 作业、kernel 写入的 echo/smoke 新行均不受回填影响（新行不被误标 legacy_unsigned/synthetic_fixture）——tests/unit/migrations.test.ts；
+- legacy-log-no-cas-marker（storage-migrations.md §9）：openDatabase 无 casRoot 时旧日志只记 `legacy:in-payload` 标记，不创建引用缺失 Blob 的 Artifact 行（完整性扫描不产生 missing blob）——tests/unit/migrations.test.ts。

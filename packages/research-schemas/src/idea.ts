@@ -39,6 +39,11 @@ export const IdeaCard = z.object({
   idea_id: z.string().regex(/^idea_[a-z0-9_]+$/),
   project_id: z.string().min(1),
   version: z.number().int().positive().default(1),
+  // v2 shape (domain-model.md §6): every idea bound to a frozen Corpus
+  // snapshot BEFORE its Idea Gate decision. NULLABLE for pre-v2 cards —
+  // old cards keep working and simply skip the gate binding check; new
+  // cards are expected to carry it (kernel validates at Gate decision).
+  corpus_snapshot_id: z.string().nullable().default(null),
   title: z.string().min(1),
   hypothesis: z.string().min(1),
   scientific_gap: z.object({

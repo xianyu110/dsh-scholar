@@ -1049,6 +1049,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             if (role !== null) proxyHeaders['x-principal-role'] = role
           }
         }
+        // v2 shape (domain-model.md §9): job submission records the durable
+        // submitter principal (jobs.created_by_principal_id). On the v1 jobs
+        // route the BFF injects the loopback operator identity the same way
+        // it does for /v2/* — server-derived, never client-supplied; the
+        // kernel route falls back to the body override for internal callers
+        // and NULL when neither is present.
+        if (options.principal !== null && method === 'POST' && /^\/v1\/projects\/[^/]+\/jobs$/.test(url.pathname)) {
+          proxyHeaders['x-principal-id'] = options.principal
+        }
         // PTY-01 (execution-runtime.md §6.1): the kernel demands the
         // authenticated principal on pty open (x-principal-id, fail-closed)
         // and pins it on the session row. The BFF resolves BOTH here:

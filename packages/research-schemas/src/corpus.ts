@@ -32,6 +32,11 @@ export const Passage = z.object({
   location: z.string().default(''), // page / paragraph / section reference
   license: z.string().optional(),
   claim_summary: z.string().default(''),
+  // v2 shape (domain-model.md §5): content hash of the passage text
+  // (sha256 hex). OPTIONAL at parse time so pre-v2 rows keep reading;
+  // the kernel ALWAYS fills it on snapshot writes and rejects passages
+  // without one (new-write required, old-read compatible).
+  content_hash: z.string().optional(),
   is_untrusted: z.boolean().default(true), // external content: prompt-injection tagged
 })
 export type Passage = z.infer<typeof Passage>
@@ -58,6 +63,13 @@ export type ExternalClaim = z.infer<typeof ExternalClaim>
 export const CorpusSnapshot = z.object({
   snapshot_id: z.string().min(1),
   project_id: z.string().min(1),
+  // v2 shape (domain-model.md §5): schema version of the snapshot payload
+  // + per-source retrieval status. `source_status: complete` is the
+  // backward-compatible default: legacy snapshots (no field) read as
+  // complete. A source failure must be recorded here instead of silently
+  // dropping the query.
+  schema_version: z.number().int().positive().default(1),
+  source_status: z.enum(['pending', 'complete']).default('complete'),
   queries: z.array(z.object({
     source: z.enum(['openalex', 'crossref', 'arxiv', 'semantic-scholar']),
     query: z.string(),

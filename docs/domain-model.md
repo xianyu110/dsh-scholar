@@ -109,6 +109,8 @@ Paper 使用规范化 paper_id，优先 DOI，其次 arXiv ID，再用来源 ID�
 
 CorpusSnapshot 包含 snapshot_id、project_id、schema_version、查询及时间、每源状态、Paper、Passage、citation_edges、external_claims、coverage 和 frozen=true。创建后不可编辑；新调研产生新快照。任一来源失败必须保存在 source_status。
 
+**现状注记（已实现，commit 待定主代理统一提交）**：v2 形状对齐组（审计报告 §4 #9）已落地——`CorpusSnapshot.schema_version`（默认 1）与 `source_status`（`pending|complete`，默认 `complete` 兼容旧快照）在 `snapshotCorpus` 写入时填充，显式 `source_status='pending'` 用于记录来源失败；`Passage.content_hash` 为**新写必填、旧读兼容**：kernel 快照写入时对每条 passage 强制计算 `sha256(text)`（调用方提供的 content_hash 一律被覆盖，客户端不可声明 hash），验证步骤要求非空（`passage_content_hash_required` 422），旧行（无该字段）仍可解析读取；`is_untrusted` 保持既有语义（默认 `true`，外部内容提示注入标记）。证据：tests/unit/v2-shape.test.ts 15/15（六项正/负向 + 旧数据兼容）、根 pnpm test 692/692。
+
 标题去重顺序为 NFKC、Unicode case fold、字母数字保留、标点和空白归一；不得使用只支持 ASCII 的规则。
 
 ## 6. IdeaCard
@@ -116,6 +118,8 @@ CorpusSnapshot 包含 snapshot_id、project_id、schema_version、查询及时�
 必填字段：idea_id、project_id、version、corpus_snapshot_id、title、hypothesis、exact_delta、falsification.observation、minimum_viable_experiment、scores 和 status。
 
 MVE 必须包含 dataset_ref、baseline_ref、primary_metric 和 estimated_gpu_hours。Novelty Audit 保存查询、结果、重叠论文和未解决风险。Idea 进入 Gate 前必须绑定冻结 Corpus、至少一个最近邻、明确反证、可执行 MVE 和数据或伦理评估。
+
+**现状注记（已实现，commit 待定主代理统一提交）**：`IdeaCard.corpus_snapshot_id` 已落地（可空，旧卡兼容——无该字段的卡 parse 为 null 且不被 Gate 拦截）。Idea Gate 决策（decideGate 的 idea 分支）执行绑定校验：当 card 携带 `corpus_snapshot_id` 时，snapshot 必须存在（否则 422 `idea_corpus_unknown`）且属于 Gate 所在项目（跨项目 422 `idea_corpus_foreign`，绝不批准）；不携带该字段的旧卡与无 idea_id payload 的 idea gate 原样放行。`createIdea` 接受并持久化 `corpus_snapshot_id`；HTTP ideaSchema 同步放行。证据：tests/unit/v2-shape.test.ts（同项目批准 / 未知 422 / 跨项目 422 / 旧卡放行）。
 
 ## 7. ExperimentContract
 
@@ -173,6 +177,8 @@ BlobObject 只有 sha256、size_bytes、storage_uri、created_at，是全局内�
 
 Artifact kind 至少支持 code、pdf、data、log、model、chart、paper、analysis、manifest、bundle、tex-source、bib、compile-log、compile-aux。
 
+**现状注记（已实现，commit 待定主代理统一提交）**：`ArtifactKind` 已扩展 `tex-source|bib|compile-log|compile-aux`（kernel `registerArtifact`、HTTP artifact 路由与 multipart upload 的 kind 校验同步放行，非法 kind 仍 422 `invalid_kind`）。TeX 构建产物按新 kind 注册：runner latex-compile 完成路径把 TeX 日志注册为 `compile-log`（原泛型 `log`）、aux/bbl/blg/fls 打包 JSON 注册为 `compile-aux`（原泛型 `data`），PDF 保持 `pdf`；`tex-source`/`bib` 供显式登记 TeX 源码与参考文献使用。旧 kind（log/data）与旧行为完全兼容。证据：tests/unit/v2-shape.test.ts（四新 kind 注册/回读/HTTP 放行 + 旧 kind 兼容）。
+
 CodeSnapshot 和 TexWorkspaceSnapshot 都保存实际内容的 archive Artifact 与 manifest Artifact。Manifest 文件路径是根相对 POSIX 路径，拒绝绝对路径、..、NUL、设备、FIFO 和越界 symlink。
 
 ## 9. Job、Lease 与 RunManifest
@@ -182,6 +188,8 @@ Job kind：echo、smoke、baseline、pilot、formal、analysis、reproduce、lat
 JobSpec 至少包含 project_id、contract_id 可选、kind、idempotency_key、command 数组、payload、code_snapshot_id、data_artifact_ids、image_digest、output_contract、max_attempts。正式实验必须有 approved Contract、快照和固定 digest；latex-compile 必须有 TexWorkspaceSnapshot 和固定 TeX image digest。
 
 Job 还必须持久化 created_by_principal_id；researcher 的 own cancel 以此字段判断。full-auto 项目必须有 fixture_id，且所有 Job 绑定同一受信任 fixture profile；无 fixture_id 的 full-auto 创建直接 422。
+
+**现状注记（已实现，commit 待定主代理统一提交）**：`jobs.created_by_principal_id` 已落地（migration 0016 追加列，可空，旧行 NULL 兼容）。`submitJob` 接受可选 `created_by_principal_id` 并落库；HTTP 作业路由从 BFF 注入的 `x-principal-id` 头解析（body 覆写仅供内部调用方），两者皆缺 → NULL；`getJob`/`listJobs` 读回该字段。证据：tests/unit/v2-shape.test.ts（kernel 落库/读回/缺省 NULL + HTTP 头解析 + 裸请求 NULL）。
 
 Lease 包含 owner、generation、opaque token、expires_at 和 heartbeat_at。每次重新 claim 增加 generation 并生成新 token。
 
@@ -293,6 +301,8 @@ NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolve
 ## 16. Budget
 
 预算记录 model_cost_usd、gpu_hours、api_requests、storage_bytes 和 updated_at。增量必须非负并在事务内原子累计。越限时同一事务把项目置 BLOCKED_GATE、创建 Budget Gate 并写 policy.violation Outbox。恢复状态只接受 Gate payload 中经过校验的 resume_to。
+
+**现状注记（已实现，commit 待定主代理统一提交）**：`BudgetRecord.storage_bytes` 已落地（默认 0，旧行兼容；migration 0016 追加 `budget.storage_bytes INTEGER NOT NULL DEFAULT 0` 列）。`recordUsage` 接受 `storage_bytes` 并在同一事务内与 model_cost_usd/gpu_hours/api_requests 原子累计（非负增量）；`getBudget` 读回该字段；HTTP budget 路由与 budgetSchema 同步放行。证据：tests/unit/v2-shape.test.ts（累计/读回/legacy 行 0 + HTTP 放行）。
 
 ## 17. Outbox Event
 

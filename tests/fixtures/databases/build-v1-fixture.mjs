@@ -206,6 +206,31 @@ db.prepare(`INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, 
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
   'job_legacy1', 'p_legacy1', null, 'legacy-key-1', 'baseline', '["node","train.js"]', '{}', 'succeeded', null, null, null, null, 1, 3, null, '', now, now,
 )
+// MIG-V1 (§9) fixture rows — exercise the three 0017 steps:
+// (1) echo/smoke are v1 message-only FIXTURE jobs (stdout/stderr live inline
+//     in payload, no real execution) → synthetic_fixture + legacy log → final
+//     log Artifact (job_echo1) / synthetic_fixture only (job_smoke1).
+db.prepare(`INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  'job_echo1', 'p_legacy1', null, 'legacy-echo-1', 'echo', '[]',
+  JSON.stringify({ stdout: 'echo fixture output line 1\n', stderr: 'echo fixture stderr line\n' }),
+  'succeeded', null, null, null, null, 1, 3, null, '', now, now,
+)
+db.prepare(`INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  'job_smoke1', 'p_legacy1', null, 'legacy-smoke-1', 'smoke', '[]', '{}', 'succeeded', null, null, null, null, 1, 3, null, '', now, now,
+)
+// (2) unsigned legacy manifest — v1 manifests predate signed-manifest
+//     enforcement (requireSignedManifest defaulted on later) →
+//     signature_status='legacy_unsigned'.
+db.prepare(`INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, heartbeat_at, attempts, max_attempts, run_manifest, error, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  'job_manifest1', 'p_legacy1', null, 'legacy-manifest-1', 'baseline', '["node","train.js"]', '{}', 'succeeded', null, null, null, null, 1, 3,
+  JSON.stringify({ run_id: 'run_legacy1', project_id: 'p_legacy1', job_id: 'job_manifest1', exit_code: 0, started_at: now, finished_at: now }),
+  '', now, now,
+)
+// (3) job_legacy1 (baseline, succeeded, NO manifest) also becomes
+//     legacy_unsigned — it predates RUN-01's run_manifest_required.
 db.prepare(`INSERT INTO evidence (evidence_id, project_id, body, provenance_status, created_at)
   VALUES (?, ?, ?, ?, ?)`).run('ev_legacy1', 'p_legacy1', JSON.stringify({ effect: 0.2 }), 'legacy_unverified', now)
 db.prepare(`INSERT INTO manuscripts (manuscript_id, project_id, body, created_at)

@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, afterEach } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, copyFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, copyFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,13 +51,13 @@ describe('explicit migrations', () => {
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(13)
+    expect(SCHEMA_VERSION).toBe(15)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('13')
+    expect(meta.schema_version).toBe('15')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash', '0016_v2_shape_alignment', '0017_v1_legacy_marks'])
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
@@ -75,6 +75,14 @@ describe('explicit migrations', () => {
     // plaintext token is never persisted — payload.__lease_token is gone).
     const jobCols = tableInfo(db, 'jobs').map(c => c.name)
     expect(jobCols).toContain('lease_token_hash')
+    // 0016 (v2 shape): jobs.created_by_principal_id + budget.storage_bytes.
+    expect(jobCols).toContain('created_by_principal_id')
+    const budgetCols = tableInfo(db, 'budget').map(c => c.name)
+    expect(budgetCols).toContain('storage_bytes')
+    // 0017 (MIG-V1): the three legacy-mark columns exist on fresh databases.
+    for (const c of ['synthetic_fixture', 'signature_status', 'legacy_log_artifact']) {
+      expect(jobCols, `jobs.${c}`).toContain(c)
+    }
     const workspaceNodeCols = tableInfo(db, 'workspace_nodes').map(c => c.name)
     for (const c of ['workspace_id', 'path', 'version', 'binary', 'media', 'size_bytes', 'content', 'blob_sha256', 'content_hash']) {
       expect(workspaceNodeCols, `workspace_nodes.${c}`).toContain(c)
@@ -106,7 +114,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('13')
+    expect(version).toBe('15')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -150,7 +158,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('13')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -199,8 +207,8 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(14)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('13')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(16)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -225,7 +233,7 @@ describe('explicit migrations', () => {
     db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run()
     runMigrations(db)
     // Version bumped; outbox columns re-added by the new migration.
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('13')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
     const cols = tableInfo(db, 'events').map(c => c.name)
     for (const c of outboxCols) expect(cols).toContain(c)
     // Existing rows get default envelope values + a stable backfilled seq.
@@ -346,5 +354,132 @@ describe('explicit migrations', () => {
     // The regeneration script must exist so the binary asset is reproducible.
     const script = fileURLToPath(new URL('../fixtures/databases/build-v1-fixture.mjs', import.meta.url))
     expect(existsSync(script)).toBe(true)
+  })
+
+  it('0017 (MIG-V1): v1 fixture import marks synthetic_fixture / unsigned_legacy and materializes the final log Artifact', () => {
+    const path = tmpDbPath()
+    const casDir = mkdtempSync(join(tmpdir(), 'dsh-mig-cas-'))
+    copyFileSync(FIXTURE, path)
+    const db = openDatabase(path, undefined, casDir)
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('15')
+    // STORE-08 rule: the canonical body binds the up source AND the helpers
+    // it executes — editing either changes the recorded checksum.
+    const m17 = MIGRATIONS.find(x => x.id === '0017_v1_legacy_marks')
+    expect(m17).toBeDefined()
+    expect(m17!.body).toContain('manifestHasSignature')
+    expect(m17!.body).toContain('composeLegacyLog')
+    // Columns exist after the upgrade.
+    const jobCols = tableInfo(db, 'jobs').map(c => c.name)
+    for (const c of ['synthetic_fixture', 'signature_status', 'legacy_log_artifact']) expect(jobCols).toContain(c)
+    // §9 synthetic_fixture: v1 echo/smoke jobs are fixture runs.
+    const echo = db.prepare('SELECT synthetic_fixture, signature_status, legacy_log_artifact FROM jobs WHERE job_id = ?').get('job_echo1') as { synthetic_fixture: number; signature_status: string | null; legacy_log_artifact: string | null }
+    expect(echo.synthetic_fixture).toBe(1)
+    const smoke = db.prepare('SELECT synthetic_fixture FROM jobs WHERE job_id = ?').get('job_smoke1') as { synthetic_fixture: number }
+    expect(smoke.synthetic_fixture).toBe(1)
+    // Non-fixture legacy rows stay 0 (the kind-scoped backfill never touches them).
+    const baseline = db.prepare('SELECT synthetic_fixture FROM jobs WHERE job_id = ?').get('job_legacy1') as { synthetic_fixture: number }
+    expect(baseline.synthetic_fixture).toBe(0)
+    // §9 unsigned_legacy: unsigned manifest + succeeded-without-manifest.
+    const manifest1 = db.prepare('SELECT signature_status FROM jobs WHERE job_id = ?').get('job_manifest1') as { signature_status: string | null }
+    expect(manifest1.signature_status).toBe('legacy_unsigned')
+    const noManifest = db.prepare('SELECT signature_status FROM jobs WHERE job_id = ?').get('job_legacy1') as { signature_status: string | null }
+    expect(noManifest.signature_status).toBe('legacy_unsigned')
+    // §9 legacy log → final log Artifact: kind='log' artifact + CAS blob +
+    // durable reference on the job. No terminal frames are fabricated.
+    expect(echo.legacy_log_artifact).toMatch(/^sha256:[0-9a-f]{64}$/)
+    const logArtifact = db.prepare("SELECT artifact_id, kind, size_bytes, sha256, media_type, file_name, metadata FROM artifacts WHERE project_id = ? AND kind = 'log'").get('p_legacy1') as {
+      artifact_id: string; kind: string; size_bytes: number; sha256: string; media_type: string; file_name: string; metadata: string
+    }
+    expect(logArtifact.artifact_id).toBe(echo.legacy_log_artifact)
+    expect(logArtifact.kind).toBe('log')
+    expect(logArtifact.media_type).toBe('text/plain; charset=utf-8')
+    expect(logArtifact.file_name).toBe('legacy-run-job_echo1.log')
+    expect(JSON.parse(logArtifact.metadata)).toMatchObject({ legacy_log: true, source: 'v1 payload', job_id: 'job_echo1' })
+    // The blob physically exists in CAS and its content hash matches the row.
+    const blob = readFileSync(join(casDir, logArtifact.sha256), 'utf8')
+    expect(blob).toContain('=== dsh-scholar legacy run (job job_echo1, kind echo) ===')
+    expect(blob).toContain('--- stdout ---')
+    expect(blob).toContain('echo fixture output line 1')
+    expect(blob).toContain('--- stderr ---')
+    expect(blob).toContain('echo fixture stderr line')
+    expect(createHash('sha256').update(blob, 'utf8').digest('hex')).toBe(logArtifact.sha256)
+    expect(logArtifact.size_bytes).toBe(Buffer.byteLength(blob, 'utf8'))
+    // Re-open: idempotent — same marks, no duplicate artifacts, version stable.
+    db.close()
+    const db2 = openDatabase(path, undefined, casDir)
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(16)
+    const echo2 = db2.prepare('SELECT synthetic_fixture, signature_status, legacy_log_artifact FROM jobs WHERE job_id = ?').get('job_echo1') as { synthetic_fixture: number; signature_status: string | null; legacy_log_artifact: string | null }
+    expect(echo2.synthetic_fixture).toBe(1)
+    expect(echo2.signature_status).toBeNull()
+    expect(echo2.legacy_log_artifact).toBe(echo.legacy_log_artifact)
+    expect((db2.prepare("SELECT COUNT(*) AS n FROM artifacts WHERE kind = 'log'").get() as { n: number }).n).toBe(1)
+    db2.close()
+    rmSync(path, { recursive: false, force: true })
+    rmSync(casDir, { recursive: true, force: true })
+  })
+
+  it('0017 (MIG-V1): backfills are idempotent and never touch post-0017 rows', () => {
+    const casDir = mkdtempSync(join(tmpdir(), 'dsh-mig-cas-'))
+    const db = openDatabase(':memory:', undefined, casDir)
+    // Legacy-shaped rows (as written by a pre-0017 release).
+    db.prepare(`INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, lease_generation, attempts, max_attempts, run_manifest, error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'baseline', '[]', '{}', 'succeeded', NULL, NULL, NULL, 1, 1, 3, ?, '', ?, ?)`)
+      .run('job_pre_unsigned', 'p1', null, 'pre-key-1', JSON.stringify({ job_id: 'job_pre_unsigned', exit_code: 0 }), '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    db.prepare(`INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, manifest_json, signature_status, started_at, finished_at)
+      VALUES (?, 'p1', 'job_pre_unsigned', 1, NULL, NULL, NULL, 'unsigned', ?, ?)`)
+      .run('run_pre_unsigned', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z')
+    // Rewind 0017 (simulate a database produced by the PREVIOUS release) and
+    // re-run: the legacy rows must be marked.
+    db.exec("DELETE FROM schema_migrations WHERE id = '0017_v1_legacy_marks'")
+    db.prepare("UPDATE meta SET value = '14' WHERE key = 'schema_version'").run()
+    runMigrations(db, undefined, casDir)
+    const pre = db.prepare('SELECT signature_status FROM jobs WHERE job_id = ?').get('job_pre_unsigned') as { signature_status: string | null }
+    expect(pre.signature_status).toBe('legacy_unsigned')
+    const preRun = db.prepare('SELECT signature_status FROM runs WHERE run_id = ?').get('run_pre_unsigned') as { signature_status: string }
+    expect(preRun.signature_status).toBe('legacy_unsigned')
+    // Post-0017 rows: governed by the NEW regime — the backfills must not touch them.
+    db.prepare(`INSERT INTO jobs (job_id, project_id, contract_id, idempotency_key, kind, command, payload, status, failure_class, lease_owner, lease_expires_at, lease_generation, attempts, max_attempts, run_manifest, error, created_at, updated_at, synthetic_fixture, signature_status, legacy_log_artifact)
+      VALUES (?, 'p1', NULL, 'new-key-1', 'baseline', '[]', '{}', 'succeeded', NULL, NULL, NULL, 1, 1, 3, ?, '', ?, ?, 0, NULL, NULL)`)
+      .run('job_new_signed', JSON.stringify({ job_id: 'job_new_signed', exit_code: 0, signature: 'sig-test', runner_key_id: 'k1' }), '2026-02-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z')
+    db.prepare(`INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, manifest_json, signature_status, started_at, finished_at)
+      VALUES ('run_new_signed', 'p1', 'job_new_signed', 1, NULL, NULL, ?, 'signed', ?, ?)`)
+      .run(JSON.stringify({ job_id: 'job_new_signed', signature: 'sig-test' }), '2026-02-01T00:00:00.000Z', '2026-02-01T00:00:01.000Z')
+    db.prepare(`INSERT INTO runs (run_id, project_id, job_id, attempt_no, contract_id, snapshot_sha256, manifest_json, signature_status, started_at, finished_at)
+      VALUES ('run_new_pending', 'p1', 'job_new_signed', 2, NULL, NULL, NULL, 'pending', ?, NULL)`)
+      .run('2026-02-01T00:00:00.000Z')
+    // A fixture job created by the post-0017 kernel (already marked 1).
+    db.prepare(`INSERT INTO jobs (job_id, project_id, idempotency_key, kind, command, payload, status, attempts, max_attempts, error, created_at, updated_at, synthetic_fixture)
+      VALUES (?, 'p1', 'new-echo-1', 'echo', '[]', '{}', 'queued', 0, 3, '', ?, ?, 1)`)
+      .run('job_new_echo', '2026-02-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z')
+    // Second rewind re-run: idempotent backfill, new rows untouched.
+    db.exec("DELETE FROM schema_migrations WHERE id = '0017_v1_legacy_marks'")
+    db.prepare("UPDATE meta SET value = '14' WHERE key = 'schema_version'").run()
+    runMigrations(db, undefined, casDir)
+    const newJob = db.prepare('SELECT signature_status, synthetic_fixture FROM jobs WHERE job_id = ?').get('job_new_signed') as { signature_status: string | null; synthetic_fixture: number }
+    expect(newJob.signature_status).toBeNull()
+    expect(newJob.synthetic_fixture).toBe(0)
+    const newRunSigned = db.prepare('SELECT signature_status FROM runs WHERE run_id = ?').get('run_new_signed') as { signature_status: string }
+    expect(newRunSigned.signature_status).toBe('signed')
+    const newRunPending = db.prepare('SELECT signature_status FROM runs WHERE run_id = ?').get('run_new_pending') as { signature_status: string }
+    expect(newRunPending.signature_status).toBe('pending')
+    const newEcho = db.prepare('SELECT synthetic_fixture FROM jobs WHERE job_id = ?').get('job_new_echo') as { synthetic_fixture: number }
+    expect(newEcho.synthetic_fixture).toBe(1)
+    // Legacy rows keep their marks.
+    const pre2 = db.prepare('SELECT signature_status FROM jobs WHERE job_id = ?').get('job_pre_unsigned') as { signature_status: string | null }
+    expect(pre2.signature_status).toBe('legacy_unsigned')
+    db.close()
+    rmSync(casDir, { recursive: true, force: true })
+  })
+
+  it('0017 (MIG-V1): without a CAS root the legacy log is marked, not materialized', () => {
+    const path = tmpDbPath()
+    copyFileSync(FIXTURE, path)
+    const db = openDatabase(path)
+    const echo = db.prepare('SELECT legacy_log_artifact FROM jobs WHERE job_id = ?').get('job_echo1') as { legacy_log_artifact: string | null }
+    expect(echo.legacy_log_artifact).toBe('legacy:in-payload')
+    // No phantom artifact row referencing a missing blob (integrity stays clean).
+    expect((db.prepare("SELECT COUNT(*) AS n FROM artifacts WHERE kind = 'log'").get() as { n: number }).n).toBe(0)
+    db.close()
+    rmSync(path, { recursive: false, force: true })
   })
 })

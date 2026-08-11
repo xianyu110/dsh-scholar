@@ -64,6 +64,9 @@ export function fixtureIdea(projectId = 'rsp_20260806_001'): IdeaCard {
     idea_id: 'idea_003',
     project_id: projectId,
     version: 2,
+    // v2 shape (domain-model.md §6): bound to the frozen corpus snapshot
+    // (fixtureCorpus above) — the binding the Idea Gate validates.
+    corpus_snapshot_id: 'corpus_snap_001',
     title: 'Shift-robust temporal localization via uncertainty-weighted proposals',
     hypothesis: 'Uncertainty-weighted proposal scoring improves temporal localization mAP under domain shift without new data.',
     scientific_gap: { claims: ['ext_claim_17', 'ext_claim_42'], statement: 'Existing methods assume train/test distribution match.' },
@@ -99,6 +102,10 @@ export function fixtureCorpus(projectId = 'rsp_20260806_001'): CorpusSnapshot {
   return {
     snapshot_id: 'corpus_snap_001',
     project_id: projectId,
+    // v2 shape (domain-model.md §5): explicit schema version + per-source
+    // status (complete = all queries retrieved).
+    schema_version: 1,
+    source_status: 'complete',
     queries: [{ source: 'openalex', query: 'temporal action localization', run_at: NOW }],
     papers: [
       {
@@ -120,6 +127,8 @@ export function fixtureCorpus(projectId = 'rsp_20260806_001'): CorpusSnapshot {
         text: 'Most methods assume train and test distributions match.',
         location: 'p.3, §2',
         claim_summary: 'Distribution shift is unaddressed.',
+        // v2 shape (domain-model.md §5): sha256(text).
+        content_hash: '9f37b91ae03367d0026fea6cb9ebb0e4ab454763494437ca7b53668a73e84ba1',
         is_untrusted: true,
       },
     ],

@@ -41,7 +41,7 @@
 | 500 | internal_error | 脱敏内部失败 |
 | 502 | kernel_unreachable、connector_unavailable | 依赖不可用 |
 
-稳定补充 code：invalid_cursor(400,false)、unsupported_media_type(415,false)、idempotency_conflict(409,false)、upload_offset_conflict(409,true)、artifact_stage_expired(409,false)、document_version_conflict(409,true)、tex_root_not_found(422,false)、lease_conflict/lease_stale(409,true)、job_finished(409,false)、manifest_invalid/signature_invalid(422,false)、project_required(422,false)、fixture_required(422,false)、fixture_image_mismatch(422,false)、fixture_artifact_outside_profile(422,false)、fixture_code_mismatch(422,false)、jobs_running(409,false)、domain_unsupported(422,false)。括号第二项是 retryable；未登记 code 默认 retryable=false。
+稳定补充 code：invalid_cursor(400,false)、unsupported_media_type(415,false)、idempotency_conflict(409,false)、upload_offset_conflict(409,true)、artifact_stage_expired(409,false)、document_version_conflict(409,true)、tex_root_not_found(422,false)、lease_conflict/lease_stale(409,true)、job_finished(409,false)、manifest_invalid/signature_invalid(422,false)、project_required(422,false)、fixture_required(422,false)、fixture_image_mismatch(422,false)、fixture_artifact_outside_profile(422,false)、fixture_code_mismatch(422,false)、jobs_running(409,false)、domain_unsupported(422,false)、idea_corpus_unknown(422,false)、idea_corpus_foreign(422,false)、passage_content_hash_required(422,false)。括号第二项是 retryable；未登记 code 默认 retryable=false。
 
 Zod 错误 details 只返回字段路径和安全消息。上游 5xx、文件系统绝对路径、SQL、环境变量和 Token 不得传到浏览器。
 
@@ -124,7 +124,7 @@ Contract approval 只能由 Gate 事务发生，没有独立 approve 路由。
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `kind` | 是 | 固定枚举：code/pdf/data/log/model/chart/paper/analysis/manifest/bundle；非法 → 422 `invalid_kind` |
+| `kind` | 是 | 固定枚举：code/pdf/data/log/model/chart/paper/analysis/manifest/bundle/tex-source/bib/compile-log/compile-aux（v2 形状：TeX 构建产物用 tex-source/bib/compile-log/compile-aux 而非泛型 log/data）；非法 → 422 `invalid_kind` |
 | `file` | 是 | 唯一文件 part（`filename=` 必填）；缺失 → 422 `missing_file`，多于一个文件 part → 422 `multiple_files` |
 | `file_name` | 否 | 登记到 ArtifactRecord 的下载名；缺省用 file part 的 filename。必须是单段 basename |
 | `media_type` | 否 | RFC 2046；缺省 pdf→`application/pdf`，其余 `application/octet-stream` |

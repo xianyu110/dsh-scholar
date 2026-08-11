@@ -66,7 +66,7 @@ const followupSchema = z.object({
 }).strict()
 
 /** Canonical artifact kind list (schema + upload route share it). */
-const ARTIFACT_KINDS = ['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle'] as const
+const ARTIFACT_KINDS = ['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle', 'tex-source', 'bib', 'compile-log', 'compile-aux'] as const
 
 const terminalFramesSchema = z.object({
   run_id: z.string().min(1),
@@ -163,6 +163,9 @@ const corpusSchema = z.object({
   passages: z.array(z.unknown()).optional(),
   citation_edges: z.array(z.unknown()).optional(),
   external_claims: z.array(z.unknown()).optional(),
+  // v2 shape (domain-model.md §5): per-source status; a source failure must
+  // be recorded (pending) instead of silently dropping the query.
+  source_status: z.enum(['pending', 'complete']).optional(),
 })
 
 const contractSchema = z.object({
@@ -192,6 +195,10 @@ const jobSchema = z.object({
   data_artifact_ids: z.array(z.string()).optional(),
   image_digest: z.string().optional(),
   output_contract: z.object({ metrics: z.string(), logs: z.string() }).optional(),
+  // v2 shape (domain-model.md §9): durable submitter principal. The route
+  // prefers the BFF-injected x-principal-id header; a body value is accepted
+  // only as an explicit override for internal callers — absent both → NULL.
+  created_by_principal_id: z.string().nullable().optional(),
 })
 
 const codeSnapshotSchema = z.object({
@@ -217,6 +224,9 @@ const runnerKeySchema = z.object({
 
 const ideaSchema = z.object({
   project_id: z.string().min(1).optional(),
+  // v2 shape (domain-model.md §6): optional frozen-corpus binding; the Idea
+  // Gate validates it (422 idea_corpus_unknown/idea_corpus_foreign) when set.
+  corpus_snapshot_id: z.string().nullable().optional(),
   title: z.string().min(1),
   hypothesis: z.string().min(1),
   scientific_gap: z.record(z.unknown()).optional(),
@@ -265,6 +275,8 @@ const budgetSchema = z.object({
   model_cost_usd: z.number().nonnegative().optional(),
   gpu_hours: z.number().nonnegative().optional(),
   api_requests: z.number().int().nonnegative().optional(),
+  // v2 shape (domain-model.md §16): storage accounting in bytes.
+  storage_bytes: z.number().int().nonnegative().optional(),
 })
 
 function readJson(req: IncomingMessage): Promise<unknown> {
@@ -1264,7 +1276,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
             if (method === 'POST' && sub === 'jobs') {
               const input = jobSchema.parse(body)
-              const job = kernel.submitJob({ ...input, project_id: id })
+              // v2 shape (domain-model.md §9): durable submitter principal —
+              // BFF-injected x-principal-id first, body override for internal
+              // callers, NULL when neither is present.
+              const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== '' ? req.headers['x-principal-id'] : undefined
+              const job = kernel.submitJob({ ...input, project_id: id, created_by_principal_id: input.created_by_principal_id ?? headerPrincipal ?? null })
               send(res, 201, job)
               return
             }
@@ -2208,7 +2224,11 @@ async function handleV2(ctx: {
     // researcher; viewer/auditor are read-only (enforced above).
     memberOr404(id)
     const input = jobSchema.parse(body)
-    const job = kernel.submitJob({ ...input, project_id: id })
+    // v2 shape (domain-model.md §9): the durable submitter principal is the
+    // BFF-injected x-principal-id (never client body trust); a body override
+    // is honored for internal callers; absent both → NULL.
+    const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== '' ? req.headers['x-principal-id'] : undefined
+    const job = kernel.submitJob({ ...input, project_id: id, created_by_principal_id: input.created_by_principal_id ?? headerPrincipal ?? null })
     send(res, 201, job)
     return
   }

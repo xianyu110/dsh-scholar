@@ -995,9 +995,11 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       if (existsSync(logPath)) {
         const logText = readFileSync(logPath, 'utf8')
         diagnostics = parseLatexDiagnostics(logText)
+        // v2 shape (domain-model.md §8): TeX build outputs use the specific
+        // `compile-log` kind (previously the generic `log`).
         const rec = await client.registerArtifact({
           project_id: job.project_id,
-          kind: 'log',
+          kind: 'compile-log',
           content_base64: Buffer.from(logText).toString('base64'),
           media_type: 'text/plain; charset=utf-8',
           file_name: `tex-${texManifest.revision}.log`,
@@ -1011,9 +1013,11 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       }
       let auxArtifact: string | null = null
       if (Object.keys(aux).length > 0) {
+        // v2 shape (domain-model.md §8): TeX auxiliaries use the specific
+        // `compile-aux` kind (previously the generic `data`).
         const rec = await client.registerArtifact({
           project_id: job.project_id,
-          kind: 'data',
+          kind: 'compile-aux',
           content_base64: Buffer.from(JSON.stringify(aux)).toString('base64'),
           media_type: 'application/json',
           file_name: `tex-${texManifest.revision}-aux.json`,

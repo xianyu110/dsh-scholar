@@ -52,7 +52,7 @@ export const Decision = z.object({
 export type Decision = z.infer<typeof Decision>
 
 /** Artifact kinds in the CAS registry. */
-export const ArtifactKind = z.enum(['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle'])
+export const ArtifactKind = z.enum(['code', 'pdf', 'data', 'log', 'model', 'chart', 'paper', 'analysis', 'manifest', 'bundle', 'tex-source', 'bib', 'compile-log', 'compile-aux'])
 export type ArtifactKind = z.infer<typeof ArtifactKind>
 
 /** Content-addressed artifact registry record (design §4.2 Artifact Registry). */
@@ -93,6 +93,11 @@ export const JobRecord = z.object({
   lease_generation: z.number().int().nonnegative().nullable().default(null),
   /** §12.6: opaque lease token returned at claim time; persisted in payload.__lease_token. */
   lease_token: z.string().nullable().default(null),
+  // v2 shape (domain-model.md §9): durable submitter identity — the
+  // authenticated principal who submitted the job (BFF-injected
+  // x-principal-id, never client-supplied). NULL for legacy rows and
+  // internal submissions without a principal.
+  created_by_principal_id: z.string().nullable().default(null),
   attempts: z.number().int().nonnegative().default(0),
   max_attempts: z.number().int().positive().default(3),
   run_manifest: z.record(z.unknown()).nullable().default(null),
@@ -116,6 +121,9 @@ export const BudgetRecord = z.object({
   model_cost_usd: z.number().nonnegative().default(0),
   gpu_hours: z.number().nonnegative().default(0),
   api_requests: z.number().int().nonnegative().default(0),
+  // v2 shape (domain-model.md §16): storage accounting in bytes, filled at
+  // recordUsage time; default 0 keeps legacy ledger rows readable.
+  storage_bytes: z.number().int().nonnegative().default(0),
   updated_at: z.string(),
 })
 export type BudgetRecord = z.infer<typeof BudgetRecord>
