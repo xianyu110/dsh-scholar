@@ -488,126 +488,7 @@ const legacyV1Import = (db: DatabaseSync, report: MigrationReport): void => {
   convertManuscriptsToTex(db, report)
 }
 
-/**
- * FROZEN terminal-DDL snapshot executed by migration 0003 (STORE-08,
- * storage-migrations.md §8.1). 0003's checksum must bind the DDL it ACTUALLY
- * executes — the shared TERMINAL_DDL/TEX_DDL constants evolve with new
- * capabilities (each delta arrives as its own migration), so a released
- * migration can never reference them by name. The canonical body of 0003
- * embeds THIS text; shared-constant evolution therefore cannot silently
- * change what a released migration does, nor invalidate the checksums
- * recorded on existing databases.
- *
- * Freeze rule: this snapshot is the TeX/terminal shape at the time 0003 was
- * released (0010/0011/0012/0013 later brought tex_preview_pending, pty/
- * workspace, intake and trajectory tables on top of it). It is NEVER edited
- * in place — schema growth goes through new migrations + the live stores'
- * own CREATE IF NOT EXISTS convergence (tex-workspace.ts / pty-session.ts).
- */
-const TERMINAL_DDL_0003 = `
-CREATE TABLE IF NOT EXISTS terminal_frames (
-  job_id TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  stream_seq INTEGER,
-  channel TEXT,
-  text TEXT,
-  byte_offset INTEGER,
-  byte_length INTEGER,
-  frame_kind TEXT NOT NULL,
-  payload_json TEXT NOT NULL DEFAULT '{}',
-  lease_generation INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (job_id, run_id, seq),
-  FOREIGN KEY (job_id) REFERENCES jobs(job_id),
-  CHECK (frame_kind IN ('chunk','gap','exit')),
-  CHECK (channel IS NULL OR channel IN ('stdout','stderr')),
-  CHECK (
-    (frame_kind = 'chunk' AND channel IS NOT NULL AND stream_seq IS NOT NULL AND text IS NOT NULL AND byte_offset IS NOT NULL AND byte_length IS NOT NULL)
-    OR
-    (frame_kind IN ('gap','exit') AND channel IS NULL AND stream_seq IS NULL AND text IS NULL)
-  )
-);
-CREATE INDEX IF NOT EXISTS idx_terminal_job_seq ON terminal_frames(job_id, seq);
-CREATE TABLE IF NOT EXISTS terminal_retention (
-  job_id TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  retained_from_seq INTEGER NOT NULL DEFAULT 1,
-  total_bytes INTEGER NOT NULL DEFAULT 0,
-  dropped_bytes INTEGER NOT NULL DEFAULT 0,
-  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
-  PRIMARY KEY (job_id, run_id)
-);
-`
 
-/** FROZEN TeX-DDL snapshot executed by migration 0003 (see TERMINAL_DDL_0003
- * for the freeze rule — STORE-08, storage-migrations.md §8.1). */
-const TEX_DDL_0003 = `
-CREATE TABLE IF NOT EXISTS tex_documents (
-  document_id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  root_file TEXT NOT NULL DEFAULT 'paper.tex',
-  revision INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tex_files (
-  document_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  content TEXT NOT NULL,
-  content_hash TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (document_id, path)
-);
-CREATE INDEX IF NOT EXISTS idx_tex_files_doc ON tex_files(document_id);
-CREATE TABLE IF NOT EXISTS tex_snapshots (
-  document_id TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  manifest TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (document_id, revision)
-);
--- TEX-01 (§4 row 95): frozen, materializable snapshot bytes (parity with the
--- tex-workspace SCHEMA — the Runner compiles these revision-scoped bytes).
-CREATE TABLE IF NOT EXISTS tex_snapshot_files (
-  document_id TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  path TEXT NOT NULL,
-  content TEXT NOT NULL,
-  content_hash TEXT NOT NULL,
-  PRIMARY KEY (document_id, revision, path)
-);
-CREATE INDEX IF NOT EXISTS idx_tex_snapshot_files_doc ON tex_snapshot_files(document_id, revision);
-CREATE TABLE IF NOT EXISTS tex_builds (
-  build_id TEXT PRIMARY KEY,
-  document_id TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  root_file TEXT NOT NULL,
-  job_id TEXT,
-  status TEXT NOT NULL,
-  diagnostics TEXT NOT NULL DEFAULT '[]',
-  pdf_artifact TEXT,
-  log_artifact TEXT,
-  -- TEX-03 (§4 row 96 / execution-runtime.md §12.1): preview flag +
-  -- supersede linkage for live preview builds (parity with tex-workspace.ts).
-  preview INTEGER NOT NULL DEFAULT 0,
-  superseded_by TEXT,
-  superseded_at TEXT,
-  created_at TEXT NOT NULL,
-  finished_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tex_builds_doc ON tex_builds(document_id);
--- TEX-03: durable debounced preview request (survives kernel restarts).
-CREATE TABLE IF NOT EXISTS tex_preview_pending (
-  document_id TEXT PRIMARY KEY,
-  revision INTEGER NOT NULL,
-  root_file TEXT NOT NULL,
-  engine TEXT NOT NULL DEFAULT 'pdflatex',
-  debounce_ms INTEGER NOT NULL DEFAULT 800,
-  requested_at TEXT NOT NULL
-);
-`
 
 /**
  * 0003 — terminal/TeX/i18n capabilities for databases that were created by
@@ -615,15 +496,18 @@ CREATE TABLE IF NOT EXISTS tex_preview_pending (
  * Idempotent: terminal + TeX tables are CREATE IF NOT EXISTS, and column
  * additions check existence first. On current databases this is a no-op.
  *
- * STORE-08: the executed DDL is the FROZEN snapshot above (never the shared
- * TERMINAL_DDL/TEX_DDL constants), and the canonical `body` embeds that
- * snapshot text — so the recorded checksum binds the actual DDL and shared
- * constant evolution cannot weaken the "released migrations are immutable"
- * guarantee.
+ * RELEASED-MIGRATION FREEZE: 0003's recorded checksum binds THIS function
+ * source, which references the shared TERMINAL_DDL/TEX_DDL constants by
+ * name — those constants are therefore part of 0003's released behaviour
+ * and must only ever GROW via new migrations + the live stores' own CREATE
+ * IF NOT EXISTS convergence, never be edited in place. An earlier attempt
+ * to inline a frozen DDL snapshot changed this function source and broke
+ * every existing database's recorded checksum ("released migrations are
+ * immutable"); it was reverted — checksums are immutable once released.
  */
 const terminalTexCapabilities = (db: DatabaseSync, report: MigrationReport): void => {
-  db.exec(TERMINAL_DDL_0003)
-  db.exec(TEX_DDL_0003)
+  db.exec(TERMINAL_DDL)
+  db.exec(TEX_DDL)
   ensureColumn(db, 'evidence', 'provenance_status', "TEXT NOT NULL DEFAULT 'legacy_unverified'")
   ensureColumn(db, 'decisions', 'principal_id', 'TEXT')
   ensureColumn(db, 'decisions', 'principal_tenant_id', 'TEXT')
@@ -1199,11 +1083,7 @@ export const MIGRATIONS: Migration[] = [
   {
     id: '0003_terminal_tex_i18n_capabilities',
     description: 'Terminal/TeX tables + v2 columns for early v2-preview databases',
-    // STORE-08 (storage-migrations.md §8.1): the canonical body is the up
-    // source PLUS the frozen inline DDL snapshot the migration executes —
-    // the checksum binds the actual DDL, and the shared TERMINAL_DDL/TEX_DDL
-    // constants can evolve without invalidating recorded checksums.
-    body: `${terminalTexCapabilities.toString()}\n\n${TERMINAL_DDL_0003}\n${TEX_DDL_0003}`,
+    body: terminalTexCapabilities.toString(),
     up: terminalTexCapabilities,
   },
   {

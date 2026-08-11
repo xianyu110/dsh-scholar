@@ -323,28 +323,29 @@ describe('explicit migrations', () => {
     db.close()
   })
 
-  it('STORE-08: 0003 checksum binds a FROZEN inline DDL snapshot (shared TEX_DDL evolution cannot invalidate released checksums)', () => {
+  it('STORE-08: 0003 stays a released migration — checksum binds the function source which references the shared DDL constants', () => {
     const m = MIGRATIONS.find(x => x.id === '0003_terminal_tex_i18n_capabilities')
     expect(m).toBeDefined()
-    // The canonical body embeds the inline DDL text the migration executes —
-    // it never references the shared TERMINAL_DDL/TEX_DDL constants by name.
-    expect(m!.body).toContain('CREATE TABLE IF NOT EXISTS tex_documents')
-    expect(m!.body).toContain('CREATE TABLE IF NOT EXISTS tex_snapshot_files')
-    expect(m!.body).toContain('CREATE TABLE IF NOT EXISTS tex_preview_pending')
-    expect(m!.body).not.toMatch(/db\.exec\((TERMINAL_DDL|TEX_DDL)\)/)
-    // The recorded checksum is a pure function of id + frozen inline text:
-    // editing the SHARED constant (or any other external text) cannot change
-    // it, so checksums recorded on existing databases stay valid — while any
-    // edit to the released body itself changes the checksum (immutability is
-    // enforced, not weakened).
+    // RELEASED-MIGRATION FREEZE (reverted inline-snapshot experiment): the
+    // canonical body is the up source, which executes the shared
+    // TERMINAL_DDL/TEX_DDL constants by name — that is the behaviour that
+    // was released, and the checksums recorded on existing databases bind
+    // this exact source text. Editing the body would break every existing
+    // database ("released migrations are immutable").
+    expect(m!.body).toContain('db.exec(TERMINAL_DDL)')
+    expect(m!.body).toContain('db.exec(TEX_DDL)')
+    expect(m!.body).not.toMatch(/TERMINAL_DDL_0003|TEX_DDL_0003/)
+    // The recorded checksum is a pure function of id + body: any edit to the
+    // released body changes the checksum (immutability is enforced), and the
+    // constants referenced BY NAME are part of the released behaviour — they
+    // must only grow through new migrations, never be edited in place.
     expect(checksumOf(m!)).toBe(sha256(`${m!.id}\n${m!.body}`))
     expect(checksumOf({ ...m!, body: m!.body + '\n-- shared TEX_DDL evolved elsewhere\n' })).not.toBe(checksumOf(m!))
-    expect(checksumOf({ ...m!, body: m!.body.replace('tex_files', 'tex_files_x') })).not.toBe(checksumOf(m!))
-    // And the frozen snapshot is what 0003 executes on a fresh database:
-    // the tables it alone provides exist after a full migration run.
+    expect(checksumOf({ ...m!, body: m!.body.replace('db.exec(TERMINAL_DDL)', 'db.exec(TERMINAL_DDL_X)') })).not.toBe(checksumOf(m!))
+    // 0003 still converges the terminal/TeX tables on a fresh database via
+    // the shared constants (CREATE IF NOT EXISTS is idempotent).
     const db = openDatabase(':memory:')
-    const snapshotTables = tableInfo(db, 'tex_snapshot_files').map(c => c.name)
-    expect(snapshotTables.length).toBeGreaterThan(0)
+    expect(tableInfo(db, 'tex_snapshot_files').length).toBeGreaterThan(0)
     expect(tableInfo(db, 'tex_preview_pending').length).toBeGreaterThan(0)
     db.close()
   })

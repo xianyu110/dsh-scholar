@@ -1906,7 +1906,7 @@ export class ResearchKernel {
       } catch {
         continue // raced with another cleanup — skip
       }
-      if (now - mtime > maxAgeMs) {
+      if (now - mtime >= maxAgeMs) {
         try {
           unlinkSync(full)
           removed += 1
@@ -2683,7 +2683,7 @@ export class ResearchKernel {
         } catch {
           continue
         }
-        if (now - mtime > maxAgeMs) {
+        if (now - mtime >= maxAgeMs) {
           try {
             unlinkSync(full)
             removed += 1
