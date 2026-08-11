@@ -191,6 +191,7 @@
 - `./node_modules/.bin/vitest run`：43 个测试文件通过、2 个 suite 失败；703 个测试通过、1 个失败、9 个因 `pnpm` 不在 PATH 而跳过；失败项为 workspace 子目录权限在 `umask 0077` 下实际 0700、契约要求 0750；packaging suite 因 `spawnSync pnpm ENOENT` 未执行；**两项已在本轮修复并重跑全绿（见下表 WORK-01/CI-01 行：workspace-store.test.ts 16/16、packaging.test.ts 10/10、security.test.ts 26/26）**；
 - `bash tests/security/run-selfmod-tests.sh`：17/18；生产隔离、显式 dev overlay 和真实 DSH dump-config composition 通过，tarball 负向断言因 `pnpm pack` 未产出 tarball 失败（脚本直接调用裸 `pnpm`，环境 PATH 无 pnpm）；因此 SELFMOD-01 只能记“已实现未验收”；**已修复（resolve_pnpm 解析 pnpm 入口）并本轮重跑 19/19**；
 - 文档中的 713/713、19/19、4/4、29/29 是历史证据，不能替代上述 `main@fda346b` 当前结果。
+- **2026-08-11 修复轮后的同环境复验（无 pnpm PATH：`PATH=<node_dir>:/usr/bin:/bin`）**：`./node_modules/.bin/vitest run tests/unit/packaging.test.ts` 10/10（resolvePnpm npm_execpath 生效，无 ENOENT）；`bash tests/security/run-selfmod-tests.sh` 19/19（tarball 负向正常）；`./node_modules/.bin/vitest run tests/unit/workspace-store.test.ts tests/unit/security.test.ts` 42/42（umask 0077 权限链 0750/0640 + 安全单测不排除）；完整 `pnpm test` 934/934、聚合器 CI=true 19/19、ci-gate 4/4、verify-docs 19/19。
 
 | 优先级 | 影响 ID / 当前状态 | 当前阻断 | 强制关闭条件 |
 |---|---|---|---|
