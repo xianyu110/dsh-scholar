@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Start an isolated DSH Agent development instance for the dsh-scholar
-# tools, commands, Skills and Cordis lifecycle. This does not install or
-# expose a DSH-embedded Scholar browser UI; the only Scholar UI is the
-# standalone server started by scripts/start-standalone-ui.sh.
+# tools, commands, Skills, Cordis lifecycle, Plugin config and the thin
+# conversation launcher for the separately running standalone workbench.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -56,7 +55,7 @@ if [ -n "$EXTRA_PATCH" ]; then
 fi
 
 echo "starting isolated DSH Agent host: http://127.0.0.1:$WEB_PORT"
-echo "Scholar browser UI is not mounted; use scripts/start-standalone-ui.sh."
+echo "Start scripts/start-standalone-ui.sh to populate the dsh Scholar conversation tab."
 DSH_HOME="$DEV_HOME" setsid nohup "$DEV_CLI" web "${EXTRA_ARGS[@]}" --host 127.0.0.1 --port "$WEB_PORT" \
   >> "$DEV_HOME/agent-web.log" 2>&1 < /dev/null &
 echo "pid $! — log: $DEV_HOME/agent-web.log"
@@ -82,4 +81,4 @@ if [ "$kernel_state" != ok ]; then
 fi
 
 echo "verification: curl -s http://127.0.0.1:$KERNEL_PORT/v1/health"
-echo "Use direct slash commands such as /new, /status and /reproduce in DSH; use http://127.0.0.1:18610 for the Scholar UI."
+echo "Use direct slash commands such as /new, /status and /reproduce in DSH; open the dsh Scholar tab or Alt+Shift+S for http://127.0.0.1:18610."

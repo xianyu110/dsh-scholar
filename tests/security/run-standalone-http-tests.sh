@@ -204,8 +204,37 @@ else
   HDR=$(curl -sI -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P")
   echo "$HDR" | grep -qi "content-type: application/pdf" && ok "ART-01: proxied pdf content-type" || fail "ART-01: proxied content-type ($(echo "$HDR" | grep -i content-type || true))"
   echo "$HDR" | grep -qi "etag: \"sha256:" && ok "ART-01: proxied etag present" || fail "ART-01: proxied etag missing"
+  echo "$HDR" | grep -qi 'content-disposition: inline; filename="roundtrip.pdf"' && ok "ART-01: proxied download name" || fail "ART-01: proxied content-disposition missing"
   GOT=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P" | base64 | tr -d '\n')
   [ "$GOT" = "$PDF_B64" ] && ok "ART-01: proxied bytes round-trip intact" || fail "ART-01: bytes mismatch"
+  RANGE_HEADERS="$WORK/artifact-range.headers"
+  RANGE_BODY="$WORK/artifact-range.body"
+  RANGE_CODE=$(curl -sS -D "$RANGE_HEADERS" -o "$RANGE_BODY" -w '%{http_code}' \
+    -H "Authorization: Bearer $TOKEN" -H 'Range: bytes=0-3' \
+    "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P")
+  [ "$RANGE_CODE" = "206" ] && ok "ART-01: proxied Range request -> 206" || fail "ART-01: proxied Range request -> $RANGE_CODE"
+  grep -qi '^content-range: bytes 0-3/' "$RANGE_HEADERS" && ok "ART-01: proxied Content-Range present" || fail "ART-01: proxied Content-Range missing"
+  [ "$(cat "$RANGE_BODY")" = '%PDF' ] && ok "ART-01: proxied Range bytes exact" || fail "ART-01: proxied Range bytes mismatch"
+  UNSAT_HEADERS="$WORK/artifact-range-unsat.headers"
+  UNSAT_CODE=$(curl -sS -D "$UNSAT_HEADERS" -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $TOKEN" -H 'Range: bytes=999999-1000000' \
+    "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P")
+  [ "$UNSAT_CODE" = "416" ] && ok "ART-01: unsatisfiable proxied Range -> 416" || fail "ART-01: unsatisfiable proxied Range -> $UNSAT_CODE"
+  grep -qi '^content-range: bytes \*/' "$UNSAT_HEADERS" && ok "ART-01: 416 Content-Range present" || fail "ART-01: 416 Content-Range missing"
+
+  P2=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$WEB_PORT/v1/projects" \
+    -d '{"name":"art-rt-2","workspace":"/w/art-rt-2","mode":"gate-only","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+  ART2=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$WEB_PORT/v1/artifacts" \
+    -d "{\"project_id\":\"$P2\",\"kind\":\"pdf\",\"content_base64\":\"$PDF_B64\",\"media_type\":\"application/pdf\",\"file_name\":\"roundtrip-2.pdf\"}" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.artifact_id||'')})")
+  [ -n "$P2" ] && [ "$ART2" = "$ART" ] && ok "ART-UI-01: two projects share one CAS blob id" || fail "ART-UI-01: shared CAS fixture"
+  UNSCOPED=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART")
+  [ "$UNSCOPED" = "404" ] && ok "ART-UI-01: ambiguous unscoped artifact fails closed" || fail "ART-UI-01: ambiguous unscoped artifact -> $UNSCOPED"
+  SCOPED2=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$WEB_PORT/v1/artifacts/$ART?project_id=$P2")
+  [ "$SCOPED2" = "200" ] && ok "ART-UI-01: selected project scope resolves shared blob" || fail "ART-UI-01: selected project scope -> $SCOPED2"
 fi
 
 # ── API-01: BFF membership enforcement (--principal) ───────────────────────

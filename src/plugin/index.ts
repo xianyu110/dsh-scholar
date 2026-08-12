@@ -38,6 +38,7 @@ import z from '@deepseek-ai/schemastery'
 // Module augmentations: ctx.tools (ToolRegistry), ctx.commands (CommandService).
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Settings } from '@deepseek-ai/dsh-settings'
 import * as SkillLocal from '@deepseek-ai/dsh-skill-local'
@@ -51,6 +52,14 @@ import { registerResearchTools } from './tools.js'
 import { registerResearchCommands } from './commands.js'
 import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
+import { readStandaloneAccessToken } from './standalone-token.js'
+import {
+  DEFAULT_STANDALONE_SHORTCUT,
+  DEFAULT_STANDALONE_URL,
+  normalizeStandaloneShortcut,
+  normalizeStandaloneUrl,
+  type StandaloneShortcut,
+} from '../shared/standalone.js'
 
 export const name = 'research-plugin'
 
@@ -77,12 +86,18 @@ export interface ResearchPluginConfig {
   models?: Record<string, string>
   /** Directory for connector response caches (defaults under dataDir). */
   cacheDir?: string
+  /** Standalone workbench launcher shown by the DSH browser half. */
+  standalone?: {
+    url?: string
+    shortcut?: StandaloneShortcut
+  }
 }
 
 type ConfigIssue = { message: string; path: PropertyKey[] }
 
-const ROOT_CONFIG_KEYS = new Set(['kernel', 'defaultMode', 'unattended', 'models', 'cacheDir'])
+const ROOT_CONFIG_KEYS = new Set(['kernel', 'defaultMode', 'unattended', 'models', 'cacheDir', 'standalone'])
 const KERNEL_CONFIG_KEYS = new Set(['host', 'port', 'dataDir', 'token'])
+const STANDALONE_CONFIG_KEYS = new Set(['url', 'shortcut'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -104,6 +119,33 @@ function unknownConfigIssues(value: unknown): ConfigIssue[] {
       }
     }
   }
+  if (isRecord(value.standalone)) {
+    for (const key of Object.keys(value.standalone)) {
+      if (!STANDALONE_CONFIG_KEYS.has(key)) {
+        issues.push({ message: `unknown config key "standalone.${key}"`, path: ['standalone', key] })
+      }
+    }
+  }
+  return issues
+}
+
+function standaloneConfigIssues(value: unknown): ConfigIssue[] {
+  if (!isRecord(value) || !isRecord(value.standalone)) return []
+  const issues: ConfigIssue[] = []
+  if (typeof value.standalone.url === 'string') {
+    try {
+      normalizeStandaloneUrl(value.standalone.url)
+    } catch (error) {
+      issues.push({ message: (error as Error).message, path: ['standalone', 'url'] })
+    }
+  }
+  if (typeof value.standalone.shortcut === 'string') {
+    try {
+      normalizeStandaloneShortcut(value.standalone.shortcut)
+    } catch (error) {
+      issues.push({ message: (error as Error).message, path: ['standalone', 'shortcut'] })
+    }
+  }
   return issues
 }
 
@@ -122,12 +164,14 @@ function strictPluginConfig(schema: z<ResearchPluginConfig>): z<ResearchPluginCo
       validate(value: unknown) {
         const result = standard.validate(value)
         if (result instanceof Promise) {
-          return result.then(resolved => resolved.issues !== undefined
-            ? resolved
-            : (unknownConfigIssues(value).length > 0 ? { issues: unknownConfigIssues(value) } : resolved))
+          return result.then((resolved) => {
+            if (resolved.issues !== undefined) return resolved
+            const issues = [...unknownConfigIssues(value), ...standaloneConfigIssues(resolved.value)]
+            return issues.length > 0 ? { issues } : resolved
+          })
         }
         if (result.issues !== undefined) return result
-        const issues = unknownConfigIssues(value)
+        const issues = [...unknownConfigIssues(value), ...standaloneConfigIssues(result.value)]
         return issues.length > 0 ? { issues } : result
       },
     },
@@ -150,6 +194,12 @@ export const Config: z<ResearchPluginConfig> = strictPluginConfig(z.object({
   models: z.dict(z.string().min(1)).default({})
     .description('Per-role model routing for research subagents.'),
   cacheDir: z.string().min(1).description('Connector response cache directory.'),
+  standalone: z.object({
+    url: z.string().min(1).default(DEFAULT_STANDALONE_URL)
+      .description('Standalone workbench URL; HTTPS or loopback HTTP without credentials/query/fragment.'),
+    shortcut: z.union([DEFAULT_STANDALONE_SHORTCUT, 'disabled'] as const).default(DEFAULT_STANDALONE_SHORTCUT)
+      .description('Global shortcut for opening Scholar in a new browser page.'),
+  }).default({} as never).description('DSH browser launcher for the standalone workbench.'),
 }).default({} as never))
 
 declare module '@deepseek-ai/cordis' {
@@ -221,6 +271,27 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   })
   const effectiveConfig = settingsScope?.get() ?? config
   const unattended = effectiveConfig.unattended ?? false
+
+  // Optional browser Host seam. The registration is lifecycle-owned and only
+  // becomes reachable through DSH Connection's loopback authority fence.
+  // It accepts no path or token input: the Host resolves the fixed standalone
+  // token file and returns it only for an explicit clipboard action.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['connection'], connectionCtx => connectionCtx.connection.rpc.handle(
+      '/dsh-scholar',
+      async (endpoint) => {
+        if (endpoint !== 'standalone-token') {
+          return { ok: false, error: { code: 'internal', message: 'unsupported Scholar endpoint', details: {} } }
+        }
+        try {
+          return { ok: true, value: { token: readStandaloneAccessToken() } }
+        } catch {
+          return { ok: false, error: { code: 'internal', message: 'standalone token is unavailable', details: {} } }
+        }
+      },
+      { authority: 'loopback' },
+    ))
+  }
   // True once this fiber's disposer ran (dispose/reload mid-startup).
   let disposed = false
   const sidecar = new KernelSidecar({

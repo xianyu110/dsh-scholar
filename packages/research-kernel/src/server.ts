@@ -181,8 +181,8 @@ const artifactSchema = z.object({
   kind: z.enum(ARTIFACT_KINDS),
   content_base64: z.string().min(1),
   metadata: z.record(z.unknown()).optional(),
-  media_type: z.string().min(1).optional(),
-  file_name: z.string().min(1).optional(),
+  media_type: z.string().min(1).max(256).optional(),
+  file_name: z.string().min(1).max(255).optional(),
 })
 
 const corpusSchema = z.object({
@@ -760,6 +760,22 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 
 function ok(res: ServerResponse, body: unknown): void {
   send(res, 200, body)
+}
+
+/** Safe RFC 6266/5987 download header; active document types are attachment-only. */
+function artifactContentDisposition(mediaType: string, fileName: string): string {
+  const essence = mediaType.split(';', 1)[0]!.trim().toLowerCase()
+  const safeInline = essence === 'application/pdf' || [
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
+  ].includes(essence)
+  const fallback = fileName
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7e]/g, '_')
+    .replace(/["\\]/g, '_')
+    .slice(0, 180) || 'artifact'
+  const encoded = encodeURIComponent(fileName).replace(/[!'()*]/g, char =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+  return `${safeInline ? 'inline' : 'attachment'}; filename="${fallback}"; filename*=UTF-8''${encoded}`
 }
 
 function fail(res: ServerResponse, error: unknown): void {
@@ -1962,39 +1978,58 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               res.end(body)
             }
             const fileName = record.file_name ?? `${record.kind}-${record.artifact_id.slice(0, 16)}`
-            const disposition = record.kind === 'pdf' || record.kind === 'chart' || record.kind === 'paper'
-              ? `inline; filename="${fileName.replaceAll('"', '')}"`
-              : `attachment; filename="${fileName.replaceAll('"', '')}"`
+            const disposition = artifactContentDisposition(mediaType, fileName)
             const baseHeaders: Record<string, string> = {
               'content-type': mediaType,
               'content-length': String(content.byteLength),
               etag,
               'cache-control': 'no-store',
               'content-disposition': disposition,
+              'accept-ranges': 'bytes',
               'x-artifact-id': record.artifact_id,
               'x-project-id': record.project_id,
             }
-            // Single-range support (api-contracts.md): bytes=a-b.
+            // Single-range support (api-contracts.md): bytes=a-b. Invalid or
+            // unsatisfiable byte ranges never clamp to a different resource
+            // segment; they retain the RFC 7233 416 + bytes */N contract.
             const range = req.headers.range
             const match = typeof range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null
-            if (match !== null && match[1] !== '' && match[2] !== '') {
-              let start = Number(match[1])
-              const end = Math.min(Number(match[2]), content.byteLength - 1)
-              if (start >= content.byteLength) {
-                res.writeHead(416, { 'content-range': `bytes */${content.byteLength}` })
+            if (match !== null) {
+              const unsatisfiable = (): void => {
+                res.writeHead(416, { 'content-range': `bytes */${content.byteLength}`, 'accept-ranges': 'bytes' })
                 res.end()
+              }
+              let start: number
+              let end: number
+              if (content.byteLength === 0 || (match[1] === '' && match[2] === '')) {
+                unsatisfiable()
                 return
               }
-              if (end < start) start = 0
-              endBody(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) }, content.subarray(start, end + 1))
-              return
-            }
-            if (match !== null && (match[1] !== '' || match[2] !== '')) {
-              // bytes=a- or bytes=-n (suffix) — simple forms.
-              let start = 0
-              let end = content.byteLength - 1
-              if (match[1] !== '') start = Math.min(Number(match[1]), content.byteLength - 1)
-              if (match[2] !== '') start = Math.max(0, content.byteLength - Number(match[2]))
+              if (match[1] !== '') {
+                start = Number(match[1])
+                if (!Number.isSafeInteger(start) || start >= content.byteLength) {
+                  unsatisfiable()
+                  return
+                }
+                if (match[2] === '') {
+                  end = content.byteLength - 1
+                } else {
+                  const requestedEnd = Number(match[2])
+                  if (!Number.isSafeInteger(requestedEnd) || requestedEnd < start) {
+                    unsatisfiable()
+                    return
+                  }
+                  end = Math.min(requestedEnd, content.byteLength - 1)
+                }
+              } else {
+                const suffixLength = Number(match[2])
+                if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+                  unsatisfiable()
+                  return
+                }
+                start = Math.max(0, content.byteLength - suffixLength)
+                end = content.byteLength - 1
+              }
               endBody(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${content.byteLength}`, 'content-length': String(end - start + 1) }, content.subarray(start, end + 1))
               return
             }

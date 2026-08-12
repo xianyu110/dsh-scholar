@@ -3,6 +3,7 @@
 > 规范性文档。任何新增需求或修复建议必须在这里增加可自动化或可重复人工执行的验收场景。
 
 - ui-brand-dsh-scholar：主 Header、Sidebar、Standalone 解锁页、浏览器 title、Chat 欢迎语/导出和 Settings 卡片均显示 `dsh Scholar`，可见 UI 不含旧组合品牌 `dsh Research`/`DSH Research`；`Research Kernel` 与 API 路径不受影响；中英文 locale parity 和 standalone 首屏副本校验通过。
+- readme-current-product-shot：`README.md` 的产品首图引用 `docs/assets/dsh-scholar-home-zh.png`，并展示当前 DSH 会话内的 `dsh Scholar` 页签、中文 Scholar 首页和 `Open in new page` 入口；界面发生可见变化时同步替换该图片，不能只保留旧截图。
 
 ## 1. 测试层级
 
@@ -249,8 +250,10 @@
 - ui-survey-next-action-cta：SCOPED 的 `survey_run` 必须是 `route=chat`、`required_by=agent`；点击 CTA 后 active project 不变、Chat 打开、draft 等于 `/survey <Brief.problem>`（无 problem 时 `/survey `），但 connector/Corpus/Outbox 计数保持不变，直到用户确认发送。不得导航到空 Runs，也不得自动发送。成功发送后 Corpus Snapshot、`SCOPED→SURVEYING` 和 Outbox 同事务落地，projection 主动作变 `idea_generate`；刷新/重连不得重新显示已完成的 `survey_run`。
 - ui-survey-phase-runs-empty：构造 `project.status=SURVEYING`、至少一个 `frozen=true/source_status=complete` Corpus Snapshot、`jobs=[]`、主 NextAction=`idea_generate`。zh 阶段 pill 必须显示“调研已就绪”，en 显示“SURVEY READY”，不得显示“调研中”或暗示活动 connector。Runs 仍为 0，空态明确“调研已完成，尚未创建实验运行”并存在可键盘触发的 Overview CTA；点击只导航、不创建 Job/Run/新 Corpus。其他阶段零 Job 仍用通用空态，有 Job 但筛选无匹配时仍用 `runs.noMatch`。纯模型测试覆盖三种分支，i18n runtime 覆盖 zh/en 阶段文案；浏览器回归同时断言页面不出现误导组合。
 - ui-refresh-focus-stability：开启默认 8 秒刷新，分别在 Project Sidebar 搜索、Chat composer、Terminal 搜索、Workspace editor/search、Manuscript editor 中输入且把光标置于非末尾；跨越至少两个轮询周期及一次投影变更后，ShadowRoot 内 active element、文本、selectionStart/End、scrollTop、dirty/草稿均保持。背景刷新在可编辑控件聚焦时延迟，focusout 后只补一次合并刷新；SSE/PTY 输出在期间仍增量到达。手动操作引起的必要重绘必须恢复焦点/选区，IME composition 不中断；并发延迟 API 响应不得乱序重绘。PTY emulator DOM identity 仍保持不变。自动测试覆盖刷新合并/延迟纯 seam 与 ShadowRoot 焦点恢复；真实 IME/两轮询观感记 `NOT_RUN_MANUAL_PENDING`。
+- ui-chat-slash-caret：DSH 与 standalone composer 逐键输入 `/`、`s`；命令菜单同步打开、异步候选 settle 与 session mirror 更新前后，textarea DOM identity 和 focus 不变，selectionStart/End 分别为 1/2，最终值为 `/s`。全局 `/`、starter、命令面板和补全项预填后 caret 位于预填文本末尾；editable/IME/repeat 不触发全局快捷键或页面级重绘。
 - ui-chat-natural-turn-guidance：显式 slash 仍原样进入 direct command；collecting project 的普通文本只回答 current Grill question；confirmed project 的普通文本进入 natural turn，不能得到 `Unknown command`。分别用 zh/en 输入“查看当前进展/有哪些想法/看审批/看运行任务/调研 <query>”与同义句，断言解析到 canonical status/ideas/gates/jobs/survey operation，显式参数和 project/session 保持；每次响应包含最新阶段、NextAction reason/required_by/阻断和一个可达引导。未知/歧义只回答或给候选，Human-only、Gate、Brief confirm、adopt、release、blocked、future NextAction 零副作用；外部附件/OCR prompt 不参与 intent。模型 adapter 不可用时仍返回 deterministic guidance，不退化为 slash error；自然语言与显式 slash 的 ACL/idempotency/refs 等价。
 - ui-chat-scroll-anchor：Chat 初始/距底部 <120px 时，用户发送、assistant 回复及流式增量后保持贴底；用户向上查看历史后，新消息只显示“跳到最新”，8 秒刷新、locale 切换、阶段引导更新和主区/Dock 重绘保持 scrollTop/首条可见消息锚点，绝不回到顶部或强拉到底部。点击“跳到最新”或主动发送恢复 follow mode。项目 A/B、同项目 session A/B、main/dock surface 各自恢复滚动状态；右↔底移动同一 DOM，主↔Dock 重建恢复对应状态。纯模型覆盖 near-bottom/anchor/explicit-send，真实浏览器跨两轮询验证。
+- ui-artifact-preview-download-project-scope：两个项目登记相同 CAS blob 时，从各自 Artifacts 页预览/下载均携带对应 `project_id` 并返回 200；缺 scope 的模糊 global-id 仍 fail closed。PDF/image/text 依据响应媒体类型预览；下载采用已登记安全文件名而非 `.bin`/artifact id；BFF Range 返回 206/416 并透传 Content-Range/Accept-Ranges/Content-Disposition/ETag；关闭、切项目、卸载后 Blob URL 计数归零。
 - topology-trajectory-bff-principal-forward：以有效 standalone bearer 和当前项目成员身份请求 `/v1/projects/{id}/topology`、`/trajectory`、`/trajectory-lanes`，BFF 必须忽略客户端自报 identity、从服务端 operator session 注入 `x-principal-id`，三路均返回 200；不得出现 `422 principal_required` 或 UI “桥接错误”。非成员三路统一 404；无 BFF principal 的 token-mode 实例统一 401；分页与 SSE 采用相同身份边界。Topology 200 的空 `items` 是合法空态，不得当成错误。自动证据：`tests/unit/standalone-web.test.ts` 19/19、`tests/security/run-standalone-http-tests.sh` 259/259（2026-08-12）。
 - ui-routes：Workspace、Run Terminal、Interactive PTY、Manuscript、Trajectory/Topology、Settings 可由上下文/命令面板/深链到达，URL 无 Token；
 - ui-panel-dock-model：`ALL_TAB_KEYS` 的 chat/phase/gates/runs/artifacts/evidence/budget/manuscript/terminal/trajectory/topology/workspace/pty 均可打开到单一活动 Dock、在 right/bottom 间移动、关闭并恢复主区；同页主区/Dock 冲突使用稳定回退页，禁止两个活 renderer；rightSize 只按 280–720 clamp，bottomSize 只按 180–640 clamp；小于 720 px 的 right 首选只投影 bottom、不改写持久化；未知版本、未知 panel、损坏 JSON 和 storage 读写异常 fail closed；证据 `tests/unit/dock-layout.test.ts` 6/6；
@@ -322,12 +325,15 @@ UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 - 开发机未配置 registry/credential 时脚本输出 `NOT_RUN_MANUAL_PENDING` 并进入 `manual-acceptance.md`，不得伪装为 PASS；带 `CI=true` 或实际提供任一私有环境输入后必须 fail-closed。
 
 - clean DSH_HOME 安装 Agent bundle，tools/commands/subagents/Skills 可发现；
-- DSH plugin entry 导出 host-visible `Config` Standard Schema；空 row 得到 kernel loopback/7412、gate-only、非 unattended、空 model map，端口/类型错误与未知 root/kernel key 在 `apply` 前拒绝，token schema 带 secret role；包 peer 使用真实宿主名 `@deepseek-ai/schemastery`；
+- DSH plugin entry 导出 host-visible `Config` Standard Schema；空 row 得到 kernel loopback/7412、gate-only、非 unattended、空 model map、standalone loopback/18610 与 `Alt+Shift+S`，端口/URL/快捷键/类型错误与未知 root/kernel/standalone key 在 `apply` 前拒绝，kernel token schema 带 secret role；包 peer 使用真实宿主名 `@deepseek-ai/schemastery`；
 - `defaultMode` 不是展示字段：`research_project create` 与 `/new` 省略 mode 时继承插件 row，显式 mode 优先；full-auto 仍必须绑定 registered FixtureProfile；
-- 根包无 legacy `dshClient` 字段；`./client` 只导出 DSH Plugin config 卡片的 browser bundle，manifest 声明 `dsh.client`，打包产物包含 `lib/client.js`；
+- 根包无 legacy `dshClient` 字段；`./client` 导出 DSH Plugin config 卡片和 `conversation.view` 页签的 browser bundle，manifest 声明 `dsh.client` 及 connection/conversation 依赖，打包产物包含 `lib/client.js`；
 - Host 插件在 settings provider 就绪后注册 `research-plugin` namespace，显式允许受信配置客户端访问脱敏 descriptor；未主动暴露的第三方 namespace 仍不可读写；
-- DSH Settings → Plugin config 显示 `dsh Scholar` 卡片，展开后可编辑 `defaultMode` 与 `unattended`，并明确提示重启生效；
-- DSH 组装不注册 `/research-api`、`/research-ui-api` 或 Scholar Web slot；
+- DSH Settings → Plugin config 显示 `dsh Scholar` 卡片，展开后可编辑 `defaultMode`、`unattended`、`standalone.url` 与 `standalone.shortcut`，并明确提示重启生效；URL 拒绝 userinfo/query/hash、unsafe scheme 和非 loopback HTTP；
+- 会话顶部按 `Chat`、`Trajectory`、`dsh Scholar` 顺序显示页签；Scholar 页签以最小权限 iframe 展示同一 standalone 页面，显式按钮和默认 `Alt+Shift+S` 都以 `noopener,noreferrer` 打开同一规范化 URL；editable/IME/repeat 时快捷键不触发，dispose 后 listener 被移除；
+- Plugin config 初始 DOM、aria、Settings snapshot、URL、storage 和日志均无 Token。仅在显式 click/Enter/Space 后调用 loopback-only RPC，Host 固定读取 standalone `0600` 普通非 symlink Token 文件，客户端直接写 `navigator.clipboard.writeText` 并只显示成功/失败状态；缺文件、空值、过大、权限错误、symlink、非 loopback 或 Clipboard 拒绝均 fail closed 且不使用 DOM fallback；
+- 复制出的值只可通过 standalone `/api/token-check`，不得是 `kernel.token`、Kernel/Runner service token、Provider SecretRef、SSH 私钥或任意浏览器提交路径的文件；
+- DSH 组装不注册 `/research-api`、`/research-ui-api` bridge；唯一 Scholar Web slot 是上述 `conversation.view` 启动/嵌入层，不得增加第二套 BFF 或业务实现；
 - standalone HTTP 对 `/research-api/*` 和 `/research-ui-api/*` 必须真实返回 404，不能 fallback 到 SPA 或 `/v1`；
 - `@dsh-scholar/research-ui` 无 Cordis host export、`dsh.bundle.patch` 和 host bridge 源码；
 - headless 无 httpServer 仍可使用工具；

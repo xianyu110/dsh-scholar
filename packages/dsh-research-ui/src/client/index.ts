@@ -36,7 +36,7 @@ import { terminalDisconnect, renderTerminal } from './terminal'
 import { renderPhase } from './panels/phase'
 import { renderGates } from './panels/gates'
 import { renderRuns } from './panels/runs'
-import { renderArtifacts } from './panels/artifacts'
+import { closeArtifactPreview, renderArtifacts, retainArtifactPreviewForProject } from './panels/artifacts'
 import { renderEvidence } from './panels/evidence'
 import { renderBudget } from './panels/budget'
 import { renderManuscript } from './panels/manuscript'
@@ -68,6 +68,7 @@ let booting = true
 let modalObserver: MutationObserver | null = null
 
 export function apply(): void {
+  closeArtifactPreview()
   // dsh-web i18n: locale resolves before the first render (§13.4); the
   // document lang reflects the active locale and chrome re-paints on
   // change (subscription installed at the end of apply(), once every
@@ -1106,6 +1107,7 @@ export function apply(): void {
   }
 
   const renderOnce = async (): Promise<void> => {
+    retainArtifactPreviewForProject(state.projectId)
     styleTabs()
     // Keep the live chat dock mounted during chat refreshes. Hiding it before
     // the async project requests complete makes the body gain its height for a
@@ -1184,6 +1186,7 @@ export function apply(): void {
     // ShadowRoot.activeElement identifies the real editor inside this UI;
     // document.activeElement would only identify the outer host.
     const focusSnapshot = captureFocus(root)
+    retainArtifactPreviewForProject(state.projectId)
     try {
     syncTitle(projection?.project?.name)
     if (state.projectId === undefined) chatDeactivateProject()
@@ -1479,7 +1482,9 @@ export function apply(): void {
       }
       const overlays = root.querySelectorAll('.overlay')
       if (overlays.length > 0) {
-        overlays[overlays.length - 1]?.remove()
+        const latest = overlays[overlays.length - 1]
+        if (latest instanceof HTMLElement && latest.dataset.artifactPreview === 'true') closeArtifactPreview()
+        else latest?.remove()
       } else if (state.chatDetailIndex >= 0) {
         state.chatDetailIndex = -1
         state.rerender()
@@ -1525,6 +1530,7 @@ export function apply(): void {
   onResize()
   window.addEventListener('resize', onResize)
   window.addEventListener('beforeunload', () => {
+    closeArtifactPreview()
     if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer)
     state.refreshTimer = null
     window.removeEventListener('keydown', onKey)

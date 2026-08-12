@@ -104,12 +104,30 @@ describe('multipart parser (uploads.ts)', () => {
   })
 
   it('validateUploadFileName rejects absolute/.. /NUL/Windows drive/nested paths', () => {
-    for (const bad of ['../evil.txt', 'a/../../b.txt', '/etc/passwd', 'a\u0000b', 'C:\\evil.txt', 'c:/evil.txt', 'C:evil.txt', 'dir/file.txt', '..', '.', '']) {
+    for (const bad of ['../evil.txt', 'a/../../b.txt', '/etc/passwd', 'a\u0000b', 'line\r\nbreak.txt', 'control\u007f.txt', 'C:\\evil.txt', 'c:/evil.txt', 'C:evil.txt', 'dir/file.txt', '..', '.', '', `${'界'.repeat(86)}.txt`]) {
       expectKernelError(() => validateUploadFileName(bad), 422, 'invalid_file_name')
     }
     for (const good of ['paper.pdf', 'a b.txt', '训练数据.csv', 'v1.2.tar.gz']) {
       expect(() => validateUploadFileName(good)).not.toThrow()
     }
+  })
+
+  it('registerArtifact rejects unsafe header metadata before writing CAS bytes', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    expectKernelError(() => kernel.registerArtifact({
+      project_id: project.project_id,
+      kind: 'data',
+      content: 'unsafe-name',
+      file_name: 'bad\r\nname.bin',
+    }), 422, 'invalid_file_name')
+    expectKernelError(() => kernel.registerArtifact({
+      project_id: project.project_id,
+      kind: 'data',
+      content: 'unsafe-media',
+      media_type: 'text/plain\r\nx-forged: yes',
+    }), 422, 'validation_error')
+    expect(kernel.cas.list()).toHaveLength(0)
   })
 })
 

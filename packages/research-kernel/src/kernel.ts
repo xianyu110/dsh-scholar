@@ -186,6 +186,12 @@ export function validateUploadFileName(name: string): void {
   if (name.includes('\0')) {
     throw new KernelError(422, 'invalid_file_name', 'upload file name must not contain NUL bytes')
   }
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must not contain control characters')
+  }
+  if (Buffer.byteLength(name, 'utf8') > 255) {
+    throw new KernelError(422, 'invalid_file_name', 'upload file name must not exceed 255 UTF-8 bytes')
+  }
   if (name.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(name)) {
     throw new KernelError(422, 'invalid_file_name', 'upload file name must be a relative basename (absolute paths are rejected)')
   }
@@ -2353,6 +2359,14 @@ export class ResearchKernel {
     file_name?: string
   }): ArtifactRecord {
     this.getProject(input.project_id)
+    if (input.file_name !== undefined) validateUploadFileName(input.file_name)
+    if (input.media_type !== undefined && (
+      Buffer.byteLength(input.media_type, 'utf8') > 256 ||
+      /[\u0000-\u001f\u007f]/.test(input.media_type) ||
+      !/^[^\s/;]+\/[^\s/;]+(?:\s*;[\x20-\x7e]*)?$/.test(input.media_type)
+    )) {
+      throw new KernelError(422, 'validation_error', 'artifact media_type must be a valid RFC 2046 value')
+    }
     const { sha256, size_bytes } = this.cas.put(input.content)
     const artifactId = `sha256:${sha256}`
     // v2 §7.4: blobs are global (CAS), artifact records are project-scoped —

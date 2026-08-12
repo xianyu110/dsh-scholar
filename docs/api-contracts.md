@@ -146,7 +146,7 @@ Contract approval 只能由 Gate 事务发生，没有独立 approve 路由。
 
 - **大小**：单文件 ≤ 32 MiB（`ResearchKernel.UPLOAD_MAX_FILE_BYTES`，可覆写）；请求体上限 = 32 MiB + 1 MiB multipart envelope 余量。超限 → 413 `payload_too_large`（流式读取中途即拒，不完整缓冲），错误消息含具体 limit 与实测字节数；
 - **hash 绑定**：sha256 由服务端对实际收到的字节计算（stage 时计算、finalize 时复算并核对），客户端无法声明 hash；artifact_id=`sha256:<hex>` 与 CAS blob 一一对应；
-- **路径安全**：`file_name` 拒绝绝对路径（POSIX 与 Windows 盘符）、`..`/`.` 段（两种分隔符）、NUL 与路径分隔符 → 422 `invalid_file_name`；重复规范化路径与越界 symlink 属于研究包 archive 语义，由 code-snapshot walk（snapshotCodeArchive/unpackCodeSnapshot）在 archive 面强制；
+- **路径与响应头安全**：`file_name` 拒绝绝对路径（POSIX 与 Windows 盘符）、`..`/`.` 段（两种分隔符）、NUL、C0/DEL 控制字符、路径分隔符和超过 255 UTF-8 bytes 的名称 → 422 `invalid_file_name`；下载响应使用安全 ASCII `filename` + RFC 5987 `filename*`，不得把原始名称直接拼入响应头。重复规范化路径与越界 symlink 属于研究包 archive 语义，由 code-snapshot walk（snapshotCodeArchive/unpackCodeSnapshot）在 archive 面强制；
 - **staged → finalize 原子**：先写会话 id 命名的 staged 文件（CAS root 下 `staged-uploads/stage_<id>.part` + `.json` 元数据），finalize 时复算 hash、原子 rename 进 CAS blob 槽并插入 artifact 行；任何失败回滚 staged 文件，绝不留下半成品 artifact 行；
 - **幂等**：同 project + sha256 + file_name 重传返回**原 artifact**（HTTP 200，响应体 `reused: true`；新建为 201 `reused: false`），不重复写 blob、不重复插行；同 project 不同 file_name 的同 blob 也返回既有记录（与 `POST /v1/artifacts` 语义一致，首登记名生效）；
 - **恢复/GC**：过期 staged 文件由 `kernel.cleanupStagedUploads(maxAgeMs)` 清理（默认 TTL 24h，`ResearchKernel.STAGED_UPLOAD_TTL_MS`），grace-period 模型同 CAS 孤儿 GC；已 finalize 的 blob 永不被该 GC 触碰；
@@ -156,7 +156,7 @@ Contract approval 只能由 Gate 事务发生，没有独立 approve 路由。
 
 ### GET /bff/research/projects/{project_id}/artifacts/{artifact_id}
 
-返回字节流，保留 Content-Type、Content-Length、Content-Disposition、ETag。支持 Range。artifact_id 不能脱离 project_id 读取；不提供模糊的全局 artifact GET。
+返回字节流，保留 Content-Type、Content-Length、Content-Disposition、ETag、Accept-Ranges 与 Content-Range。支持单 Range；合法范围返回 206，越界、反向、零长度 suffix 和空文件范围返回 416 + `Content-Range: bytes */N`，不得钳制为其他字节段。HTML、SVG、XML 等主动文档媒体类型强制 `attachment`；仅 PDF 与安全栅格图允许 `inline`。artifact_id 不能脱离 project_id 读取；不提供模糊的全局 artifact GET。
 
 ### POST /v1/projects/{id}/code-snapshots（P0-4 SNAPSHOT-01/API-01）
 

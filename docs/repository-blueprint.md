@@ -5,11 +5,14 @@
 ## 1. 技术基线
 
 - GitHub 仓库元数据必须包含 `dsh` 与 `dsh-plugin` 两个 Topics，对应产品约定中的 `#dsh` 与 `@dsh-plugin`；Topic 值本身不接受 `#` 或 `@` 前缀，便于 DSH 与 DSH Plugin 生态检索；
+- 仓库及全部 workspace package 统一使用 BSD-3-Clause License；根目录必须保留标准 `LICENSE` 文件，package manifest 的 `license` 必须为 `BSD-3-Clause`，禁止文案与发布元数据漂移；
+- 根 README 必须给出当前未发布阶段从本地源码安装 Agent 插件到 DSH profile 的可执行命令、安装验证和卸载命令；registry 安装命令必须标记为发布后使用，不能暗示当前已经发布；
 - 根 README 的产品介绍必须嵌入一张由当前 standalone 构建生成的中文首页截图；截图使用全新浏览器 profile、显式 `dsh.locale=zh`，不得包含访问 token、私密项目资料、调试覆盖层或伪造 UI，界面发生结构性变化后应重新采集；
 - Node.js 24、TypeScript 5.9、pnpm 11、ESM；
 - workspace：packages/*、workers/*、apps/*；
 - Zod 3、Vitest、node:sqlite、原生 fetch/http；
-- 完整科研浏览器 UI 只使用 standalone 全屏形态，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；DSH 配置卡是独立的窄 client half，不承载业务页面；
+- 完整科研浏览器 UI、BFF 与状态实现只有 standalone 一份，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；DSH client half 提供配置卡及会话 `dsh Scholar` 入口，入口只嵌入/启动同一 standalone URL，不复制业务实现；
+- Plugin config 可经 loopback-only、固定 `0600` 文件、零回显 seam 显式复制 standalone access token；Kernel、Runner、Provider、SSH 等其他 secret 永不可复制；
 - browser bundle 使用 tsdown 输出 classic-script handoff；根配置卡使用 `dsh.client`，禁止 legacy `dshClient` 字段；
 - 所有包 strict TypeScript，不使用 skipLibCheck 掩盖本项目错误。
 

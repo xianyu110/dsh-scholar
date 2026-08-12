@@ -20,6 +20,10 @@ describe('DSH research plugin Config', () => {
         defaultMode: 'gate-only',
         unattended: false,
         models: {},
+        standalone: {
+          url: 'http://127.0.0.1:18610/',
+          shortcut: 'Alt+Shift+S',
+        },
       },
     })
   })
@@ -38,6 +42,30 @@ describe('DSH research plugin Config', () => {
     expect(unknownNested.issues?.[0]).toMatchObject({
       message: 'unknown config key "kernel.socket"',
       path: ['kernel', 'socket'],
+    })
+
+    const unknownStandalone = validate({ standalone: { tokenFile: '/tmp/token' } })
+    expect(unknownStandalone.issues?.[0]).toMatchObject({
+      message: 'unknown config key "standalone.tokenFile"',
+      path: ['standalone', 'tokenFile'],
+    })
+  })
+
+  it('rejects unsafe standalone URLs and unsupported shortcuts', () => {
+    for (const url of [
+      'javascript:alert(1)',
+      'http://example.com/',
+      'http://user:secret@127.0.0.1:18610/',
+      'http://127.0.0.1:18610/?token=secret',
+      'http://127.0.0.1:18610/#secret',
+    ]) {
+      expect(validate({ standalone: { url } }).issues?.[0]?.path).toEqual(['standalone', 'url'])
+    }
+    expect(validate({ standalone: { shortcut: 'Ctrl+S' } }).issues?.[0]?.path).toEqual(['standalone', 'shortcut'])
+    expect(validate({ standalone: { url: 'https://scholar.example.test/workbench', shortcut: 'disabled' } })).toEqual({
+      value: expect.objectContaining({
+        standalone: { url: 'https://scholar.example.test/workbench', shortcut: 'disabled' },
+      }),
     })
   })
 })

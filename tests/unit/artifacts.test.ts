@@ -42,7 +42,9 @@ describe('artifact GET media type (ART-02)', () => {
       expect(res.status).toBe(200)
       expect(res.headers.get('content-type')).toBe('application/pdf')
       expect(res.headers.get('etag')).toBe(`"sha256:${record.sha256}"`)
-      expect(res.headers.get('content-disposition')).toBe('inline; filename="paper.pdf"')
+      expect(res.headers.get('content-disposition')).toContain('inline; filename="paper.pdf"')
+      expect(res.headers.get('content-disposition')).toContain("filename*=UTF-8''paper.pdf")
+      expect(res.headers.get('accept-ranges')).toBe('bytes')
       expect(await res.text()).toBe('%PDF-1.4 fake')
       // If-None-Match → 304.
       const notModified = await fetch(`${base}/v1/artifacts/${encodeURIComponent(record.artifact_id)}?project_id=${encodeURIComponent(project.project_id)}`, {
@@ -85,6 +87,26 @@ describe('artifact GET media type (ART-02)', () => {
       const unsat = await fetch(url, { headers: { range: 'bytes=99-100' } })
       expect(unsat.status).toBe(416)
       expect(unsat.headers.get('content-range')).toBe('bytes */10')
+      for (const invalidRange of ['bytes=8-3', 'bytes=10-', 'bytes=-0']) {
+        const invalid = await fetch(url, { headers: { range: invalidRange } })
+        expect(invalid.status, invalidRange).toBe(416)
+        expect(invalid.headers.get('content-range'), invalidRange).toBe('bytes */10')
+      }
+    })
+  })
+
+  it('forces active document types to attachment and emits an encoded Unicode file name', async () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 't', workspace: '/w', mode: 'gate-only', brief: makeBrief(), constraints: {}, execution: {}, integrity: {} })
+    const html = kernel.registerArtifact({ project_id: project.project_id, kind: 'pdf', content: '<script>alert(1)</script>', media_type: 'text/html', file_name: '论文.html' })
+    const svg = kernel.registerArtifact({ project_id: project.project_id, kind: 'chart', content: '<svg/>', media_type: 'image/svg+xml', file_name: 'chart.svg' })
+    await withServer(kernel, async (base) => {
+      for (const record of [html, svg]) {
+        const response = await fetch(`${base}/v1/artifacts/${encodeURIComponent(record.artifact_id)}?project_id=${encodeURIComponent(project.project_id)}`)
+        expect(response.headers.get('content-disposition')).toMatch(/^attachment;/)
+      }
+      const response = await fetch(`${base}/v1/artifacts/${encodeURIComponent(html.artifact_id)}?project_id=${encodeURIComponent(project.project_id)}`)
+      expect(response.headers.get('content-disposition')).toContain("filename*=UTF-8''%E8%AE%BA%E6%96%87.html")
     })
   })
 })

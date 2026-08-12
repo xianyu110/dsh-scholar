@@ -1483,6 +1483,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const value = req.headers[name]
           if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
         }
+        // Artifact previews and downloads rely on conditional/range reads.
+        // Forward only the standard read headers; browser identity headers
+        // remain server-derived below.
+        if ((method === 'GET' || method === 'HEAD') && /^\/v1\/artifacts\/[^/]+$/.test(url.pathname)) {
+          for (const name of ['range', 'if-none-match']) {
+            const value = req.headers[name]
+            if (typeof value === 'string' && value !== '') proxyHeaders[name] = value
+          }
+        }
         // CHUNK-01: chunk protocol headers pass through (the kernel validates
         // offset contiguity + per-chunk sha256; the BFF never reads them).
         if (isChunkAppend) {
@@ -1647,6 +1656,25 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             : typeof body === 'string' ? body
               : new Uint8Array(body),
         })
+        // Preserve the HTTP Range contract for Artifact reads.  A 416 is a
+        // normal byte-serving response (with `Content-Range: bytes */N`),
+        // not a JSON kernel error to be collapsed into the generic envelope.
+        const artifactRangeNotSatisfiable = upstream.status === 416 &&
+          (method === 'GET' || method === 'HEAD') &&
+          /^\/v1\/artifacts\/[^/]+$/.test(url.pathname)
+        if (artifactRangeNotSatisfiable) {
+          const headers: Record<string, string> = {
+            'cache-control': upstream.headers.get('cache-control') ?? 'no-store',
+            'x-content-type-options': 'nosniff',
+          }
+          for (const name of ['content-range', 'accept-ranges', 'etag']) {
+            const value = upstream.headers.get(name)
+            if (value !== null) headers[name] = value
+          }
+          res.writeHead(416, headers)
+          res.end()
+          return
+        }
         if (upstream.status >= 400) {
           let code = upstream.status >= 500 ? 'kernel_error' : 'request_rejected'
           if (upstream.status < 500) {
@@ -1663,7 +1691,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           'cache-control': upstream.headers.get('cache-control') ?? 'no-store',
           'x-content-type-options': 'nosniff',
         }
-        for (const name of ['content-type', 'content-length', 'content-disposition', 'etag', 'last-modified']) {
+        for (const name of ['content-type', 'content-length', 'content-disposition', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
           const value = upstream.headers.get(name)
           if (value !== null) headers[name] = value
         }

@@ -124,12 +124,13 @@ LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可�
 - 每项声明 instance/user/project/workspace/session/target/job scope、类型、默认值、范围、是否 secret、是否可热更新、是否需要重启以及是否允许更窄的下层覆盖；
 - effective config 展示每个字段的值和来源；修改使用 revision CAS，外部文件修改与 UI 修改不会静默互相覆盖；
 - secret 值不进入普通配置、浏览器、argv、日志、Manifest 或 Bundle，只保存 `SecretRef` 并由服务端解析；
+- 唯一的浏览器明文例外是用户在 DSH Plugin config 显式触发“复制 standalone 访问 Token”：loopback-only Host action 从固定 `0600` 普通文件读取后直接写 Clipboard，不回显、不持久化、不进入 URL/日志/配置；该例外不适用于 Kernel、Runner、Provider、SSH 或任何其他 secret；
 - 运行中的 Job、PTY 和 Build 固定创建时的 config revision/hash，新配置只影响新动作。
 
 ### 5.8 全页面 i18n
 
 - 所有页面 chrome、弹窗、aria、通知、Terminal 状态和 TeX Workbench 控件首发支持简体中文与英文；
-- 浏览器 UI 仅以独立模式交付，使用本地 locale adapter；DSH Agent 插件不注入 Web UI；
+- 浏览器 UI 仍只构建和交付一份 standalone 实现；DSH Agent 插件可在会话区注入 `dsh Scholar` 页签，以受控 iframe/新页面启动器复用同一 standalone URL，不复制业务 UI 或 BFF；
 - 语言选择、fallback、插值、复数和 Intl 格式遵循 gui-plugin-plan.md；
 - 项目名、论文、模型文本、Terminal 输出、TeX 源码和原始编译消息保持原文。
 

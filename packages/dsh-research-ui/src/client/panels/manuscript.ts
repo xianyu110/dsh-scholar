@@ -27,19 +27,38 @@ export let msConflict: string | null = null
 export let msBuilds: ManuscriptBuild[] = []
 export let msBuildPoll: number | undefined
 export let msPdfUrl: string | null = null
+/** Document the main-build PDF blob was loaded for (blob lifetime guard). */
+let msPdfDocId: string | null = null
 // TEX-03 (P0-3): live-preview projection (GET /v1/documents/{id}/preview-builds).
 export let msPreviews: ManuscriptBuild[] = []
 export let msPreviewPending: { document_id: string; revision: number; debounce_ms: number } | null = null
 export let msPreviewPoll: number | undefined
 export let msPreviewPdfUrl: string | null = null
 export let msPreviewPdfBuildId: string | null = null
+/** Document the preview PDF blob was loaded for (blob lifetime guard). */
+let msPreviewPdfDocId: string | null = null
 
 export function msCleanup(): void {
   if (msBuildPoll !== undefined) { window.clearInterval(msBuildPoll); msBuildPoll = undefined }
   if (msPreviewPoll !== undefined) { window.clearInterval(msPreviewPoll); msPreviewPoll = undefined }
-  if (msPdfUrl !== null) { URL.revokeObjectURL(msPdfUrl); msPdfUrl = null }
-  if (msPreviewPdfUrl !== null) { URL.revokeObjectURL(msPreviewPdfUrl); msPreviewPdfUrl = null }
-  msPreviewPdfBuildId = null
+  // P0 (hot-loop guard): the PDF blob URLs are owned by the DOCUMENT they
+  // were loaded for. A same-document re-render must NOT revoke them —
+  // render → poll → "PDF not loaded yet" → fetch → set URL → rerender →
+  // revoke → poll again … is an infinite loop once any build has a PDF,
+  // and it floods the loopback rate limit within seconds (page keeps
+  // "refreshing" and then freezes on 429s). Blobs are freed only when the
+  // document actually changes (or the panel is left: msDocId !== owner).
+  if (msPdfDocId !== null && msPdfDocId !== msDocId) {
+    if (msPdfUrl !== null) URL.revokeObjectURL(msPdfUrl)
+    msPdfUrl = null
+    msPdfDocId = null
+  }
+  if (msPreviewPdfDocId !== null && msPreviewPdfDocId !== msDocId) {
+    if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
+    msPreviewPdfUrl = null
+    msPreviewPdfBuildId = null
+    msPreviewPdfDocId = null
+  }
 }
 
 export async function msLoadDocument(projectId: string): Promise<{ document_id: string }> {
@@ -176,6 +195,7 @@ export async function msPollBuilds(): Promise<void> {
     if (response.ok) {
       const blob = await response.blob()
       msPdfUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+      msPdfDocId = msDocId
       pdfNow = true
     }
   }
@@ -218,6 +238,7 @@ export async function msPollPreviews(): Promise<void> {
       if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
       msPreviewPdfUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
       msPreviewPdfBuildId = ok.build_id
+      msPreviewPdfDocId = msDocId
       pdfNow = true
     }
   }
@@ -244,6 +265,7 @@ export async function msRegenerate(projectId: string): Promise<void> {
   // preview poll shows the fresh projection).
   if (msPreviewPdfUrl !== null) { URL.revokeObjectURL(msPreviewPdfUrl); msPreviewPdfUrl = null }
   msPreviewPdfBuildId = null
+  msPreviewPdfDocId = null
   msDocId = result.document_id
   await msLoadTree()
   if (msOpenPath !== null) {

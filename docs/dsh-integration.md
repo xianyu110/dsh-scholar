@@ -4,7 +4,7 @@
 
 ## 1. 包与前置条件
 
-根包名为 @dsh-scholar/research-plugin，ESM，导出 Cordis Agent 插件，并通过 `./client` 与 `dsh.client` 提供一个窄范围的 DSH Web 配置半侧。该半侧只向 Settings → Plugin config 注入 Scholar 配置卡，不注入完整科研工作台。宿主提供私有 `@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-settings` 以及 Host/Client 相关 DSH 包；这些 DeepSeek 包不假设存在于公共 npm registry。
+根包名为 @dsh-scholar/research-plugin，ESM，导出 Cordis Agent 插件，并通过 `./client` 与 `dsh.client` 提供 DSH Web 半侧。该半侧向 Settings → Plugin config 注入 Scholar 配置卡，并向会话 `conversation.view` 注册 `dsh Scholar` 页签；页签只复用 standalone URL，不包含第二套业务 UI/BFF。宿主提供私有 `@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-settings` 以及 Host/Client 相关 DSH 包；这些 DeepSeek 包不假设存在于公共 npm registry。
 
 开发环境通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。symlink/check-out 验证只用于开发反馈，不能计为宿主兼容性 PASS。
 
@@ -17,11 +17,11 @@ export const Config = z.object({ /* DSH host-visible Schemastery schema */ })
 export async function apply(ctx, config) { /* effect-scoped registrations */ }
 ~~~
 
-所有工具、命令、事件、Skill provider、settings 注册和 sidecar 生命周期都有 disposer。`Config` 通过 Cordis Standard Schema 在 `apply` 前完成默认值和类型校验；Scholar 的严格适配层额外拒绝未知 root/kernel key，避免拼写错误静默进入运行时。Host 半侧不依赖 `httpServer`、slots、LocaleFace 或 ThemeFace；浏览器半侧只依赖 DSH Client runtime、locale、settings 与 plugin-config slot。全局可变 toolContextRef 禁止；每个插件实例使用闭包保存 Client、RoleRegistry、Tenant 和 cache。
+所有工具、命令、事件、Skill provider、settings 注册和 sidecar 生命周期都有 disposer。`Config` 通过 Cordis Standard Schema 在 `apply` 前完成默认值和类型校验；Scholar 的严格适配层额外拒绝未知 root/kernel/standalone key，避免拼写错误静默进入运行时。Host 半侧除可选的 loopback connection RPC 外不依赖 `httpServer`、slots、LocaleFace 或 ThemeFace；浏览器半侧依赖 DSH Client runtime、connection、locale、settings、plugin-config 与 conversation slot。全局可变 toolContextRef 禁止；每个插件实例使用闭包保存 Client、RoleRegistry、Tenant 和 cache。
 
 ## 3. 目标配置
 
-以下是 v2 生成目标。当前兼容层已把 v0.1 的 `kernel.host/port/dataDir/token`、`defaultMode`、`unattended`、`models`、`cacheDir` 暴露为 DSH 可发现的运行时 Schemastery schema：空配置生成 loopback/7412、gate-only、非 unattended 与空 model map；端口范围和类型在 `apply` 前校验，token 标记为 secret，未知字段拒绝。插件在 `research-plugin` namespace 下显式注册该 schema，并允许受信配置客户端访问脱敏视图；Settings → Plugin config 的卡片目前编辑 `defaultMode` 与 `unattended`，保存后在下一次 DSH 重启生效。`defaultMode` 已接入 `research_project create` 与 `/new`，显式调用参数仍优先；`full-auto` 继续要求注册 FixtureProfile。下列 skills/onboarding/trajectory/runner/config 字段仍是 v2 目标，差距记录在 hardening-v0.2-status.md。
+以下是 v2 生成目标。当前兼容层已把 v0.1 的 `kernel.host/port/dataDir/token`、`defaultMode`、`unattended`、`models`、`cacheDir` 以及 `standalone.url/shortcut` 暴露为 DSH 可发现的运行时 Schemastery schema：空配置生成 loopback/7412、gate-only、非 unattended、空 model map、`http://127.0.0.1:18610/` 与 `Alt+Shift+S`；端口、URL、快捷键和类型在 `apply` 前校验，token 标记为 secret，未知字段拒绝。插件在 `research-plugin` namespace 下显式注册该 schema，并允许受信配置客户端访问脱敏视图；Settings → Plugin config 的卡片编辑 `defaultMode`、`unattended`、standalone URL 与快捷键，保存后在下一次 DSH 重启生效。`defaultMode` 已接入 `research_project create` 与 `/new`，显式调用参数仍优先；`full-auto` 继续要求注册 FixtureProfile。下列 skills/onboarding/trajectory/runner/config 字段仍是 v2 目标，差距记录在 hardening-v0.2-status.md。
 
 ~~~yaml
 kernel:
@@ -127,7 +127,7 @@ Domain/venue 选择必须由项目 brief.domain 和 target_venue 产生确定性
 
 ## 9. 独立 Web UI
 
-`@dsh-scholar/research-ui` 只发布独立 HTTP server、browser client bundle 和可执行入口。包不得声明 Cordis host export、`dsh.bundle.patch`、`dshClient` 或 DSH browser slots。客户端只通过同源 standalone BFF 读写 Kernel，不存在浮动面板或 DSH boot token fallback。
+`@dsh-scholar/research-ui` 只发布独立 HTTP server、browser client bundle 和可执行入口。包不得声明 Cordis host export、`dsh.bundle.patch` 或 `dshClient`。根插件的 browser half 可以注册 DSH `conversation.view`，但 renderer 只能嵌入/启动该独立 URL；客户端仍只通过同源 standalone BFF 读写 Kernel，不存在 DSH boot token fallback。
 
 ## 10. i18n 集成
 
@@ -139,7 +139,22 @@ Domain/venue 选择必须由项目 brief.domain 和 target_venue 产生确定性
 
 ## 12. Composition 与安装
 
-根 package 的 dsh.bundle.patch 只插入 Agent `research-plugin` 行；根 manifest 另声明 `dsh.client` 与 `./client`，由 DSH Web 模块宿主加载配置卡。它不插入额外 UI row，也不把 standalone 业务页面挂进 DSH。standalone UI 独立管理自己的 loopback server、BFF、Token、dataDir 和 Kernel sidecar。同一 dataDir 不得同时被 DSH Agent sidecar 和 standalone sidecar 打开。
+根 package 的 dsh.bundle.patch 只插入 Agent `research-plugin` 行；根 manifest 另声明 `dsh.client` 与 `./client`，由 DSH Web 模块宿主加载配置卡和 `conversation.view` 页签。页签是 standalone 的 iframe/新页面启动器，不插入第二个 BFF 或业务状态层。standalone UI 独立管理自己的 loopback server、BFF、Token、dataDir 和 Kernel sidecar。同一 dataDir 不得同时被 DSH Agent sidecar 和 standalone sidecar 打开。
+
+Plugin config 编辑 `standalone.url` 与 `standalone.shortcut`，并提供显式“复制 standalone 访问 Token”。Host 通过 connection generic RPC 注册固定 channel/endpoint，authority 必须是 loopback；handler 只读取 `DSH_SCHOLAR_STANDALONE_DATA`（或默认 standalone dataDir）下固定文件名，不接受浏览器路径。浏览器只在用户动作中把成功响应直接交给 Clipboard API，随后丢弃；不能把该能力泛化为读取 `kernel.token`、service token、Provider SecretRef 或任意宿主文件。
+
+Scholar 包尚未发布时，当前可用的用户安装路径是从本地 checkout 构建后加入 DSH profile：
+
+~~~bash
+source ~/.bashrc # 仅当 NPM_TOKEN 配置在这里
+pnpm install --frozen-lockfile
+pnpm run build
+dsh plugin --profile web add "$PWD"
+dsh plugin --profile web why @dsh-scholar/research-plugin
+dsh web
+~~~
+
+更新时重新 build 并执行同一 add；卸载使用 `dsh plugin --profile web remove @dsh-scholar/research-plugin`。`dsh plugin --profile web add @dsh-scholar/research-plugin` 只在包已发布且当前 registry 可解析后才是有效的用户安装路径。源码安装允许开发期链接当前 checkout；下文兼容性 PASS 仍必须使用 build + pack 后的 tgz 和空 profile，不能用该链接替代。
 
 静态 repository plugin 只承载 Skills/MCP，不能替代完整代码 bundle。安装验收必须使用全新 DSH_HOME 和远程或打包产物，不能只验证本地 symlink。
 

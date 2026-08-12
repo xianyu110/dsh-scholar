@@ -57,7 +57,7 @@ bash scripts/start-standalone-ui.sh
 bash scripts/start-dsh-agent-dev.sh
 ~~~
 
-脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 是 DSH 的会话入口，并加载 Scholar 的 Plugin config 静态 client；完整 Scholar 页面、`/research-api` 和 `/research-ui-api` 都不存在。
+脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 是 DSH 的会话入口，并加载 Scholar 的 Plugin config 与 `dsh Scholar` conversation view；该 view 只嵌入/启动另行运行的 standalone 18610，`/research-api` 和 `/research-ui-api` bridge 仍不存在。
 
 当前仓库迁移期验证：
 
@@ -66,7 +66,7 @@ curl http://127.0.0.1:3081/
 curl http://127.0.0.1:17412/v1/health
 ~~~
 
-Agent 集成验收必须证明 tools、commands、subagents、四组 Skills 可用，根 Agent 包 manifest 没有 legacy `dshClient` 字段，并且 `dsh.client`/`./client` 只装配 Plugin config 卡片。完整科研工作台的浏览器 Golden Path 只在 standalone 18610 验收。
+Agent 集成验收必须证明 tools、commands、subagents、四组 Skills 可用，根 Agent 包 manifest 没有 legacy `dshClient` 字段，并且 `dsh.client`/`./client` 只装配 Plugin config 卡片与受控 conversation view。验证 Chat/Trajectory/dsh Scholar 页签顺序、Alt+Shift+S、URL 配置、loopback-only Token 复制及零回显；完整科研工作台的业务 Golden Path 仍由 standalone 18610 的同一实现验收。
 
 发布兼容性不复用上述 checkout。用隔离环境执行：
 
@@ -80,7 +80,7 @@ bash tests/integration/run-dsh-private-registry-tests.sh
 
 脚本自行创建全新安装目录、`DSH_HOME` 和权限 0600 的临时 npm userconfig；输出必须脱敏。缺少真实 registry/credential 时登记 `NOT_RUN_MANUAL_PENDING`，本地 symlink/fake host 不计 PASS。
 
-需要在 Scholar 尚未发布时验证“最新 DSH host 能否安装当前产物”，允许执行一次性 artifact smoke：从 registry 的 `latest` dist-tag 解析出精确 `@deepseek-ai/dsh@x.y.z`，把当前 checkout 经正式 build + pack 生成 `.tgz`，在 `mktemp` 的空 launcher 与独立 `DSH_HOME` 中安装两者，并验证 package realpath 不指向 checkout、profile compose/dump、Cordis apply、限定时间存活和 SIGTERM dispose。该结果只证明“最新 host + 当前打包产物”的安装/启动兼容性，必须记录 host 精确版本与 tarball hash；不能替代上一段“两个包均从 registry 固定版本安装”的正式发布兼容 PASS。临时 npm userconfig 权限必须为 0600，token 只能从进程环境写入，不得出现在 argv、日志或报告，测试结束必须删除临时目录。
+需要在 Scholar 尚未发布时验证“最新 DSH host 能否安装当前产物”，允许执行一次性 local artifact smoke：从 registry 的 `latest` dist-tag 解析出精确 `@deepseek-ai/dsh@x.y.z`；把根插件及其所有未发布的本地 `@dsh-scholar/*` 运行时 workspace 包分别经正式 build + pack 生成 `.tgz`，在 `mktemp` 的空 launcher 与独立 `DSH_HOME` 中以 tgz dependency/override 安装完整集合。当前开发阶段不要求单个根插件 tgz 从 registry 解析这些明确未发布的内部包，相关 404 不能判作 DSH 兼容失败；通过条件是所有 Scholar package realpath 均位于临时 profile、没有 checkout symlink，并完成 profile compose/dump、Cordis apply、限定时间存活和 SIGTERM dispose。该 PASS 只证明“最新 host + 当前本地打包集合”的安装/启动兼容性，必须记录 host 精确版本与根插件 tarball hash；不能替代上一段“所有正式发布依赖均可从 registry 固定版本安装”的发布兼容 PASS。临时 npm userconfig 权限必须为 0600，token 只能从进程环境写入，不得出现在 argv、日志或报告，测试结束必须删除临时目录。
 
 ## 6. 开发模式启用 Cordis self-referential
 

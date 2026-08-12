@@ -139,7 +139,14 @@ export interface Projection {
 
 export interface ClaimRow { claim_id?: string; statement?: string; status?: string; confidence?: string; scope?: { dataset?: string; split?: string }; evidence?: { evidence_ids?: string[]; analysis_artifact?: string }; limitations?: string[]; history?: Array<{ status?: string; at?: string; reason?: string }> }
 export interface EvidenceRow { evidence_id?: string; analysis_method?: string; result?: { primary_metric?: string; value?: number; effect_size?: number; ci_low?: number; ci_high?: number; n_seeds?: number }; artifact_refs?: string[]; run_ids?: string[]; provenance_status?: string }
-export interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?: number; metadata?: Record<string, unknown> }
+export interface ArtifactRow {
+  artifact_id?: string
+  kind?: string
+  size_bytes?: number
+  metadata?: Record<string, unknown>
+  media_type?: string
+  file_name?: string | null
+}
 export interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
 export interface ProjectRow { project_id?: string; name?: string; status?: string; revision?: number; updated_at?: string }
 

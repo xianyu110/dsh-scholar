@@ -1,5 +1,6 @@
 import type { ArtifactRow } from '../types'
 import { api, authHeaders, base, overlayRoot } from '../api'
+import { artifactContentPath, artifactDownloadName } from '../artifact-transfer'
 import { t } from '../i18n/index'
 import { copyText, el, fmtBytes, fmtId, openContextMenu, rootHost, showToast, trapFocus } from '../ui'
 import { state } from '../state'
@@ -12,6 +13,19 @@ export let artifactsKind = 'all'
 /** Artifacts multi-select (dsh-web bulk download). */
 export let artifactsSelecting = false
 export let artifactsSelected = new Set<string>()
+
+let activeArtifactPreview: { projectId: string; close: () => void } | null = null
+
+/** Close blob-backed preview state when leaving its project or unloading UI. */
+export function retainArtifactPreviewForProject(projectId: string | undefined): void {
+  if (activeArtifactPreview !== null && activeArtifactPreview.projectId !== projectId) {
+    activeArtifactPreview.close()
+  }
+}
+
+export function closeArtifactPreview(): void {
+  activeArtifactPreview?.close()
+}
 
 
 export async function renderArtifacts(body: HTMLElement, projectId: string): Promise<void> {
@@ -96,7 +110,7 @@ export async function renderArtifacts(body: HTMLElement, projectId: string): Pro
         const metaById = new Map<string, ArtifactRow>()
         for (const a of artifacts) if (a.artifact_id !== undefined) metaById.set(a.artifact_id, a)
         for (const id of artifactsSelected) {
-          const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, {
+          const response = await fetch(`${base()}${artifactContentPath(projectId, id)}`, {
             headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
           })
           if (!response.ok) continue
@@ -105,11 +119,8 @@ export async function renderArtifacts(body: HTMLElement, projectId: string): Pro
           const url = URL.createObjectURL(blob)
           const a = el('a', 'dl', t('common', 'common.action.download'))
           a.href = url
-          const meta = metaById.get(id)
-          const metaName = typeof meta?.metadata?.name === 'string' && meta.metadata.name !== ''
-            ? String(meta.metadata.name).replaceAll(' ', '-').slice(0, 20)
-            : (meta?.kind ?? 'artifact')
-          a.download = `${metaName}-${id.slice(0, 12)}.bin`
+          const meta = metaById.get(id) ?? { artifact_id: id }
+          a.download = artifactDownloadName(meta, response.headers.get('content-disposition'))
           document.body.appendChild(a)
           a.click()
           a.remove()
@@ -187,7 +198,7 @@ export async function renderArtifacts(body: HTMLElement, projectId: string): Pro
       }
       row.appendChild(el('span', 'muted', fmtBytes(artifact.size_bytes)))
       row.title = t('artifacts', 'artifacts.rowTitle')
-      row.onclick = () => { void previewArtifact(artifact.artifact_id ?? '') }
+      row.onclick = () => { void previewArtifact(projectId, artifact) }
       // dsh-web context menu: preview / details / copy id.
       row.oncontextmenu = (event) => {
         event.preventDefault()
@@ -196,15 +207,15 @@ export async function renderArtifacts(body: HTMLElement, projectId: string): Pro
         if (root == null || artifact.artifact_id === undefined) return
         const aid = artifact.artifact_id
         openContextMenu(root, event.clientX, event.clientY, [
-          { label: t('artifacts', 'artifacts.detail.preview'), onPick: () => { void previewArtifact(aid) } },
-          { label: `⧉ ${t('common', 'common.action.details')}`, onPick: () => openArtifactDetailModal(root, artifact) },
+          { label: t('artifacts', 'artifacts.detail.preview'), onPick: () => { void previewArtifact(projectId, artifact) } },
+          { label: `⧉ ${t('common', 'common.action.details')}`, onPick: () => openArtifactDetailModal(root, projectId, artifact) },
           { label: t('common', 'common.action.copyId'), hint: aid, onPick: () => copyText(aid) },
         ])
       }
       row.ondblclick = (event) => {
         event.stopPropagation()
         const root = document.querySelector('#dsh-scholar-ui')?.shadowRoot
-        if (root != null) openArtifactDetailModal(root, artifact)
+        if (root != null) openArtifactDetailModal(root, projectId, artifact)
       }
       listEl.appendChild(row)
     }
@@ -214,7 +225,7 @@ export async function renderArtifacts(body: HTMLElement, projectId: string): Pro
 }
 
 /** dsh-web artifact drawer: metadata of one CAS artifact. */
-export function openArtifactDetailModal(root: ShadowRoot, artifact: ArtifactRow): void {
+export function openArtifactDetailModal(root: ShadowRoot, projectId: string, artifact: ArtifactRow): void {
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
@@ -258,7 +269,7 @@ export function openArtifactDetailModal(root: ShadowRoot, artifact: ArtifactRow)
   previewBtn.style.cssText = 'margin-top:12px'
   previewBtn.onclick = () => {
     overlay.remove()
-    void previewArtifact(artifact.artifact_id ?? '')
+    void previewArtifact(projectId, artifact)
   }
   modal.appendChild(previewBtn)
   overlay.appendChild(modal)
@@ -267,9 +278,11 @@ export function openArtifactDetailModal(root: ShadowRoot, artifact: ArtifactRow)
 }
 
 /** Download link backed by a blob URL (used for non-previewable types). */
-export function downloadLink(blob: Blob, name: string): HTMLElement {
+export function downloadLink(blob: Blob, name: string, trackedUrls?: string[]): HTMLElement {
   const link = el('a', 'dl', t('common', 'common.action.downloadFile'))
-  link.href = URL.createObjectURL(blob)
+  const url = URL.createObjectURL(blob)
+  trackedUrls?.push(url)
+  link.href = url
   link.download = name
   return link
 }
@@ -281,19 +294,33 @@ export function downloadLink(blob: Blob, name: string): HTMLElement {
  * execution is isolated/disabled in these contexts); HTML is download-only;
  * text is rendered with textContent.
  */
-export async function previewArtifact(artifactId: string): Promise<void> {
+export async function previewArtifact(projectId: string, artifact: ArtifactRow): Promise<void> {
+  const artifactId = artifact.artifact_id ?? ''
+  if (artifactId === '') return
   try {
-    const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(artifactId)}`, {
+    const response = await fetch(`${base()}${artifactContentPath(projectId, artifactId)}`, {
       headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
     })
     if (!response.ok) return
     const blob = await response.blob()
+    const downloadName = artifactDownloadName(artifact, response.headers.get('content-disposition'))
     const root = overlayRoot ?? (document.querySelector('#dsh-scholar-ui')?.shadowRoot ?? null)
     if (root == null) return
+    closeArtifactPreview()
     const overlay = el('div', 'overlay')
+    overlay.dataset.artifactPreview = 'true'
     const blobUrls: string[] = []
-    const revoke = (): void => { for (const url of blobUrls) URL.revokeObjectURL(url) }
-    overlay.onclick = (event) => { if (event.target === overlay) { revoke(); overlay.remove() } }
+    let openableUrl: string | null = null
+    let closed = false
+    const close = (): void => {
+      if (closed) return
+      closed = true
+      for (const url of blobUrls) URL.revokeObjectURL(url)
+      overlay.remove()
+      if (activeArtifactPreview?.close === close) activeArtifactPreview = null
+    }
+    activeArtifactPreview = { projectId, close }
+    overlay.onclick = (event) => { if (event.target === overlay) close() }
     const modal = el('div', 'modal')
     const contentType = (blob.type ?? '').toLowerCase()
     const header = el('div', 'modal-header', `📦 ${artifactId.slice(0, 28)}${artifactId.length > 28 ? '…' : ''}`)
@@ -304,7 +331,7 @@ export async function previewArtifact(artifactId: string): Promise<void> {
       header.appendChild(chip)
     }
     const closeBtn = el('button', 'hbtn ghost', '×')
-    closeBtn.onclick = () => { revoke(); overlay.remove() }
+    closeBtn.onclick = close
     header.appendChild(closeBtn)
     modal.appendChild(header)
     const text = contentType.startsWith('text/') ? await blob.text() : undefined
@@ -319,43 +346,45 @@ export async function previewArtifact(artifactId: string): Promise<void> {
       img.src = url
       img.alt = artifactId
       modal.appendChild(img)
-      modal.appendChild(downloadLink(blob, artifactId))
+      modal.appendChild(downloadLink(blob, downloadName, blobUrls))
     } else if (isHtml) {
       // HTML is untrusted markup: never rendered via HTML strings, download only (§15.4).
       modal.appendChild(el('div', 'warn', t('artifacts', 'artifacts.previewDisabled')))
-      modal.appendChild(downloadLink(blob, artifactId))
+      modal.appendChild(downloadLink(blob, downloadName, blobUrls))
     } else if (contentType.startsWith('image/')) {
       const url = URL.createObjectURL(blob)
       blobUrls.push(url)
+      openableUrl = url
       const img = document.createElement('img')
       img.src = url
       img.alt = artifactId
       modal.appendChild(img)
-      modal.appendChild(downloadLink(blob, artifactId))
+      modal.appendChild(downloadLink(blob, downloadName, blobUrls))
     } else if (contentType === 'application/pdf') {
       const url = URL.createObjectURL(blob)
       blobUrls.push(url)
+      openableUrl = url
       const embed = document.createElement('embed')
       embed.src = url
       embed.type = 'application/pdf'
       embed.style.cssText = 'width:100%;height:60vh'
       modal.appendChild(embed)
-      modal.appendChild(downloadLink(blob, artifactId))
+      modal.appendChild(downloadLink(blob, downloadName, blobUrls))
     } else {
       const content = text ?? (await blob.text())
       const pre = el('pre', '', content.length > 6000 ? content.slice(0, 6000) + String.fromCharCode(10) + t('artifacts', 'artifacts.truncated') : content)
       pre.className = 'pre'
       modal.appendChild(pre)
-      modal.appendChild(downloadLink(blob, artifactId))
+      modal.appendChild(downloadLink(blob, downloadName, blobUrls))
     }
     // dsh-web depth: open blob-backed previews in their own browser tab.
-    if (blobUrls.length > 0) {
+    const previewUrl = openableUrl
+    if (previewUrl !== null) {
       const openTab = el('button', 'hbtn', t('artifacts', 'artifacts.detail.openTab'))
       openTab.title = t('artifacts', 'artifacts.detail.openTab.title')
       openTab.style.cssText = 'margin-top:10px'
       openTab.onclick = () => {
-        const url = blobUrls[blobUrls.length - 1]!
-        window.open(url, '_blank', 'noopener')
+        window.open(previewUrl, '_blank', 'noopener')
       }
       modal.appendChild(openTab)
     }
@@ -363,4 +392,3 @@ export async function previewArtifact(artifactId: string): Promise<void> {
     root.appendChild(overlay)
   } catch { /* bridge unreachable */ }
 }
-
