@@ -1,5 +1,7 @@
 # DSH Scholar
 
+**简体中文** | [English](README.en.md)
+
 DSH Scholar 是面向纯计算研究的 AI 科研工作台。它把研究资料、项目对话、代码与数据、实验运行、证据账本和 TeX 手稿放在同一个可恢复项目中，既可以从新问题开始，也可以接入已经进行到一半的研究。
 
 ![dsh Scholar 中文首页](docs/assets/dsh-scholar-home-zh.png)
