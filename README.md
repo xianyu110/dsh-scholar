@@ -8,6 +8,8 @@ DSH Scholar 是面向纯计算研究的 AI 科研工作台。它把研究资料�
 - Research Kernel：保存权威状态、Gate、Job、Artifact、Evidence 和审计记录；
 - Runner：在本机 Docker 或受控远端机器上执行冻结的实验计划。
 
+![dsh Scholar 中文首页](docs/assets/dsh-scholar-home-zh.png)
+
 ## 使用边界
 
 - DSH Scholar 辅助研究，不代替研究者承担科学判断、审批、署名和发布责任。

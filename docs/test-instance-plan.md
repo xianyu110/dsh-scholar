@@ -80,6 +80,8 @@ bash tests/integration/run-dsh-private-registry-tests.sh
 
 脚本自行创建全新安装目录、`DSH_HOME` 和权限 0600 的临时 npm userconfig；输出必须脱敏。缺少真实 registry/credential 时登记 `NOT_RUN_MANUAL_PENDING`，本地 symlink/fake host 不计 PASS。
 
+需要在 Scholar 尚未发布时验证“最新 DSH host 能否安装当前产物”，允许执行一次性 artifact smoke：从 registry 的 `latest` dist-tag 解析出精确 `@deepseek-ai/dsh@x.y.z`，把当前 checkout 经正式 build + pack 生成 `.tgz`，在 `mktemp` 的空 launcher 与独立 `DSH_HOME` 中安装两者，并验证 package realpath 不指向 checkout、profile compose/dump、Cordis apply、限定时间存活和 SIGTERM dispose。该结果只证明“最新 host + 当前打包产物”的安装/启动兼容性，必须记录 host 精确版本与 tarball hash；不能替代上一段“两个包均从 registry 固定版本安装”的正式发布兼容 PASS。临时 npm userconfig 权限必须为 0600，token 只能从进程环境写入，不得出现在 argv、日志或报告，测试结束必须删除临时目录。
+
 ## 6. 开发模式启用 Cordis self-referential
 
 它不是 dsh web --dev 的隐含能力，必须显式 overlay：

@@ -5,6 +5,7 @@
 ## 1. 技术基线
 
 - GitHub 仓库元数据必须包含 `dsh` 与 `dsh-plugin` 两个 Topics，对应产品约定中的 `#dsh` 与 `@dsh-plugin`；Topic 值本身不接受 `#` 或 `@` 前缀，便于 DSH 与 DSH Plugin 生态检索；
+- 根 README 的产品介绍必须嵌入一张由当前 standalone 构建生成的中文首页截图；截图使用全新浏览器 profile、显式 `dsh.locale=zh`，不得包含访问 token、私密项目资料、调试覆盖层或伪造 UI，界面发生结构性变化后应重新采集；
 - Node.js 24、TypeScript 5.9、pnpm 11、ESM；
 - workspace：packages/*、workers/*、apps/*；
 - Zod 3、Vitest、node:sqlite、原生 fetch/http；
