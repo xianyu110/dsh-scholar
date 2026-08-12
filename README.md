@@ -164,13 +164,23 @@ Scope、Idea 和 Contract Gate 依次锁定范围、方案与实验合同；Rele
 
 ![CNN 案例的基线与正式实验运行](docs/assets/cnn-mnist-runs.png)
 
-### 3. 聚合证据
+### 3. 查看运行数据与远程终端
+
+Run Terminal 提供某个正式 Job 的只读 stdout/stderr、退出状态和可恢复日志。下图可查看 baseline 在各轮训练中的 `train_loss` 和 `test_acc`，以及随机种子 `23` 的最终 `test_accuracy = 88.3`。
+
+![CNN 案例的训练指标与运行日志](docs/assets/cnn-mnist-run-terminal.png)
+
+Interactive Terminal 是绑定项目或 session 的真实 Web PTY，用于连接执行环境、输入命令、调整窗口和重连会话。它适合交互式检查和调试，但其输出不会自动成为正式 Evidence。
+
+![DSH Scholar 远程 Web 交互终端](docs/assets/cnn-mnist-web-terminal.png)
+
+### 4. 聚合证据
 
 系统将指标、效应量、置信区间、Run 和 Artifact 绑定到 Evidence。本案例的证据经评审后标记为 `accepted`，用于支持“双卷积方案优于基线”的主张。
 
 ![CNN 案例的准确率证据与置信区间](docs/assets/cnn-mnist-evidence.png)
 
-### 4. 写作与发布
+### 5. 写作与发布
 
 Manuscript 工作台用于编辑 `paper.tex` 和 `main.bib`，在固定 TeX Live 环境中编译手稿。评审与打包完成后，最终对外发布仍需批准 Release Gate。
 
