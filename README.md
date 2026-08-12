@@ -152,19 +152,25 @@ Chat 支持普通文本和一级 slash command，常用命令包括：
 
 ![CNN 手写数字识别项目总览](docs/assets/cnn-mnist-overview.png)
 
-### 1. 审批研究设计
+### 1. 通过 Chat 推进项目
+
+每个研究项目拥有独立会话。研究者可以直接描述任务，也可以使用 `/status`、`/survey`、`/run` 等命令，并通过附件、拖拽或粘贴接入研究资料。
+
+![CNN 案例的项目 Chat 页面](docs/assets/cnn-mnist-chat.png)
+
+### 2. 审批研究设计
 
 Scope、Idea 和 Contract Gate 依次锁定范围、方案与实验合同；Release Gate 仍由研究者决定。
 
 ![CNN 案例的人工 Gate 审批](docs/assets/cnn-mnist-gates.png)
 
-### 2. 执行受控对照实验
+### 3. 执行受控对照实验
 
 基线与正式方案以独立 Job 执行。截图中的 8 次运行有 7 次成功、1 次失败；失败记录被保留并显式提示重试。
 
 ![CNN 案例的基线与正式实验运行](docs/assets/cnn-mnist-runs.png)
 
-### 3. 查看运行数据与远程终端
+### 4. 查看运行数据与远程终端
 
 Run Terminal 提供某个正式 Job 的只读 stdout/stderr、退出状态和可恢复日志。下图可查看 baseline 在各轮训练中的 `train_loss` 和 `test_acc`，以及随机种子 `23` 的最终 `test_accuracy = 88.3`。
 
@@ -174,13 +180,13 @@ Interactive Terminal 是绑定项目或 session 的真实 Web PTY，用于连接
 
 ![DSH Scholar 远程 Web 交互终端](docs/assets/cnn-mnist-web-terminal.png)
 
-### 4. 聚合证据
+### 5. 聚合证据
 
 系统将指标、效应量、置信区间、Run 和 Artifact 绑定到 Evidence。本案例的证据经评审后标记为 `accepted`，用于支持“双卷积方案优于基线”的主张。
 
 ![CNN 案例的准确率证据与置信区间](docs/assets/cnn-mnist-evidence.png)
 
-### 5. 写作与发布
+### 6. 写作与发布
 
 Manuscript 工作台用于编辑 `paper.tex` 和 `main.bib`，在固定 TeX Live 环境中编译手稿。评审与打包完成后，最终对外发布仍需批准 Release Gate。
 
