@@ -1,7 +1,7 @@
 import type { ArtifactRow, ClaimRow, EvidenceRow, ProjectRow, Projection } from '../types'
 import { api } from '../api'
 import { registerOverlayRebuild, t } from '../i18n/index'
-import { chatSessionSelect, notifClear, notifMarkRead, notifPersist, state, tabSave } from '../state'
+import { chatSessionSelect, chatSessionsPersist, notifClear, notifMarkRead, notifPersist, state, tabSave } from '../state'
 import { STATUS_META, copyText, el, openContextMenu, rootHost, showToast, statusLabel } from '../ui'
 import { HISTORY_KEY, favProjects } from '../state'
 export function openNotificationsModal(root: ShadowRoot | null | undefined): void {
@@ -436,9 +436,7 @@ export function openGlobalSearchModal(root: ShadowRoot | null | undefined): void
 
 /* ─────────────────────────── session search modal ─────────────────────────── */
 
-/** Cross-session transcript search (dsh-web "search all sessions"). */
-
-export let sessionSearchQuery = ''
+/** Search every session inside the active project Chat context. */
 
 export function openSessionSearchModal(root: ShadowRoot | null | undefined): void {
   if (root == null) return
@@ -455,7 +453,7 @@ export function openSessionSearchModal(root: ShadowRoot | null | undefined): voi
   const input = document.createElement('input')
   input.type = 'text'
   input.placeholder = t('shell', 'shell.sessionSearch.placeholder')
-  input.value = sessionSearchQuery
+  input.value = state.chatSessionSearchQuery
   input.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font:12px/1.4 system-ui,sans-serif;outline:none;margin-bottom:10px'
   input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
   input.onblur = () => { input.style.borderColor = 'var(--border)' }
@@ -478,7 +476,7 @@ export function openSessionSearchModal(root: ShadowRoot | null | undefined): voi
   }
 
   const runSearch = (): void => {
-    const q = sessionSearchQuery.trim().toLowerCase()
+    const q = state.chatSessionSearchQuery.trim().toLowerCase()
     results.replaceChildren()
     rowEls.length = 0
     selIdx = -1
@@ -496,7 +494,7 @@ export function openSessionSearchModal(root: ShadowRoot | null | undefined): voi
       }
     }
     if (hits.length === 0) {
-      results.appendChild(el('div', 'empty', t('shell', 'shell.sessionSearch.noMatch', { query: sessionSearchQuery.trim(), count: String(state.chatSessions.length) })))
+      results.appendChild(el('div', 'empty', t('shell', 'shell.sessionSearch.noMatch', { query: state.chatSessionSearchQuery.trim(), count: String(state.chatSessions.length) })))
       return
     }
     const count = el('div', 'muted', t('shell', 'shell.sessionSearch.stats', { hits: String(hits.length), count: String(state.chatSessions.length) }))
@@ -554,14 +552,15 @@ export function openSessionSearchModal(root: ShadowRoot | null | undefined): voi
   }
   let debounceTimer: number | undefined
   input.oninput = () => {
-    sessionSearchQuery = input.value
+    state.chatSessionSearchQuery = input.value
+    chatSessionsPersist()
     if (debounceTimer !== undefined) window.clearTimeout(debounceTimer)
     debounceTimer = window.setTimeout(() => { runSearch() }, 300)
   }
   overlay.appendChild(modal)
   root.appendChild(overlay)
   // dsh-web i18n §13.4: locale switch re-opens the session search modal
-  // (sessionSearchQuery is module state, so the query survives the rebuild).
+  // (the query is part of the active project Chat context).
   registerOverlayRebuild(overlay, () => { overlay.remove(); openSessionSearchModal(root) })
   input.focus()
 }
@@ -816,9 +815,6 @@ export async function openCompareModal(root: ShadowRoot, projectIds: string[]): 
   modal.appendChild(exportRow)
 }
 
-
-export let chatCommandsOnly = false
-/** Global search state (dsh-web cross-session search). */
 
 /** Global search state (dsh-web cross-session search). */
 let globalSearchOpen = false

@@ -112,6 +112,8 @@ node scripts/generate-config-artifacts.mjs
 配置变更后 pin 必然变化，因此运行中 Job/PTY/Build 可与产生它的配置精确关联
 （gui-plugin-plan.md：“运行中 Job/PTY/Build 标注 pinned config hash，修改配置只影响新动作”）。
 
+Panel Dock 的活动页面、首选 right/bottom 位置和两种尺寸是浏览器本地展示偏好：由页面 Dock 控件配置，使用独立版本化 local storage，损坏值回默认；它们不改变 Kernel/Runner/Workspace/Terminal/TeX/Agent 的行为，因此不属于 canonical Config Registry、HTTP config patch 或 Job/PTY/Build config pin。偏好中禁止保存 token、secret、Chat 内容或研究文件。
+
 ## 6. 接入点与边界
 
 已接入（CLI 解析全部走注册表 `parseCli`）：
@@ -161,4 +163,4 @@ Provider credential 使用严格 SecretRef 存储层；项目仅保存 provider/
 
 新增 target scope 和 `runner.targets.*`/`runner.profiles.*` descriptor。Settings 可登记 `local-docker` 或 `remote-ssh-runner` target 的 safe label、capabilities、health、draining、image/resource/network policy，以及 endpoint/known-hosts/SSH/mTLS `SecretRef`；普通 effective/API/浏览器只返回 target ID、label、健康、revision/hash 与 secret available，不返回连接明文。
 
-项目、ExperimentContract、PaperReproductionSpec 与 Job 只选择 opaque profile/target ID。secure Job/PTY/Build 固定 target/profile/effective environment revision/hash；修改只影响新 attempt。远端不可用不自动回退本机。真实 SSH adapter 与 mTLS 未通过人工环境验收前状态只能“已实现未验收”或更低。
+项目、ExperimentContract、PaperReproductionSpec 与 Job 只选择 opaque profile/target ID。secure Job/PTY/Build 固定 target/profile/effective environment revision/hash；修改只影响新 attempt。远端不可用不自动回退本机。开发接线可由 `runner.ssh_bootstrap_target` + `runner.secret_root` + `runner.ssh_connect_timeout_ms` 启用受控 SSH → RemoteRunnerAgent 引导；SSH endpoint/key/known_hosts 仅从 file SecretRef 解析，项目不能提供。真实 SSH 主机与 mTLS 未通过人工环境验收前状态只能“已实现未验收”或更低。

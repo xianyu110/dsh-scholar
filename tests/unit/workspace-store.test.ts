@@ -451,6 +451,12 @@ describe('generic workspace store (WORK-01 disk adapter)', () => {
     const before = kernel.texTree(doc.document_id).document.revision
     kernel.workspaceWrite(wsId, 'paper.tex', '\\documentclass{article}\n')
     expect(kernel.texTree(doc.document_id).document.revision).toBe(before + 1)
+    // The browser reads manuscript files through the generic Workspace API.
+    // Resolve the TeX facade before treating a missing generic row as a
+    // missing file.
+    expect(kernel.workspaceRead(wsId, 'paper.tex')?.content).toBe('\\documentclass{article}\n')
+    expect(kernel.workspaceRead(wsId, 'sections/intro.tex')?.content).toBe('\\section{Intro}\n')
+    expect(kernel.workspaceRead(wsId, 'missing.tex')).toBeNull()
     // CAS conflicts flow through the facade.
     try {
       kernel.workspaceWrite(wsId, 'sections/intro.tex', 'x', { version: 99 })

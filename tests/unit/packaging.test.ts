@@ -30,7 +30,15 @@ const PACKAGE_NAMES = ['research-plugin', 'research-client', 'research-kernel', 
  * runtime dependencies. runner-gateway/analysis-worker are dev-only workers
  * of the plugin and legitimately absent from a consumer install. */
 const RUNTIME_NAMES = ['research-plugin', 'research-client', 'research-kernel', 'research-schemas', 'scholar-connectors', 'analysis-worker']
-const HOST_PEERS = ['@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-skill-local', '@deepseek-ai/dsh-tools']
+const HOST_PEERS = [
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/schemastery',
+  '@deepseek-ai/dsh-commands',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-skill-local',
+  '@deepseek-ai/dsh-tools',
+]
+const OPTIONAL_HOST_PEERS = ['@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-skill-local', '@deepseek-ai/dsh-tools']
 /** Sibling DSH host harness checkout (SELFMOD-01): must never be referenced
  * by a published artifact or a clean consumer install. */
 const HARNESS = join(dirname(REPO), 'test-lzszq')
@@ -268,6 +276,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
   it('plugin tarball ships lib, all four skills, patch and README', () => {
     const files = tarList(packed.tarballs['research-plugin']!)
     expect(files).toContain('package/lib/index.js')
+    expect(files).toContain('package/lib/client.js')
     expect(files).toContain('package/cordis.patch.yml')
     expect(files).toContain('package/README.md')
     for (const s of SKILLS) expect(files).toContain(`package/skills/${s}/SKILL.md`)
@@ -300,11 +309,23 @@ describe('packaging (PACK-01/SKILL-01)', () => {
       expect(peers?.[host], `peer ${host}`).toBeTruthy()
     }
     const optional = rootManifest['peerDependenciesMeta'] as Record<string, unknown>
-    for (const host of HOST_PEERS) {
+    for (const host of OPTIONAL_HOST_PEERS) {
       expect(optional?.[host], `optional peer ${host}`).toMatchObject({ optional: true })
     }
     const files = rootManifest['files'] as string[]
     for (const entry of ['lib', 'skills', 'cordis.patch.yml', 'README.md']) expect(files).toContain(entry)
+    expect(rootManifest['exports']).toMatchObject({ './client': { default: './lib/client.js' } })
+    expect(rootManifest['dsh']).toMatchObject({
+      client: {
+        platform: 'web',
+        inject: expect.arrayContaining([
+          '@deepseek-ai/dsh-client-runtime',
+          '@deepseek-ai/dsh-client-ui-plugin-config',
+          '@deepseek-ai/dsh-client-ui-settings',
+        ]),
+      },
+    })
+    expect(peers?.['@deepseek-ai/dsh-settings']).toBeTruthy()
     expect((rootManifest['scripts'] as Record<string, string>)['prepare']).toContain('build')
   })
 
@@ -391,7 +412,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
     const installed = JSON.parse(readFileSync(join(consumer, 'node_modules', '@dsh-scholar', 'research-plugin', 'package.json'), 'utf8')) as Record<string, unknown>
     const peers = installed['peerDependencies'] as Record<string, string>
     const meta = installed['peerDependenciesMeta'] as Record<string, unknown>
-    for (const host of HOST_PEERS) {
+    for (const host of OPTIONAL_HOST_PEERS) {
       expect(peers?.[host], `installed peer ${host}`).toBeTruthy()
       expect(meta?.[host], `installed optional peer ${host}`).toMatchObject({ optional: true })
     }
@@ -448,6 +469,13 @@ describe('standalone unlock page i18n (UI-03)', () => {
       expect(html.includes(`document.documentElement.lang = window.__BOOT_LOCALE__`), 'lang switches with the boot locale').toBe(true)
       expect(html.includes(`'dsh.locale'`), 'persisted locale key is read').toBe(true)
       expect(html.includes('navigator.languages'), 'browser locales are consulted').toBe(true)
+      // Product branding is one canonical wordmark in both the fallback
+      // markup and locale dictionaries; technical Research Kernel naming is
+      // outside this unlock-page assertion.
+      expect(html).toContain('>Scholar</span>')
+      expect(html).toContain("'standalone.pageTitle': 'dsh Scholar'")
+      expect(html).not.toContain('>Research</span>')
+      expect(html).not.toContain('Research OS')
       // The legacy flat keys must not come back.
       for (const legacy of ['data-i18n="err.invalid"', 'data-i18n="label.token"', 'data-i18n="submit.open"', 'data-i18n="placeholder.token"', 'data-i18n="hint"']) {
         expect(html.includes(legacy), `legacy key ${legacy} removed`).toBe(false)

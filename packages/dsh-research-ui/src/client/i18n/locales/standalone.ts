@@ -5,9 +5,9 @@
  */
 export const zh = {
   'standalone.brand.mark': 'dsh',
-  'standalone.brand.name': 'Research',
+  'standalone.brand.name': 'Scholar',
   'standalone.brand.meta': '工作区',
-  'standalone.pageTitle': '研究 OS — DSH Scholar',
+  'standalone.pageTitle': 'dsh Scholar',
   'standalone.operatorAccess': '操作员访问',
   'standalone.welcomeBack': '欢迎回来。',
   'standalone.intro': '打开你的证据工作区。人类 Gate 决策将以你的操作员身份记录。',
@@ -25,9 +25,9 @@ export type StandaloneKey = keyof typeof zh
 
 export const en: Record<StandaloneKey, string> = {
   'standalone.brand.mark': 'dsh',
-  'standalone.brand.name': 'Research',
+  'standalone.brand.name': 'Scholar',
   'standalone.brand.meta': 'Workspace',
-  'standalone.pageTitle': 'Research OS — DSH Scholar',
+  'standalone.pageTitle': 'dsh Scholar',
   'standalone.operatorAccess': 'Operator access',
   'standalone.welcomeBack': 'Welcome back.',
   'standalone.intro': 'Open your evidence workspace. Human gate decisions are recorded with your operator identity.',

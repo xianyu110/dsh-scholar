@@ -45,7 +45,7 @@ import {
   applySavedWorkspaceTab, applyWorkspaceFeedToTabs, applyWorkspaceListSince,
   applyWorkspaceTree, binaryDownload, binaryTooLarge, binaryUploadCall,
   closeWorkspaceTab, createFileCall, deleteNodeCall, filterWorkspacePaths,
-  flattenWorkspaceTree, initialWorkspaceTreeState, isWorkspaceConflict,
+  flattenWorkspaceTree, formatWorkspaceBytes, initialWorkspaceTreeState, isWorkspaceConflict,
   markWorkspaceTabConflict, moveNodeCall, openWorkspaceTab,
   placeholderWorkspaceTab, readVersionCall, reloadWorkspaceTab,
   rollbackFileCall, saveFileCall,
@@ -124,6 +124,12 @@ function revision(over: Partial<WorkspaceRevisionLite> = {}): WorkspaceRevisionL
 /* ─────────────────────── tree model ─────────────────────── */
 
 describe('WORK-01 tree model (lazy expand / virtual dirs / selection)', () => {
+  it('never exposes NaN or an unknown unit for malformed wire sizes', () => {
+    expect(formatWorkspaceBytes(Number.NaN)).toBe('0 B')
+    expect(formatWorkspaceBytes(Number.POSITIVE_INFINITY)).toBe('0 B')
+    expect(formatWorkspaceBytes(-1)).toBe('0 B')
+    expect(formatWorkspaceBytes(0)).toBe('0 B')
+  })
   it('flatten renders only EXPANDED subtrees (lazy expand contract)', () => {
     const st = applyWorkspaceTree(initialWorkspaceTreeState('ws_main'), tree([
       node({ path: 'README.md', size: 7 }),

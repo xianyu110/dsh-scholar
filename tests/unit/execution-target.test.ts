@@ -29,9 +29,34 @@ import {
   buildLocalDockerArgs,
   deepFreezePlan,
   ExecutionPlanMutationError,
+  runnerTargetPinFailure,
   type DockerExecContext,
   type RunOutcome,
 } from '@dsh-scholar/runner-gateway'
+
+describe('runner target spawn-time fencing', () => {
+  const payload = {
+    runner_target_id: 'docker-a',
+    runner_target_kind: 'local-docker',
+    runner_target_revision: 3,
+    runner_target_hash: 'sha256:current',
+  }
+  const target = {
+    target_id: 'docker-a', display_name: 'Docker A', kind: 'local-docker' as const,
+    enabled: true, draining: false, capabilities: ['docker'], health: 'online' as const,
+    revision: 3, config_hash: 'sha256:current',
+  }
+
+  it('accepts only the configured exact id and current registry revision/hash', async () => {
+    const client = { getRunnerTarget: async () => target }
+    await expect(runnerTargetPinFailure(client, payload, 'local-docker', 'docker-a')).resolves.toBeNull()
+    await expect(runnerTargetPinFailure(client, payload, 'local-docker', 'docker-b')).resolves.toMatch(/refuses/)
+    await expect(runnerTargetPinFailure({ getRunnerTarget: async () => ({ ...target, revision: 4 }) }, payload, 'local-docker', 'docker-a'))
+      .resolves.toMatch(/changed after claim/)
+    await expect(runnerTargetPinFailure({ getRunnerTarget: async () => ({ ...target, enabled: false }) }, payload, 'local-docker', 'docker-a'))
+      .resolves.toMatch(/disabled at spawn time/)
+  })
+})
 
 function makeJob(overrides: Partial<JobRecord> = {}): JobRecord {
   return {
@@ -129,6 +154,27 @@ describe('ExecutionPlan schema（research-schemas）', () => {
     expect(plan.snapshot.tex_snapshot).toEqual({ schema_version: 1 })
   })
 
+  it('将 target kind/revision/hash 的不可变 pin 带入 ExecutionPlan', () => {
+    const plan = buildExecutionPlan(makeJob({
+      payload: {
+        runner_target_id: 'lab-gpu-1',
+        runner_target_kind: 'remote-ssh',
+        runner_target_revision: 7,
+        runner_target_hash: `sha256:${'a'.repeat(64)}`,
+      },
+    }), {
+      run_id: 'run_target_pin',
+      lease: { owner: 'fleet', generation: 1, token: 'tok', expires_at: null },
+      image_digest: 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32',
+      timeout_ms: 60000,
+      target_id: 'lab-gpu-1',
+    })
+    expect(plan).toMatchObject({
+      target_id: 'lab-gpu-1', target_kind: 'remote-ssh', target_revision: 7,
+      target_config_hash: `sha256:${'a'.repeat(64)}`,
+    })
+  })
+
   it('缺必需字段拒绝（plan 是固定契约）', () => {
     const plan = makePlan()
     const { run_id: _runId, ...missing } = plan
@@ -214,6 +260,23 @@ describe('LocalDockerAdapter（ExecutionTarget port 本地实现）', () => {
     // dockerRun 收到的是 schema 校验过的 plan（含默认值归一化）
     expect(gotPlan.limits.timeout_ms).toBe(60000)
     expect(gotPlan.image.digest).toBe(plan.image.digest)
+  })
+
+  it('拒绝发给其他 target 或非 local-docker kind 的计划', async () => {
+    const adapter = new LocalDockerAdapter({
+      jobId: 'j-target', targetId: 'target_local_docker_v1',
+      dockerRun: async () => fakeOutcome(), cancel: () => false,
+    })
+    await expect(adapter.prepare(makePlan())).rejects.toThrow(/refuses plan pinned/)
+    const wrongKind = buildExecutionPlan(makeJob({ payload: {
+      runner_target_kind: 'remote-ssh', runner_target_revision: 1,
+      runner_target_hash: `sha256:${'b'.repeat(64)}`,
+    } }), {
+      run_id: 'run_wrong_kind', lease: { owner: 'o', generation: 1, token: null, expires_at: null },
+      image_digest: 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32',
+      timeout_ms: 60000, target_id: 'target_local_docker_v1',
+    })
+    await expect(adapter.prepare(wrongKind)).rejects.toThrow(/refuses remote-ssh/)
   })
 
   it('start() 未先 prepare() → ExecutionPlanMutationError', async () => {

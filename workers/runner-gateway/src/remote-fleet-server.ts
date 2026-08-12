@@ -82,7 +82,16 @@ import { appendTerminalFramesWithLease } from './kernel-client.js'
  * （appendTerminalFramesWithLease 的 owner/token 头语义）。
  */
 export interface FleetKernelClient {
-  claimJobs(owner: string, limit: number, leaseTtlSeconds?: number): Promise<JobRecord[]>
+  claimJobs(
+    owner: string,
+    limit: number,
+    leaseTtlSeconds?: number,
+    targetFilter?: {
+      runner_target_kinds?: Array<'local-process' | 'local-docker' | 'remote-ssh'>
+      runner_target_ids?: string[]
+      include_unpinned?: boolean
+    },
+  ): Promise<JobRecord[]>
   registerArtifact(input: {
     project_id: string
     kind: string
@@ -103,6 +112,17 @@ export interface FleetKernelClient {
   }): Promise<JobRecord>
   heartbeatJob(jobId: string, owner: string, leaseGeneration?: number | null, leaseToken?: string | null): Promise<JobRecord>
   getJob(jobId: string): Promise<JobRecord>
+  /** Authoritative target snapshot used again immediately before a remote
+   * claim crosses the fleet boundary. Optional only for legacy test clients
+   * whose pre-registry plans carry no target revision/hash pins. */
+  getRunnerTarget?(targetId: string): Promise<{
+    target_id: string
+    kind: 'local-process' | 'local-docker' | 'remote-ssh'
+    enabled: boolean
+    draining: boolean
+    revision: number
+    config_hash: string
+  }>
   /**
    * CAS 拉取：**字节流**（Buffer，绝不经过 UTF-8 text 编解码——二进制内容
    * 往返无损，hardening §5 RUN-REMOTE-01 / acceptance remote-cas-binary-auth）。
@@ -133,11 +153,12 @@ export interface FleetKernelClient {
 /** ResearchClient → FleetKernelClient 适配（frames 复用本地 runner 的 lease 头路径）。 */
 export function createFleetKernelClient(client: ResearchClient): FleetKernelClient {
   return {
-    claimJobs: (owner, limit, ttl) => client.claimJobs(owner, limit, ttl),
+    claimJobs: (owner, limit, ttl, filter) => client.claimJobs(owner, limit, ttl, filter),
     registerArtifact: input => client.registerArtifact(input),
     completeJob: input => client.completeJob(input),
     heartbeatJob: (jobId, owner, gen, token) => client.heartbeatJob(jobId, owner, gen, token),
     getJob: jobId => client.getJob(jobId),
+    getRunnerTarget: targetId => client.getRunnerTarget(targetId),
     fetchArtifactBytes: (projectId, sha) => client.fetchArtifactBytes(projectId, sha),
     appendTerminalFrames: (jobId, runId, frames, owner, token, maxLogBytes) =>
       appendTerminalFramesWithLease(client, jobId, runId, frames, owner, token, maxLogBytes),
@@ -294,9 +315,8 @@ export class RemoteFleetServer {
     this.maxFinalizeBytes = options.maxFinalizeBytes ?? 32 * 1024 * 1024
     this.resolveTargetId = options.resolveTargetId ?? (job => {
       const payload = job.payload as Record<string, unknown> | undefined
-      return typeof payload?.target_id === 'string' && payload.target_id !== ''
-        ? payload.target_id
-        : LOCAL_DOCKER_TARGET_ID
+      if (typeof payload?.runner_target_id === 'string' && payload.runner_target_id !== '') return payload.runner_target_id
+      return typeof payload?.target_id === 'string' && payload.target_id !== '' ? payload.target_id : LOCAL_DOCKER_TARGET_ID
     })
     this.now = options.now ?? (() => Date.now())
   }
@@ -399,7 +419,63 @@ export class RemoteFleetServer {
       const matched = this.matchFromPending(agentId, registration, Math.max(0, room))
       for (const claim of matched) claims.push(this.toAgentClaim(claim))
     }
-    return { schema_version: 1, claims }
+    return { schema_version: 1, claims: await this.filterCurrentTargetClaims(agentId, claims) }
+  }
+
+  /** Last-moment registry fence for remote dispatch. A plan may have been
+   * claimed while its target was enabled and then sit pending/outstanding;
+   * never hand it to an agent after the target is drained or revised. */
+  private async filterCurrentTargetClaims(agentId: string, claims: AgentClaim[]): Promise<AgentClaim[]> {
+    const accepted: AgentClaim[] = []
+    for (const claim of claims) {
+      const plan = claim.plan
+      // Legacy pre-registry plans are preserved for wire compatibility. New
+      // kernel jobs always carry all three pins and use the authoritative API.
+      if (plan.target_revision === null && plan.target_config_hash === null && plan.target_kind === null) {
+        accepted.push(claim)
+        continue
+      }
+      let reason: string | null = null
+      if (plan.target_revision === null || plan.target_config_hash === null || plan.target_kind === null) {
+        reason = `remote plan ${plan.plan_id} has an incomplete target pin`
+      } else if (this.client.getRunnerTarget === undefined) {
+        reason = `remote plan ${plan.plan_id} cannot revalidate target ${plan.target_id}`
+      } else {
+        try {
+          const target = await this.client.getRunnerTarget(plan.target_id)
+          if (!target.enabled || target.draining) {
+            reason = `runner target ${plan.target_id} is ${target.draining ? 'draining' : 'disabled'} before remote dispatch`
+          } else if (target.target_id !== plan.target_id || target.kind !== 'remote-ssh'
+            || target.kind !== plan.target_kind || target.revision !== plan.target_revision
+            || target.config_hash !== plan.target_config_hash) {
+            reason = `runner target ${plan.target_id} changed after claim; remote dispatch pin is stale`
+          }
+        } catch (error) {
+          reason = `runner target ${plan.target_id} could not be revalidated before remote dispatch: ${(error as Error).message ?? String(error)}`
+        }
+      }
+      if (reason === null) {
+        accepted.push(claim)
+        continue
+      }
+      const outstanding = this.requireOutstanding(agentId, plan.run_id)
+      try {
+        await this.client.completeJob({
+          job_id: outstanding.job.job_id,
+          owner: plan.lease.owner,
+          status: 'failed',
+          failure_class: 'environment',
+          error: reason,
+          lease_generation: plan.lease.generation,
+          lease_token: plan.lease.token,
+        })
+        this.settle(outstanding, 'runner_target_stale')
+      } catch (error) {
+        const mapped = mapKernelError(error)
+        this.settle(outstanding, mapped.code)
+      }
+    }
+    return accepted
   }
 
   /** 从 pending 匹配（target_id 精确 + capability）并登记 outstanding，返回分发结果。 */
@@ -444,15 +520,40 @@ export class RemoteFleetServer {
     if (room <= 0) return 0
     let jobs: JobRecord[]
     try {
-      jobs = await this.client.claimJobs(this.owner, room, this.leaseTtlSeconds)
+      // A fleet server only leases remote targets. Local process/Docker jobs
+      // stay available for the corresponding local runner loop; unpinned
+      // legacy jobs are deliberately excluded from remote dispatch.
+      jobs = await this.client.claimJobs(this.owner, room, this.leaseTtlSeconds, {
+        runner_target_kinds: ['remote-ssh'],
+        include_unpinned: false,
+      })
     } catch (error) {
       throw mapKernelError(error)
     }
     let added = 0
     for (const job of jobs) {
       if (this.claimedJobIds.has(job.job_id) || this.pending.some(p => p.job.job_id === job.job_id)) continue
+      let plan: ExecutionPlan
+      try {
+        plan = this.buildPlan(job)
+      } catch (error) {
+        const mapped = mapKernelError(error)
+        try {
+          await this.client.completeJob({
+            job_id: job.job_id,
+            owner: this.owner,
+            status: 'failed',
+            failure_class: 'environment',
+            error: `remote execution plan rejected before dispatch: ${mapped.message}`,
+            lease_generation: job.lease_generation,
+            lease_token: job.lease_token,
+          })
+        } catch (completeError) {
+          throw mapKernelError(completeError)
+        }
+        continue
+      }
       this.claimedJobIds.add(job.job_id)
-      const plan = this.buildPlan(job)
       this.pending.push({
         claim_id: `clm_${randomUUID().replaceAll('-', '').slice(0, 12)}`,
         job,

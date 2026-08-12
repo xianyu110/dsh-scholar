@@ -57,7 +57,7 @@ bash scripts/start-standalone-ui.sh
 bash scripts/start-dsh-agent-dev.sh
 ~~~
 
-脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 只是 DSH 的会话入口；Scholar 页面、静态 client、`/research-api` 和 `/research-ui-api` 都不存在。
+脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 是 DSH 的会话入口，并加载 Scholar 的 Plugin config 静态 client；完整 Scholar 页面、`/research-api` 和 `/research-ui-api` 都不存在。
 
 当前仓库迁移期验证：
 
@@ -66,7 +66,7 @@ curl http://127.0.0.1:3081/
 curl http://127.0.0.1:17412/v1/health
 ~~~
 
-Agent 集成验收必须证明 tools、commands、subagents、四组 Skills 可用，且根 Agent 包 manifest 没有 `dshClient` 和 `./client` export。standalone UI 包可合法导出自己的 `./client`。浏览器 Golden Path 只在 standalone 18610 验收。
+Agent 集成验收必须证明 tools、commands、subagents、四组 Skills 可用，根 Agent 包 manifest 没有 legacy `dshClient` 字段，并且 `dsh.client`/`./client` 只装配 Plugin config 卡片。完整科研工作台的浏览器 Golden Path 只在 standalone 18610 验收。
 
 发布兼容性不复用上述 checkout。用隔离环境执行：
 

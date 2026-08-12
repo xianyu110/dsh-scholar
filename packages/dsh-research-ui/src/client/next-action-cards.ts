@@ -39,6 +39,7 @@ export const NEXT_ACTION_UNKNOWN_CODE = 'unknown'
  *  converge on the Overview tab (the phase panel hosts ideas/contracts and
  *  release/overview guidance). */
 const ROUTE_TO_TAB: Record<string, string> = {
+  chat: 'chat',
   gates: 'gates',
   runs: 'runs',
   evidence: 'evidence',
@@ -126,6 +127,13 @@ export interface NextActionCardModel {
    *  the kernel did not declare it (USAGE_GUIDE §11 "需要 Human/Agent/
    *  Runner" chip — rendered by the panel layer). */
   requiredBy: 'human' | 'agent' | 'runner' | null
+  /** Safe, editable slash-command draft for whitelisted Chat interactions.
+   * Never auto-submitted by the card click. */
+  commandDraft: string | null
+}
+
+export interface NextActionCardContext {
+  briefProblem?: string
 }
 
 /** True when `key` exists in the overview dictionary of `locale` (parity is
@@ -140,7 +148,11 @@ function hasOverviewKey(key: string, locale: Locale): boolean {
  * fields degrade to safe defaults (unknown code, ready tone, no gaps, no
  * route) so a malformed action still renders as a read-only card.
  */
-export function nextActionCardModel(action: NextActionV2, locale: Locale = getLocale()): NextActionCardModel {
+export function nextActionCardModel(
+  action: NextActionV2,
+  locale: Locale = getLocale(),
+  context: NextActionCardContext = {},
+): NextActionCardModel {
   const code = typeof action.code === 'string' && action.code !== '' ? action.code : NEXT_ACTION_UNKNOWN_CODE
   const isUnknown = code === NEXT_ACTION_UNKNOWN_CODE
   // ONBOARD-01 intake overlay actions open the intake wizard modal (route
@@ -167,7 +179,14 @@ export function nextActionCardModel(action: NextActionV2, locale: Locale = getLo
   // unknown → always read-only (never a mutation CTA).
   const disabled = state === 'done' || isUnknown || (state === 'blocked' && required.length > 0)
   const rawRoute = typeof action.route === 'string' ? action.route : ''
-  const route = isUnknown ? '' : (isIntake ? 'intake' : (ROUTE_TO_TAB[rawRoute] ?? 'phase'))
+  // Compatibility: old kernels projected survey_run as route=runs. Runs only
+  // contains durable Jobs and cannot launch a connector survey, so the stable
+  // action code wins and opens project Chat instead.
+  const route = isUnknown ? '' : (isIntake ? 'intake' : (code === 'survey_run' ? 'chat' : (ROUTE_TO_TAB[rawRoute] ?? 'phase')))
+  const problem = typeof context.briefProblem === 'string'
+    ? context.briefProblem.trim().replace(/\s+/g, ' ')
+    : ''
+  const commandDraft = code === 'survey_run' ? `/survey ${problem}` : null
   return {
     code,
     title,
@@ -183,6 +202,7 @@ export function nextActionCardModel(action: NextActionV2, locale: Locale = getLo
     intakeId,
     intakeProjectId,
     requiredBy,
+    commandDraft,
   }
 }
 

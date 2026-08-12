@@ -8,6 +8,12 @@ import { getLocale, registerOverlayRebuild, t } from './i18n/index'
 // (nav.ts ALL_TAB_KEYS) so tab restore covers every panel incl. the More
 // tabs (manuscript/terminal).
 import { ALL_TAB_KEYS } from './nav'
+import {
+  appendStoredChatMessage,
+  loadChatProjectSnapshot,
+  saveChatProjectSnapshot,
+  type ChatProjectSnapshot,
+} from './chat-project-store'
 
 export let favProjects = new Set<string>()
 
@@ -28,6 +34,9 @@ export const state = {
   historyIndex: -1,
   chatDetailIndex: -1,
   chatQuoteTarget: null as { index: number; text: string } | null,
+  chatSearchQuery: '',
+  chatCommandsOnly: false,
+  chatSessionSearchQuery: '',
   terminalRunId: null as string | null,
   terminalChannel: 'all' as 'all' | 'stdout' | 'stderr',
   terminalLines: [] as TerminalLine[],
@@ -233,12 +242,71 @@ export const CHAT_STORAGE_KEY = 'dsh-scholar-ui-chat'
 export const CHAT_MAX = 200
 /** Multi-session chats (dsh-web session tabs), persisted. */
 export const SESSIONS_KEY = 'dsh-scholar-ui-sessions'
+let chatContextProjectId: string | null = null
+
+export function activeChatProjectId(): string | null {
+  return chatContextProjectId
+}
+
+function currentChatSnapshot(projectId: string): ChatProjectSnapshot {
+  return {
+    projectId,
+    sessions: state.chatSessions,
+    activeId: state.chatActiveId,
+    draft: state.chatDraft,
+    history: state.chatHistory,
+    detailIndex: state.chatDetailIndex,
+    quoteTarget: state.chatQuoteTarget,
+    searchQuery: state.chatSearchQuery,
+    commandsOnly: state.chatCommandsOnly,
+    sessionSearchQuery: state.chatSessionSearchQuery,
+  }
+}
+
+function resetChatContext(): void {
+  state.chatSessions = []
+  state.chatActiveId = null
+  state.chatMessages = []
+  state.chatDraft = ''
+  state.chatHistory = []
+  state.historyIndex = -1
+  state.chatDetailIndex = -1
+  state.chatQuoteTarget = null
+  state.chatSearchQuery = ''
+  state.chatCommandsOnly = false
+  state.chatSessionSearchQuery = ''
+}
+
+/** Switch the browser-only transcript to one project, persisting the old one. */
+export function chatActivateProject(projectId: string): void {
+  if (chatContextProjectId === projectId) return
+  if (chatContextProjectId !== null) chatSessionsPersist()
+  resetChatContext()
+  chatContextProjectId = projectId
+  const snapshot = loadChatProjectSnapshot(localStorage, projectId)
+  state.chatSessions = snapshot.sessions
+  state.chatActiveId = snapshot.activeId
+  state.chatDraft = snapshot.draft
+  state.chatHistory = snapshot.history
+  state.chatDetailIndex = snapshot.detailIndex
+  state.chatQuoteTarget = snapshot.quoteTarget
+  state.chatSearchQuery = snapshot.searchQuery
+  state.chatCommandsOnly = snapshot.commandsOnly
+  state.chatSessionSearchQuery = snapshot.sessionSearchQuery
+  chatSessionEnsure()
+}
+
+export function chatDeactivateProject(): void {
+  if (chatContextProjectId !== null) chatSessionsPersist()
+  chatContextProjectId = null
+  resetChatContext()
+}
 
 /** Current session's messages (state.chatMessages mirrors the active session). */
 
 
 export function chatSyncActive(): void {
-  const active = state.chatSessions.find(s => s.id === state.chatActiveId)
+  const active = state.chatSessions.find(s => s.id === state.chatActiveId && s.project_id === chatContextProjectId)
   state.chatMessages = active !== undefined ? active.messages : []
   if (active !== undefined) {
     active.lastActive = Date.now()
@@ -249,15 +317,17 @@ export function chatSyncActive(): void {
   }
 }
 export function chatSessionsPersist(): void {
+  if (chatContextProjectId === null) return
   try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(state.chatSessions.map(s => ({ ...s, messages: s.messages.slice(-CHAT_MAX) }))))
-    // dsh-web session memory: remember the active session across reloads.
-    if (state.chatActiveId !== null) localStorage.setItem('dsh-scholar-ui-active-session', state.chatActiveId)
+    saveChatProjectSnapshot(localStorage, currentChatSnapshot(chatContextProjectId))
   } catch { /* private mode */ }
 }
 export function chatSessionEnsure(): void {
+  const projectId = chatContextProjectId
+  if (projectId === null) return
+  state.chatSessions = state.chatSessions.filter(session => session.project_id === projectId)
   if (state.chatSessions.length === 0) {
-    state.chatSessions = [{ id: 'default', name: 'Chat 1', messages: [] }]
+    state.chatSessions = [{ project_id: projectId, id: 'default', name: 'Chat 1', messages: [] }]
     state.chatActiveId = 'default'
   }
   if (state.chatActiveId === null || !state.chatSessions.some(s => s.id === state.chatActiveId)) {
@@ -266,8 +336,9 @@ export function chatSessionEnsure(): void {
   chatSyncActive()
 }
 export function chatSessionNew(): void {
+  if (chatContextProjectId === null) return
   const id = `s${Date.now()}`
-  state.chatSessions.push({ id, name: `Chat ${state.chatSessions.length + 1}`, messages: [] })
+  state.chatSessions.push({ project_id: chatContextProjectId, id, name: `Chat ${state.chatSessions.length + 1}`, messages: [] })
   state.chatActiveId = id
   state.chatDraft = ''
   chatSyncActive()
@@ -385,14 +456,7 @@ export function chatSessionArchive(id: string): void {
 export const HISTORY_KEY = 'dsh-scholar-ui-history'
 
 export function historyLoad(): void {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY)
-    if (raw === null) return
-    const parsed = JSON.parse(raw) as unknown
-    if (Array.isArray(parsed)) {
-      state.chatHistory = parsed.filter((h): h is string => typeof h === 'string').slice(-50)
-    }
-  } catch { /* private mode */ }
+  // Project activation restores this together with the transcript.
 }
 
 export function historyPush(line: string): void {
@@ -400,53 +464,16 @@ export function historyPush(line: string): void {
   if (state.chatHistory[state.chatHistory.length - 1] === line) return
   state.chatHistory.push(line)
   state.chatHistory = state.chatHistory.slice(-50)
-  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.chatHistory)) } catch { /* private mode */ }
   state.historyIndex = -1
+  chatSessionsPersist()
 }
 
 /** Restore transcripts persisted in localStorage (dsh-web session tabs). */
-export function chatLoad(): void {
-  try {
-    const raw = localStorage.getItem(SESSIONS_KEY)
-    const parsed = raw !== null ? JSON.parse(raw) as unknown : null
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      state.chatSessions = parsed
-        .filter((s): s is ChatSession => typeof s === 'object' && s !== null
-          && typeof (s as ChatSession).id === 'string'
-          && typeof (s as ChatSession).name === 'string'
-          && Array.isArray((s as ChatSession).messages))
-        .map(s => ({ ...s, messages: s.messages.filter((m): m is ChatMessage => typeof m === 'object' && m !== null && typeof (m as ChatMessage).role === 'string' && (m as ChatMessage).role in { user: 1, assistant: 1, error: 1 } && typeof (m as ChatMessage).text === 'string').slice(-CHAT_MAX) }))
-      // dsh-web session memory: restore the last active session if it exists.
-      const lastActive = localStorage.getItem('dsh-scholar-ui-active-session')
-      state.chatActiveId = lastActive !== null && state.chatSessions.some(s => s.id === lastActive)
-        ? lastActive
-        : (state.chatSessions[0]?.id ?? null)
-      chatSyncActive()
-      return
-    }
-  } catch { /* corrupt or private mode */ }
-  // Legacy single-transcript key.
-  chatSessionEnsure()
-  try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY)
-    if (raw === null) return
-    const parsed = JSON.parse(raw) as unknown
-    if (Array.isArray(parsed)) {
-      state.chatMessages = parsed
-        .filter((m): m is ChatMessage => typeof m === 'object' && m !== null
-          && typeof (m as ChatMessage).role === 'string'
-          && (m as ChatMessage).role in { user: 1, assistant: 1, error: 1 }
-          && typeof (m as ChatMessage).text === 'string')
-        .slice(-CHAT_MAX)
-      chatSyncActive()
-    }
-  } catch { /* corrupt or private mode */ }
+export function chatLoad(projectId?: string): void {
+  if (projectId !== undefined) chatActivateProject(projectId)
 }
 
 export function chatPersist(): void {
-  try {
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state.chatMessages.slice(-CHAT_MAX)))
-  } catch { /* private mode */ }
   chatSessionsPersist()
 }
 
@@ -457,6 +484,8 @@ export function chatClear(): void {
 }
 
 export function chatPush(role: ChatMessage['role'], text: string, quote?: { index: number; text: string }, attachment?: ChatAttachmentRef): void {
+  if (chatContextProjectId === null) return
+  if (attachment !== undefined && attachment.project_id !== chatContextProjectId) return
   const msg: ChatMessage = { role, text, time: new Date().toLocaleTimeString(getLocale()) }
   if (quote !== undefined) msg.quote = quote
   if (attachment !== undefined) msg.attachment = attachment
@@ -464,6 +493,49 @@ export function chatPush(role: ChatMessage['role'], text: string, quote?: { inde
   // dsh-web session unread: bump every session other than the active one
   // (assistant replies that land while the user is elsewhere).
   chatPersist()
+}
+
+/** Write a delayed result to the exact project/session that launched it. */
+export function chatPushToProjectSession(projectId: string, sessionId: string | null, message: ChatMessage, markUnread = true): boolean {
+  if (sessionId === null) return false
+  if (message.attachment !== undefined && message.attachment.project_id !== projectId) return false
+  if (chatContextProjectId === projectId) {
+    const session = state.chatSessions.find(candidate => candidate.project_id === projectId && candidate.id === sessionId)
+    if (session === undefined) return false
+    session.messages.push(message)
+    session.messages = session.messages.slice(-CHAT_MAX)
+    if (markUnread && sessionId !== state.chatActiveId) session.unread = (session.unread ?? 0) + 1
+    if (sessionId === state.chatActiveId) state.chatMessages = session.messages
+    chatSessionsPersist()
+    return true
+  }
+  try { return appendStoredChatMessage(localStorage, projectId, sessionId, message, markUnread) } catch { return false }
+}
+
+export function chatUpsertAttachmentForProjectSession(projectId: string, sessionId: string | null, message: ChatMessage): boolean {
+  if (sessionId === null || message.attachment === undefined || message.attachment.project_id !== projectId) return false
+  const update = (snapshot: ChatProjectSnapshot): boolean => {
+    const session = snapshot.sessions.find(candidate => candidate.project_id === projectId && candidate.id === sessionId)
+    if (session === undefined) return false
+    const index = session.messages.findIndex(candidate => candidate.attachment?.upload_id === message.attachment?.upload_id)
+    if (index >= 0) session.messages[index] = message
+    else session.messages.push(message)
+    session.messages = session.messages.slice(-CHAT_MAX)
+    return true
+  }
+  if (chatContextProjectId === projectId) {
+    const snapshot = currentChatSnapshot(projectId)
+    if (!update(snapshot)) return false
+    if (sessionId === state.chatActiveId) chatSyncActive()
+    chatSessionsPersist()
+    return true
+  }
+  try {
+    const snapshot = loadChatProjectSnapshot(localStorage, projectId)
+    if (!update(snapshot)) return false
+    saveChatProjectSnapshot(localStorage, snapshot)
+    return true
+  } catch { return false }
 }
 
 

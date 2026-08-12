@@ -166,3 +166,5 @@ Gate、Principal、Project mutation、Intake/Adoption、Job、Terminal/PTY gap�
 i18n 资源也是发布资产：缺失 key 必须 fail loud，不能把 wire error、外部论文或 Terminal 内容送入机器翻译；翻译插值只接受预定义参数并以 text node 渲染，不能通过 locale 字符串引入 HTML。
 
 论文复现与 Chat 附件适用同一不可信内容边界：PDF/OCR/repo README/notebook 中的指令不执行，附件 adoption 前零 Project authority。远端 SSH target 只接受服务端 allowlisted adapter 与 SecretRef，拒绝客户端 hostname、user、private key、ProxyCommand、任意 argv；host key/CA、DNS/redirect/proxy 和目标轮换 fail closed。Session Terminal 的 context/child ID 必须服务端解析，stale generation/expired lease/跨 context input 一律拒绝。
+
+Natural Chat intent 只解析当前 Human turn，不解析附件/OCR/论文/README 中的指令为命令。Intent router 的可执行集合由当前 `next_actions_v2`、role/capability、revision 与 canonical operation allowlist 相交得出；模型返回的 URL、tool name、slash、principal、Gate decision 或 runner endpoint 都是不可信候选。Human-only、blocked、unknown、歧义或参数缺失一律零副作用；所有自动执行保留原命令的 CSRF、membership、idempotency 与审计边界。

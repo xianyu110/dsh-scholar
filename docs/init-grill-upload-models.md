@@ -19,7 +19,9 @@
 
 创建成功后自动打开项目绑定 Chat，并恢复该项目 active Init Intake。Grill 是确定性状态机，不用自由文本 LLM 决定问题、完成度或权限。
 
-Chat composer 支持附件按钮、拖拽和粘贴。附件进入同一 active Intake 的批量分块队列，消息只保存 attachment/stage ref；scan/OCR 与 Human 确认前不写 Project Artifact。命令直接使用 `/new`、`/confirm-brief`、`/reproduce` 等一级 slash command；DSH 不注册聚合 descriptor，standalone 的旧输入只允许隐藏 parser 兼容，不进入帮助和补全。
+“自由对话”不改变 Grill 的确定性：存在 current Grill question 时，普通文本只作为该题一个 Human answer 提交；用户要讨论而不回答时必须显式选择跳过/未知或切换会话。Brief confirmed 后，普通文本才进入 natural turn/intent router。模型可以改写问题或解释材料，但不能把聊天推断自动写成 Human answer、确认 Brief 或创建 Scope Gate。
+
+Chat composer 支持附件按钮、拖拽和粘贴。附件进入同一 active Intake 的批量分块队列，消息只保存 attachment/stage ref；scan/OCR 与 Human 确认前不写 Project Artifact。命令直接使用 `/new`、`/confirm-brief`、`/reproduce` 等一级 slash command；DSH 与 standalone 都不注册、不解析或兼容旧聚合 descriptor/prefix。
 
 首版问题顺序固定且可版本化：
 

@@ -49,6 +49,8 @@ export interface ResearchToolContext {
   roles: { set(sessionId: string, role: 'scholar' | 'curator' | 'idea-panel' | 'statistician' | 'reviewer' | 'auditor'): void }
   /** Per-role model routing for panel children (design §8.5); undefined = default model. */
   modelFor: (role: string) => string | undefined
+  /** Project governance mode inherited when a create call omits `mode`. */
+  defaultMode?: 'gate-only' | 'full-auto'
 }
 
 interface ResearchToolDef {
@@ -235,7 +237,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
               baseline_repo: brief.baseline_repo !== undefined ? String(brief.baseline_repo) : null,
               domain: String(brief.domain ?? 'machine-learning'),
             },
-            mode: args.mode,
+            mode: args.mode ?? toolCtx.defaultMode,
             ...(args.fixture_id !== undefined && args.fixture_id !== ''
               ? { execution: { fixture_id: args.fixture_id } }
               : {}),
@@ -563,6 +565,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         passages: buildPassages(papers),
         // Intra-corpus citation edges from OpenAlex referenced_works (§4.4 step 4).
         citation_edges: result.citation_edges,
+        source_status: result.source_status.some(source => source.status === 'failed') ? 'pending' : 'complete',
       })
       return { ok: true, snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length, passages: snapshot.passages.length, citation_edges: snapshot.citation_edges.length, dedup_removed: result.dedup_removed }
     },

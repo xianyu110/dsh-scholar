@@ -4,20 +4,23 @@
 
 ## 1. 运行形态
 
-浏览器 UI 只有独立模式：本地 HTTP host、同源 BFF、全屏 UI、独立 Token 解锁，并内置 locale/theme adapter。DSH Agent 插件可以继续提供 tools、commands 和 Skills，但不发布 `dshClient`、不注册 Web slot、不代理浏览器 BFF、不渲染浮动面板。
+完整科研浏览器 UI 只有独立模式：本地 HTTP host、同源 BFF、全屏 UI、独立 Token 解锁，并内置 locale/theme adapter。DSH Agent 插件可以继续提供 tools、commands、Skills，以及 Settings → Plugin config 中只编辑插件运行参数的窄配置卡；它不发布 legacy `dshClient`、不注册科研业务 Web slot、不代理浏览器 BFF、不渲染浮动面板。
 
 所有页面、状态模型、翻译 key、ResearchClient 和 UI 实现都只有一份。Shadow DOM 可以用于隔离独立 bootstrap 与工作区样式，不得再引入 DSH Web 宿主适配分支。
 
 ## 2. 布局
 
+全局品牌字标固定为 `dsh Scholar`。主区域、Project Sidebar、Standalone 首屏、浏览器标题、Chat 和 Settings 复用同一语义，不允许局部回退成 `dsh Research`；技术组件 `Research Kernel` 与 research API 命名保持不变。
+
 ### 2.1 全屏
 
-- 左侧 230 px Workspace sidebar，可折叠到 44 px；
+- 左侧 230 px Project Sidebar，可折叠到 44 px；
 - 主区包含全局 header、项目 header、分组 tabs 和当前页面；
-- 小于 720 px 时 sidebar 变抽屉、tabs 横向滚动、编辑器改上下分屏；
+- 主区右侧或底部可以出现一个 Panel Dock；它承载当前业务页面，不取代左侧 Project Sidebar；
+- 小于 720 px 时 Project Sidebar 变抽屉、tabs 横向滚动、右侧 Dock 视觉投影为底部、编辑器改上下分屏；
 - 小于 640 px 时占满 viewport，不使用浮动阴影。
 
-Sidebar：搜索、All/Active/Done/Archived、收藏、状态、创建、重命名、归档、恢复、详情、复制 ID。支持键盘和右键菜单，批量归档不能包含 running project。
+Project Sidebar：搜索、All/Active/Done/Archived、收藏、状态、创建、重命名、归档、恢复、详情、复制 ID。支持键盘和右键菜单，批量归档不能包含 running project。
 
 Header：Kernel 状态、Human Gate 数、命令面板、快捷键、活动通知、语言、密度、主题、刷新。Kernel 不可用时显示持续 banner 和 Retry；不能只用 toast。
 
@@ -41,32 +44,51 @@ Header：Kernel 状态、Human Gate 数、命令面板、快捷键、活动通�
 | Operations | Budget | 用量、限制、策略和项目内容计数 |
 | Operations | Settings | 所有配置、来源、revision/hash、SecretRef 和 diagnostics |
 
-Tab 可收藏，Alt+1…9 切换。URL 或持久 UI state 保存 active project/tab，但不能把 Token 放 URL。
+Tab 可收藏，Alt+1…9 切换。上表全部当前业务页面都必须提供“停靠到右侧”和“停靠到底部”入口；Panel Dock 内的页面选择器也必须覆盖同一组页面。URL 或持久 UI state 保存 active project/tab，但不能把 Token 放 URL。
 
-### 2.3 Start、路由与窄屏
+### 2.3 Panel Dock 契约
+
+- 任一时刻最多一个活动 Dock 页面；同一个页面在主区和 Dock 中不能同时存在，避免 Chat、PTY、Workspace、TeX 和流式面板出现双写或错投；
+- 页面可从主区打开到右侧/底部 Dock，也可从 Dock 切换位置、关闭或打开回主区。右侧与底部切换只改变同一已挂载 surface 的布局，不重新执行页面 renderer；
+- 主区与 Dock 之间切换时，Run Terminal、PTY、Workspace watch、Trajectory 等流式 adapter 先停止旧宿主，再携带 `after_seq`、`after_revision` 或模型已消费游标连接新宿主，确保无旧闭包继续写已离开的 DOM；
+- Dock 默认右侧 420 px、底部 320 px；右侧允许 280–720 px，底部允许 180–640 px。分隔条支持 pointer drag、方向键、Home/End，使用 `role=separator`、正确 orientation、value/min/max aria；
+- 本地持久化只保存 schema version、活动页面 key、首选位置和两种尺寸；解析失败、未知页面或越界值回默认。不得保存项目数据、草稿、token、secret 或服务端状态；
+- 小于 720 px 时首选 `right` 的 Dock 按 `bottom` 渲染，但不改写持久化首选位置；重新回到宽屏后恢复右侧。所有 Dock chrome、tooltip、aria、空态和动作都来自 i18n 字典并随 locale 即时重绘；
+- “Project Sidebar”专指左侧项目导航；“Panel Dock/页面侧栏”专指右侧或底部业务页面容器。实现、文档和翻译不得混用二者。
+
+### 2.4 Start、路由与窄屏
 
 - `/start`：三入口；Resume 按 updated_at 展示 status、pending Gate、下一步并恢复 last route；Upload 显示 preflight/进度/scan/Grill/Proposal；
 - `/p/{id}/overview|workspace|runs|manuscript|approvals|artifacts|evidence|budget|trajectory|topology|settings`；
 - `/p/{id}/runs/{run}/terminal` 是只读 Run Terminal；`/p/{id}/pty/{session}` 是 Interactive PTY；
 - URL 只含 opaque ID；locale/layout/token/secret 不进 URL；未知或无权路由回可见项目列表并显示安全错误；
-- 小于 720 px：sidebar 为抽屉、Start 卡纵向、More 全屏菜单；小于 640 px：Workspace/Manuscript/Terminal 上下分屏或子页面，breadcrumb 和主要 CTA 固定可达。
+- 小于 720 px：Project Sidebar 为抽屉、右侧 Dock 有效位置为底部、Start 卡纵向、More 全屏菜单；小于 640 px：Workspace/Manuscript/Terminal 上下分屏或子页面，breadcrumb 和主要 CTA 固定可达。
 
 ## 3. 数据与刷新
 
 - 项目投影默认每 8 秒刷新；页面隐藏时暂停，恢复可见立即刷新；
 - 活动 Terminal 使用 SSE，不能由 8 秒轮询或本地逐字动画模拟；
 - TeX save 使用 expected_version，build 使用 expected_document_revision；
-- 请求可取消，页面切换时清理 listener、Blob URL 和 stream；
+- 请求可取消；页面从主区/Dock 离开或 Dock 关闭时清理 listener、Blob URL 和 stream，仍在可见 Dock 中的页面不得被普通 tab cleanup 错误停止；
 - 401 只允许一次 session refresh 重试；之后回到解锁/登录，不无限循环；
 - UI 不保存权威业务状态，只缓存选择、布局、草稿和 lastSeq。
 - NextAction、Intake、Trajectory 和 Topology 都读取 Kernel/BFF projection；浏览器不从文案推断状态或因果；
-- route/layout 可恢复，Token 不写 localStorage 普通 preference、URL 或导出文件。
+- route/layout 可恢复，Panel Dock 本地偏好不进入 config pin；Token 不写 localStorage 普通 preference、URL 或导出文件。
+- 8 秒背景刷新不得替换当前聚焦的 input/textarea/select/contenteditable/terminal emulator。用户正在输入或 IME composition 时，背景刷新延迟到 focusout，但 SSE/PTY/Terminal 流继续增量消费；手动操作或服务器终态必须重绘时，需恢复 ShadowRoot 内的 active element、选区/光标、输入滚动位置和可识别的焦点目标。
+- 全局 render 必须串行化并合并重入请求；较旧的异步响应不得在较新 render 之后再次 `replaceChildren()`。为了恢复焦点，必须从页面 ShadowRoot 读取 `activeElement`，不能只读 `document.activeElement` 宿主节点。
+- Chat/Workspace/Manuscript/搜索框的本地输入不能因为投影轮询丢失值、焦点、选区、undo/redo 或未提交的 dirty 状态；PTY 继续采用不重建 emulator DOM 的更严格契约。
 
 ## 4. Chat
 
-支持会话新建、切换、重命名、固定、复制、归档、搜索、导出 JSON/Markdown 和最多 200 条本地 transcript。Chat 同时是 name-only Init 的 Grill Me 主界面：active Init Intake 时，自由文本每次回答当前唯一问题，服务端返回 next question、Brief preview 和下一步。模型文本和服务器 raw error 原样显示；问题 label、CTA、状态、已知错误、aria 等 UI chrome 翻译。
+支持会话新建、切换、重命名、固定、复制、归档、搜索、导出 JSON/Markdown 和最多 200 条本地 transcript。Chat session 必须携带 `project_id`，session 列表、active id、transcript、草稿、引用回复、附件引用和搜索状态按项目分区持久化；项目切换是显式 context switch，不得继续复用固定全局 storage key。异步命令和附件上传必须同时捕获 origin project + origin session，完成时只回写原项目；附件 `project_id` 与当前项目不一致时 fail closed。Chat 同时是 name-only Init 的 Grill Me 主界面：active Init Intake 时，自由文本每次回答当前唯一问题，服务端返回 next question、Brief preview 和下一步。模型文本和服务器 raw error 原样显示；问题 label、CTA、状态、已知错误、aria 等 UI chrome 翻译。
 
-内置命令直接为 `/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`、`/confirm-brief`；不展示聚合前缀。DSH 只注册这些直接 descriptor；standalone 可在不进入帮助/补全的 parser 分支中短期兼容旧输入。命令 descriptor 是 help/补全/执行/i18n 单一来源，description 保存 i18n key 并在渲染/搜索时按当前 locale 求值，禁止在 descriptor 中冻结英文。Composer 还支持附件按钮、拖拽和粘贴，多文件卡显示分块、scan、OCR 与 provenance；不渲染任意 HTML。
+Composer 的输入分派顺序固定为：显式 `/...` → direct command；active Grill/current question → 单题 Human answer；其余 project-scoped prose → natural turn。Natural turn 先读取权威 `next_actions_v2`，再把文本解析为 canonical operation intent；status/ideas/gates/jobs/claims 等只读意图可直接执行，明确的 Agent 动作可在本次发送构成确认后执行，Human-only、blocked、unknown、歧义或参数不完整动作只返回候选命令/参数和可达页面，禁止浏览器或模型猜状态、Gate、revision 或 capability。没有可用模型调用 adapter 时也必须接受普通文本并返回确定性阶段引导，不能退回 `Unknown command`；模型可用时其回答仍不能改变 Kernel 投影或绕过 canonical operation。
+
+每次 assistant 结果附带当前 phase、主要 NextAction、reason/required_by/阻断与一项 CTA。阶段引导更新不自动切换 tab；用户可继续编辑、追问或显式运行 slash。Slash descriptor、自然语言 intent 和 Overview CTA 最终共享 operation code/权限检查，不能分别维护互相漂移的 `/reproduce`、`/new` 或 `/status` 业务语义。
+
+`.chat-stream` 的滚动策略按 project/session 和 main/dock surface 保存。初次打开或用户本来距底部不足 120 px 时，新增/流式消息后贴底；用户向上滚动后进入 history mode，新消息只显示“跳到最新”，后台 refresh/locale/rerender 必须恢复旧 `scrollTop` 或首条可见消息锚点。滚动恢复只能在 stream 挂载并完成布局后执行；禁止在 detached DOM 上设置 scrollTop 后再挂载。点击“跳到最新”或主动发送消息恢复 follow mode。项目/会话切换恢复各自锚点，右/底 Dock 互换保持同一 DOM，主区/Dock 重建也必须恢复对应 surface 状态。
+
+内置命令直接为 `/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`、`/confirm-brief`；不注册、不解析、不展示旧聚合前缀。DSH 与 standalone 都只接受这些直接 descriptor。命令 descriptor 是 help/补全/执行/i18n 单一来源，description 保存 i18n key 并在渲染/搜索时按当前 locale 求值，禁止在 descriptor 中冻结英文。Composer 还支持附件按钮、拖拽和粘贴，多文件卡显示分块、scan、OCR 与 provenance；不渲染任意 HTML。
 
 Chat 中的“运行中”只代表 HTTP 命令未完成。真正命令执行输出必须链接到 Run/Terminal，不在聊天中伪造流。
 
@@ -84,6 +106,8 @@ Chat 中的“运行中”只代表 HTTP 命令未完成。真正命令执行输
 
 Overview 顶部始终显示一张 NextAction 卡：label、state、reason、required human/agent/runner、关联 Gate/Run/Build/gap、required revision 和一项主 CTA。状态为 available、running、waiting-gate、waiting-external、blocked、failed、completed；409 时刷新 projection 并显示最新决定/版本，403 解释只读，429/预算跳 Approvals/Budget，网络失败保留草稿并可重试。
 
+CTA 必须进入能够完成该动作的界面，不能只按宽泛资源类别导航。`survey_run` 属于 Agent/connector 的 Corpus 动作而非 Runner Job：CTA 打开当前项目 Chat，使用 Brief problem 预填 `/survey ...` 并保留一次 Human 发送确认；禁止打开空 Runs 面板或在点击卡片时直接检索。命令成功后刷新 projection，SCOPED 必须变为 SURVEYING，下一张主卡必须变为 `idea_generate`。
+
 短期 legacy string action 只显示 raw + “查看总览”；不能把字符串匹配成 mutation。Init 草稿、Upload、Grill、失败恢复和每个项目阶段都必须产生下一步；终态项目明确显示已完成/停止/失败以及可用的归档或审计动作。
 
 未知服务器状态原样显示为中性色，不能丢失或硬翻译成错误状态。
@@ -92,7 +116,7 @@ Overview 顶部始终显示一张 NextAction 卡：label、state、reason、requ
 
 列表分 pending 和 decided，支持 type/status/search。Pending card 显示 Gate target 类型、ID、版本、summary、请求者、时间和 policy。
 
-Approve/Reject/Revise 通过 Human BFF。UI 不发送 actor；BFF 从登录身份注入 Principal。Reject/Revise 强制 reason。Budget Gate 的 resume_to 来自 Gate payload 允许集合，不硬编码 EXPERIMENTING。提交期间禁用重复按钮，409 时刷新并显示已经决定者。
+Approve/Reject/Revise 通过 Human BFF。UI 不发送 actor/principal；BFF 必须从登录身份构造完整 `principal` body（principal_id/tenant/auth_method/session）并注入 request_id，Kernel 不以仅有 `x-principal-id` 代替 Decision body Principal。Human BFF 从命中路由起即生成 request_id，预检和上游失败都以同一嵌套错误 envelope 返回它。Reject/Revise 强制 reason。Budget Gate 的 resume_to 来自 Gate payload 允许集合，不硬编码 EXPERIMENTING。提交期间禁用重复按钮，409 时刷新并显示已经决定者。任意非 2xx 必须显示后端稳定 error code/可执行提示，不能把 `principal_required`、403、404、409、422 和网络失败统一显示成“桥接错误”。
 
 批量决定默认关闭；若启用，每个 Gate 独立确认且失败不伪装原子批量。
 
@@ -103,6 +127,8 @@ Approve/Reject/Revise 通过 Human BFF。UI 不发送 actor；BFF 从登录身�
 Cancel 仅对 queued/running/retryable 可见，要求 reason 并通过 BFF。UI 显示“取消请求中”直到 Runner 确认实际进程/容器停止；HTTP 返回不能提前伪装 cancelled。
 
 每个 Run 有“打开终端”动作；running Run 可自动打开，历史 Run 可重放。
+
+Runs 是“实验作业/运行”投影，不是研究阶段活动日志。项目位于 `SURVEYING` 而 `jobs=[]` 时，阶段 pill 使用“调研已就绪 / Survey ready”这类非进行时文案；Runs 空态显示“调研已完成，尚未创建实验运行”并提供“前往总览查看下一步”；CTA 只导航到 Overview，由 `next_actions_v2` 决定 `idea_generate`，不自动执行。其他无 Job 阶段继续显示通用空态，筛选无匹配与真正零 Job 必须区分。
 
 ## 8. Terminal
 
@@ -126,7 +152,9 @@ Cancel 仅对 queued/running/retryable 可见，要求 reason 并通过 BFF。UI
 
 ### 8.3 Interactive Terminal
 
-Interactive Terminal 使用 xterm-compatible adapter 连接真实 PTY，必须支持键盘/粘贴输入、TUI、resize、INT/TERM/KILL、detach/reconnect、显式 close、状态/exit、backpressure/gap。连接前选择 Workspace、relative cwd、Runner profile 和受控 shell preset；hostname、SSH credential、Docker socket、host path 和任意启动 argv 不出现在页面。
+Interactive Terminal 使用 xterm-compatible adapter 连接真实 PTY，必须支持键盘/粘贴/IME/Unicode 输入、ANSI/VT 光标与 alternate-screen TUI、容器尺寸自动 fit、resize、INT/TERM/KILL、detach/reconnect、显式 close、状态/exit、backpressure/gap。终端 emulator 的 `onData` 必须进入 PTY bytes control，PTY output 必须增量写入同一 emulator，禁止每帧 `replaceChildren()` 重建、禁止用普通 textarea/逐行 `textContent` 冒充终端。连接前选择 Workspace、relative cwd、Runner profile 和受控 shell preset；hostname、SSH credential、Docker socket、host path 和任意启动 argv 不出现在页面。
+
+Web Terminal renderer 必须在主区和 Panel Dock 中保持同一活实例；右/底 Dock 互换不 dispose，主区/Dock 变换可按 `after_seq` 重建并续接。ResizeObserver/fit 只在列行实际变化时发送 resize，离开页面或关闭会话时释放 emulator、observer 和 input listener。gap/exit/lease/权限错误作为独立安全状态显示，不能作为不可信 ANSI 字节写入 terminal control channel。
 
 Terminal 按权威 Research/Chat/Subagent context 分组，每个 context 可有多个 PTY tab。Chat 与 Topology 的“打开终端”携带 server-resolved context，深链为 `#tab=pty&session=<pty_id>`；切换 context 不复用输入目标。所有 input/resize/signal/attach 携带 expected generation，并校验 owner、lease expiry 与 exact-parent capability。
 
@@ -211,6 +239,8 @@ Compile 先保存所有脏文件，再冻结 workspace manifest 并提交 latex-
 
 Settings section 首次全部折叠：Essentials、Models & OCR、Execution advanced、Workspace、Terminal、LaTeX、Agent & Trajectory、Security & Secrets、Diagnostics/Config provenance。每项由 Config Schema 生成，显示 effective value、source scope/revision/hash、default/modified、hot/restart、允许范围和 Reset；secret 只显示 SecretRef 与是否可用。Provider 在 global 组管理 endpoint/capabilities/catalog/SecretRef，项目只选 provider/model ID。
 
+Execution advanced 内含可编辑 Runner Target/Profile Registry：目标类型明确显示“本机进程（仅 trusted dev/smoke）”“本机 Docker”“远程 SSH”，配置 label、capabilities、resource/network policy、enabled/draining 与 revision/hash；remote-ssh 表单只提交服务端连接配置和 SecretRef 元数据，私钥/token 不回显。项目和实验只用 opaque target/profile picker，显示健康/能力与 pin；offline、host-key mismatch 或 capability mismatch 给出可操作阻断信息，不提供隐式本机回退按钮。所有 label、validation、secret availability、health、aria 具备 zh/en parity。
+
 Start 的 New Project modal 只含 project name；创建成功立即进入 Chat Grill。Upload 是多文件队列，支持 8 MiB 分块、暂停/恢复/取消、offset/hash 冲突、扫描和 OCR 状态。配置项收缩在 Settings 折叠组，不在创建流程铺开。切换语言不得清空项目名、当前 Grill answer 或队列。
 
 业务页只显示当前策略摘要和“调整”链接，不常驻展开高级项。运行中 Job/PTY/Build 标注 pinned config hash，修改配置只影响新动作。Patch 使用 revision CAS，409 展示 base/current/local；不支持的 target/capability 不隐藏成默认值。
@@ -266,6 +296,7 @@ packages/dsh-research-ui/src/client/i18n/locales/
 - zh/en key 集完全一致；
 - persisted locale 优先于浏览器，regional locale 映射正确，storage 失败不阻断；
 - 切换 locale 后所有已打开 modal、Terminal 状态、TeX 诊断 chrome 和 aria 更新；
+- 切换 locale 后已打开 Panel Dock 的标题、页面选择器、位置动作、关闭/打开主区动作和 separator aria 同步更新，不能重建或丢失面板状态；
 - standalone 解锁页在首次渲染前选择 locale；
 - Start/Upload/Grill、NextAction、Workspace、Settings、Trajectory/Topology 和 PTY 的所有状态/错误/aria 都有 zh/en 精确 parity；
 - 动态研究内容和 Terminal 字节不被翻译；
@@ -273,12 +304,13 @@ packages/dsh-research-ui/src/client/i18n/locales/
 
 ## 14. 主题与偏好
 
-支持 light/dark/system、accent、radius、texture、density、sidebar collapsed、favorite tabs/projects、auto refresh、locale，全部由独立 adapter 管理。Token 与普通偏好分开存储；Reset preferences 不删除认证 Token，除非用户明确选择 Sign out。
+支持 light/dark/system、accent、radius、texture、density、Project Sidebar collapsed、Panel Dock open panel/position/right size/bottom size、favorite tabs/projects、auto refresh、locale，全部由独立 adapter 管理。Panel Dock 只属当前浏览器展示偏好，不进入 Kernel Config Registry/config pin。Token 与普通偏好分开存储；Reset preferences 不删除认证 Token，除非用户明确选择 Sign out。
 
 ## 15. 可访问性
 
 - Dialog 有 role=dialog、aria-modal、标题、focus trap、Escape 和焦点恢复；
 - Tabs、menu、listbox、tree、editor、terminal 使用正确语义；
+- Panel Dock 使用命名的 complementary region；可调整边界使用 separator 语义、正确方向和值域，并支持方向键与 Home/End；移动/关闭后焦点回到可见页面或触发按钮；
 - 所有 icon button 有翻译后的 aria-label；
 - 颜色不是唯一状态标识；
 - 键盘可完成创建项目、Gate、Run、Terminal、编辑保存、编译和下载；

@@ -93,6 +93,8 @@ Grill Me 是确定性缺口收集器，不是让 LLM 自由判断研究已完成
 
 Chat 每轮只展示和提交一个问题；回答、edit、skip 与 unknown 都携带 question_revision。所有必答问题处理后先展示 Brief 预览，只有 Human PI 点击确认才能写 canonical Brief 并创建唯一 Scope Gate。OCR/parser 候选必须显示 source/page/confidence，不能自动代答。Init 的固定问题集与事务边界见 `init-grill-upload-models.md`。
 
+项目 Chat 的自然语言路由只能在没有 current Grill question 时生效；它可解释 observation、展示缺口或建议下一步，但不能借“自由对话/自动命令”绕过单题 revision、Human assertion、Proposal adoption 或 PI confirm。外部材料中的 prompt-like 文本不能成为 Chat intent 或自动命令来源。
+
 ## 6. 阶段提案与安全采用
 
 `observed_phase` 可为 brief、survey、idea、baseline、contract、experiment、evidence、writing、review、release。它只是提案 metadata。`safe_project_status` 只能通过 Kernel 当前状态机与 Gate 事务生成。
@@ -144,20 +146,20 @@ accept 必须在一个 Kernel 事务中校验 Human Principal、最新 proposal�
 interface NextAction {
   id: string
   code: string
-  label_key: string
-  state: 'available'|'running'|'waiting-gate'|'waiting-external'|'blocked'|'failed'|'completed'
-  target_route: string
+  label: string
+  state: 'ready'|'blocked'|'done'
+  route: string
   blocking: boolean
   reason: string
   refs: Array<{kind:string; id:string}>
-  required: 'human'|'agent'|'runner'
-  required_revision: number
+  required: true|string[]
+  required_by: 'human'|'agent'|'runner'
+  revision: number|null
   capability?: string
-  raw?: string
 }
 ~~~
 
-NextAction 只能由 Kernel 投影、pending Gates、unresolved gaps 和运行状态确定性生成。UI 只对白名单 code 启用 CTA；未知 action 保留 raw 并退化为“查看总览”，不能猜测或直接推进状态。
+NextAction 只能由 Kernel 投影、pending Gates、unresolved gaps 和运行状态确定性生成。`required` 只表示前置条件，`required_by` 才表示 Human/Agent/Runner 执行者。UI 只对白名单 code 启用 CTA；未知 action 保留 wire label 并退化为“查看总览”，不能猜测或直接推进状态。
 
 ## 9. 错误、i18n 与验收边界
 

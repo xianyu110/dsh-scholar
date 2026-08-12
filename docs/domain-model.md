@@ -204,7 +204,7 @@ RunManifest 必须包含 run_id、project_id、job_id、contract 和版本、代
 
 ### 9.1 RunnerTarget 与 RunnerProfile
 
-`RunnerTarget` 表示一台本机或受控远端执行目标：target_id、placement(local/remote)、adapter(local-docker/remote-agent/scheduler)、ownership=project、capabilities、labels、health、endpoint_label、service_identity_id、created_at、updated_at。endpoint_label 只引用服务端配置，不能包含 secret。
+`RunnerTarget` 表示一台本机或受控远端执行目标：target_id、kind(`local-process|local-docker|remote-ssh`)、capabilities、health、enabled/draining、revision/config hash、SecretRef availability、created_at、updated_at。`remote-ssh` 是服务端 bootstrap/transport adapter，连接只由 endpoint/credential/known_hosts SecretRef 解析；安全投影不能包含 hostname、私钥、token、ProxyCommand 或任意启动 argv。`local-process` 仅允许 trusted development/smoke，正式 kind 一律拒绝。
 
 `RunnerProfile` 包含 runner_profile_id、target_id、image allowlist/digest、network policy、resource limits、artifact transport、interaction policy、config_revision/config_sha256 和 enabled/draining 状态。Job submit 固定 profile/config hash；target 变更不会修改已存在 attempt。无 capability、离线或 draining 目标拒绝新 claim；除显式创建新 attempt 外，不得自动从远端回退本机。
 
@@ -278,6 +278,8 @@ WorkspaceSearch 是短期投影，不是科研权威：请求包含 query、glob
 
 TexDocument 绑定一个 `workspace_id` 和根相对 subtree。`TexPreview` 是可取消、可 supersede 的非权威 Build，保存成功后按配置 debounce 触发；它包含 preview_id、document_id、input_manifest_id、input_revision、config_sha256、job_id、status、diagnostics、pdf/log Artifact 与 superseded_by。任何 source revision 变化立即使旧 Preview/PDF `fresh=false`。显式 Compile 创建权威 latex-compile Job；Preview 永远不能直接产生 accepted Evidence。
 
+Generic Workspace 的 public `WorkspaceNode` 使用 `size`（bytes）而非数据库列名 `size_bytes`。manuscript workspace 是 TeX store facade，不是空的 generic workspace：Kernel 在 read/readVersion/blob 以及全部 mutation 前必须先解析 backend；generic store 不存在该 workspace 时必须转到 TeX facade，只有 facade 中也不存在文件才返回 `workspace_file_not_found`。tree 成功而同一节点 read 404 属契约破坏。UI 遇到旧/畸形节点的非有限 size 时降级为 `0 B`，不得把 `NaN` 或未知单位暴露给用户。
+
 ### 12.2 PaperReproductionSpec、Attempt 与 Report
 
 论文复现新增三个权威对象：`PaperReproductionSpec` 固定 paper/code/data/claims/comparators/execution/environment 与 revision；`ReproductionAttempt` 固定 Spec/Contract、Job/Run/lease 和全部环境 pin；`ReproducibilityReport` 保存论文目标比较与 clean-room identity 比较、checks、状态、stable error/failure class 和 Artifact refs。完整字段、比较算法与 provenance 见 `reproduction-contracts.md`。
@@ -301,11 +303,21 @@ Intake status 为 draft、uploading、scanning、needs_input、grilling、propos
 
 ## 14. NextAction
 
-NextAction 是 Kernel 投影，不是 UI 本地状态（GUIDE-01）。字段：`id`（`${code}:${projectId}` 稳定，ref-bound 覆盖动作追加 ref id）、`code`（稳定机器码：scope_gate_submit / survey_run / idea_generate / idea_gate_approve / contract_register / baseline_reproduce / pilot_formal_submit / evidence_verify / manuscript_write / reviewer_run / release_bundle / release_gate / gate_resolve / budget_resolve / gate_decide / job_retry / project_stop / project_archived / project_released / project_stopped / unknown）、`label`（i18n key 或英文默认文案；legacy `next_actions: string[]` 由此派生）、`reason`（为什么现在做）、`required`（true 或缺失前置项列表，如 `['approved_contract']`）、`route`（gates/runs/evidence/manuscript/budget/ideas/contracts/release/overview）、`capability` 可选（如 researcher/pi）、`revision`（依赖对象版本：gate 决策=project.revision、run 动作=contract version、idea gate=idea version；null=不适用）、`state`（ready=现在做 / blocked=前置缺失 / done=已完成）、`blocking`（是否阻塞阶段完成）、`refs`（gate/job/contract/idea/evidence 权威对象）、`required_by`（human/agent/runner）。
+NextAction 是 Kernel 投影，不是 UI 本地状态（GUIDE-01）。字段：`id`（`${code}:${projectId}` 稳定，ref-bound 覆盖动作追加 ref id）、`code`（稳定机器码：scope_gate_submit / survey_run / idea_generate / idea_gate_approve / contract_register / baseline_reproduce / pilot_formal_submit / evidence_verify / manuscript_write / reviewer_run / release_bundle / release_gate / gate_resolve / budget_resolve / gate_decide / job_retry / project_stop / project_archived / project_released / project_stopped / unknown）、`label`（i18n key 或英文默认文案；legacy `next_actions: string[]` 由此派生）、`reason`（为什么现在做）、`required`（true 或缺失前置项列表，如 `['approved_contract']`）、`route`（chat/gates/runs/evidence/manuscript/budget/ideas/contracts/release/overview）、`capability` 可选（如 researcher/pi）、`revision`（依赖对象版本：gate 决策=project.revision、run 动作=contract version、idea gate=idea version；null=不适用）、`state`（ready=现在做 / blocked=前置缺失 / done=已完成）、`blocking`（是否阻塞阶段完成）、`refs`（gate/job/contract/idea/evidence 权威对象）、`required_by`（human/agent/runner）。`required` 只表达前置条件，不能用来表示执行者；执行者只能读取 `required_by`。
 
 NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code（`unknown` 退化）只能只读显示。每阶段至少一个动作：confirmed DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate、IDEATING→idea_gate_approve、IDEA_APPROVED/BASELINE_REPRO→contract_register+baseline_reproduce、CONTRACT_APPROVED/EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done。pending gate 产生 gate 决策动作（budget→budget_resolve，其余→gate_decide，base 已引用不重复）；失败/retryable 作业产生 job_retry（attempts 耗尽→blocked+repair_decision）。Intake/Grill 覆盖动作包括 `intake_resume`、`intake_scan`、`intake_answer`、`intake_propose`、`intake_adopt`；collecting DRAFT 不得产生 `scope_gate_submit`。
 
-### 14.1 Model Provider、Binding 与 OCR Request
+`survey_run` 不是 Runner Job：它由当前项目 Chat 的 `/survey <query>` 驱动 connector 并冻结 Corpus Snapshot，因此 route 必须是 `chat`，不能把用户导航到没有 Job 的空 Runs 列表。浏览器 CTA 只预填由 Brief problem 得出的 slash command，必须由用户确认发送，不能因打开卡片自动产生外部检索副作用。SCOPED 项目第一次成功冻结 Corpus Snapshot 时，snapshot、`SCOPED→SURVEYING` 与对应 Outbox 必须在同一事务提交；随后投影主动作变为 `idea_generate`，不能继续重复显示 `survey_run`。其他状态补充/重做 Corpus Snapshot 不擅自改变阶段。
+
+Project `status` 是研究阶段标记，不是活动任务计数。首个冻结快照完成后的 `SURVEYING` 表示“调研语料已就绪，等待或正在执行 `idea_generate`”，不能翻译成暗示 connector 仍在运行的进行时。Runs 只投影持久实验 Job/Run；`SURVEYING + frozen Corpus + jobs=[]` 是合法组合，UI 必须明示“调研已完成、尚未创建实验运行”并导航到 Overview 的权威 NextAction，不得伪造 Job/Run 或用 Runs 计数推断 connector 是否活动。若未来 connector 改为长时任务，必须引入独立的 ConnectorActivity/Action 投影，仍不能冒充实验 Run。
+
+### 14.1 Project Chat Turn 与 Intent
+
+`ChatTurn` 是 project/session-scoped 交互记录，不是 Project state、Evidence 或 Decision。输入分为 `direct_command | grill_answer | natural_turn`；`natural_turn` 的解析结果 `ChatIntent` 至少包含 `intent_code`、canonical command/operation 可选、confidence/ambiguity、effect(`read|agent-write|human-only`) 和基于哪一个 `NextAction.id/revision`。普通文本不能被默认拼成 slash，也不能因无法识别而显示“未知命令”。
+
+Natural turn 只可在当前 Kernel projection 声明的 route/capability 内自动路由。只读查询可直接执行；明确的 Agent 动作以本次 Human 发送作为意图确认，但仍执行相同 ACL/idempotency/revision；Human-only、Gate、Brief confirm、adoption、release decision、blocked/unknown/ambiguous intent 永远只返回候选与页面导航。assistant 回答必须带最新 `next_actions_v2` 的阶段引导；LLM 文本只是非权威说明，不得生成或覆盖 Project status、Decision、Run、Evidence。显式 slash 与 natural intent 必须共享 canonical operation，不能出现两个语义不同的 `/new`、`/reproduce` 或 `/status` adapter。
+
+### 14.2 Model Provider、Binding 与 OCR Request
 
 `ModelProvider` 是 global/instance 资源，字段为 provider_id、display_name、kind、base_url、enabled、capabilities、models、credential SecretRef、revision、created_at、updated_at。响应永不包含 secret value。`ProjectModelBinding` 只保存 project_id、purpose、provider_id、model_id、revision；OCR/Job 创建时固定 provider/config revision/hash。
 

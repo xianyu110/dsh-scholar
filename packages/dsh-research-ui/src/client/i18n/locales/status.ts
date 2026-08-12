@@ -1,15 +1,15 @@
 /**
  * status namespace: status pill / sidebar / search-row labels for project
- * phases, gate decisions, job states and evidence claims. EN mirrors the
- * kernel's raw status enums verbatim (acceptance-tests.md §8 line 115 keeps
- * enum/wire text as-is); ZH translates the same keys. zh/en key sets must
- * stay exactly equal (localeParityReport / assertLocaleParity).
+ * phases, gate decisions, job states and evidence claims. Known project-phase
+ * labels are user-facing semantics (SURVEYING is a ready phase, not an active
+ * task); unknown wire values still stay raw. zh/en key sets must stay exactly
+ * equal (localeParityReport / assertLocaleParity).
  */
 export const zh = {
   // project phases
   'status.DRAFT': '草稿',
   'status.SCOPED': '已定范围',
-  'status.SURVEYING': '调研中',
+  'status.SURVEYING': '调研已就绪',
   'status.IDEATING': '构思中',
   'status.IDEA_APPROVED': '构思通过',
   'status.BASELINE_REPRO': '基线复现',
@@ -45,10 +45,10 @@ export const zh = {
 export type StatusKey = keyof typeof zh
 
 export const en: Record<StatusKey, string> = {
-  // project phases (raw kernel enum mirrors, kept verbatim)
+  // project phases (human-readable labels; unknown enums stay raw in ui.ts)
   'status.DRAFT': 'DRAFT',
   'status.SCOPED': 'SCOPED',
-  'status.SURVEYING': 'SURVEYING',
+  'status.SURVEYING': 'SURVEY READY',
   'status.IDEATING': 'IDEATING',
   'status.IDEA_APPROVED': 'IDEA ✓',
   'status.BASELINE_REPRO': 'BASELINE',

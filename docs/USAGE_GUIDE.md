@@ -10,6 +10,16 @@ bash scripts/start-standalone-ui.sh
 
 访问 http://127.0.0.1:18610，输入启动脚本打印的 Token。DSH Web 不再注入 Scholar 页面。打开页面后可以在 Settings → Language 选择中文或 English。没有手动选择时，系统先读 dsh.locale，再匹配浏览器语言，最后使用中文。切换语言不会翻译项目名、论文、命令输出和 TeX 原始错误。
 
+### 1.1 把页面停靠在右侧或底部
+
+选择项目后，Chat、Overview、Approvals、Runs、Artifacts、Evidence、Budget、Manuscript、Run Terminal、Trajectory、Topology、Workspace 和 Interactive Terminal 等每个当前页面标题区都有“停靠到右侧”和“停靠到底部”。Dock 顶部的页面选择器可以直接换页，“打开到主区”把当前 Dock 页面恢复为全页，“关闭”只关闭 Dock，不关闭项目。
+
+同一页面只会存在一个活实例：把正在主区显示的 Chat/Terminal/Workspace/Manuscript 放入 Dock 时，主区自动切换到其他安全页面；从 Dock 打开到主区时也不会复制第二份实例。右侧和底部之间切换的是同一个已挂载页面，因此草稿、选中文件、滚动位置和实时连接应保持。主区与 Dock 之间移动流式页面时，会从最后消费的序号安全重连。
+
+拖动主区与 Dock 之间的分隔条可调整尺寸；聚焦分隔条后可用方向键微调、Home/End 跳到最小/最大。小于 720 px 时，右侧首选位置会临时显示在底部；回到宽屏后恢复右侧。打开页面、首选位置和两种尺寸只保存在当前浏览器，是展示偏好，不是项目配置或 Kernel config pin，也不会跨设备同步。
+
+实验环境在 Settings → 实验环境（Experiment environments）中配置，分为本机进程、本机 Docker 和远程 SSH。正式实验应使用本机 Docker 或满足同一容器/快照合同的远程机器；本机进程只面向明确受信的开发/冒烟任务。项目、实验和复现只选择 Target/Profile 名称与 ID；SSH 私钥、known-host 和真实 endpoint 只由服务端 SecretRef 管理。远程机器离线、能力不匹配或 host key 校验失败时任务会阻断/重试，不会自动改成本机执行。当前代码已实现持久 Target Registry、revision CAS、PI/Operator 写权限、Settings 中英写面、Job/ExecutionPlan target revision/hash pin、target-aware claim，以及受控 SSH → RemoteRunnerAgent 引导；真实 Docker/SSH 主机、host-key 轮换、网络分区和生产 mTLS 仍为人工验收项，未验收前不得用于正式科研。
+
 ## 2. 首次进入：Init、Resume 或 Upload
 
 未选择项目时页面显示三张启动卡（不会自动选中某个项目）：
@@ -25,6 +35,12 @@ Upload 可以创建新项目或选择有权限的现有项目。采用前材料�
 点击 New Project，只输入项目名。系统进入 Chat，逐题询问研究问题、范围、指标、输出、约束和已有材料；你可以回答、编辑、跳过或标记 unknown。确认 Brief 预览后才出现 Scope Gate。
 
 **创建后自动进入 Chat 引导（2026-08-12 已实现）**：创建成功即跳转到 Chat 页面，输入框上方显示引导卡「完善研究 Brief」，按固定 7 题顺序逐题作答（提交 / 跳过 / 标记未知），答完后卡片出现 Brief 预览与「确认 Brief」按钮（等价于 `/confirm-brief`）；项目确认后引导卡消失，Chat 顶部出现一次「项目已就绪」提示。刷新页面后引导卡从服务端投影继续（不依赖 localStorage）。
+
+Chat 对话属于当前项目。切换项目时，会话列表、当前会话、消息、草稿、引用回复和附件也随项目切换；返回原项目才恢复原对话。项目 A 中仍在执行的命令或上传即使晚于切换完成，也只能回写 A，不能出现在项目 B。当前修复状态以 hardening 的 `CHAT-SCOPE-01` 为准。
+
+Chat 同时支持普通自然语言和一级 slash command。直接输入“现在进展怎么样”“看看审批”“有哪些想法”“查看运行任务”会按当前项目投影路由到对应只读操作；明确输入“调研 <主题>”可路由到 survey。显式 `/status`、`/gates`、`/ideas`、`/jobs`、`/survey ...` 仍是完全确定性的高级入口。Init Grill 尚有当前问题时，普通文本仍回答该问题；Brief confirmed 后才作为自由对话处理。系统会在回答后给出当前阶段的一项下一步建议，但不会自动替你批准 Gate、确认 Brief、adopt 导入或决定发布。未知或参数不足时只给候选，不执行副作用。
+
+对话在底部时会随新消息保持到底部；向上查看历史后，刷新和新消息不会把内容拉回顶部或强制到底部，使用“跳到最新”恢复跟随。项目、Chat session、主区与 Dock 分别保存自己的查看位置。
 
 Chat 使用直接一级 slash command；不要添加聚合前缀：
 
@@ -42,6 +58,10 @@ Chat 输入框支持附件按钮、拖拽和粘贴。一次可以给出多篇论
 /survey "temporal action localization under domain shift"
 /ideas
 ~~~
+
+Scope 审批后，Overview 的 `survey_run` 主 CTA 会打开当前项目 Chat，并从 Brief problem 预填 `/survey ...`；检查或修改 query 后按 Enter 才开始外部检索。它不是 Runner Job，因此不会把你带到空的 Runs 列表。成功后 Corpus Snapshot 与项目进入 SURVEYING 一起提交，刷新后的主 CTA 变为 `idea_generate`。
+
+SURVEYING 是阶段码，不是“当前有调研任务正在跑”。在快照已冻结且下一步为 `idea_generate` 时，中文页面显示“调研已就绪”；Runs 仍可以是 0，因为这里只记录实验 Job/Run。此时 Runs 空态会说明“调研已完成，尚未创建实验运行”，点击“前往总览”回到权威 NextAction。页面不会为了填充 Runs 而伪造调研任务。
 
 Overview 展示阶段流水线、Brief（问题与主指标）、NextAction 卡、候选 Idea（点击/双击/右键打开详情弹窗，内含 hypothesis、exact delta、falsification、MVE、novelty audit 与评分）、最近 Contract、预算摘要和审计历史（默认最近 10 条，可展开全部）。Corpus 目前只在项目详情弹窗与 Budget 面板以快照计数展示，最近邻（nearest_prior_works）尚未在 UI 展示。调研来源失败在 connector 层以 `source_status` 记录（api-contracts），不会把部分失败伪装成完整覆盖；当前聊天输出只汇总成功去重后的数量，不逐来源列出失败。选择 Idea 后在 Approvals 决定 Idea Gate。
 
@@ -76,7 +96,13 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 - exit code、signal、timeout 和 cancelled 是不同终态；
 - Cancel 只有在实际容器停止确认后才显示完成。
 
+页面默认每 8 秒刷新项目投影。聚焦 Chat、搜索框、Workspace/TeX 编辑器或 Interactive Terminal 时，背景刷新不会抢走焦点；编辑控件的刷新会延迟到离开焦点，必要重绘则恢复光标与选区。Terminal/PTY 的实时流不因此停止。若仍观察到焦点或未保存文本丢失，应按 `ui-refresh-focus-stability` 记录页面、控件、时间与是否刚好跨过轮询周期。
+
+Manuscript workspace 在通用 Workspace 页面中应可直接打开 `paper.tex`/`.bib`；文件树能看到但点击 404、出现“文件读取失败”或 `NaN undefined` 都是缺陷。节点大小缺失时安全显示 `0 B`，不会影响打开内容。
+
 终端内容是原始执行数据，不随页面语言翻译。
+
+Run Terminal 可停靠到右侧或底部并继续接收同一 Run 的输出。仅在主区与 Dock 之间移动时，客户端会关闭旧宿主的流并从 `after_seq` 续接；右侧与底部互换不会关闭连接。Run Terminal 仍然只读，能输入命令的是独立的 Interactive Terminal。
 
 当前“Download log”只导出浏览器保留窗口，不等同于完整日志 Artifact；长日志和取消/超时结果必须回到 Runs/Artifact 核对。正式使用前必须等待 TERM-01 标为“已验收”。
 
@@ -84,13 +110,28 @@ Runs 显示 queued、running、retryable、succeeded、failed、cancelled。选�
 
 目标 UI 的 Workspace 像 VS Code：Explorer 打开 code/manuscript/scratch 文件，使用标签、搜索、Problems、查看图片/PDF/JSON、编辑文本、上传/移动/删除/历史并冻结 Snapshot。并发冲突会显示 base/current/local，不自动覆盖。**Workspace tree client 逻辑层已实现(2026-08-11,commit 98243ff)**：More →「工作区」面板(#tab=workspace 深链)——workspace 选择器与工具栏(新建文件/新建目录/上传(≤32 MiB multipart)/刷新/路径搜索框);左侧文件树按目录懒展开(implied 目录由文件路径投影、客户端创建的空目录为虚拟节点、文件行 hover 移动/删除);右侧多标签编辑区——每个 tab 持有 path/version/etag/content/savedContent,dirty 语义与 Manuscript 一致(清空读未保存、恢复已保存读干净),保存带 expected_version/etag CAS(409 冲突 → 横幅提示"重新加载",绝不静默覆盖),二进制节点只读显示 meta + 下载(原始字节 + media type),历史版本列表可回退(旧字节以当前 version/etag 守卫写回);树经 workspace watch SSE 流(`…/workspaces/{wid}/watch/stream?after_revision=`)实时增量刷新,流不可用时回退 listSince 每 5s 轮询(离开该 tab 自动停止)。搜索框为客户端路径过滤,尚未接线服务端查询;**服务端已实现路径搜索(prefix/glob)与内容搜索(commit 98243ff)**——POST search `{q, mode:'content'}` 线性文本扫描(文本节点/二进制跳过/每文件 20 匹配/50 文件上限/512 KiB 跳过/大小写可选/非法 UTF-8 容错,无全文索引,大数据集性能受限如实注明;客户端搜索框接入服务端路径/内容模式属后续轮)。剩余(浏览器层,Playwright 类环境不可用,记 NOT_RUN_MANUAL_PENDING):文件树渲染/拖拽上传/多标签视觉/窄屏/键盘 a11y 验收;Problems 面板与集成 PTY 入口。
 
-点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset 后可以输入命令、使用 TUI、resize、发送 INT/TERM/KILL、detach/reconnect/close。每个 Operator、Research、Chat 或 Subagent session 都有服务端解析的 context；同一 context 可以打开多个 PTY 标签。通过 Chat/Topology 进入终端时必须打开对应 session 的 PTY，不能把命令发送到 project 级共享终端。PTY 不是正式 Run，输出不能成为 Evidence。服务端已实现:真实 PTY 会话(LocalPtyAdapter,preset 白名单、env 白名单、detach 不杀进程、idle TTL、client_seq 幂等、输出永不进入 Metrics/Evidence/Gate)与通用 Workspace 磁盘 adapter(节点读写/移动/删除/二进制 asset/历史回退/watch/路径搜索+内容搜索,tex-facade 同一契约)。**PTY TUI client 逻辑层已实现(2026-08-11,commit 98243ff)**：More →「PTY 终端」面板(#tab=pty 深链)——open 表单(workspace 选择/preset/相对 cwd/cols/rows + 钉定 profile/target)、会话工具栏(resize、INT/TERM/KILL、detach/reconnect、close)、纯文本输出区(gap/retention 截断标记、exit 行)、状态行(会话状态/in-out seq/掩码 lease+过期/generation/字节数)、idle TTL/lease 过期/权限撤销关闭提示与 lease 失效(403)重新打开提示;client_seq 单调幂等、失败重试重发同 seq、断线重连按 after_seq 重放;输出经 `…/frames/stream` SSE 实时流消费(commit d01d415),流不可用时回退 after_seq 轮询。剩余(代码与浏览器层，记 NOT_RUN_MANUAL_PENDING):服务端 session context/multi-PTY 绑定、真实终端渲染(ANSI/xterm 类)、键盘输入、resize 拖拽、完整日志下载与窄屏/断线观感。
+点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset。Interactive Terminal 已使用 xterm-compatible emulator 接到真实 LocalPtyAdapter：聚焦后可输入/粘贴，支持 ANSI/VT/TUI、IME 与自动 fit/resize，输出按 server_seq 增量追加而不因刷新重复。PTY 不是正式 Run，输出不能成为 Evidence。服务端 session context/multi-PTY 绑定、Remote PTY、完整日志下载以及真实浏览器 `WEBTERM_OK`/Unicode/vim/top/Dock/窄屏验收仍分别受 PTY-SESSION-02 与人工队列约束。
+
+Workspace 与 Interactive Terminal 都可以独立停靠；Dock 不改变 Workspace 的 version/etag、编辑 tab 或 PTY 的 session/context。关闭 Dock 等同离开该页面：Workspace watch 会停止，PTY 服务端进程是否继续由 detach/close 与 lease 语义决定，不能用关闭面板代替显式关闭 PTY。
 
 ### 6.2 本机与远端执行
 
-执行 target 的选择目前经项目配置（`execution.runner_profile_id` / `execution.runner_profile`，见 Settings 的 config 面板）与 runner CLI 确定；Settings 的 runner 组当前为只读占位（浏览器层未验收），尚无可交互的 Execution profile 选择器——目标 UI 只显示 target label、capability、health、resources 和 policy，不输入 SSH credential/hostname/任意命令。远端离线时任务明确失败或等待，不会静默改在本机/subprocess 运行。服务端已实现:RUN-REMOTE-01 wire 协议、RemoteFleetServer(注册/心跳/claim/CAS/frames/artifacts/complete,含 service-token 传输等价实现)与 RemoteRunnerAgentImpl(验签、CAS hash 复算、有界 spool、fail-closed);真实 mTLS 证书链与真实远端 sandbox 验收、跨主机网络分区故障注入、Remote PTY 与浏览器 UI 仍属后续阶段。
+执行 target 经项目配置 `execution.runner_target_id`/`execution.runner_profile_id` 选择。先进入 Settings →“实验环境”创建或编辑 target（label、kind、capability、enabled/draining 与 remote SecretRef metadata），再在同一折叠组的“当前项目默认实验环境”选择器保存；页面不输入 SSH 明文、hostname 或任意命令。只覆盖一次运行时，在 `/run` 或 `/reproduce` 的 JSON 中加入 `"runner_target_id":"target_remote_lab_a"`，它优先于项目默认。远端离线时任务明确失败或等待，不会静默改在本机/subprocess 运行。服务端已实现 RUN-REMOTE-01 wire、RemoteFleetServer、RemoteRunnerAgentImpl、持久 Target Registry 和 target-aware claim；真实 mTLS 证书链、跨主机 sandbox/网络分区、Remote PTY 与浏览器视觉验收仍属后续人工阶段。
 
-runner CLI（`node workers/runner-gateway/lib/bin/runner.js`）已接线三个互斥角色（FLEET-01，用法与互斥规则见 remote-runner-wire.md §9）：默认 `--kernel` 本地 claim 循环（既有行为不变）；`--fleet-server <port>` 启动 Fleet 服务端（`--kernel` 指向 job 来源，plan 签名公钥打印到 stderr 供 agent 配置）；`--agent <fleet-url>` 启动远端代理端（`--fleet-public-key` 验签 plan——缺省任何 plan 拒绝执行；`--key-file` 签名 manifest，显式 `--kernel` 时尽力注册公钥）。`--fleet-server` 与 `--agent` 互斥、fleet 角色与 `--mode` 互斥；本地 wire 用 `--service-token` 鉴权（生产必须 mTLS，见 remote-runner-wire.md §3/§9）。
+runner CLI（`node workers/runner-gateway/lib/bin/runner.js`）已接线四个互斥角色（FLEET-01，用法与互斥规则见 remote-runner-wire.md §9）：默认 `--kernel` 本地 claim 循环；`--fleet-server <port>` 启动 Fleet 服务端；`--agent <fleet-url>` 启动已在远端机器上的 Agent；`--agent <fleet-url> --ssh-bootstrap-target <id>` 从受控 SecretRef 通过 SSH 引导远端 Agent。fleet/SSH 角色与本地 `--mode` 互斥；开发 wire 用 `--service-token` 鉴权，生产必须 mTLS。
+
+受控 SSH 引导（开发/人工验收）在 Fleet 服务端已经可达且其 plan 公钥已保存后运行：
+
+~~~bash
+node workers/runner-gateway/lib/bin/runner.js \
+  --kernel http://127.0.0.1:7412 \
+  --agent https://fleet.example \
+  --ssh-bootstrap-target lab-gpu-01 \
+  --secret-root /srv/dsh-scholar/secrets \
+  --fleet-public-key /srv/dsh-scholar/fleet-public.pem
+~~~
+
+`lab-gpu-01` 必须是已登记且启用的 `remote-ssh` target；三个 file SecretRef 分别解析 endpoint JSON（只允许 `host/port/user`）、0600 credential 和预固定 known_hosts。适配器固定 `BatchMode`、`StrictHostKeyChecking=yes`、`IdentitiesOnly=yes`，只启动 `dsh-scholar-runner`，不接受 ProxyCommand、项目 argv 或任意远端 shell。远端主机必须已安装该 runner，并通过受控环境提供 Fleet service token；bootstrap 会先在中央 Kernel 注册 manifest 公钥，再通过加密 SSH stdin 下发临时 plan 公钥/manifest key，退出时删除。生产仍必须把 HTTP service-token 链路升级为 mTLS。
 
 ## 7. Evidence 与 Claim
 
@@ -128,11 +169,15 @@ Diagnostics 按 error/warning/info 分级着色展示（服务端 tex-diagnostic
 
 可以下载 PDF、完整 compile log、sources 和 aux Artifact。HTML 不作为稿件预览。预览/编译状态与 PDF 的同页视觉链（浏览器验收）未执行，记 NOT_RUN_MANUAL_PENDING。
 
+Manuscript 可停靠在右侧或底部；右侧/底部互换不重新创建编辑器或 Preview。离开主区进入 Dock 后仍使用同一文档 revision、dirty 状态与构建投影，关闭 Dock 前应显式保存需要保留的编辑。
+
 ## 9. Trajectory 与 Subagent 拓扑
 
 Overview 的 Research Trajectory 显示权威 Gate/Job/Evidence/Manuscript 事件；Session Trajectory 显示 Agent 的消息和工具过程，后者不是科研事实。打开 Agent Topology 可展开 parent→child 直系树并点击进入 child，查看详情（状态/模式/类型/摘要/起止时间/子项数；role、时长、token/cost 与失败等字段尚未在 UI 展示），用 breadcrumb 返回。
 
 one-shot child 只读；follow-up 输入框对子项常显（one-shot 只读，提交后仅返回 message_id，不激活 child；"仅 parent 在线且有权限才出现"的 capability 校验属后续）。读取历史不会唤醒 Agent，原始 prompt、工具参数/结果、环境和 secret 默认不展示。服务端已实现:TRAJ-01/SUBAGENT-01 投影与拓扑 API 层(Outbox 只读投影、redaction、10k 事件分页、exact direct-child、breadcrumb、只读 history、followup 记录 message_id 不冒充执行)。**UI 逻辑层已实现（commit 98243ff）**：More 导航新增「轨迹」（Trajectory，`#tab=trajectory`）与「拓扑」（Topology，`#tab=topology`）两个面板——轨迹面板双泳道渲染 Research（权威）与 Session（观察）事件，每条泳道可「加载更多」分页（服务端 keyset 游标），条目显示 event_seq/时间/脱敏摘要，点击可展开 allowlisted 详情（聚合引用/来源/会话/状态/条目 ID，原始负载永不展示）；轨迹增量经 `…/trajectory/stream?after_seq=&lane=` SSE 流消费（commit d01d415，lane 过滤、entry_id 去重、断线从最后 seq 续传，离开 tab 关闭流），流失败回退 keyset 分页；拓扑面板展示项目子代理直系树（点击节点懒加载其直接子项），「进入 child 详情」后顶部 breadcrumb 可逐级返回 parent，详情含状态/模式/类型与只读历史列表，底部为 one-shot 只读 follow-up 输入框（提交后仅返回 message_id，不激活 child）。剩余（浏览器视觉验收，Playwright 类环境不可用，记 NOT_RUN_MANUAL_PENDING）：双 lane 滚动/虚拟化（10k 节点 DOM 有界）、树展开/键盘/ARIA、follow-up 交互观感。
+
+Trajectory 与 Topology 均可停靠。Trajectory 从主区移动到 Dock 时按最后事件序号续接，右侧与底部互换不重开双泳道流；进入 child 后的 breadcrumb 与展开状态应保持。
 
 ## 10. Review 与 Release
 
@@ -150,9 +195,11 @@ Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译�
 
 Budget 页面显示模型费用、GPU 小时与 API 请求用量，以及项目内容计数（corpus 快照/Idea/Contract/Claim/Evidence/Artifact）与详情弹窗中的约束和策略（数据集、并发上限、执行 profile、网络与完整性要求；内核记账的存储用量字段当前未在 UI 展示）。超过硬上限时项目进入 BLOCKED_GATE，正在运行的策略按 Job contract 安全停止或完成；只有 Human Budget Gate 可恢复到 payload 允许的状态。
 
-Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步：每张卡含 code 徽标、三态标记（ready 可执行 / blocked 受阻 / done 已完成——done 灰显、blocked 因缺失前置条件而禁用、ready 高亮）、原因、需要 Human/Agent/Runner 徽标（内核 `required_by` 未声明时不显示）、缺失前置条件列表（点击受阻卡展开）、阻断说明和跳转目标页面的按钮（gates/runs/evidence/manuscript/budget 直达，ideas/contracts/release 收敛到总览）。标签优先按字典翻译，未登记 code 原样显示内核 label；未知状态动作（code='unknown'）只读，不提供猜测的执行按钮。旧内核的 `next_actions: string[]` 仍以列表形式兼容显示。
+Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步：每张卡含 code 徽标、三态标记（ready 可执行 / blocked 受阻 / done 已完成——done 灰显、blocked 因缺失前置条件而禁用、ready 高亮）、原因、需要 Human/Agent/Runner 徽标（内核 `required_by` 未声明时不显示）、缺失前置条件列表（点击受阻卡展开）、阻断说明和进入可完成动作界面的按钮（chat/gates/runs/evidence/manuscript/budget 直达，ideas/contracts/release 收敛到总览）。其中 `survey_run` 打开项目 Chat 并预填命令，不自动发送。标签优先按字典翻译，未登记 code 原样显示内核 label；未知状态动作（code='unknown'）只读，不提供猜测的执行按钮。旧内核的 `next_actions: string[]` 仍以列表形式兼容显示。
 
 所有配置集中在 Settings，首次进入时所有分组默认折叠：静态分组为 连接 / 外观 / 偏好 / runner / workspace / terminal / TeX / agent / config provenance（runner、workspace、terminal、TeX、agent 五组在 registry 数据可用时由动态 ConfigScope 分组替换），另按 ConfigScope 动态生成 global/project/job（保留，无键）/runner-profile/orchestrator/kernel/standalone 七组折叠面板（覆盖注册表全部键）。每字段显示 effective 当前值（secret 只显示"已设置，不显示明文"掩码，明文永不回显）、scope、声明来源、安全基线标记、env 别名、schema 描述与默认；config pin 显示并在变化时提示；热生效/需重启按声明来源推断（注册表尚无 hot_reload 标记——含 http/ui 来源的键"保存后即时生效"，仅 cli/env/file 的键"需重启生效"，规则见 docs/config-registry.md §6）；per-key revision/hash 与"已修改"标记未展示（只有全局 pin）。修改只影响新 Job/PTY/Build。服务端已实现:canonical Config Registry(CONFIG-01,单一注册表 + parseCli 四二进制接入 + security floor + effective pin/redacted 视图 + 生成物 configs/generated/)与 kernel/standalone 的 x-config-pin 响应头、/v1/config/effective、/v1/config/schema。**Settings UI 已由 /v1/config/schema + /v1/config/effective 动态生成(2026-08-11,只读视图)**；本版本无配置写接口(kernel 仅提供读取面),提交按钮禁用并注明"当前配置只读,经 CLI/env 提供"——修改配置请用各二进制 CLI flag 或 DSH_* env。/bff/research/config/* 写面与 SecretRef 存储层仍属后续阶段(本地校验与错误回显映射机制已就绪)。
+
+Panel Dock 的打开页面、首选位置与尺寸通过页面上的 Dock 控件即时配置并只保存在当前浏览器；它们不改变任何 Job/PTY/Build 的 config hash，也不出现在 Settings 的 Kernel Config Registry/config pin 中。
 
 ## 11.1 Models & OCR（Model Provider 与项目绑定）
 

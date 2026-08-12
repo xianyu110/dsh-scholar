@@ -30,6 +30,7 @@ import { createHash, createPublicKey, sign, verify, type KeyObject } from 'node:
 import { z } from 'zod'
 import type { JobRecord } from './kernel.js'
 import type { RunnerProfile } from './runner-profile.js'
+import { RunnerTargetKind } from './runner-target.js'
 
 /** 本地 Docker target 的稳定 opaque id（Kernel/gateway/注册表共用）。 */
 export const LOCAL_DOCKER_TARGET_ID = 'local-docker'
@@ -136,6 +137,10 @@ export const ExecutionPlan = z.object({
   profile_config_hash: z.string().nullable().default(null),
   /** opaque target id（如 'local-docker' 或远端注册的 target_id）。 */
   target_id: z.string().min(1),
+  /** Target registry pins; null only for pre-registry legacy plans. */
+  target_kind: RunnerTargetKind.nullable().default(null),
+  target_revision: z.number().int().positive().nullable().default(null),
+  target_config_hash: z.string().min(1).nullable().default(null),
   lease: LeaseBinding,
   /** effective config 的 sha256 pin（CONFIG-01；未知/未接入时 null）。 */
   config_pin: z.string().nullable().default(null),
@@ -287,6 +292,13 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
     profile_id: options.profile_id ?? options.profile?.profile_id ?? LOCAL_DOCKER_TARGET_ID,
     profile_config_hash: options.profile?.config_hash ?? null,
     target_id: options.target_id ?? LOCAL_DOCKER_TARGET_ID,
+    target_kind: typeof payload?.runner_target_kind === 'string'
+      ? payload.runner_target_kind as 'local-process' | 'local-docker' | 'remote-ssh'
+      : null,
+    target_revision: typeof payload?.runner_target_revision === 'number' ? payload.runner_target_revision : null,
+    target_config_hash: typeof payload?.runner_target_hash === 'string' && payload.runner_target_hash !== ''
+      ? payload.runner_target_hash
+      : null,
     data_hash: typeof payload?.data_hash === 'string' ? payload.data_hash : '',
     code_commit: typeof payload?.code_commit === 'string' ? payload.code_commit : '',
     lease: {

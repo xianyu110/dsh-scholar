@@ -188,21 +188,31 @@ export interface LocalRunHandle extends ExecutionRunHandle {
  * 断言在本 adapter；docker 参数映射为纯函数 buildLocalDockerArgs。
  */
 export class LocalDockerAdapter implements ExecutionTarget {
-  readonly target_id = LOCAL_DOCKER_TARGET_ID
+  readonly target_id: string
 
   constructor(
     private readonly deps: {
       jobId: string
       dockerRun: DockerRunFn
       cancel: CancelRunFn
+      /** Opaque registry id; legacy callers retain local-docker. */
+      targetId?: string
     },
-  ) {}
+  ) {
+    this.target_id = deps.targetId ?? LOCAL_DOCKER_TARGET_ID
+  }
 
   private preparedFingerprint: string | null = null
 
   /** 校验并冻结 plan，记录 fingerprint——plan 不可变的断言基准。 */
   async prepare(plan: ExecutionPlanType): Promise<ExecutionPreparation> {
     const parsed = ExecutionPlan.parse(plan) // schema 校验失败即抛（计划外字段/缺字段）
+    if (parsed.target_id !== this.target_id) {
+      throw new ExecutionTargetError(`local Docker target ${this.target_id} refuses plan pinned to ${parsed.target_id}`)
+    }
+    if (parsed.target_kind !== null && parsed.target_kind !== 'local-docker') {
+      throw new ExecutionTargetError(`local Docker target refuses ${parsed.target_kind} plan ${parsed.plan_id}`)
+    }
     this.preparedFingerprint = executionPlanFingerprint(deepFreezePlan(parsed))
     return { target_id: this.target_id, fingerprint: this.preparedFingerprint }
   }

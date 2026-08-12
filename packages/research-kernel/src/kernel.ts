@@ -18,12 +18,13 @@ import {
   EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, getFixtureProfile, getRunnerProfile, randomId, resolveRunnerProfileId, validateConfig, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  buildProjectId, getFixtureProfile, getRunnerProfile, randomId, resolveRunnerProfileId, runnerTargetConfigHash, validateConfig, RUNNER_PROFILE_IDS, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
   type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus, type ImportMapping,
   type ProjectDeletionReceipt,
   type ProviderDescriptor, type ProviderCreateInput, type ProviderUpdateInput, type SecretRef,
+  type RunnerTargetCreateInput, type RunnerTargetDescriptor, type RunnerTargetUpdateInput,
   type ProjectModelBinding, type ProjectModelBindingInput, type BindingPurpose,
   type UploadSession, type UploadSessionView, type ChunkAppendResult, type UploadSessionBeginInput,
   parseContentRange,
@@ -33,7 +34,7 @@ import {
   // PaperReproductionSpec / ReproductionAttempt / ReproducibilityReport wire
   // shapes and the spec status transition table.
   REPRODUCTION_SPEC_TRANSITIONS, PaperReproductionSpec, ReproductionAttempt, ReproductionReportInput, ReproducibilityReport,
-  type ClaimToReproduce, type CodeSource, type DataSource, type EnvironmentLock, type ExecutionBinding,
+  EnvironmentLock, type ClaimToReproduce, type CodeSource, type DataSource, type ExecutionBinding,
   type MetricComparator, type PaperRef, type ReproductionLevel, type ReproductionSpecStatus,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
@@ -66,6 +67,7 @@ import {
   secretRefAvailable, parseProviderModels, type ProviderUrlAllowlist,
 } from './provider.js'
 import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
+import { RunnerTargetRegistry } from './runner-target-registry.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -360,7 +362,11 @@ function projectFromRow(row: ProjectRow): ResearchProject {
     brief_status: row.brief_status === 'collecting' ? 'collecting' : 'confirmed',
     brief: jsonParse(row.brief, {} as ResearchProject['brief']),
     constraints: jsonParse(row.constraints, {} as ResearchProject['constraints']),
-    execution: jsonParse(row.execution, {} as ResearchProject['execution']),
+    // Older databases legitimately contain `{}` or an ExecutionConfig from
+    // before runner_target_id existed. Parse through the canonical schema so
+    // newly introduced defaults are applied on read instead of making every
+    // legacy project fail its next job submission with runner_target_unknown.
+    execution: ExecutionConfig.parse(jsonParse(row.execution, {})),
     integrity: jsonParse(row.integrity, {} as ResearchProject['integrity']),
     session_id: row.session_id,
     dsh_workspace_id: row.dsh_workspace_id,
@@ -854,6 +860,8 @@ export class ResearchKernel {
   readonly secretRoot: string | null
   /** MODEL-01: provider base-URL allowlist (SSRF fail closed). */
   readonly providerUrlAllowlist: ProviderUrlAllowlist
+  /** EXEC-ENV-02: authoritative configurable local/Docker/remote-SSH targets. */
+  readonly runnerTargets: RunnerTargetRegistry
   /** §12.1 (TEX-03): in-flight debounce timers, one per document. */
   private readonly previewTimers = new Map<string, NodeJS.Timeout>()
   /**
@@ -963,6 +971,7 @@ export class ResearchKernel {
     // MODEL-01: secret root for file-scheme SecretRef availability.
     this.secretRoot = options.secretRoot ?? null
     this.providerUrlAllowlist = options.providerUrlAllowlist ?? {}
+    this.runnerTargets = new RunnerTargetRegistry(this.db, ref => secretRefAvailable(ref, this.secretRoot))
     // CONFIG-01: pin the effective runtime config through the registry. The
     // registry validates the values (unknown keys / floor violations throw
     // here — fail fast at construction) and returns the one-way sha256 pin.
@@ -1222,14 +1231,29 @@ export class ResearchKernel {
       throw new KernelError(422, 'fixture_required',
         'full-auto projects require execution.fixture_id bound to a REGISTERED FixtureProfile (reconstruction-contracts.md §5); unknown fixture ids are rejected')
     }
-    // domain-model.md §2/§9.1: Project 只能引用已登记的 opaque RunnerProfile
-    // id。runner_profile_id 显式设置时必须在注册表内——未知 id 422，零落库
-    // （与 fixture_required 同一 fail-closed 姿态）。
-    if (execution.runner_profile_id !== null && execution.runner_profile_id !== '') {
-      if (getRunnerProfile(execution.runner_profile_id) === null) {
-        throw new KernelError(422, 'runner_profile_unknown',
-          `execution.runner_profile_id ${execution.runner_profile_id} is not a registered opaque RunnerProfile id (domain-model.md §9.1)`)
-      }
+    // Project defaults must already be executable: target/profile are both
+    // resolved before persistence, and kind/state mismatches fail closed.
+    const projectProfileRef = execution.runner_profile_id ?? execution.runner_profile
+    const projectProfileId = resolveRunnerProfileId(projectProfileRef)
+    const projectProfile = projectProfileId === null ? null : getRunnerProfile(projectProfileId)
+    if (projectProfile === null || !projectProfile.enabled) {
+      throw new KernelError(422, 'runner_profile_unknown',
+        `execution runner profile ${projectProfileRef} is not an enabled registered opaque RunnerProfile id`)
+    }
+    const projectTarget = this.listRunnerTargets().find(target => target.target_id === execution.runner_target_id)
+    if (projectTarget === undefined) {
+      throw new KernelError(422, 'runner_target_unknown',
+        `execution.runner_target_id ${execution.runner_target_id} is not a registered opaque RunnerTarget id`)
+    }
+    if (!projectTarget.enabled || projectTarget.draining) {
+      throw new KernelError(409, projectTarget.draining ? 'runner_target_draining' : 'runner_target_disabled',
+        `runner target ${projectTarget.target_id} is not accepting new projects`)
+    }
+    if (projectProfile.runner_mode === 'isolated-subprocess' && projectTarget.kind !== 'local-process') {
+      throw new KernelError(422, 'runner_target_profile_mismatch', 'isolated-subprocess profile requires a local-process target')
+    }
+    if (projectProfile.runner_mode === 'local-docker' && projectTarget.kind === 'local-process') {
+      throw new KernelError(422, 'runner_target_profile_mismatch', 'container profile cannot execute on a local-process target')
     }
     const project: ResearchProject = {
       project_id: buildProjectId(),
@@ -1633,6 +1657,18 @@ export class ResearchKernel {
     const member = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND principal_id = ?')
       .get(projectId, principalId) as { role: string } | undefined
     return member?.role ?? null
+  }
+
+  /** Global configuration administration is derived from current durable
+   * project memberships, never from a caller-supplied role header. */
+  getGlobalConfigRole(principalId: string): 'pi' | 'operator' | null {
+    if (principalId === '') return null
+    const row = this.db.prepare(`SELECT pm.role FROM project_members pm
+      INNER JOIN projects p ON p.project_id = pm.project_id
+      WHERE pm.principal_id = ? AND pm.role IN ('pi', 'operator') AND p.deleted_at IS NULL
+      ORDER BY CASE pm.role WHEN 'pi' THEN 0 ELSE 1 END LIMIT 1`)
+      .get(principalId) as { role: 'pi' | 'operator' } | undefined
+    return row?.role ?? null
   }
 
   addProjectMember(input: {
@@ -3714,6 +3750,76 @@ export class ResearchKernel {
     return removed
   }
 
+  // ── Runner Target registry (EXEC-ENV-02) ──
+
+  listRunnerTargets(): RunnerTargetDescriptor[] { return this.runnerTargets.list() }
+  getRunnerTarget(targetId: string): RunnerTargetDescriptor { return this.runnerTargets.get(targetId) }
+  runnerTargetView(target: RunnerTargetDescriptor): ReturnType<RunnerTargetRegistry['view']> { return this.runnerTargets.view(target) }
+  registerRunnerTarget(input: RunnerTargetCreateInput, createdBy = ''): RunnerTargetDescriptor {
+    return this.runnerTargets.create(input, createdBy)
+  }
+  updateRunnerTarget(targetId: string, input: RunnerTargetUpdateInput): RunnerTargetDescriptor {
+    return this.runnerTargets.update(targetId, input)
+  }
+
+  /** Configure the active project's default execution target with revision
+   * CAS. The compatible built-in profile follows the target kind so changing
+   * to local-process cannot leave a Docker profile (or vice versa). Job-level
+   * runner_target_id/runner_profile_id remain explicit one-shot overrides. */
+  configureProjectRunnerTarget(input: {
+    project_id: string
+    runner_target_id: string
+    expected_revision: number
+  }): ResearchProject {
+    const project = this.getProject(input.project_id)
+    if (project.revision !== input.expected_revision) {
+      throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_revision}, got ${project.revision}`)
+    }
+    const target = this.listRunnerTargets().find(candidate => candidate.target_id === input.runner_target_id)
+    if (target === undefined) {
+      throw new KernelError(422, 'runner_target_unknown', `runner target '${input.runner_target_id}' is not registered`)
+    }
+    if (!target.enabled || target.draining) {
+      throw new KernelError(409, target.draining ? 'runner_target_draining' : 'runner_target_disabled',
+        `runner target ${target.target_id} is not accepting new jobs`)
+    }
+    const currentProfileId = resolveRunnerProfileId(project.execution.runner_profile_id ?? project.execution.runner_profile)
+    const currentProfile = currentProfileId === null ? null : getRunnerProfile(currentProfileId)
+    const profileId = target.kind === 'local-process'
+      ? RUNNER_PROFILE_IDS.isolatedSubprocess
+      : currentProfile?.runner_mode === 'local-docker'
+        ? currentProfile.profile_id
+        : RUNNER_PROFILE_IDS.localDockerCpu
+    const profile = getRunnerProfile(profileId)
+    if (profile === null || !profile.enabled) {
+      throw new KernelError(422, 'runner_profile_unknown', `runner profile '${profileId}' is unavailable`)
+    }
+    const legacyProfile = profileId === RUNNER_PROFILE_IDS.isolatedSubprocess
+      ? 'isolated-subprocess'
+      : profileId === RUNNER_PROFILE_IDS.localDockerGpu
+        ? 'local-docker-gpu'
+        : 'local-docker-cpu'
+    const execution = ExecutionConfig.parse({
+      ...project.execution,
+      runner_target_id: target.target_id,
+      runner_profile_id: profile.profile_id,
+      runner_profile: legacyProfile,
+    })
+    const now = nowIso()
+    const history = [...project.history, `runner target -> ${target.target_id} (profile ${profile.profile_id})`]
+    const result = this.db.prepare(
+      'UPDATE projects SET execution = ?, revision = revision + 1, updated_at = ?, history = ? WHERE project_id = ? AND revision = ?',
+    ).run(JSON.stringify(execution), now, JSON.stringify(history), project.project_id, input.expected_revision)
+    if (result.changes !== 1) throw new KernelError(409, 'revision_conflict', 'project revision changed during runner target update')
+    const updated = this.getProject(project.project_id)
+    this.emit(project.project_id, 'project.execution.configured', {
+      runner_target_id: target.target_id,
+      runner_profile_id: profile.profile_id,
+      revision: updated.revision,
+    })
+    return updated
+  }
+
   // ── Model Provider registry (MODEL-01, init-grill-upload-models.md §4) ──
 
   private providerModels(providerId: string): ModelProviderModelRow[] {
@@ -4544,10 +4650,19 @@ export class ResearchKernel {
       frozen: true,
     }
     CorpusSnapshot.parse(snapshot)
-    this.db.prepare('INSERT INTO corpus_snapshots (snapshot_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
-      .run(snapshot.snapshot_id, snapshot.project_id, JSON.stringify(snapshot), snapshot.created_at)
-    this.emit(input.project_id, 'corpus.snapshotted', { snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length })
-    return snapshot
+    return withTransaction(this.db, () => {
+      const project = this.getProject(input.project_id)
+      this.db.prepare('INSERT INTO corpus_snapshots (snapshot_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
+        .run(snapshot.snapshot_id, snapshot.project_id, JSON.stringify(snapshot), snapshot.created_at)
+      this.emit(input.project_id, 'corpus.snapshotted', { snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length })
+      // GUIDE-01: completing the survey must retire survey_run. Keep the
+      // snapshot, phase CAS and both Outbox events in this same transaction;
+      // supplemental snapshots in every other phase are phase-neutral.
+      if (project.status === 'SCOPED') {
+        this.transition(project.project_id, 'SURVEYING', project.revision, 'corpus snapshot frozen')
+      }
+      return snapshot
+    })
   }
 
   listCorpusSnapshots(projectId: string): CorpusSnapshot[] {
@@ -4858,6 +4973,8 @@ export class ResearchKernel {
     // domain-model.md §9.1: opaque RunnerProfile id（缺省回退 project 级
     // execution.runner_profile_id，再回退 v1 enum 映射）；未知 id 422。
     runner_profile_id?: string | null
+    /** Job override of the project's opaque configurable target id. */
+    runner_target_id?: string | null
     // v2 shape (domain-model.md §9): durable submitter principal, persisted
     // to jobs.created_by_principal_id. The server layer resolves it from the
     // BFF-injected x-principal-id header (never client body trust); internal
@@ -4897,9 +5014,34 @@ export class ResearchKernel {
       throw new KernelError(422, 'runner_profile_unknown',
         `runner profile '${profileRef ?? project.execution.runner_profile}' is not a registered opaque profile id (domain-model.md §9.1); jobs reference only registered RunnerProfile ids, never docker flags/endpoints`)
     }
+    const targetRef = input.runner_target_id ?? project.execution.runner_target_id
+    const runnerTarget = this.listRunnerTargets().find(target => target.target_id === targetRef)
+    if (runnerTarget === undefined) {
+      throw new KernelError(422, 'runner_target_unknown', `runner target '${targetRef}' is not registered`)
+    }
+    if (!runnerTarget.enabled || runnerTarget.draining) {
+      throw new KernelError(409, runnerTarget.draining ? 'runner_target_draining' : 'runner_target_disabled',
+        `runner target ${runnerTarget.target_id} is not accepting new jobs`)
+    }
+    // Preserve the primary execution-safety error: secure kinds are
+    // container-only regardless of which target happens to be selected.
     if (SECURE_KINDS.includes(input.kind) && runnerProfile.runner_mode !== 'local-docker') {
       throw new KernelError(422, 'container_execution_required',
         `job kind ${input.kind} requires a container runner profile (got ${runnerProfile.profile_id}); host subprocess is prohibited (v2 §3.2)`)
+    }
+    if (runnerProfile.runner_mode === 'isolated-subprocess' && runnerTarget.kind !== 'local-process') {
+      throw new KernelError(422, 'runner_target_profile_mismatch', 'isolated-subprocess profile requires a local-process target')
+    }
+    if (runnerProfile.runner_mode === 'local-docker' && runnerTarget.kind === 'local-process') {
+      throw new KernelError(422, 'runner_target_profile_mismatch', 'container profile cannot execute on a local-process target')
+    }
+    if (runnerTarget.kind === 'remote-ssh' && runnerTarget.connection !== undefined) {
+      const unavailable = [runnerTarget.connection.endpoint, runnerTarget.connection.credential, runnerTarget.connection.known_hosts]
+        .some(ref => !this.secretRefAvailable(ref))
+      if (unavailable) {
+        throw new KernelError(409, 'runner_target_secret_unavailable',
+          `runner target ${runnerTarget.target_id} has unavailable endpoint/credential/known_hosts SecretRef`)
+      }
     }
     // §12 latex-compile binds a frozen TeX snapshot, not a code snapshot.
     if (input.kind === 'latex-compile') {
@@ -5090,6 +5232,10 @@ export class ResearchKernel {
         runner_profile_id: runnerProfile.profile_id,
         profile_config_hash: runnerProfile.config_hash,
       } : {}),
+      runner_target_id: runnerTarget.target_id,
+      runner_target_kind: runnerTarget.kind,
+      runner_target_revision: runnerTarget.revision,
+      runner_target_hash: runnerTargetConfigHash(runnerTarget),
       image_digest: SECURE_KINDS.includes(input.kind)
         ? validateImageDigest(input.kind as SecureJobKind, digestInput)
         : (input.image_digest ?? ''),
@@ -5188,12 +5334,37 @@ export class ResearchKernel {
    * RUN-01 (P0): each claimed job carries the durable `run_id` of the runs
    * row written for THIS attempt — the runner must use it for manifest,
    * terminal frames and evidence instead of minting its own run identity. */
-  claimJobs(owner: string, leaseTtlSeconds = 300, limit = 8): Array<JobSpecBound & { run_id: string | null }> {
+  claimJobs(
+    owner: string,
+    leaseTtlSeconds = 300,
+    limit = 8,
+    targetFilter?: {
+      runner_target_kinds?: Array<'local-process' | 'local-docker' | 'remote-ssh'>
+      runner_target_ids?: string[]
+      include_unpinned?: boolean
+    },
+  ): Array<JobSpecBound & { run_id: string | null }> {
     const now = nowIso()
+    const targetKinds = targetFilter?.runner_target_kinds ?? []
+    const targetIds = targetFilter?.runner_target_ids ?? []
+    const includeUnpinned = targetFilter?.include_unpinned === true
+    const statusWhere = `(status = 'queued' OR (status = 'retryable' AND attempts < max_attempts))`
+    const kindWhere = targetKinds.length === 0 ? ''
+      : ` AND (json_extract(payload, '$.runner_target_kind') IN (${targetKinds.map(() => '?').join(',')})${includeUnpinned ? " OR json_extract(payload, '$.runner_target_kind') IS NULL" : ''})`
+    const idWhere = targetIds.length === 0 ? ''
+      : ` AND (json_extract(payload, '$.runner_target_id') IN (${targetIds.map(() => '?').join(',')})${includeUnpinned ? " OR json_extract(payload, '$.runner_target_id') IS NULL" : ''})`
+    // Target-aware claim is the first line of defence against a local runner
+    // leasing a remote-ssh job (or a subprocess runner leasing a Docker job).
+    // executeJob/ExecutionTarget perform the same check again before spawn.
+    // Do not apply the lease limit in SQL: target revision/state validation
+    // happens below against the current registry, so a stale early row must
+    // not consume the limit and starve a later valid job for the same exact
+    // target. We stop after `limit` successful CAS leases instead.
     const rows = this.db.prepare(
-      `SELECT * FROM jobs WHERE status = 'queued' OR (status = 'retryable' AND attempts < max_attempts) ORDER BY created_at LIMIT ?`,
-    ).all(limit) as unknown as JobRow[]
+      `SELECT * FROM jobs WHERE ${statusWhere}${kindWhere}${idWhere} ORDER BY created_at`,
+    ).all(...targetKinds, ...targetIds) as unknown as JobRow[]
     const claimed: Array<JobSpecBound & { run_id: string | null }> = []
+    const targets = new Map(this.listRunnerTargets().map(target => [target.target_id, target]))
     // STORE-06 (storage-migrations.md §4): the claim persists ONLY the
     // sha256 of the opaque token (jobs.lease_token_hash) — the plaintext
     // never touches the database, it lives in kernel memory (this.leaseTokens)
@@ -5202,8 +5373,17 @@ export class ResearchKernel {
       `UPDATE jobs SET status = 'running', lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, lease_generation = COALESCE(lease_generation, 0) + 1, lease_token_hash = ?, payload = ?, updated_at = ? WHERE job_id = ? AND (status = 'queued' OR status = 'retryable')`,
     )
     for (const row of rows) {
+      if (claimed.length >= limit) break
       const leaseExpires = new Date(Date.now() + leaseTtlSeconds * 1000).toISOString()
       const payload = jsonParse(row.payload, {} as Record<string, unknown>)
+      const pinnedTargetId = typeof payload.runner_target_id === 'string' && payload.runner_target_id !== '' ? payload.runner_target_id : null
+      if (pinnedTargetId !== null) {
+        const currentTarget = targets.get(pinnedTargetId)
+        if (currentTarget === undefined || !currentTarget.enabled || currentTarget.draining) continue
+        if (payload.runner_target_kind !== currentTarget.kind
+          || payload.runner_target_revision !== currentTarget.revision
+          || payload.runner_target_hash !== runnerTargetConfigHash(currentTarget)) continue
+      }
       const leaseToken = `lt_${randomUUID().replaceAll('-', '')}${randomUUID().slice(0, 8)}`
       // execution-runtime.md §3 / storage-migrations.md §4: a claim is ONE
       // transaction — UPDATE jobs (running + lease + generation + token
@@ -6510,6 +6690,11 @@ export class ResearchKernel {
 
   workspaceRead(workspaceId: string, path: string): import('@dsh-scholar/research-schemas').WorkspaceNode | null {
     try {
+      // Resolve the backend first. `WorkspaceStore.read()` intentionally
+      // returns null for a missing FILE, so calling it directly cannot
+      // distinguish a missing generic workspace from a missing node and
+      // would skip the manuscript/TeX facade fallback.
+      this.workspaces.get(workspaceId)
       return this.workspaces.read(workspaceId, path)
     } catch (error) {
       if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
@@ -6568,6 +6753,7 @@ export class ResearchKernel {
   /** Binary node bytes (artifact CAS); null for text/missing nodes. */
   workspaceBlob(workspaceId: string, path: string): Buffer | null {
     try {
+      this.workspaces.get(workspaceId)
       return this.workspaces.blob(workspaceId, path)
     } catch (error) {
       if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
@@ -6638,6 +6824,7 @@ export class ResearchKernel {
    * bytes; TeX facade: current version only). */
   workspaceReadVersion(workspaceId: string, path: string, version: number): import('@dsh-scholar/research-schemas').WorkspaceNode | null {
     try {
+      this.workspaces.get(workspaceId)
       return this.workspaces.readVersion(workspaceId, path, version)
     } catch (error) {
       if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
@@ -7404,6 +7591,71 @@ export class ResearchKernel {
 
   // ── paper reproduction (docs/reproduction-contracts.md §2/§4) ────────────
 
+  /** Resolve a reproduction's opaque target/profile binding and return the
+   * canonical EnvironmentLock pins. Callers use this both when storing a
+   * spec and immediately before starting an attempt, so a target changed in
+   * between cannot execute under a stale or fabricated environment lock. */
+  private pinReproductionEnvironment(
+    binding: ExecutionBinding | null,
+    environmentLock: EnvironmentLock,
+  ): EnvironmentLock {
+    const lock = EnvironmentLock.parse(environmentLock)
+    if (binding === null) {
+      if (lock.target_id !== '' || lock.target_revision !== '' || lock.target_hash !== '' || lock.runner_profile_id !== '') {
+        throw new KernelError(422, 'runner_target_binding_required',
+          'reproduction environment target/profile pins require an execution_binding')
+      }
+      return lock
+    }
+    const profile = getRunnerProfile(binding.runner_profile_id)
+    if (profile === null || !profile.enabled) {
+      throw new KernelError(422, 'runner_profile_unknown',
+        `runner profile ${binding.runner_profile_id} is not an enabled registered opaque profile`)
+    }
+    const target = this.listRunnerTargets().find(candidate => candidate.target_id === binding.target_id)
+    if (target === undefined) {
+      throw new KernelError(422, 'runner_target_unknown',
+        `runner target ${binding.target_id} is not a registered opaque RunnerTarget id`)
+    }
+    if (!target.enabled || target.draining) {
+      throw new KernelError(409, target.draining ? 'runner_target_draining' : 'runner_target_disabled',
+        `runner target ${target.target_id} is not accepting reproduction attempts`)
+    }
+    if (profile.runner_mode === 'isolated-subprocess' && target.kind !== 'local-process') {
+      throw new KernelError(422, 'runner_target_profile_mismatch',
+        'isolated-subprocess reproduction profile requires a local-process target')
+    }
+    if (profile.runner_mode === 'local-docker' && target.kind === 'local-process') {
+      throw new KernelError(422, 'runner_target_profile_mismatch',
+        'container reproduction profile cannot execute on a local-process target')
+    }
+    const revision = String(target.revision)
+    const hash = runnerTargetConfigHash(target)
+    if (lock.runner_profile_id !== '' && lock.runner_profile_id !== binding.runner_profile_id) {
+      throw new KernelError(409, 'runner_profile_pin_conflict',
+        `environment lock profile ${lock.runner_profile_id} conflicts with execution binding ${binding.runner_profile_id}`)
+    }
+    if (lock.target_id !== '' && lock.target_id !== target.target_id) {
+      throw new KernelError(409, 'runner_target_pin_conflict',
+        `environment lock target ${lock.target_id} conflicts with execution binding ${target.target_id}`)
+    }
+    if (lock.target_revision !== '' && lock.target_revision !== revision) {
+      throw new KernelError(409, 'runner_target_revision_conflict',
+        `environment lock target revision ${lock.target_revision} is stale; registry has ${revision}`)
+    }
+    if (lock.target_hash !== '' && lock.target_hash !== hash) {
+      throw new KernelError(409, 'runner_target_hash_conflict',
+        'environment lock target config hash does not match the current registry descriptor')
+    }
+    return EnvironmentLock.parse({
+      ...lock,
+      runner_profile_id: binding.runner_profile_id,
+      target_id: target.target_id,
+      target_revision: revision,
+      target_hash: hash,
+    })
+  }
+
   /** Shared ref validation for spec create/update: paper ref format, paper
    *  artifact/snapshot/data artifacts belong to THIS project (cross-project
    *  refs are 422/404 — no enumeration), code snapshots exist, execution
@@ -7522,6 +7774,10 @@ export class ResearchKernel {
       execution_binding: input.execution_binding ?? null,
       source_artifact_id: input.source_artifact_id ?? null,
     })
+    const environmentLock = this.pinReproductionEnvironment(
+      input.execution_binding ?? null,
+      EnvironmentLock.parse(input.environment_lock ?? {}),
+    )
     const now = nowIso()
     const spec = this.parseReproductionSpec({
       spec_id: randomId('repro'),
@@ -7540,7 +7796,7 @@ export class ResearchKernel {
       code_source: input.code_source ?? null,
       data_inputs: input.data_inputs ?? [],
       execution_binding: input.execution_binding ?? null,
-      environment_lock: input.environment_lock ?? {},
+      environment_lock: environmentLock,
       expected_outputs: input.expected_outputs ?? [],
       metric_comparators: input.metric_comparators ?? [],
       revision: 1,
@@ -7619,7 +7875,8 @@ export class ResearchKernel {
       execution_binding: input.patch.execution_binding !== undefined ? input.patch.execution_binding : current.execution_binding,
       source_artifact_id: input.patch.source_artifact_id !== undefined ? input.patch.source_artifact_id : current.source_artifact_id,
     })
-    const updated = { ...merged, revision: current.revision + 1, updated_at: nowIso() }
+    const environmentLock = this.pinReproductionEnvironment(merged.execution_binding, merged.environment_lock)
+    const updated = { ...merged, environment_lock: environmentLock, revision: current.revision + 1, updated_at: nowIso() }
     const next = this.parseReproductionSpec(updated)
     const result = this.db.prepare('UPDATE reproduction_specs SET body = ?, revision = ?, status = ?, updated_at = ? WHERE spec_id = ? AND project_id = ? AND revision = ?')
       .run(JSON.stringify(next), next.revision, next.status, next.updated_at, specId, projectId, input.expected_revision)
@@ -7669,6 +7926,10 @@ export class ResearchKernel {
         return { attempt, generation: attempt.generation, lease_token: this.reproductionLeaseTokens.get(attempt.attempt_id) ?? null }
       }
     }
+    // Re-read and compare the target immediately before attempt creation.
+    // Any disabled/draining/revision/hash change after spec confirmation
+    // fails closed; changing environment requires an explicit spec update.
+    const environmentLock = this.pinReproductionEnvironment(spec.execution_binding, spec.environment_lock)
     const now = nowIso()
     const token = randomBytes(24).toString('hex')
     const attempt = ReproductionAttempt.parse({
@@ -7684,10 +7945,12 @@ export class ResearchKernel {
       code_snapshot_id: input.code_snapshot_id ?? (spec.code_source !== null && spec.code_source.kind === 'snapshot' ? spec.code_source.code_snapshot_id : null),
       data_pins: spec.data_inputs.filter(d => d.kind === 'artifact').map(d => d.artifact_id),
       environment_pins: {
-        image_digest: spec.environment_lock.image_digest ?? '',
-        runner_profile_id: spec.environment_lock.runner_profile_id ?? spec.execution_binding?.runner_profile_id ?? '',
-        target_id: spec.environment_lock.target_id ?? spec.execution_binding?.target_id ?? '',
-        effective_config_hash: spec.environment_lock.effective_config_hash ?? '',
+        image_digest: environmentLock.image_digest ?? '',
+        runner_profile_id: environmentLock.runner_profile_id || spec.execution_binding?.runner_profile_id || '',
+        target_id: environmentLock.target_id || spec.execution_binding?.target_id || '',
+        target_revision: environmentLock.target_revision,
+        target_hash: environmentLock.target_hash,
+        effective_config_hash: environmentLock.effective_config_hash ?? '',
       },
       run_manifest_refs: [],
       submitter_principal: input.submitter_principal,

@@ -1,5 +1,6 @@
 import type { ContextMenuItem, GateRow } from '../types'
-import { api } from '../api'
+import { api, apiResult, type ApiResult } from '../api'
+import { gateDecisionErrorKey, gateDecisionRequest } from '../gate-decision'
 import { t } from '../i18n/index'
 import { state } from '../state'
 import { copyText, el, fmtId, openContextMenu, pill, rootHost, shortType, showToast } from '../ui'
@@ -11,6 +12,19 @@ export let gatesSelected = new Set<string>()
 export let gatesQuery = ''
 /** Decided-gates section folded by default on busy projects. */
 export let gatesDecidedOpen = true
+
+function gateDecisionErrorText(error: Extract<ApiResult<unknown>, { ok: false }>['error'], status: number): string {
+  return t('overview', gateDecisionErrorKey(error, status), { code: error.code ?? `HTTP ${status}` })
+}
+
+async function submitGateDecision(
+  gateId: string,
+  decision: 'approved' | 'rejected' | 'revised',
+  reason?: string,
+): Promise<ApiResult<Record<string, unknown>>> {
+  const request = gateDecisionRequest(gateId, decision, reason)
+  return apiResult<Record<string, unknown>>(request.path, request.init)
+}
 
 
 export async function renderGates(body: HTMLElement, projectId: string): Promise<void> {
@@ -74,21 +88,17 @@ export async function renderGates(body: HTMLElement, projectId: string): Promise
     const approveSel = el('button', 'btn approve', t('overview', 'overview.gatesApproveSelected'))
     approveSel.disabled = gatesSelected.size === 0
     approveSel.onclick = async () => {
+      let firstFailure: Extract<ApiResult<Record<string, unknown>>, { ok: false }> | null = null
       for (const id of gatesSelected) {
-        const g = gates.find(x => x.gate_id === id)
-        await api(`/v1/gates/${encodeURIComponent(id)}/decisions`, {
-          method: 'POST',
-          body: JSON.stringify({
-            actor: 'web-user',
-            decision: 'approved',
-            // Raw wire payload: the reason string is stored verbatim in the
-            // kernel Gate Decision ledger (acceptance §8 line 115 — wire
-            // text stays raw), never displayed as UI chrome.
-            reason: 'bulk approved from Research OS panel',
-          }),
-        })
+        const result = await submitGateDecision(id, 'approved', 'bulk approved from dsh Scholar panel')
+        if (!result.ok && firstFailure === null) firstFailure = result
       }
-      showToast(rootHost(), t('overview', 'overview.gatesApprovedToast', { count: String(gatesSelected.size) }))
+      if (firstFailure !== null) {
+        state.lastError = gateDecisionErrorText(firstFailure.error, firstFailure.status)
+      } else {
+        state.lastError = undefined
+        showToast(rootHost(), t('overview', 'overview.gatesApprovedToast', { count: String(gatesSelected.size) }))
+      }
       gatesSelecting = false
       gatesSelected.clear()
       state.rerender()
@@ -96,13 +106,17 @@ export async function renderGates(body: HTMLElement, projectId: string): Promise
     const rejectSel = el('button', 'btn reject', t('overview', 'overview.gatesRejectSelected'))
     rejectSel.disabled = gatesSelected.size === 0
     rejectSel.onclick = async () => {
+      let firstFailure: Extract<ApiResult<Record<string, unknown>>, { ok: false }> | null = null
       for (const id of gatesSelected) {
-        await api(`/v1/gates/${encodeURIComponent(id)}/decisions`, {
-          method: 'POST',
-          body: JSON.stringify({ actor: 'web-user', decision: 'rejected', reason: 'bulk rejected from Research OS panel' }), // raw wire payload → stored verbatim in the Gate Decision ledger
-        })
+        const result = await submitGateDecision(id, 'rejected', 'bulk rejected from dsh Scholar panel')
+        if (!result.ok && firstFailure === null) firstFailure = result
       }
-      showToast(rootHost(), t('overview', 'overview.gatesRejectedToast', { count: String(gatesSelected.size) }))
+      if (firstFailure !== null) {
+        state.lastError = gateDecisionErrorText(firstFailure.error, firstFailure.status)
+      } else {
+        state.lastError = undefined
+        showToast(rootHost(), t('overview', 'overview.gatesRejectedToast', { count: String(gatesSelected.size) }))
+      }
       gatesSelecting = false
       gatesSelected.clear()
       state.rerender()
@@ -188,20 +202,13 @@ export async function renderGates(body: HTMLElement, projectId: string): Promise
     }
     const act = async (decision: 'approved' | 'rejected', label: string): Promise<void> => {
       const reason = reasonInput.value.trim()
-      const ok = await api(`/v1/gates/${encodeURIComponent(gate.gate_id ?? '')}/decisions`, {
-        method: 'POST',
-        body: JSON.stringify({
-          actor: 'web-user',
-          decision,
-          reason: reason !== '' ? reason : `${label} from Research OS panel`,
-          // dsh-web resume: approving a budget gate on a BLOCKED_GATE project
-          // must pin the resume target (kernel §6.6 default: EXPERIMENTING),
-          // otherwise the project stays parked after approval.
-
-        }),
-      })
-      if (ok === null) {
-        state.lastError = t('overview', 'overview.gateFailedError', { label: label.toLowerCase() })
+      const result = await submitGateDecision(
+        gate.gate_id ?? '',
+        decision,
+        reason !== '' ? reason : `${label} from dsh Scholar panel`,
+      )
+      if (!result.ok) {
+        state.lastError = gateDecisionErrorText(result.error, result.status)
       } else {
         state.lastError = undefined
         // dsh-web confirmation: toast the decision outcome.
@@ -257,7 +264,17 @@ export async function renderGates(body: HTMLElement, projectId: string): Promise
         const dec = decisions.find(d => d.gate_id === gate.gate_id)
         if (dec !== undefined) {
           const when = String(dec.decided_at ?? '').replace('T', ' ').slice(0, 16)
-          const meta = el('div', 'muted', `${String(dec.actor ?? '?')} · ${String(dec.decision ?? '?')}${when !== '' ? ` · ${when}` : ''}`)
+          const decisionWire = String(dec.decision ?? '?')
+          const decision = decisionWire === 'approved'
+            ? t('overview', 'overview.gateApproved')
+            : decisionWire === 'rejected'
+              ? t('overview', 'overview.gateRejected')
+              : decisionWire === 'revised'
+                ? t('overview', 'overview.gateRevised')
+                : decisionWire
+          const meta = el('div', 'muted', t('overview', 'overview.gateDecisionProvenance', {
+            actor: String(dec.actor ?? '?'), decision, when: when || '—',
+          }))
           meta.style.cssText = 'font-size:9.5px;margin-top:2px;color:var(--text-3)'
           const reason = String(dec.reason ?? '')
           if (reason !== '') meta.title = reason

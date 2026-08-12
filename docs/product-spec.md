@@ -6,6 +6,8 @@
 
 DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研究项目。它不是“替用户自动发表论文”的机器人，而是一套把研究问题、论文证据、代码、实验合同、运行记录、统计结论、TeX 稿件和复现包连成一条审计链的科研工作台。
 
+产品正式名称是 `DSH Scholar`；Web UI 的组合字标统一显示为 `dsh Scholar`。顶部栏、侧边栏、独立解锁页、浏览器标题、Chat 欢迎语/导出标题、设置卡片与命令帮助不得再显示 `dsh Research`、`DSH Research` 或以 `dsh` + `Research` 分段拼出旧品牌。`Research Kernel`、Research/Session lane、API 路径和科研动作中的 `research` 是领域或技术名称，不得因品牌替换而改名。
+
 支持领域以机器学习、数据科学、生物信息学等纯计算研究为主。涉及临床决策、人体试验、湿实验、武器、生物安全或其他高风险领域时，系统必须停止自动推进并要求独立政策扩展。
 
 ## 2. 用户与职责
@@ -63,6 +65,12 @@ DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研�
 - MetricSpec、RunSet、AnalysisPlan、EvidenceItem、Claim；
 - 确定性稿件、图表、BibTeX、复现包。
 
+Chat 是项目内部工作面，不是跨项目共享的全局收件箱。每个本地 Chat session、active session、transcript、草稿、引用回复、附件引用、搜索上下文和异步命令/上传回写都必须绑定明确 `project_id`；切换项目只加载目标项目的对话，返回原项目时恢复其自身状态。固定全局 localStorage key、无项目字段的 session、或仅凭同名 session id 回写结果均不符合隔离要求。跨项目附件引用必须拒绝或过滤，项目 A 发起后延迟完成的命令/上传不得写入项目 B。
+
+Chat composer 必须同时接受自由自然语言与一级 slash command。显式 `/...` 是确定性高级入口；普通文本在 active Init Grill 时仍只回答当前唯一问题，其他阶段进入 project-scoped natural turn，由意图路由器结合 Kernel `next_actions_v2` 选择只读查询、可执行 Agent 动作或普通对话，不能把 prose 当成未知命令。自然语言路由不得根据状态 label 猜 mutation：未知/歧义/blocked/权限不足时只解释并给出候选；Gate Decision、Brief confirm、Intake adoption、Release 决定等 Human-only 动作永远不能由模型代做。任何自动触发结果都必须回显解析出的动作、参数、执行状态和最新权威 NextAction；显式 slash 与自然语言必须进入同一 canonical operation/权限/审计语义。
+
+每次 assistant 回答结尾都应给出与当前阶段相符的一项下一步引导，但不得自动跳页或覆盖用户正在编辑的草稿。Chat transcript 在底部时随新消息继续贴底；用户向上查看历史时，新消息、8 秒投影刷新、locale 切换和 Dock 重绘必须保持当前滚动锚点并显示“跳到最新”，不得反复回到顶部或强制拉到底部。滚动/follow 状态按 project + session + surface 隔离，切换回来恢复各自位置。
+
 ### 5.3 执行可观测性
 
 - Runs 列表和任务详情；
@@ -71,13 +79,23 @@ DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研�
 - 取消实际进程树或容器，并显示权威取消结果；
 - 完整日志作为项目级 CAS Artifact 下载。
 
-Run Terminal 是正式 Job 的只读、可恢复账本。Interactive Terminal 是单独的真实 PTY 会话，必须支持 stdin、UTF-8/二进制安全帧、窗口 resize、INT/TERM/KILL、断线续传、显式关闭和审计。Interactive Terminal 不得直接产生正式 Metrics、accepted Evidence 或 Human Decision；浏览器不能获得 Runner/SSH/Kernel secret。
+Run Terminal 是正式 Job 的只读、可恢复账本。Interactive Terminal 是单独的真实 PTY 会话，必须使用 xterm-compatible 浏览器终端模拟器，支持可聚焦键盘输入、粘贴、IME/Unicode、ANSI/VT 光标与 alternate-screen TUI、窗口自动 resize、INT/TERM/KILL、断线续传、显式关闭和审计。把服务端输出逐行放进普通 `div/textContent`、只提供 resize/signal 按钮或存在未接线的 `sendText()` 均不算 Web Terminal 完成。Interactive Terminal 不得直接产生正式 Metrics、accepted Evidence 或 Human Decision；浏览器不能获得 Runner/SSH/Kernel secret。
+
+### 5.3.1 可配置实验环境
+
+- 实验执行环境是版本化 `RunnerTarget + RunnerProfile`，至少支持 `local-process`、`local-docker`、`remote-ssh` 三种显式类型；项目、Contract、Job 和复现 attempt 只引用 opaque ID，并在 submit 时固定 target/profile/environment revision 与 hash；
+- `local-process` 仅允许明确标记的 trusted development/smoke 工作负载，不能承载 baseline、pilot、formal、reproduce、latex-compile 等正式隔离任务；`local-docker` 使用固定 digest、非 root、只读根、资源/网络策略；`remote-ssh` 连接受控实验机器并在远端执行同一冻结 ExecutionPlan，不能成为业务权威；
+- Settings 的 Execution 折叠组提供 Target/Profile 列表、创建、编辑、禁用、健康状态与能力配置。远端 endpoint、known-host/CA 与 credential 分别以完整 SecretRef 配置，界面必须显式覆盖 `scheme`、`name`、可选 `version` 与可选 `scope`，编辑已有 Target 时不得丢失任何可选元数据；SecretRef 只保存于服务端，浏览器、项目、Job、argv、导出包和日志均不得得到私钥或原始 endpoint 内容；
+- 当前项目必须能在 Settings 中以 CAS 保存默认 RunnerTarget；`/run` 与 `/reproduce` 的 JSON 可用顶层 `runner_target_id` 对单次 Job 显式覆盖。解析优先级固定为“Job 覆盖 > 项目默认”，两条路径都必须在 Job/ExecutionPlan 中固定同一 target revision/hash；页面只显示 opaque id、类型、能力与健康摘要；
+- unknown/offline/draining/capability mismatch/host-key mismatch 必须 fail closed 或保持 retryable，绝不静默切换到本机或 Docker。目标在排队、claim 或 spawn 前任一时刻被禁用、排空、换 kind 或 revision/hash 漂移，旧 pin 均不得执行；更换环境必须由用户创建显式新 attempt，并产生新 pin/审计。
+- 论文复现的 execution binding 与 environment lock 不能只保存未经解析的字符串：创建/更新 spec 与启动 attempt 都要对照 RunnerTarget Registry 校验 target/profile 兼容性，并固化 target revision/hash；未知、禁用、排空、冲突或过期的环境绑定必须 fail closed。
 
 ### 5.4 Workspace Workbench
 
 - 项目可有 code、manuscript、scratch 等版本化 Workspace，文件树和路径均为项目根相对形式；
 - VS Code 式 Explorer、已打开标签页、全局搜索、行号、语法高亮、查找替换、撤销重做、快捷键、Problems 和集成 Terminal；
 - 文本与二进制文件可直接查看；可编辑类型由 media type 和策略决定，未知/大文件安全降级为只读或下载；
+- manuscript TeX facade 与 generic Workspace API 必须是同一文件权威的两种视图：list/tree/read/version/blob/write/move/delete/search/watch 任一 generic 操作都必须先解析 workspace backend，不能因“generic store 未命中”把已存在的 TeX 文件误报 404；公共节点大小字段缺失或非法时 UI 安全显示 `0 B`，不得出现 `NaN undefined`；
 - create/read/write/move/delete/upload/watch/search/snapshot 共用 Revision/ETag/CAS，冲突提供 base/current/local，禁止静默覆盖；
 - 编辑器只是 Workspace interface 的 adapter；Kernel 不依赖 Monaco、CodeMirror 或 VS Code Web。
 
@@ -146,6 +164,16 @@ LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可�
 - Chat 附件先进入隔离 Intake；Interactive Terminal 按 Research/Chat/Subagent session 打开多个独立 PTY，不能作为正式复现证据；
 - 生成级对象、比较算法、环境绑定、API、NextAction 与验收见 `reproduction-contracts.md`。
 
+### 5.13 全页面可停靠侧栏
+
+- 左侧 Project Sidebar 只负责项目搜索、选择和项目生命周期；页面停靠区统一称为 Panel Dock/页面侧栏，二者不是同一个导航或配置对象；
+- Chat、Overview、Approvals、Runs、Artifacts、Evidence、Budget、Manuscript、Run Terminal、Trajectory、Topology、Workspace、Interactive Terminal 等全部当前页面既可占据主区，也可作为一个活动面板停靠在右侧或底部；
+- 同一页面任一时刻只允许一个活实例。把当前主页面放入 Dock 时，主区切到安全回退页；从 Dock 打开到主区时先关闭 Dock 中的该实例，禁止复制 Chat 草稿、PTY 输入目标、Workspace/TeX 编辑状态或流消费器；
+- 右侧与底部切换必须移动同一个已挂载面板，不重建 DOM、不关闭 SSE/PTY，也不丢失焦点、草稿、选中文件和滚动位置；主区与 Dock 之间切换允许按最后序号安全重连，Terminal、PTY、Workspace watch 与 Trajectory 不得丢帧或重复展示；
+- 用户可拖动分隔条调整尺寸，也可用方向键、Home/End 完成同一操作。默认右侧 420 px、底部 320 px，右侧限制 280–720 px、底部限制 180–640 px；无效或过期持久化值必须 fail closed 回默认值；
+- Dock 的打开页面、首选位置和尺寸是当前浏览器的本地展示偏好，不是 Kernel Config Registry、运行时 config pin、项目数据或跨设备同步配置，不得保存 token、secret、聊天内容或研究文件；
+- 视口小于 720 px 时，右侧首选位置只在视觉上投影为底部，不覆盖已保存的右侧偏好；Dock 标题、选择器、移动/关闭动作、分隔条 aria 和提示全部支持 zh/en 即时切换。
+
 ## 6. 明确不做
 
 - 不把 LLM 对新颖性或结果的自评当作 Evidence；
@@ -160,13 +188,13 @@ LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可�
 
 ## 7. 用户可见信息架构
 
-页面采用渐进披露。未选项目只显示 Start；选中项目后顶栏只显示 Overview、Workspace、Runs、Manuscript 四个高频入口和 Settings 齿轮。其他能力收进 More、上下文 CTA 和可复制深链，不能因此失去键盘可达性。
+页面采用渐进披露。未选项目只显示 Start；选中项目后顶栏只显示 Overview、Workspace、Runs、Manuscript 四个高频入口和 Settings 齿轮。其他能力收进 More、上下文 CTA 和可复制深链，不能因此失去键盘可达性。表中的全部当前业务页面都支持主区、右侧 Dock 和底部 Dock 三种展示位置；Settings 仍是独立设置面，不作为业务页复制到 Dock。
 
 | 分组 | 页面/路由 | 核心任务 |
 |---|---|---|
 | Start | `/start` | Init、Resume、Upload/Continue existing research |
 | Research | Overview | 唯一主 NextAction、阶段、Brief、可折叠 Trajectory/Topology |
-| Research | Chat | 使用 `/new`、`/reproduce` 等一级 slash command，上传材料并查看结构化结果卡 |
+| Research | Chat | 自由对话、按阶段自动引导与自然语言动作路由；保留 `/new`、`/reproduce` 等一级 slash command，上传材料并查看结构化结果卡 |
 | Execution | Approvals | Human Gate 决策和审计 |
 | Execution | Runs | 任务筛选、详情、取消和 Manifest |
 | Execution | Run Terminal | 查看活动或历史 Run 的真实只读终端流 |
@@ -198,6 +226,7 @@ Settings 首次进入时所有 section 默认折叠，按 Essentials、Execution
 | Guidance | 每个非终态项目都有结构化下一步、原因、负责人和目标路由；未知 action 不会误执行 |
 | Trajectory | Research/Session 权威性明确；subagent 拓扑可展开/进入/返回；详情脱敏、history 不激活 Agent |
 | i18n | zh/en key 完整；全页面无硬编码 chrome；切换后即时更新且格式 locale 一致 |
+| Panel Dock | 全部当前页面可在主区/右侧/底部间切换；同页仅一活实例；位置与尺寸可恢复；窄屏、键盘、i18n 与流重连无数据丢失 |
 | 隔离 | 项目级 Job、Artifact、日志、文档和权限不串项目 |
 | 恢复 | Kernel/Runner/UI 重启后无重复正式 Run、无丢失 Gate、无孤儿容器 |
 | 复现 | Release Bundle 在空环境重建关键指标和论文，满足合同容差 |

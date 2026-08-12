@@ -143,6 +143,32 @@ export interface ArtifactRow { artifact_id?: string; kind?: string; size_bytes?:
 export interface GateRow { gate_id?: string; type?: string; title?: string; status?: string; summary?: string }
 export interface ProjectRow { project_id?: string; name?: string; status?: string; revision?: number; updated_at?: string }
 
+export type RunnerTargetKindLite = 'local-process' | 'local-docker' | 'remote-ssh'
+export interface SecretRefViewLite { scheme: 'keyring' | 'file' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
+export interface RunnerTargetSafeViewLite {
+  target_id: string
+  display_name: string
+  kind: RunnerTargetKindLite
+  enabled: boolean
+  draining: boolean
+  capabilities: string[]
+  connection?: { endpoint: SecretRefViewLite; credential: SecretRefViewLite; known_hosts: SecretRefViewLite }
+  health: 'unknown' | 'online' | 'offline'
+  last_seen_at: string | null
+  revision: number
+  config_hash: string
+}
+
+export interface ProjectExecutionSettingsLite {
+  project_id: string
+  name: string
+  revision: number
+  execution: {
+    runner_target_id: string
+    runner_profile_id?: string | null
+  }
+}
+
 /* ── TRAJ-01/SUBAGENT-01 wire shapes (research-schemas/trajectory.ts
  *  contract, docs/trajectory-subagents.md §1/§3 — mirrored structurally so
  *  the browser bundle stays dependency-light). ── */
@@ -292,7 +318,7 @@ export interface ChatAttachmentRef {
   state: 'queued' | 'uploading' | 'paused' | 'staged' | 'ready' | 'quarantined' | 'failed'
 }
 
-export interface ChatSession { id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean; unread?: number; pinned?: boolean }
+export interface ChatSession { project_id: string; id: string; name: string; messages: ChatMessage[]; lastActive?: number; archived?: boolean; unread?: number; pinned?: boolean }
 
 export interface NotifEntry { text: string; time: string; ts?: number; count?: number }
 

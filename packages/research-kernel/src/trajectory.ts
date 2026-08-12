@@ -105,7 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_events_project_seq ON events(project_id, event_se
 
 /** Research lane: authoritative Kernel business events (research facts). */
 const RESEARCH_KINDS: ReadonlySet<string> = new Set([
-  'project.created', 'project.transitioned', 'project.renamed',
+  'project.created', 'project.transitioned', 'project.renamed', 'project.execution.configured',
   'gate.created', 'gate.decided',
   'artifact.registered',
   'idea.created', 'idea.updated',
@@ -194,6 +194,8 @@ export function summaryForKind(kind: string, payload: Record<string, unknown>): 
     }
     case 'project.renamed':
       return `project renamed to ${label ?? '?'}`
+    case 'project.execution.configured':
+      return `project execution configured for ${str(payload.runner_target_id) ?? '?'}`
     case 'gate.created':
       return `gate ${str(payload.type) ?? '?'} created${label !== null ? `: ${label}` : ''}`
     case 'gate.decided': {

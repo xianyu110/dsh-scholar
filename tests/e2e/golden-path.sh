@@ -72,7 +72,7 @@ else
   SNAP=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/corpus" -d "{\"queries\":[{\"source\":\"openalex\",\"query\":\"temporal action localization\",\"run_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}],\"papers\":[{\"paper_id\":\"doi:10.1000/example1\",\"title\":\"Temporal Action Localization: A Survey\",\"authors\":[\"A. Author\"],\"year\":2021,\"venue\":\"TPAMI\",\"source\":\"openalex\",\"identifiers\":{\"doi\":\"10.1000/example1\"},\"abstract\":\"Survey.\",\"retrieved_at\":\"2026-08-06T12:00:00Z\"}]}" | jqfield snapshot_id)
   ok "snapshot $SNAP (deterministic fixture papers)"
 fi
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"SURVEYING","expected_revision":1}' > /dev/null
+# Freezing the first survey corpus advances SCOPED -> SURVEYING atomically.
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"IDEATING","expected_revision":2}' > /dev/null
 
 say "4. idea + novelty audit → Idea Gate"

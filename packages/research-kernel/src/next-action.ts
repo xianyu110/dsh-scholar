@@ -114,7 +114,7 @@ export interface NextActionContext {
 }
 
 /** UI tab / operation path an action maps to. */
-export type NextActionRoute = 'gates' | 'runs' | 'evidence' | 'manuscript' | 'budget' | 'ideas' | 'contracts' | 'release' | 'overview'
+export type NextActionRoute = 'chat' | 'gates' | 'runs' | 'evidence' | 'manuscript' | 'budget' | 'ideas' | 'contracts' | 'release' | 'overview'
 
 interface BaseActionSpec {
   code: string
@@ -219,7 +219,9 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
         code: 'survey_run',
         label: 'Run literature survey → corpus snapshot',
         reason: 'a corpus snapshot is required before idea generation can start',
-        route: 'runs',
+        // Survey is a connector/Corpus action initiated through the
+        // project-scoped Chat slash command, not a Runner Job.
+        route: 'chat',
         state: 'ready',
         required: true,
         required_by: 'agent',

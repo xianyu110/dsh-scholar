@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Link the DSH installation's packages into this repo's node_modules so local
 # typechecking/tests can resolve @deepseek-ai/* and the vendored Cordis
-# framework (@cordisjs/*, cosmokit) — none of these are on the npm registry.
+# framework (@deepseek-ai/schemastery, @cordisjs/*, cosmokit) — none of these
+# are on the public npm registry.
 # At RUNTIME inside DSH, the profile's flat node_modules fallback provides
 # them; this script only serves local development.
 #
@@ -70,7 +71,7 @@ done
 for pkg in "$root"/vendor/*/package.json; do
   name=$(node -e "console.log(require('$pkg').name || '')" 2>/dev/null || true)
   case "$name" in
-    @deepseek-ai/cordis | cordis | @cordisjs/* | cosmokit) link_one "$pkg" ;;
+    @deepseek-ai/cordis | @deepseek-ai/schemastery | cordis | @cordisjs/* | cosmokit) link_one "$pkg" ;;
   esac
 done
 

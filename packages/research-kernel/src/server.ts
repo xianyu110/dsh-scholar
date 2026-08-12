@@ -12,7 +12,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, type PtySession } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, RunnerTargetCreateInput, RunnerTargetUpdateInput, type PtySession } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -128,6 +128,11 @@ const projectGrillConfirmSchema = z.object({
   expected_intake_revision: z.number().int().positive(),
 }).strict()
 
+const projectRunnerTargetSchema = z.object({
+  expected_revision: z.number().int().nonnegative(),
+  runner_target_id: z.string().min(1).max(120),
+}).strict()
+
 const transitionSchema = z.object({
   to: z.string().min(1),
   expected_revision: z.number().int().nonnegative(),
@@ -219,6 +224,8 @@ const jobSchema = z.object({
   data_artifact_ids: z.array(z.string()).optional(),
   image_digest: z.string().optional(),
   output_contract: z.object({ metrics: z.string(), logs: z.string() }).optional(),
+  runner_profile_id: z.string().nullable().optional(),
+  runner_target_id: z.string().nullable().optional(),
   // v2 shape (domain-model.md §9): durable submitter principal. The route
   // prefers the BFF-injected x-principal-id header; a body value is accepted
   // only as an explicit override for internal callers — absent both → NULL.
@@ -682,6 +689,8 @@ const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string 
   { method: 'POST', re: /^\/v1\/jobs-claim\/run$/, label: 'jobs-claim' },
   { method: 'POST', re: /^\/v1\/runner-keys$/, label: 'runner-keys' },
   { method: 'POST', re: /^\/v1\/recover\/leases$/, label: 'recover/leases' },
+  { method: 'POST', re: /^\/v1\/runner-targets$/, label: 'runner-targets/create' },
+  { method: 'PATCH', re: /^\/v1\/runner-targets\/[^/]+$/, label: 'runner-targets/update' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/verified$/, label: 'evidence/verified' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/[^/]+\/accept$/, label: 'evidence/accept' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/contracts\/[^/]+\/approve$/, label: 'contracts/approve' },
@@ -828,6 +837,7 @@ const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
   // INIT-GRILL-02 §2: Grill confirm 是 PI-only 显式确认事务（写入 canonical
   // Brief + 创建唯一 Scope Gate）—— researcher/viewer/auditor 一律 403。
   /(?:^|\/)grill\/confirm(?:\/|$)/,
+  /(?:^|\/)execution(?:\/|$)/,
 ]
 
 function isPiOnlyWrite(pathname: string): boolean {
@@ -882,6 +892,18 @@ function requirePiOnly(
     }
   }
   return true
+}
+
+/** Global execution-target configuration is a PI/operator administration
+ * surface. The Kernel derives that authority from current durable project
+ * memberships for x-principal-id; x-principal-role is never trusted. The
+ * BFF independently performs the same fail-closed check before proxying. */
+function requireGlobalConfigRole(kernel: ResearchKernel, req: IncomingMessage, res: ServerResponse, action: string): boolean {
+  const principal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : ''
+  const role = kernel.getGlobalConfigRole(principal)
+  if (role !== null) return true
+  send(res, 403, { error: errorEnvelope('role_forbidden', `${action} requires PI or operator role`) })
+  return false
 }
 
 /**
@@ -1161,6 +1183,35 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
           }
           send(res, 404, { error: { code: 'not_found', message: 'unknown provider route' } })
+          return
+        }
+        case 'runner-targets': {
+          // EXEC-ENV-02: global target registry. Connection fields are
+          // SecretRef metadata + availability only; values never cross HTTP.
+          const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : ''
+          if (method === 'GET' && id === undefined) {
+            ok(res, kernel.listRunnerTargets().map(target => kernel.runnerTargetView(target)))
+            return
+          }
+          if (method === 'POST' && id === undefined) {
+            if (!requireGlobalConfigRole(kernel, req, res, 'runner target creation')) return
+            const input = RunnerTargetCreateInput.parse(body)
+            send(res, 201, kernel.runnerTargetView(kernel.registerRunnerTarget(input, headerPrincipal)))
+            return
+          }
+          if (id !== undefined) {
+            if (method === 'GET') {
+              ok(res, kernel.runnerTargetView(kernel.getRunnerTarget(id)))
+              return
+            }
+            if (method === 'PATCH') {
+              if (!requireGlobalConfigRole(kernel, req, res, 'runner target update')) return
+              const input = RunnerTargetUpdateInput.parse(body)
+              ok(res, kernel.runnerTargetView(kernel.updateRunnerTarget(id, input)))
+              return
+            }
+          }
+          send(res, 404, { error: { code: 'not_found', message: 'unknown runner target route' } })
           return
         }
         case 'projects': {
@@ -2336,8 +2387,19 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
         }
         case 'jobs-claim': {
           if (method === 'POST' && id !== undefined) {
-            const input = z.object({ owner: z.string().min(1), lease_ttl_seconds: z.number().int().positive().optional(), limit: z.number().int().positive().max(64).optional() }).parse(body)
-            ok(res, kernel.claimJobs(input.owner, input.lease_ttl_seconds, input.limit))
+            const input = z.object({
+              owner: z.string().min(1),
+              lease_ttl_seconds: z.number().int().positive().optional(),
+              limit: z.number().int().positive().max(64).optional(),
+              runner_target_kinds: z.array(z.enum(['local-process', 'local-docker', 'remote-ssh'])).max(3).optional(),
+              runner_target_ids: z.array(z.string().min(1).max(120)).max(64).optional(),
+              include_unpinned: z.boolean().optional(),
+            }).parse(body)
+            ok(res, kernel.claimJobs(input.owner, input.lease_ttl_seconds, input.limit, {
+              runner_target_kinds: input.runner_target_kinds,
+              runner_target_ids: input.runner_target_ids,
+              include_unpinned: input.include_unpinned,
+            }))
             return
           }
           break
@@ -2997,6 +3059,13 @@ async function handleV2(ctx: {
   if (id !== undefined && sub === undefined && method === 'GET') {
     memberOr404(id)
     ok(res, kernel.getProject(id))
+    return
+  }
+  if (id !== undefined && sub === 'execution' && method === 'PATCH') {
+    memberOr404(id)
+    if (!requirePiOnly(kernel, req, res, id, body, 'project execution configuration')) return
+    const input = projectRunnerTargetSchema.parse(body)
+    ok(res, kernel.configureProjectRunnerTarget({ project_id: id, ...input }))
     return
   }
   if (id !== undefined && sub === undefined && method === 'DELETE') {

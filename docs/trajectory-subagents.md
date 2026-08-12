@@ -123,6 +123,8 @@ interface TrajectoryEvent {
 
 所有全局 ID 先解析 project_id，再做 project membership 与 `trajectory_summary_read`/`trajectory_detail_read`/`subagent_continue` 能力检查。跨项目和隐藏节点统一 404。BFF 不透明转发 DSH raw event 属于实现错误。
 
+Standalone 当前页面使用同源 v1 adapter：`GET /v1/projects/{project}/trajectory`、`GET /v1/projects/{project}/trajectory-lanes`、`GET /v1/projects/{project}/topology`、`POST /v1/projects/{project}/topology/children`，以及 `/v1/topology/{child}*`。这些入口必须先用 standalone operator session 做 project membership 检查，再由 BFF 服务端注入可信 `x-principal-id` 转发给 Kernel；浏览器发送的同名 header 必须忽略。不得只给 child/global 或 SSE 路由注入 identity 而遗漏项目级 JSON 读取，否则页面会把 Kernel 的 `422 principal_required` 表现成桥接错误。普通 JSON 读取、分页读取和 SSE 必须采用同一 principal/membership 契约。
+
 ## 8. 存储与验收边界
 
 独立投影表为 `trajectory_roots`、`trajectory_nodes`、`trajectory_events`、`trajectory_cursors`、`trajectory_redactions`；它们可以由 Outbox/Session replay 重建，不得反向成为 Project 状态权威。canonical raw detail 只存加密/CAS reference 与 TTL，不存浏览器可直接读取的任意 JSON。

@@ -340,6 +340,7 @@ describe('GUIDE-01 kernel integration (projectProjection)', () => {
       const scoped = kernel.projectProjection(projectId)
       expect(scoped.project.status).toBe('SCOPED')
       expect(scoped.next_actions_v2[0]?.code).toBe('survey_run')
+      expect(scoped.next_actions_v2[0]?.route).toBe('chat')
       expect(scoped.next_actions_v2[0]?.required_by).toBe('agent')
       expect(scoped.next_actions).toEqual(['Run literature survey → corpus snapshot'])
 
@@ -353,6 +354,36 @@ describe('GUIDE-01 kernel integration (projectProjection)', () => {
       expect(resolve?.required).toEqual(['budget_headroom'])
       expect(blocked.next_actions_v2.some(a => a.code === 'gate_resolve')).toBe(true)
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('freezing the survey corpus advances SCOPED atomically and removes the stale survey_run action', () => {
+    const { kernel, dir } = freshKernel()
+    try {
+      const out = kernel.createProjectWithInitialGate({
+        name: 'survey-flow', workspace: '/research/survey-flow',
+        brief: { problem: 'object recognition', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
+        idempotency_key: 'survey-flow', request_hash: 'survey-flow',
+      })
+      const projectId = out.project.project_id
+      kernel.decideGate({ gate_id: out.gate.gate_id, actor: 'human-1', principal: { principal_id: 'human-1' }, decision: 'approved' })
+      const before = kernel.getProject(projectId)
+
+      kernel.snapshotCorpus({
+        project_id: projectId,
+        queries: [{ source: 'openalex', query: 'object recognition', run_at: '2026-08-12T00:00:00.000Z' }],
+        papers: [],
+        source_status: 'complete',
+      })
+
+      const projection = kernel.projectProjection(projectId)
+      expect(projection.project.status).toBe('SURVEYING')
+      expect(projection.project.revision).toBe(before.revision + 1)
+      expect(projection.next_actions_v2[0]?.code).toBe('idea_generate')
+      expect(projection.next_actions_v2.some(a => a.code === 'survey_run')).toBe(false)
+    } finally {
+      kernel.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })

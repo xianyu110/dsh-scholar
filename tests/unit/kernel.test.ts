@@ -3186,7 +3186,10 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
 
   it('isolated-subprocess 限制：secure kinds 经 profile 解析后 422 container_execution_required', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), execution: { runner_profile: 'isolated-subprocess' } })
+    const project = kernel.createProject({
+      name: 't', workspace: '/w', brief: makeBrief(),
+      execution: { runner_profile: 'isolated-subprocess', runner_target_id: 'target_local_process_v1' },
+    })
     const code = codeArtifact(kernel, project.project_id)
     for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
       expectKernelError(

@@ -4,7 +4,7 @@
 
 ## 1. 包与前置条件
 
-根包名为 @dsh-scholar/research-plugin，ESM，只导出 Cordis Agent 插件。它不导出 `./client`、不声明 `dshClient`、不向 DSH Web 注入 Scholar UI。宿主提供私有 `@deepseek-ai/cordis`、schemastery 以及 @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-local 等模块；这些 DeepSeek 包不假设存在于公共 npm registry。
+根包名为 @dsh-scholar/research-plugin，ESM，导出 Cordis Agent 插件，并通过 `./client` 与 `dsh.client` 提供一个窄范围的 DSH Web 配置半侧。该半侧只向 Settings → Plugin config 注入 Scholar 配置卡，不注入完整科研工作台。宿主提供私有 `@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-settings` 以及 Host/Client 相关 DSH 包；这些 DeepSeek 包不假设存在于公共 npm registry。
 
 开发环境通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。symlink/check-out 验证只用于开发反馈，不能计为宿主兼容性 PASS。
 
@@ -12,15 +12,16 @@
 
 ~~~typescript
 export const name = 'research-plugin'
-export const inject = ['tools', 'commands', 'subagents']
+export const inject = ['tools', 'commands', 'subagents', 'settings']
+export const Config = z.object({ /* DSH host-visible Schemastery schema */ })
 export async function apply(ctx, config) { /* effect-scoped registrations */ }
 ~~~
 
-所有工具、命令、事件、Skill provider 和 sidecar 生命周期都有 disposer。根插件不依赖 `httpServer`、slots、LocaleFace 或 ThemeFace。全局可变 toolContextRef 禁止；每个插件实例使用闭包保存 Client、RoleRegistry、Tenant 和 cache。
+所有工具、命令、事件、Skill provider、settings 注册和 sidecar 生命周期都有 disposer。`Config` 通过 Cordis Standard Schema 在 `apply` 前完成默认值和类型校验；Scholar 的严格适配层额外拒绝未知 root/kernel key，避免拼写错误静默进入运行时。Host 半侧不依赖 `httpServer`、slots、LocaleFace 或 ThemeFace；浏览器半侧只依赖 DSH Client runtime、locale、settings 与 plugin-config slot。全局可变 toolContextRef 禁止；每个插件实例使用闭包保存 Client、RoleRegistry、Tenant 和 cache。
 
 ## 3. 目标配置
 
-以下是 v2 生成目标；当前 v0.1 插件只识别 kernel.host/port/dataDir/token、defaultMode、unattended、models、cacheDir，差距记录在 hardening-v0.2-status.md。
+以下是 v2 生成目标。当前兼容层已把 v0.1 的 `kernel.host/port/dataDir/token`、`defaultMode`、`unattended`、`models`、`cacheDir` 暴露为 DSH 可发现的运行时 Schemastery schema：空配置生成 loopback/7412、gate-only、非 unattended 与空 model map；端口范围和类型在 `apply` 前校验，token 标记为 secret，未知字段拒绝。插件在 `research-plugin` namespace 下显式注册该 schema，并允许受信配置客户端访问脱敏视图；Settings → Plugin config 的卡片目前编辑 `defaultMode` 与 `unattended`，保存后在下一次 DSH 重启生效。`defaultMode` 已接入 `research_project create` 与 `/new`，显式调用参数仍优先；`full-auto` 继续要求注册 FixtureProfile。下列 skills/onboarding/trajectory/runner/config 字段仍是 v2 目标，差距记录在 hardening-v0.2-status.md。
 
 ~~~yaml
 kernel:
@@ -72,13 +73,15 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 
 ## 5. 命令
 
-命令直接注册为一级 slash command：`/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`。DSH Command Registry 没有 hidden descriptor，因此插件不注册聚合前缀别名；standalone Chat 可以在 parser 内短期兼容旧输入，但帮助、补全、descriptor、文档与新审计 provenance 一律使用直接命令。
+命令直接注册为一级 slash command：`/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`。DSH Command Registry 与 standalone parser 都不注册、不解析或兼容旧聚合前缀；帮助、补全、descriptor、文档与新审计 provenance 一律使用直接命令。
 
 `/new` 是 name-only Init 引导入口；Grill 回答与 PI `/confirm-brief` 目前属于 authenticated standalone Human Chat/BFF 面，不冒充 Agent command。Agent Intake tool 只操作 observation/question/proposal，不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 与 Brief confirm 只能由 Human PI 完成。
 
+自然语言 Chat 是 project-scoped turn adapter，不新增 `/research` 聚合 descriptor，也不改变上述 direct command Registry。DSH host 可用 agent/LLM loop 生成回答或 intent，standalone 可在无模型 adapter 时返回确定性阶段引导；两者都必须把 intent 映射到同一 canonical ResearchClient operation。模型不能直接调用 Gate Decision、Brief confirm、adopt 或 release decision，不能把 DSH session 状态当作 Kernel NextAction。
+
 命令只是 ResearchClient adapter，不重复业务逻辑。它使用 invocation.agent.id 解析 session link。错误输出 research: 加稳定错误摘要，不能泄漏内部路径、Token 或上游响应。帮助文本与 i18n 资源生成；宿主命令描述若在注册时固化语言，locale change 时重新注册或保持语言无关。
 
-本地开发可运行 `scripts/link-dsh-deps.sh` 解析当前 DSH checkout；脚本必须链接 `@deepseek-ai/*`（包括当前 DSH 的 `@deepseek-ai/cordis`）与 vendored `@cordisjs/*`/`cosmokit`，并且只替换因 DSH 包目录重组产生的 dangling symlink，不覆盖仍有效的链接或真实安装包。该链接只用于本地 typecheck，不能作为 DSH 兼容性 PASS；发布兼容性仍必须由 `tests/integration/run-dsh-private-registry-tests.sh` 在全新目录和全新 DSH_HOME 中安装固定私有 `@deepseek-ai/*` 包验证。
+本地开发可运行 `scripts/link-dsh-deps.sh` 解析当前 DSH checkout；脚本必须链接 `@deepseek-ai/*`（包括当前 DSH 的 `@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery`）与 vendored `@cordisjs/*`/`cosmokit`，并且只替换因 DSH 包目录重组产生的 dangling symlink，不覆盖仍有效的链接或真实安装包。该链接只用于本地 typecheck，不能作为 DSH 兼容性 PASS；发布兼容性仍必须由 `tests/integration/run-dsh-private-registry-tests.sh` 在全新目录和全新 DSH_HOME 中安装固定私有 `@deepseek-ai/*` 包验证。
 
 每个发布 Skill 的 YAML frontmatter 必须能被当前私有 `dsh-skill-local` 严格解析；含 `: ` 等 YAML 指示符的 description 必须引用。兼容测试必须从 `ctx.skills.list()` 公共接口核对四个 Skill，而不能读取已经移除的内部 provider collection。
 
@@ -136,7 +139,7 @@ Domain/venue 选择必须由项目 brief.domain 和 target_venue 产生确定性
 
 ## 12. Composition 与安装
 
-根 package 的 dsh.bundle.patch 只插入 Agent `research-plugin` 行，不包含 UI row 或 browser client metadata。standalone UI 独立管理自己的 loopback server、BFF、Token、dataDir 和 Kernel sidecar。同一 dataDir 不得同时被 DSH Agent sidecar 和 standalone sidecar 打开。
+根 package 的 dsh.bundle.patch 只插入 Agent `research-plugin` 行；根 manifest 另声明 `dsh.client` 与 `./client`，由 DSH Web 模块宿主加载配置卡。它不插入额外 UI row，也不把 standalone 业务页面挂进 DSH。standalone UI 独立管理自己的 loopback server、BFF、Token、dataDir 和 Kernel sidecar。同一 dataDir 不得同时被 DSH Agent sidecar 和 standalone sidecar 打开。
 
 静态 repository plugin 只承载 Skills/MCP，不能替代完整代码 bundle。安装验收必须使用全新 DSH_HOME 和远程或打包产物，不能只验证本地 symlink。
 

@@ -1,5 +1,5 @@
 /**
- * DSH Research OS — standalone GUI panel (browser half). Assembly entry:
+ * DSH Scholar — standalone GUI panel (browser half). Assembly entry:
  * apply() builds the shell, wires events, and dispatches to panel renderers
  * (panels/, chat/, sidebar/, terminal/, manuscript/, modals/). Rendering
  * lives inside a Shadow DOM; all interactive handlers attach via
@@ -12,12 +12,23 @@ import { chromeTabGroups, chromeTabs, chromeModelChoices } from './i18n/chrome'
 import { api } from './api'
 import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost } from './ui'
 import type { ProjectRow, Projection } from './types'
-import { navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups } from './nav'
+import { ALL_TAB_KEYS, isTabKey, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups, type TabKey } from './nav'
+import {
+  DOCK_BOTTOM_MAX,
+  DOCK_BOTTOM_MIN,
+  DOCK_RIGHT_MAX,
+  DOCK_RIGHT_MIN,
+  createDockStore,
+  effectiveDockPosition,
+  mainTabAfterDock,
+  updateDockLayout,
+  type DockPosition,
+} from './dock-layout'
 import {
   state, readTheme, writeTheme, radiusValue, textureValue, accentColor,
   tabSave, tabLoad, autoRefreshEnabled,
   notifLoad, favProjectsLoad,
-  chatLoad, historyLoad, chatSyncActive,
+  chatActivateProject, chatDeactivateProject, chatSyncActive,
 } from './state'
 import { renderSidebar, sidebarSortLoad } from './sidebar'
 import { renderChat } from './chat'
@@ -38,6 +49,13 @@ import { openCommandsModal, openShortcutsModal } from './modals/commands'
 import { openNotificationsModal, openSessionSearchModal, openProjectSwitcherModal } from './modals/search'
 import { openNewProjectModal } from './modals/project'
 import { openIntakeModal } from './modals/intake'
+import xtermCss from '@xterm/xterm/css/xterm.css?inline'
+import {
+  RenderCoordinator,
+  captureFocus,
+  restoreFocus,
+  shouldDeferBackgroundRefresh,
+} from './focus-preservation'
 
 export { setStandaloneBridge } from './api'
 /** Kernel reachability (dsh-web offline indicator). */
@@ -100,7 +118,7 @@ export function apply(): void {
   modalObserver.observe(root, { childList: true, subtree: true })
 
   const style = el('style')
-  style.textContent = `
+  style.textContent = `${xtermCss}
 
 :host { all: initial; }
 /* Design tokens — LIGHT is the default theme. */
@@ -238,9 +256,40 @@ export function apply(): void {
 .artifact-row:hover { background:var(--bg-hover); }
 .artifact-row:last-child { border-bottom:0; }
 .artifact-kind { font:600 9.5px/1.6 ui-monospace,Menlo,monospace; color:var(--text-2); background:var(--bg-3); border:1px solid var(--border); border-radius:5px; padding:1px 6px; flex-shrink:0; }
-/* dsh-web-style layout: left workspace sidebar + main column */
+/* dsh-web-style layout: left project sidebar + a main/dock work area. */
 .panel.row { flex-direction:row; align-items:stretch; gap:0; }
+.workspace-shell { flex:1; display:flex; min-width:0; min-height:0; height:100%; overflow:hidden; }
+.workspace-shell[data-dock-position="right"] { flex-direction:row; }
+.workspace-shell[data-dock-position="bottom"] { flex-direction:column; }
 .main { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; height:100%; overflow:hidden; }
+.dock-surface { flex:none; display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden; background:var(--bg); }
+.workspace-shell[data-dock-position="right"] .dock-surface { width:min(var(--dock-right-size,420px),calc(100% - 280px)); border-left:1px solid var(--border); }
+.workspace-shell[data-dock-position="bottom"] .dock-surface { height:min(var(--dock-bottom-size,320px),calc(100% - 180px)); border-top:1px solid var(--border); }
+.dock-surface[hidden],.dock-resizer[hidden] { display:none; }
+.dock-resizer { flex:none; position:relative; z-index:8; background:transparent; touch-action:none; }
+.workspace-shell[data-dock-position="right"] .dock-resizer { width:6px; margin-left:-3px; margin-right:-3px; cursor:col-resize; }
+.workspace-shell[data-dock-position="bottom"] .dock-resizer { height:6px; margin-top:-3px; margin-bottom:-3px; cursor:row-resize; }
+.dock-resizer::after { content:''; position:absolute; border-radius:99px; background:var(--border-strong); opacity:0; transition:opacity .12s; }
+.workspace-shell[data-dock-position="right"] .dock-resizer::after { width:2px; inset:6px 2px; }
+.workspace-shell[data-dock-position="bottom"] .dock-resizer::after { height:2px; inset:2px 6px; }
+.dock-resizer:hover::after,.dock-resizer:focus-visible::after,.dock-resizer.dragging::after { opacity:1; background:var(--accent); }
+.dock-header { flex:none; min-height:42px; display:flex; align-items:center; gap:6px; padding:6px 8px; background:var(--bg-3); border-bottom:1px solid var(--border-2); }
+.dock-title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); font:600 12px/18px system-ui,sans-serif; }
+.dock-panel-picker { min-width:0; flex:1; height:30px; border:1px solid var(--border); border-radius:8px; padding:2px 26px 2px 8px; background:var(--bg-input); color:var(--text); font:500 11px/18px system-ui,sans-serif; }
+.dock-header-actions { flex:none; display:flex; align-items:center; gap:2px; }
+.dock-action { min-width:28px; min-height:28px; padding:2px 6px; }
+.dock-action[aria-pressed="true"] { color:var(--accent-text); background:var(--accent-soft); }
+.dock-body { flex:1; min-width:0; min-height:0; overflow:auto; padding:12px; scrollbar-gutter:stable; }
+.dock-body .project-title { position:relative; top:auto; margin:-12px -12px 12px; padding:8px 12px; }
+.dock-body .view-intro { margin-bottom:12px; }
+.dock-body .view-description,.dock-body .view-group { display:none; }
+.dock-body.chat-active { display:flex; flex-direction:column; overflow:hidden; padding-bottom:0; }
+.dock-body.chat-active > .project-title,.dock-body.chat-active > .view-intro { flex:none; }
+.dock-body.chat-active > .chat-shell { flex:1; height:auto; min-height:0; }
+.dock-body.chat-active > .stamp { display:none; }
+.dock-chat-dock { padding:8px 12px 10px; }
+.view-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:5px; }
+.view-actions .hbtn { white-space:nowrap; }
 .sidebar { width:230px; flex-shrink:0; display:flex; flex-direction:column; background:var(--bg-3); border-right:1px solid var(--border); overflow:hidden; }
 .sidebar-head { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border); }
 .sidebar-title { font:700 11px/1 system-ui,sans-serif; color:var(--text-2); letter-spacing:.8px; text-transform:uppercase; }
@@ -455,6 +504,9 @@ export function apply(): void {
   .welcome { min-height:calc(100vh - 120px); padding:32px 10px; }
   .welcome-steps { flex-direction:column; }
   .overlay { padding:14px; }
+  .dock-title { display:none; }
+  .dock-body { padding:10px; }
+  .dock-body .project-title { margin:-10px -10px 10px; padding:8px 10px; }
 }
 /* UI-SIMPLE-01: Start 三卡 (acceptance §8 ui-start) */
 .start-screen { min-height:calc(100vh - 132px); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:40px 24px; text-align:center; }
@@ -497,14 +549,28 @@ export function apply(): void {
   const panel = el('div', 'panel')
   root.appendChild(panel)
 
-  // The standalone workspace uses a left project sidebar and a main column.
+  // The standalone workspace keeps the project navigator on the left. Every
+  // research page can additionally occupy the presentation-only panel dock.
   const main = el('div', 'main')
   const sidebar = el('div', 'sidebar')
+  const workspaceShell = el('div', 'workspace-shell')
   panel.classList.add('row')
   sidebar.setAttribute('role', 'navigation')
   sidebar.setAttribute('aria-label', t('shell', 'shell.sidebar.ariaLabel'))
   panel.appendChild(sidebar)
-  panel.appendChild(main)
+  panel.appendChild(workspaceShell)
+  workspaceShell.appendChild(main)
+  const dockStore = createDockStore({
+    getItem: key => localStorage.getItem(key),
+    setItem: (key, value) => { localStorage.setItem(key, value) },
+  })
+  let dockLayout = dockStore.load()
+  const deactivatePanelTransport = (key: TabKey): void => {
+    if (key === 'terminal' && state.terminalStatus !== 'idle') terminalDisconnect()
+    else if (key === 'workspace') stopWorkspaceWatch()
+    else if (key === 'trajectory') stopTrajectoryStream()
+    else if (key === 'pty') ptyPanelDetachAll()
+  }
 
   // ── header ──
   const header = el('div', 'header')
@@ -642,6 +708,14 @@ export function apply(): void {
     try { history.replaceState(null, '', `#tab=${tab}`) } catch { /* sandboxed iframe */ }
   }
   const activateTab = (key: string): void => {
+    if (!isTabKey(key)) return
+    // A page has one live renderer. Opening its full-page route first removes
+    // the same page from the dock, avoiding duplicate Chat/PTY/TeX state.
+    if (dockLayout.openPanel === key) {
+      deactivatePanelTransport(key)
+      dockLayout = updateDockLayout(dockLayout, { type: 'close' })
+      dockStore.save(dockLayout)
+    }
     state.activeTab = key
     tabSave()
     syncHash(key)
@@ -719,6 +793,7 @@ export function apply(): void {
   // ── body + picker ──
   const body = el('div', 'body')
   body.id = 'panel-body'
+  body.tabIndex = -1
   body.setAttribute('role', 'region')
   body.setAttribute('aria-label', t('shell', 'shell.panelBody.aria'))
   main.appendChild(body)
@@ -727,6 +802,176 @@ export function apply(): void {
   const chatDock = el('div', 'chat-dock')
   chatDock.hidden = true
   main.appendChild(chatDock)
+
+  // ── UI-DOCK-01: one live, movable sidebar panel (right or bottom) ──
+  // The shell owns placement and lifecycle; page renderers only receive their
+  // content host. Moving the surface changes flex geometry without remounting
+  // the page, so live streams, editor selection and draft DOM stay intact.
+  const dockResize = el('div', 'dock-resizer')
+  dockResize.tabIndex = 0
+  dockResize.setAttribute('role', 'separator')
+  const dockSurface = el('aside', 'dock-surface')
+  dockSurface.hidden = true
+  dockSurface.setAttribute('role', 'complementary')
+  const dockHeader = el('div', 'dock-header')
+  const dockTitle = el('span', 'dock-title')
+  const dockPicker = el('select', 'dock-panel-picker')
+  const dockHeaderActions = el('div', 'dock-header-actions')
+  const dockRight = el('button', 'hbtn dock-action', '⇥')
+  const dockBottom = el('button', 'hbtn dock-action', '⇓')
+  const dockMain = el('button', 'hbtn dock-action', '↗')
+  const dockClose = el('button', 'hbtn dock-action', '×')
+  dockHeaderActions.append(dockRight, dockBottom, dockMain, dockClose)
+  dockHeader.append(dockTitle, dockPicker, dockHeaderActions)
+  const dockBody = el('div', 'body dock-body')
+  dockBody.id = 'dock-panel-body'
+  dockBody.tabIndex = -1
+  dockBody.setAttribute('role', 'region')
+  const dockChatDock = el('div', 'chat-dock dock-chat-dock')
+  dockChatDock.hidden = true
+  dockSurface.append(dockHeader, dockBody, dockChatDock)
+  workspaceShell.append(dockResize, dockSurface)
+
+  const saveDock = (): void => { dockStore.save(dockLayout) }
+  const currentDockPosition = (): DockPosition => effectiveDockPosition(dockLayout, window.innerWidth)
+  const applyDockGeometry = (): void => {
+    const visible = dockLayout.openPanel !== null && state.projectId !== undefined
+    const position = currentDockPosition()
+    workspaceShell.dataset.dockPosition = position
+    workspaceShell.style.setProperty('--dock-right-size', `${dockLayout.rightSize}px`)
+    workspaceShell.style.setProperty('--dock-bottom-size', `${dockLayout.bottomSize}px`)
+    dockSurface.hidden = !visible
+    dockResize.hidden = !visible
+    dockSurface.dataset.position = position
+    dockSurface.dataset.panel = dockLayout.openPanel ?? ''
+    dockRight.setAttribute('aria-pressed', String(dockLayout.position === 'right'))
+    dockBottom.setAttribute('aria-pressed', String(dockLayout.position === 'bottom'))
+    dockResize.setAttribute('aria-orientation', position === 'right' ? 'vertical' : 'horizontal')
+    const size = position === 'right' ? dockLayout.rightSize : dockLayout.bottomSize
+    dockResize.setAttribute('aria-valuenow', String(size))
+    dockResize.setAttribute('aria-valuemin', String(position === 'right' ? DOCK_RIGHT_MIN : DOCK_BOTTOM_MIN))
+    dockResize.setAttribute('aria-valuemax', String(position === 'right' ? DOCK_RIGHT_MAX : DOCK_BOTTOM_MAX))
+    if (dockLayout.openPanel !== null) dockPicker.value = dockLayout.openPanel
+  }
+  const setDockPosition = (position: DockPosition): void => {
+    dockLayout = updateDockLayout(dockLayout, { type: 'move', position })
+    saveDock()
+    applyDockGeometry()
+  }
+  const openDock = (panelKey: TabKey, position?: DockPosition): void => {
+    const previousDock = dockLayout.openPanel
+    if (previousDock !== null && previousDock !== panelKey) deactivatePanelTransport(previousDock)
+    if (state.activeTab === panelKey) deactivatePanelTransport(panelKey)
+    if (position !== undefined) dockLayout = updateDockLayout(dockLayout, { type: 'move', position })
+    dockLayout = updateDockLayout(dockLayout, { type: 'open', panel: panelKey })
+    const nextMain = mainTabAfterDock(state.activeTab as TabKey, panelKey)
+    if (nextMain !== state.activeTab) {
+      state.activeTab = nextMain
+      tabSave()
+      syncHash(nextMain)
+    }
+    saveDock()
+    applyDockGeometry()
+    void render().then(() => dockBody.focus())
+  }
+  const closeDock = (focusMain = true): void => {
+    if (dockLayout.openPanel === null) return
+    deactivatePanelTransport(dockLayout.openPanel)
+    dockLayout = updateDockLayout(dockLayout, { type: 'close' })
+    saveDock()
+    applyDockGeometry()
+    void render().then(() => { if (focusMain) body.focus() })
+  }
+  const moveDockToMain = (): void => {
+    const panelKey = dockLayout.openPanel
+    if (panelKey === null) return
+    deactivatePanelTransport(panelKey)
+    dockLayout = updateDockLayout(dockLayout, { type: 'close' })
+    saveDock()
+    state.activeTab = panelKey
+    tabSave()
+    syncHash(panelKey)
+    applyDockGeometry()
+    void render().then(() => body.focus())
+  }
+  const paintDockChrome = (): void => {
+    const current = dockLayout.openPanel
+    const currentLabel = chromeTabs().find(item => item.key === current)?.label ?? ''
+    dockTitle.textContent = t('shell', 'shell.dock.title')
+    dockSurface.setAttribute('aria-label', t('shell', 'shell.dock.region', { panel: currentLabel }))
+    dockBody.setAttribute('aria-label', t('shell', 'shell.dock.content', { panel: currentLabel }))
+    dockPicker.setAttribute('aria-label', t('shell', 'shell.dock.panelPicker'))
+    dockPicker.title = t('shell', 'shell.dock.panelPicker')
+    const selected = dockPicker.value || current || ''
+    dockPicker.replaceChildren()
+    for (const key of ALL_TAB_KEYS) {
+      const def = chromeTabs().find(item => item.key === key)
+      const option = el('option', '', def?.label ?? key)
+      option.value = key
+      dockPicker.appendChild(option)
+    }
+    dockPicker.value = selected
+    dockRight.title = t('shell', 'shell.dock.moveRight')
+    dockRight.setAttribute('aria-label', t('shell', 'shell.dock.moveRight'))
+    dockBottom.title = t('shell', 'shell.dock.moveBottom')
+    dockBottom.setAttribute('aria-label', t('shell', 'shell.dock.moveBottom'))
+    dockMain.title = t('shell', 'shell.dock.openMain')
+    dockMain.setAttribute('aria-label', t('shell', 'shell.dock.openMain'))
+    dockClose.title = t('shell', 'shell.dock.close')
+    dockClose.setAttribute('aria-label', t('shell', 'shell.dock.close'))
+    dockResize.setAttribute('aria-label', t('shell', 'shell.dock.resize'))
+    applyDockGeometry()
+  }
+  dockPicker.onchange = () => {
+    if (isTabKey(dockPicker.value)) openDock(dockPicker.value)
+  }
+  dockRight.onclick = () => setDockPosition('right')
+  dockBottom.onclick = () => setDockPosition('bottom')
+  dockMain.onclick = () => moveDockToMain()
+  dockClose.onclick = () => closeDock()
+  dockResize.onkeydown = (event) => {
+    const position = currentDockPosition()
+    const current = position === 'right' ? dockLayout.rightSize : dockLayout.bottomSize
+    const min = position === 'right' ? DOCK_RIGHT_MIN : DOCK_BOTTOM_MIN
+    const max = position === 'right' ? DOCK_RIGHT_MAX : DOCK_BOTTOM_MAX
+    let next: number | null = null
+    if (event.key === 'Home') next = min
+    else if (event.key === 'End') next = max
+    else if (position === 'right' && event.key === 'ArrowLeft') next = current + 24
+    else if (position === 'right' && event.key === 'ArrowRight') next = current - 24
+    else if (position === 'bottom' && event.key === 'ArrowUp') next = current + 24
+    else if (position === 'bottom' && event.key === 'ArrowDown') next = current - 24
+    if (next === null) return
+    event.preventDefault()
+    dockLayout = updateDockLayout(dockLayout, { type: 'resize', position, size: next })
+    saveDock()
+    applyDockGeometry()
+  }
+  dockResize.onpointerdown = (event) => {
+    if (dockLayout.openPanel === null) return
+    event.preventDefault()
+    const position = currentDockPosition()
+    const startPoint = position === 'right' ? event.clientX : event.clientY
+    const startSize = position === 'right' ? dockLayout.rightSize : dockLayout.bottomSize
+    dockResize.classList.add('dragging')
+    const move = (nextEvent: PointerEvent): void => {
+      const point = position === 'right' ? nextEvent.clientX : nextEvent.clientY
+      dockLayout = updateDockLayout(dockLayout, { type: 'resize', position, size: startSize - (point - startPoint) })
+      applyDockGeometry()
+    }
+    const up = (): void => {
+      dockResize.classList.remove('dragging')
+      saveDock()
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+  }
+  paintDockChrome()
+
   const styleTabs = (): void => {
     body.classList.toggle('chat-active', state.activeTab === 'chat')
     const groups = chromeTabGroups()
@@ -778,7 +1023,89 @@ export function apply(): void {
     openIntakeModal(root)
   }
 
-  const render = async (): Promise<void> => {
+  type LoadedProjection = Projection & { project: NonNullable<Projection['project']> }
+
+  /** The registry adapter seam shared by the full-page main slot and Dock. */
+  const renderPage = async (
+    targetBody: HTMLElement,
+    targetChatDock: HTMLElement,
+    key: TabKey,
+    projection: LoadedProjection,
+    projectId: string,
+    docked: boolean,
+  ): Promise<void> => {
+    // A live xterm owns cursor, alternate-screen and IME state. Periodic shell
+    // refreshes update it in place instead of replacing its DOM subtree.
+    if (key === 'pty' && targetBody.dataset.panel === 'pty') {
+      renderPty(targetBody, projection, projectId)
+      return
+    }
+    targetBody.replaceChildren()
+    targetBody.dataset.panel = key
+    targetBody.classList.toggle('chat-active', key === 'chat')
+    if (key !== 'chat') {
+      targetChatDock.hidden = true
+      targetChatDock.replaceChildren()
+    }
+
+    const title = el('div', 'project-title')
+    const pname = el('span', 'pname', projection.project.name ?? projectId)
+    const projectHeading = el('div', 'project-heading')
+    projectHeading.append(el('span', 'project-kicker', t('shell', 'shell.brand.name')), pname)
+    const pid = el('span', 'pid', t('shell', 'shell.projectIdLine', { id: projectId, rev: String(projection.project.revision ?? 0) }))
+    pid.style.cssText += ';cursor:pointer;border-radius:6px;padding:1px 4px'
+    pid.title = t('common', 'common.clickCopyProjectId')
+    pid.onclick = () => { copyText(projectId) }
+    title.append(projectHeading, pill(projection.project.status), pid)
+    targetBody.appendChild(title)
+
+    const activeDef = chromeTabs().find(def => def.key === key)
+    const activeGroup = chromeTabGroups().find(group => group.tabs.some(def => def.key === key))
+    if (activeDef !== undefined && activeGroup !== undefined) {
+      const intro = el('div', 'view-intro')
+      const copy = el('div', 'view-copy')
+      copy.append(el('h2', 'view-title', activeDef.label), el('div', 'view-description', activeDef.description))
+      const actions = el('div', 'view-actions')
+      if (!docked) {
+        const right = el('button', 'hbtn', t('shell', 'shell.dock.actionRight'))
+        right.title = t('shell', 'shell.dock.actionRightTitle', { panel: activeDef.label })
+        right.setAttribute('aria-label', right.title)
+        right.onclick = () => openDock(key, 'right')
+        const bottom = el('button', 'hbtn', t('shell', 'shell.dock.actionBottom'))
+        bottom.title = t('shell', 'shell.dock.actionBottomTitle', { panel: activeDef.label })
+        bottom.setAttribute('aria-label', bottom.title)
+        bottom.onclick = () => openDock(key, 'bottom')
+        actions.append(right, bottom)
+      }
+      actions.appendChild(el('span', 'view-group', activeGroup.label))
+      intro.append(copy, actions)
+      targetBody.appendChild(intro)
+    }
+
+    switch (key) {
+      case 'chat': await renderChat(targetBody, targetChatDock, projectId, modelSelect, docked ? 'dock' : 'main'); break
+      case 'phase': await renderPhase(targetBody, projection, projectId); break
+      case 'gates': await renderGates(targetBody, projectId); break
+      case 'runs': renderRuns(targetBody, projection); break
+      case 'terminal': renderTerminal(targetBody, projection, projectId); break
+      case 'artifacts': await renderArtifacts(targetBody, projectId); break
+      case 'evidence': await renderEvidence(targetBody, projectId); break
+      case 'budget': renderBudget(targetBody, projection); break
+      case 'manuscript': await renderManuscript(targetBody, projection, projectId); break
+      case 'trajectory': await renderTrajectory(targetBody, projectId); break
+      case 'topology': await renderTopology(targetBody, projectId); break
+      case 'workspace': await renderWorkspace(targetBody, projectId); break
+      case 'pty': renderPty(targetBody, projection, projectId); break
+      default: {
+        const unreachable: never = key
+        return unreachable
+      }
+    }
+    const stampText = `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${state.lastError !== undefined ? ` · ⚠ ${state.lastError}` : ''}`
+    targetBody.appendChild(el('div', 'stamp', stampText))
+  }
+
+  const renderOnce = async (): Promise<void> => {
     styleTabs()
     // Keep the live chat dock mounted during chat refreshes. Hiding it before
     // the async project requests complete makes the body gain its height for a
@@ -786,6 +1113,10 @@ export function apply(): void {
     if (state.activeTab !== 'chat') {
       chatDock.hidden = true
       chatDock.replaceChildren()
+    }
+    if (dockLayout.openPanel !== 'chat') {
+      dockChatDock.hidden = true
+      dockChatDock.replaceChildren()
     }
     // dsh-web skeleton: placeholders while the first paint loads.
     if (booting) {
@@ -832,7 +1163,6 @@ export function apply(): void {
     // screen (Init / Resume / Import) stays until the user EXPLICITLY picks
     // a project (startScreenVisible in nav.ts is the pure contract).
     const target = state.projectId
-    type LoadedProjection = Projection & { project: NonNullable<Projection['project']> }
     let projection: LoadedProjection | null = null
     if (target !== undefined) {
       const fetched = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
@@ -850,9 +1180,20 @@ export function apply(): void {
       }
     }
     if (projection !== null && booting) booting = false
+    // Capture after network awaits and immediately before structural paints.
+    // ShadowRoot.activeElement identifies the real editor inside this UI;
+    // document.activeElement would only identify the outer host.
+    const focusSnapshot = captureFocus(root)
+    try {
     syncTitle(projection?.project?.name)
+    if (state.projectId === undefined) chatDeactivateProject()
+    else chatActivateProject(state.projectId)
     renderSidebar(sidebar, projects, state.projectId, (id) => { state.projectId = id; void render() }, sidebarToggle)
     if (state.projectId === undefined) {
+      deactivatePanelTransport('terminal')
+      deactivatePanelTransport('workspace')
+      deactivatePanelTransport('trajectory')
+      deactivatePanelTransport('pty')
       syncTitle(undefined)
       // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start, §5 P1 ONBOARD-01):
       // the first screen offers exactly three primary actions — 新建研究 /
@@ -880,74 +1221,69 @@ export function apply(): void {
       start.appendChild(cards)
       chatDock.hidden = true
       chatDock.replaceChildren()
+      dockBody.replaceChildren()
+      dockChatDock.replaceChildren()
+      applyDockGeometry()
       body.replaceChildren(start)
       return
     }
     const activeTarget = state.projectId
     if (activeTarget === undefined) return
     if (projection === null) {
+      deactivatePanelTransport('terminal')
+      deactivatePanelTransport('workspace')
+      deactivatePanelTransport('trajectory')
+      deactivatePanelTransport('pty')
       chatDock.hidden = true
       chatDock.replaceChildren()
+      dockBody.replaceChildren()
+      dockChatDock.replaceChildren()
+      applyDockGeometry()
       body.replaceChildren(el('div', 'error-banner', t('shell', 'shell.kernelUnreachableProject', { project: activeTarget })))
       return
     }
+    if (dockLayout.openPanel === state.activeTab) {
+      state.activeTab = mainTabAfterDock(state.activeTab as TabKey, dockLayout.openPanel)
+      tabSave()
+      syncHash(state.activeTab)
+    }
+    const dockedPanel = dockLayout.openPanel
+    const panelVisible = (key: TabKey): boolean => state.activeTab === key || dockedPanel === key
     // dsh-web terminal hygiene: leaving the Terminal tab closes the stream
     // (state stays for the return; a new visit reconnects from lastSeq).
-    if (state.activeTab !== 'terminal' && state.terminalStatus !== 'idle') terminalDisconnect()
+    if (!panelVisible('terminal') && state.terminalStatus !== 'idle') terminalDisconnect()
     // WORK-01: leaving the Workspace tab stops its watch stream + poll
     // fallback (the panel state survives; the next visit restarts it).
-    if (state.activeTab !== 'workspace') stopWorkspaceWatch()
+    if (!panelVisible('workspace')) stopWorkspaceWatch()
     // TRAJ-01: leaving the Trajectory tab closes both lane streams (SSE +
     // pagination fallback) — same hygiene as stopWorkspaceWatch.
-    if (state.activeTab !== 'trajectory') stopTrajectoryStream()
+    if (!panelVisible('trajectory')) stopTrajectoryStream()
     // PTY-01: leaving the PTY tab detaches the session wire (the process
     // keeps running server-side; the next visit reconnects via after_seq).
-    if (state.activeTab !== 'pty') ptyPanelDetachAll()
-    body.replaceChildren()
-
-    const title = el('div', 'project-title')
-    const pname = el('span', 'pname', projection.project.name ?? state.projectId)
-    const projectHeading = el('div', 'project-heading')
-    projectHeading.append(el('span', 'project-kicker', t('shell', 'shell.brand.name')), pname)
-    // dsh-web affordance: click the project id to copy it.
-    const pid = el('span', 'pid', t('shell', 'shell.projectIdLine', { id: state.projectId ?? '', rev: String(projection.project.revision ?? 0) }))
-    pid.style.cssText += ';cursor:pointer;border-radius:6px;padding:1px 4px'
-    pid.title = t('common', 'common.clickCopyProjectId')
-    pid.onclick = () => { if (state.projectId !== undefined) copyText(state.projectId) }
-    const statusPill = pill(projection.project.status)
-    title.append(projectHeading, statusPill, pid)
-    body.appendChild(title)
-
-    const activeDef = chromeTabs().find(def => def.key === state.activeTab)
-    const activeGroup = chromeTabGroups().find(group => group.tabs.some(def => def.key === state.activeTab))
-    if (activeDef !== undefined && activeGroup !== undefined) {
-      const intro = el('div', 'view-intro')
-      const copy = el('div', 'view-copy')
-      copy.append(el('h2', 'view-title', activeDef.label), el('div', 'view-description', activeDef.description))
-      intro.append(copy, el('span', 'view-group', activeGroup.label))
-      body.appendChild(intro)
+    if (!panelVisible('pty')) ptyPanelDetachAll()
+    await renderPage(body, chatDock, state.activeTab as TabKey, projection, activeTarget, false)
+    applyDockGeometry()
+    paintDockChrome()
+    if (dockedPanel !== null) {
+      await renderPage(dockBody, dockChatDock, dockedPanel, projection, activeTarget, true)
+    } else {
+      dockBody.replaceChildren()
+      dockChatDock.hidden = true
+      dockChatDock.replaceChildren()
     }
-
-    switch (state.activeTab) {
-      case 'chat': await renderChat(body, chatDock, activeTarget, modelSelect); break
-      case 'phase': await renderPhase(body, projection, activeTarget); break
-      case 'gates': await renderGates(body, activeTarget); break
-      case 'runs': renderRuns(body, projection); break
-      case 'terminal': renderTerminal(body, projection, activeTarget); break
-      case 'artifacts': await renderArtifacts(body, activeTarget); break
-      case 'evidence': await renderEvidence(body, activeTarget); break
-      case 'budget': renderBudget(body, projection); break
-      case 'manuscript': renderManuscript(body, projection, activeTarget); break
-      case 'trajectory': await renderTrajectory(body, activeTarget); break
-      case 'topology': await renderTopology(body, activeTarget); break
-      case 'workspace': await renderWorkspace(body, activeTarget); break
-      case 'pty': renderPty(body, projection, activeTarget); break
-    }
-    const stampText = `${t('common', 'common.updatedAt')} ${new Date().toLocaleTimeString(getLocale())}${state.lastError !== undefined ? ` · ⚠ ${state.lastError}` : ''}`
-    const stamp = el('div', 'stamp', stampText)
-    body.appendChild(stamp)
     paintBell()
+    } finally {
+      restoreFocus(root, focusSnapshot)
+    }
   }
+
+  const renderCoordinator = new RenderCoordinator(renderOnce, () => {
+    const active = root.activeElement
+    return active instanceof HTMLElement
+      && shouldDeferBackgroundRefresh(active.tagName, active.isContentEditable)
+  })
+  const render = (): Promise<void> => renderCoordinator.request('interactive')
+  const renderInBackground = (): Promise<void> => renderCoordinator.request('background')
 
   refresh.onclick = () => { void render() }
   // dsh-web notification dot: unread count on the bell (99+ capped).
@@ -988,6 +1324,7 @@ export function apply(): void {
     paintBell()
     paintModelSelect()
     styleTabs()
+    paintDockChrome()
     tabs.setAttribute('aria-label', t('shell', 'shell.tabs.ariaLabel'))
     syncTitle(lastProjectName)
   }
@@ -1010,17 +1347,17 @@ export function apply(): void {
     try { link = parseDeepLink(location.hash) } catch { /* sandboxed */ }
     if (link === null) return
     if (link.kind === 'tab') {
-      state.activeTab = link.target
-      tabSave()
-      if (renderNow) void render()
+      if (renderNow) activateTab(link.target)
+      else if (isTabKey(link.target)) {
+        state.activeTab = link.target
+        tabSave()
+      }
     } else if (link.target === 'settings') {
       openSettingsModal(root)
     }
   }
   const onHashChange = (): void => applyDeepLink(true)
   window.addEventListener('hashchange', onHashChange)
-  chatLoad()
-  historyLoad()
   tabLoad()
   applyDeepLink(false)
   notifLoad()
@@ -1033,14 +1370,19 @@ export function apply(): void {
       // dsh-web behaviour: pause background refreshes while the tab is
       // hidden (CPU/battery friendly); one refresh fires on return.
       if (document.hidden) return
-      void render()
+      void renderInBackground()
     }, 8000)
   }
   state.refreshTimer = state.startRefreshTimer()
+  root.addEventListener('focusout', () => {
+    // A focus move inside the same form settles after this event. Flush at
+    // most one coalesced poll only when no editable control remains focused.
+    queueMicrotask(() => { void renderCoordinator.releaseDeferredBackgroundRefresh() })
+  })
   // dsh-web behaviour: catch up immediately when the tab becomes visible
   // again (the interval above skips while hidden).
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) void render()
+    if (!document.hidden) void renderInBackground()
   })
   // dsh-web global shortcuts: Cmd/Ctrl+K opens the command palette (when
   // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme;
@@ -1048,11 +1390,12 @@ export function apply(): void {
   const onKey = (event: KeyboardEvent): void => {
     const target = event.target as HTMLElement | null
     const typing = target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    const chatVisible = state.activeTab === 'chat' || dockLayout.openPanel === 'chat'
     if (event.metaKey || event.ctrlKey) {
       if (event.key.toLowerCase() === 'k' && !typing) {
         event.preventDefault()
         openCommandsModal(root)
-      } else if (event.key.toLowerCase() === 'f' && event.shiftKey && !typing && state.activeTab === 'chat') {
+      } else if (event.key.toLowerCase() === 'f' && event.shiftKey && !typing && chatVisible) {
         // dsh-web cross-session search: Ctrl/Cmd+Shift+F.
         event.preventDefault()
         openSessionSearchModal(root)
@@ -1066,7 +1409,7 @@ export function apply(): void {
         writeTheme(host.dataset.theme)
         paintTheme()
         applyAccent()
-      } else if (/^[1-9]$/.test(event.key) && !typing && state.activeTab === 'chat') {
+      } else if (/^[1-9]$/.test(event.key) && !typing && chatVisible) {
         // dsh-web session navigation: Ctrl+1..9 selects the Nth session.
         event.preventDefault()
         const idx = Number(event.key) - 1
@@ -1077,7 +1420,7 @@ export function apply(): void {
           chatSyncActive()
           state.rerender()
         }
-      } else if (event.key === 'Tab' && !typing && state.activeTab === 'chat' && state.chatSessions.length > 1) {
+      } else if (event.key === 'Tab' && !typing && chatVisible && state.chatSessions.length > 1) {
         // dsh-web session navigation: Ctrl+Tab cycles chat sessions.
         event.preventDefault()
         const idx = state.chatSessions.findIndex(s => s.id === state.chatActiveId)
@@ -1088,7 +1431,7 @@ export function apply(): void {
           chatSyncActive()
           state.rerender()
         }
-      } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !typing && state.activeTab === 'chat' && state.chatMessages.length > 0) {
+      } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !typing && chatVisible && state.chatMessages.length > 0) {
         // dsh-web keyboard navigation: Ctrl+ArrowUp/Down walks messages
         // and selects them into the details panel.
         event.preventDefault()
@@ -1102,7 +1445,7 @@ export function apply(): void {
       return
     }
     // dsh-web transcript nav: Home/End select the first/last message.
-    if ((event.key === 'Home' || event.key === 'End') && !typing && state.activeTab === 'chat' && state.chatMessages.length > 0) {
+    if ((event.key === 'Home' || event.key === 'End') && !typing && chatVisible && state.chatMessages.length > 0) {
       event.preventDefault()
       state.chatDetailIndex = event.key === 'Home' ? 0 : state.chatMessages.length - 1
       state.rerender()
@@ -1118,13 +1461,11 @@ export function apply(): void {
     // the chat composer with a leading slash.
     if (event.key === '/' && !typing) {
       event.preventDefault()
-      state.activeTab = 'chat'
-      tabSave()
       state.chatDraft = '/'
-      state.rerender()
+      activateTab('chat')
       // Focus the composer once the chat tab has rendered.
       setTimeout(() => {
-        const ta = root.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
+        const ta = root.querySelector('.chat-composer-input') as HTMLTextAreaElement | null
         ta?.focus()
       }, 120)
     }
@@ -1173,6 +1514,7 @@ export function apply(): void {
       sidebarToggle.textContent = '›'
       sidebarToggle.setAttribute('aria-expanded', 'false')
     }
+    applyDockGeometry()
   }
   if (sidebarCollapsed && sidebar !== null) {
     sidebar.classList.add('collapsed')

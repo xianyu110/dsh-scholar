@@ -6,7 +6,7 @@
  * Import-safe under vitest (no DOM at module scope).
  */
 import { describe, expect, it } from 'vitest'
-import { chatInputKind, chatJsonArg, chatRunKind, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
+import { chatInputKind, chatJsonArg, chatRunKind, chatRunnerTargetId, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
 import { CHAT_COMMANDS } from '../../packages/dsh-research-ui/src/client/modals/commands'
 
 describe('name-only Init and Grill prose routing', () => {
@@ -16,7 +16,7 @@ describe('name-only Init and Grill prose routing', () => {
 
   it('routes slash input to commands and ordinary prose to the active Grill', () => {
     expect(chatInputKind('/status')).toEqual({ kind: 'command', line: '/status' })
-    expect(chatInputKind('Public datasets only')).toEqual({ kind: 'grill-answer', text: 'Public datasets only' })
+    expect(chatInputKind('Public datasets only')).toEqual({ kind: 'prose', text: 'Public datasets only' })
   })
 
   it('advertises only direct command descriptors', async () => {
@@ -61,5 +61,14 @@ describe('chatRunKind (USAGE_GUIDE §6: /run <kind> <json>)', () => {
   it('falls back when neither positional nor JSON kind is present', () => {
     expect(chatRunKind('', null, 'echo')).toBe('echo')
     expect(chatRunKind('{"command":["echo","hi"]}', { command: ['echo', 'hi'] }, 'echo')).toBe('echo')
+  })
+})
+
+describe('chat runner target override', () => {
+  it('accepts only a non-empty opaque runner_target_id for top-level Job submission', () => {
+    expect(chatRunnerTargetId({ runner_target_id: 'target_remote_lab_a' })).toBe('target_remote_lab_a')
+    expect(chatRunnerTargetId({ runner_target_id: '' })).toBeUndefined()
+    expect(chatRunnerTargetId({ runner_target_id: 22 })).toBeUndefined()
+    expect(chatRunnerTargetId(null)).toBeUndefined()
   })
 })

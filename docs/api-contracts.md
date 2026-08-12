@@ -76,8 +76,11 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 | GET | /v2/projects/{id}/grill | 当前单个问题、revision、Brief draft、材料候选和 next action |
 | POST | /v2/projects/{id}/grill/answers | 每次仅一个 `{question_code,question_revision,value}`，Human assertion |
 | POST | /v2/projects/{id}/grill/confirm | PI-only；expected project/intake revisions；写 Brief 并创建唯一 Scope Gate |
+| POST | `/bff/research/projects/{id}/chat/turns` | project-scoped 自然语言 turn；读取权威 projection，返回 assistant text、intent/effect、canonical operation/confirmation 状态与最新 `next_actions_v2`；不能直接决定 Human Gate |
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
+
+Chat turn 请求最小为 `{session_id, turn_id, text}`，`turn_id` 在 project + session 内幂等；path project 是唯一 scope，body 中任何 project/principal/role 均忽略或拒绝。分派顺序为 direct slash、active Grill answer、natural intent。响应为 `{assistant_text, intent:{code,confidence,effect,canonical_command?}, execution:{status:'answered'|'executed'|'confirmation_required'|'blocked',refs:[]}, next_actions_v2}`。没有模型 adapter 时允许返回 phase-aware deterministic answer，但不得把 prose 交给 slash parser。BFF 必须在执行任何 connector/Job/write 前重新校验 membership、role、NextAction/revision 与 idempotency；Human-only intent 始终 `confirmation_required` 并导航专用 Human BFF 页面。
 
 `DELETE /v2/projects/{id}` 是 Human-only governance 写面，Agent tool/command 不暴露。仅当项目为 `ARCHIVED`、无 active Job 且 revision/精确名称确认匹配时成功；成功后普通 GET/list/projection 和任何项目写入均返回/表现为 404，并保留 tombstone、成员、Decision、Outbox 与受 retention 管理的证据引用。相同 `X-Request-Id` 重放返回同一 `{project_id, deleted_at, deleted_by, revision, request_id}`。迁移期 `/v1/projects/{id}` DELETE 是同一 Kernel 方法的 adapter，不得拥有不同权限或物理清理语义。
 
@@ -100,6 +103,8 @@ POST /v2/projects 的 Idempotency scope 是 tenant_id + principal_id + route + k
 POST /bff/research/gates/{gate_id}/decision
 
 请求只有 decision、reason、diff、resume_to、expected_project_revision。BFF 注入 Principal 和 request_id；Kernel 在单事务完成目标冻结、Decision、Gate、Project 与 Outbox。Agent Tool 和 DSH command 中不存在此路由的调用器。
+
+浏览器不得直接调用 legacy `POST /v1/gates/{gate_id}/decisions` 并自报 `actor`。迁移期间若 standalone 内部仍把 Human BFF 映射到该 Kernel v1 路由，BFF 必须在转发 body 中写入服务端解析的完整 `principal`；仅注入身份 header 不满足 GOV-01。BFF 保留 Kernel 的稳定 error code，UI 对 `principal_required`、role/member 拒绝、already-decided/state conflict、validation 与 network 分别呈现，不得统一折叠为 bridge failure。Human Gate BFF 自身的鉴权、CSRF、路径、成员/角色、body 校验失败与 Kernel 转发失败也必须统一返回 `error:{code,message,request_id}`；`request_id` 在进入该路由时由服务端生成，不能只在成功完成 Gate/project 预检后才生成。
 
 ## 6. Corpus、Idea 与 Contract
 
@@ -356,6 +361,8 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 所有 path、ETag、Revision 和 multipart 行为以 reconstruction-contracts.md 为准。TeX Document route 是绑定 manuscript workspace subtree 的领域 facade，不能维护第二套文件存储。
 
+迁移期 v1 generic Workspace 路径 `/v1/projects/{project}/workspaces/{workspace}/nodes?path=...` 与 v2 files 路径必须投影相同 authority。对于 `ws_doc_*` manuscript facade，list/tree/read/readVersion/write/move/delete/search/watch 均转到 TeX store；tree 返回节点后，同一节点 read 不得因 generic store 无 workspace row 返回 404。wire node 大小字段统一为 `size`，客户端对缺失/非有限值显示 `0 B`。
+
 **search 参数契约（POST `/v1/projects/{id}/workspaces/{wid}/search`，commit 98243ff）**：同一端点双模式，strict body——
 - 路径搜索（legacy，不变）：`{prefix?, glob?}`（至少其一，AND；`*` 不跨 `/`）；响应 `{info, nodes}`；
 - 内容搜索：`{q, mode?: 'content', case_sensitive?: boolean}`（`q` 出现或 `mode='content'` 即内容模式；`mode` 缺省时 `q` 出现即为内容）。响应 `{info, hits: [{path, match_count, matches: [{line, snippet}]}], truncated}`——`line` 为 1-based 行号，`snippet` 为所在行（超 240 字符以 `…` 居中截断），`match_count` 为该文件真实匹配总数，`matches` 最多返回前 20 个，`truncated` 表示 50 文件上限截断。语义：只扫文本节点（`binary=0` 且 media 文本类，NUL magic 硬跳过）；>512 KiB 文件整文件跳过（绝不部分扫描）；大小写不敏感默认；非法 UTF-8 字节按替换符容错（不抛错）。参数校验：空/纯空白 `q` → 422 `invalid_query`；`q` 与 `prefix`/`glob` 混用或 `mode='path'` 携带 `q` → 422 `invalid_search_params`。**无全文索引**——线性扫描，大数据集性能受限（如实记录，索引属后续增强）；并发搜索有简单槽位上限（超限 429 `search_busy`）。内容搜索与路径搜索同受 workspace 钉定与隔离语义约束（跨项目 404、隔离 503）。
@@ -383,8 +390,9 @@ Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY �
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/bff/research/runner-targets` | 可见 target health/capability，不返回 endpoint secret |
-| POST/PATCH | `/bff/research/runner-targets` | PI/Operator 登记、drain、disable；revision CAS |
+| GET | `/v1/runner-targets`、`/bff/research/runner-targets` | 可见 target kind/health/capability/config hash 与 SecretRef availability，不返回 endpoint/credential 值 |
+| POST `/v1/runner-targets`；PATCH `/v1/runner-targets/{id}` | PI/Operator 登记、drain、disable；BFF 与 Kernel 都从权威项目成员表实时求得 PI/Operator，忽略调用方自报 role，不能把任意登录 principal 升格；生产 Kernel 同时要求 service token；revision CAS；`remote-ssh` 必须提供 endpoint/credential/known_hosts 三个 SecretRef |
+| PATCH | `/v2/projects/{id}/execution` | PI/Operator 以 `{expected_revision, runner_target_id}` CAS 保存项目默认 Target；服务端按 Target kind 同步兼容的内置 RunnerProfile，未知/禁用/排空目标拒绝 |
 | GET/POST/PATCH | `/bff/research/runner-profiles` | profile、资源/网络/image policy；revision CAS |
 | GET | `/bff/research/config/schema` | canonical schema/UI metadata |
 | GET | `/bff/research/config/effective` | scope filters + value/source/revision/hash |
@@ -397,7 +405,7 @@ Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY �
 
 Remote Agent internal 面提供 enroll/heartbeat/capability/claim/CAS fetch/stage/complete；全部使用 mTLS service identity 与 ExecutionPlan signature。任何 target/profile/config 修改只影响新动作，不能改变运行中 Job/PTY/Build 的 pinned hash。
 
-Experiment/Job/Reproduction public body 只接受 `runner_profile_id` 与 `target_id`。Target Registry 的 local-docker/remote-ssh-runner endpoint、known-hosts、SSH/mTLS credential 由 Settings + SecretRef 管理；提交时固定 profile/target/environment revision/hash。offline/draining/capability mismatch 返回 blocked/retryable，不做 implicit local fallback。
+Experiment/Job/Reproduction public body 只接受 `runner_profile_id` 与 `runner_target_id`。Settings 当前项目选择器写 `/v2/projects/{id}/execution` 作为默认值；Chat `/run` 与 `/reproduce` JSON 中的 `runner_target_id` 作为 Job 顶层字段发送，优先级为 Job > Project。Target Registry 的 local-docker/remote-ssh endpoint、known-hosts、SSH/mTLS credential 由 Settings + SecretRef 管理；提交时固定 profile/target/environment revision/hash。claim 可由服务端 `runner_target_kinds` 过滤，runner/adapter 仍须执行前二次校验；offline/draining/capability mismatch 返回 blocked/retryable，不做 implicit local fallback。
 
 ## 19.1 论文复现
 
@@ -424,11 +432,15 @@ Experiment/Job/Reproduction public body 只接受 `runner_profile_id` 与 `targe
 
 每个全局 trajectory/node ID 先解析 project，再做 summary/detail/continue AuthZ。history 默认 safe summary；raw tool args/results/prompt/env 不得透明透传。地址、事件、token/duration、retention 和 DSH 移植边界见 trajectory-subagents.md。
 
+Standalone v1 adapter 兼容面（当前 Scholar UI 使用）包括 `/v1/projects/{project}/trajectory`、`/trajectory-lanes`、`/topology`、`/topology/children` 与 `/v1/topology/{child}*`。BFF 必须对上述全部路由执行成员预检，并从服务端 operator session 注入 `x-principal-id`；客户端同名 header 不可信、不得透传。Kernel 继续 fail-closed：缺 principal=`422 principal_required`，非成员/未知 project 或 child=`404`。轮询 JSON 与 SSE 的身份转发不得分叉。
+
 ## 21. NextAction 兼容
 
 `GET /v1/projects/{id}/projection`（v2 同路由）返回双字段（GUIDE-01）：`next_actions: string[]`（legacy，由 `next_actions_v2` 中非 done 动作的 label 稳定派生，终态为空数组——旧 UI/API 消费端不受破坏）与 `next_actions_v2: NextAction[]`（权威结构化投影，wire 字段见 reconstruction-contracts.md §24 / domain-model.md §14）。
 
-NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contracts、ideas、evidence、claims 确定性生成（`nextActionProjection` 纯函数，无 DB、无副作用、不抛错）。状态、reason、required 缺口、revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label 与路由。未知/未来状态退化 `code='unknown'` 的只读动作（state=blocked、required=['state_mapping']），UI 不得为 unknown 构造 mutation。Intake/Grill 阶段动作在 ONBOARD-01 落地后由同一投影扩展。
+NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contracts、ideas、evidence、claims 确定性生成（`nextActionProjection` 纯函数，无 DB、无副作用、不抛错）。状态、reason、required 缺口、revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label、解析白名单交互与路由，不能直接执行未声明 mutation。未知/未来状态退化 `code='unknown'` 的只读动作（state=blocked、required=['state_mapping']），UI 不得为 unknown 构造 mutation。`required` 是前置条件，`required_by` 才是执行者。Intake/Grill 阶段动作在 ONBOARD-01 落地后由同一投影扩展。
+
+`survey_run` 固定 `route='chat'`、`required_by='agent'`。Overview CTA 打开当前 project-scoped Chat 并预填 `/survey <Brief.problem>`（Brief problem 为空时预填 `/survey `），等待用户确认发送；不得跳转空 Runs、不得自动发起 connector 请求。`POST /api/chat/survey` 成功写入 SCOPED 项目的 Corpus Snapshot 时，同一 Kernel 事务完成 `SCOPED→SURVEYING`，响应后 projection 必须给出 `idea_generate`；citation edges 必须随 snapshot 保存，connector 每源结果必须聚合为权威 `source_status`（任一来源失败=`pending`，全部成功=`complete`），部分失败不得伪装成 complete。
 
 ## 22. SSE 实时流端点（增量流替代轮询）
 

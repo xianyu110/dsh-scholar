@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest'
 import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadOptions, bffError } from '../../packages/dsh-research-ui/lib/standalone/server.js'
+import {
+  loadOptions, bffError, isProjectTrajectoryTopologyForward, surveySnapshotBody, surveyWriteRoleAllowed,
+} from '../../packages/dsh-research-ui/lib/standalone/server.js'
 // @ts-expect-error re-export surface
 
 describe('standalone web application', () => {
@@ -113,5 +115,40 @@ describe('standalone web application', () => {
     expect(bffError('kernel_unreachable', 'research kernel unavailable')).toEqual({ ok: false, error: { code: 'kernel_unreachable', message: 'research kernel unavailable' } })
     expect(bffError('connector_unavailable', 'survey connector unavailable')).toEqual({ ok: false, error: { code: 'connector_unavailable', message: 'survey connector unavailable' } })
     expect(bffError('invalid_json', 'bad request')).toEqual({ ok: false, error: { code: 'invalid_json', message: 'bad request' } })
+  })
+
+  it('survey snapshot preserves citation edges and never marks partial connector failure complete', () => {
+    expect(surveySnapshotBody({
+      queries: [{ source: 'openalex', query: 'object recognition', run_at: '2026-08-12T00:00:00.000Z' }],
+      hits: [{ paper: { paper_id: 'doi:10.1/x', title: 'Paper' } }],
+      citation_edges: [{ source_paper_id: 'doi:10.1/x', target_paper_id: 'doi:10.1/y', kind: 'reference' }],
+      source_status: [{ source: 'openalex', status: 'ok' }, { source: 'arxiv', status: 'failed', error: 'private upstream detail' }],
+    })).toEqual({
+      queries: [{ source: 'openalex', query: 'object recognition', run_at: '2026-08-12T00:00:00.000Z' }],
+      papers: [{ paper_id: 'doi:10.1/x', title: 'Paper' }],
+      citation_edges: [{ source_paper_id: 'doi:10.1/x', target_paper_id: 'doi:10.1/y', kind: 'reference' }],
+      source_status: 'pending',
+    })
+    expect(JSON.stringify(surveySnapshotBody({ queries: [], hits: [], citation_edges: [], source_status: [] }))).not.toContain('private upstream detail')
+  })
+
+  it('survey writes are allowed only for PI, operator and researcher roles', () => {
+    expect(surveyWriteRoleAllowed('pi')).toBe(true)
+    expect(surveyWriteRoleAllowed('operator')).toBe(true)
+    expect(surveyWriteRoleAllowed('researcher')).toBe(true)
+    expect(surveyWriteRoleAllowed('viewer')).toBe(false)
+    expect(surveyWriteRoleAllowed('auditor')).toBe(false)
+    expect(surveyWriteRoleAllowed(null)).toBe(false)
+  })
+
+  it('classifies every project Trajectory/Topology route that needs BFF principal forwarding', () => {
+    for (const path of [
+      '/v1/projects/rsp_1/trajectory',
+      '/v1/projects/rsp_1/trajectory-lanes',
+      '/v1/projects/rsp_1/topology',
+      '/v1/projects/rsp_1/topology/children',
+    ]) expect(isProjectTrajectoryTopologyForward(path)).toBe(true)
+    expect(isProjectTrajectoryTopologyForward('/v1/projects/rsp_1/jobs')).toBe(false)
+    expect(isProjectTrajectoryTopologyForward('/v1/topology/child_1')).toBe(false)
   })
 })

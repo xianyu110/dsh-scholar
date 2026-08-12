@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Runner gateway scheduler entry: claims jobs from the Kernel, executes them
  * in isolation, heartbeats leases, uploads artifacts and finalizes manifests.
@@ -44,6 +45,8 @@ import {
   resolveFleetMode,
   resolveTargetId,
   runFleetAgentMain,
+  resolveSshBootstrap,
+  startSshAgentBootstrap,
   startFleetServer,
   type RunnerMode,
   type RunnerSigningKey,
@@ -98,9 +101,20 @@ const client = new ResearchClient({ endpoint, token, serviceToken })
 
 // ── FLEET-01: fleet 角色互斥判定（local 默认；fleet-server/agent 二选一，
 //    且与本地模式专属 flag --mode 互斥；校验失败 fail fast）。────────────
-let fleetMode: 'local' | 'fleet-server' | 'agent'
+const sshBootstrapTarget = (cli['runner.ssh_bootstrap_target'] as string | undefined) ?? ''
+let fleetMode: 'local' | 'fleet-server' | 'agent' | 'ssh-bootstrap'
 try {
-  fleetMode = resolveFleetMode(cli)
+  if (sshBootstrapTarget !== '') {
+    if (typeof cli['runner.fleet_url'] !== 'string' || cli['runner.fleet_url'] === '') {
+      throw new FleetCliConfigError('--ssh-bootstrap-target requires --agent <fleet-url>')
+    }
+    if (typeof cli['runner.fleet_server_port'] === 'number') {
+      throw new FleetCliConfigError('--ssh-bootstrap-target cannot be combined with --fleet-server')
+    }
+    fleetMode = 'ssh-bootstrap'
+  } else {
+    fleetMode = resolveFleetMode(cli)
+  }
 } catch (error) {
   console.error(`[runner-gateway] invalid config: ${error instanceof FleetCliConfigError ? error.message : (error as Error).message}`)
   process.exit(1)
@@ -201,11 +215,55 @@ async function runFleetAgentMainCli(): Promise<void> {
   process.exit(0)
 }
 
+/**
+ * --ssh-bootstrap-target <id>：从 Kernel Target Registry 读取仅含
+ * SecretRef metadata 的 remote-ssh descriptor，在本机 secret root 解析
+ * endpoint/key/known_hosts，以 StrictHostKeyChecking=yes 建立 SSH，并用
+ * 固定命令启动远端 fleet agent。Job 仍由 fleet 的签名 plan/lease/CAS wire
+ * 传输；SSH 不成为任意命令执行面。
+ */
+async function runSshBootstrapMain(): Promise<void> {
+  const fleetUrl = cli['runner.fleet_url'] as string
+  const secretRoot = (cli['runner.secret_root'] as string | undefined) ?? ''
+  const fleetPublicKeyFile = (cli['runner.fleet_public_key'] as string | undefined) ?? ''
+  if (secretRoot === '') throw new FleetCliConfigError('--ssh-bootstrap-target requires --secret-root')
+  if (fleetPublicKeyFile === '' || !existsSync(fleetPublicKeyFile)) {
+    throw new FleetCliConfigError('--ssh-bootstrap-target requires an existing --fleet-public-key file')
+  }
+  const target = await client.getRunnerTarget(sshBootstrapTarget)
+  const resolved = resolveSshBootstrap(target, secretRoot)
+  const agentId = (cli['runner.agent_id'] as string | undefined) || `${sshBootstrapTarget}-agent`
+  const { key: manifestKey, publicKeyPem } = loadOrCreateSigningKey(keyFile)
+  // Register before SSH starts: a remote completion signed by this key is
+  // immediately verifiable at the central kernel.
+  await registerRunnerKey(manifestKey.keyId, publicKeyPem, 30_000)
+  const privateKeyPem = manifestKey.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  const handle = startSshAgentBootstrap({
+    resolved,
+    fleetUrl,
+    agentId,
+    connectTimeoutMs: (cli['runner.ssh_connect_timeout_ms'] as number | undefined) ?? 15000,
+    fleetPublicKeyPem: readFileSync(fleetPublicKeyFile, 'utf8'),
+    manifestPrivateKeyPem: privateKeyPem,
+    onStdout: text => process.stdout.write(text),
+    onStderr: text => process.stderr.write(text),
+  })
+  console.error(`[runner-gateway] SSH bootstrap active for target ${sshBootstrapTarget} (agent=${agentId}); endpoint is redacted`)
+  const signal = fleetShutdownSignal()
+  signal.addEventListener('abort', () => handle.child.kill('SIGTERM'), { once: true })
+  const code = await handle.completion
+  console.error(`[runner-gateway] SSH bootstrap for target ${sshBootstrapTarget} exited (${code})`)
+  process.exit(code)
+}
+
 if (fleetMode === 'fleet-server') {
   await runFleetServerMain()
 }
 if (fleetMode === 'agent') {
   await runFleetAgentMainCli()
+}
+if (fleetMode === 'ssh-bootstrap') {
+  await runSshBootstrapMain()
 }
 
 /** 尽力注册 agent manifest 公钥（非致命：超时仅告警，绝不 exit——agent 不
@@ -296,6 +354,11 @@ const { key: signingKey, publicKeyPem } = loadOrCreateSigningKey(keyFile)
 
 console.error(`[runner-gateway] ${owner} polling ${endpoint} (mode=${mode}, poll=${pollMs}ms, heartbeat=${heartbeatMs}ms, cancel-poll=${cancelPollMs}ms, key=${signingKey.keyId})`)
 
+const configuredLocalTargetId = (cli['runner.fleet_target_id'] as string | undefined)?.trim()
+const localTargetId = configuredLocalTargetId !== undefined && configuredLocalTargetId !== ''
+  ? configuredLocalTargetId
+  : mode === 'docker' ? 'target_local_docker_v1' : 'target_local_process_v1'
+
 // Register the public key once at startup (design §12.7; skipped when the
 // kernel does not expose the endpoint yet).
 await registerRunnerKey(signingKey.keyId, publicKeyPem)
@@ -313,7 +376,14 @@ while (!stopping) {
   try {
     // Recover stale leases on every cycle (self-healing after crashes, §9.3).
     await client.recoverExpiredLeases().catch(() => undefined)
-    const jobs = await client.claimJobs(owner, 1)
+    const localTargetKind = mode === 'docker' ? 'local-docker' : 'local-process'
+    const jobs = await client.claimJobs(owner, 1, 300, {
+      runner_target_kinds: [localTargetKind],
+      runner_target_ids: [localTargetId],
+      // Jobs created before target pinning existed remain executable by the
+      // explicitly selected local mode. New jobs are always target-pinned.
+      include_unpinned: true,
+    })
     for (const job of jobs) {
       if (stopping) break
       console.error(`[runner-gateway] executing ${job.kind} job ${job.job_id}`)
@@ -334,7 +404,7 @@ while (!stopping) {
       }, cancelPollMs)
       try {
         const { job: completed } = await executeJob(job, {
-          client, owner, mode, timeoutMs, signal: executeAc.signal, signingKey,
+          client, owner, mode, timeoutMs, signal: executeAc.signal, signingKey, targetId: localTargetId,
           // §12.6 (P0): terminal frames must carry the claim's generation —
           // the kernel rejects frames without it (409 lease_stale).
           leaseGeneration: job.lease_generation,

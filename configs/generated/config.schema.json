@@ -64,6 +64,13 @@
               "default": null,
               "x-dsh-scope": "project"
             },
+            "runner_target_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Opaque registered RunnerTarget id. The registry resolves local-process/local-docker/remote-ssh connection metadata server-side and pins its revision/hash at job submission.",
+              "default": "target_local_docker_v1",
+              "x-dsh-scope": "project"
+            },
             "network_policy": {
               "enum": [
                 "allowlist",
@@ -245,7 +252,7 @@
             },
             "fleet_target_id": {
               "type": "string",
-              "description": "Opaque target id the agent advertises (exact-match dispatch); defaults to local-docker.",
+              "description": "Opaque target id used for exact-match dispatch. Local mode defaults by mode to target_local_process_v1 or target_local_docker_v1; fleet agents must advertise their configured target.",
               "default": "",
               "x-dsh-scope": "runner-profile"
             },
@@ -253,6 +260,25 @@
               "type": "string",
               "description": "Path to the fleet server plan-signing public key PEM; agents refuse unverifiable plans without it (fail closed).",
               "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "ssh_bootstrap_target": {
+              "type": "string",
+              "description": "Remote-SSH RunnerTarget id to connect and bootstrap as a fleet agent; empty disables SSH bootstrap.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "secret_root": {
+              "type": "string",
+              "description": "Server-only root used to resolve file SecretRefs for remote-SSH bootstrap; never sent to the browser or remote host.",
+              "default": "",
+              "x-dsh-scope": "runner-profile"
+            },
+            "ssh_connect_timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "SSH connection/bootstrap timeout in milliseconds.",
+              "default": 15000,
               "x-dsh-scope": "runner-profile"
             },
             "network": {

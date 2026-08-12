@@ -23,6 +23,9 @@ project:
     # Opaque registered RunnerProfile id (domain-model.md §2/§9.1): overrides execution.runner_profile when set; unknown ids are rejected 422 runner_profile_unknown at project create and job submit. Job references only this opaque id — docker flags/endpoints never travel in project/job data.
     # sources: http/ui/file
     runner_profile_id: null
+    # Opaque registered RunnerTarget id. The registry resolves local-process/local-docker/remote-ssh connection metadata server-side and pins its revision/hash at job submission.
+    # sources: http/ui/file
+    runner_target_id: target_local_docker_v1
     # Runner network policy; `none` forbids any container network other than none.
     # sources: http/ui/file; security-floor
     network_policy: allowlist
@@ -95,12 +98,21 @@ runner-profile:
     # Agent identity registered with the fleet server; generated agent-<id> when empty.
     # sources: cli/env/file
     agent_id: ''
-    # Opaque target id the agent advertises (exact-match dispatch); defaults to local-docker.
+    # Opaque target id used for exact-match dispatch. Local mode defaults by mode to target_local_process_v1 or target_local_docker_v1; fleet agents must advertise their configured target.
     # sources: cli/env/file
     fleet_target_id: ''
     # Path to the fleet server plan-signing public key PEM; agents refuse unverifiable plans without it (fail closed).
     # sources: cli/env/file
     fleet_public_key: ''
+    # Remote-SSH RunnerTarget id to connect and bootstrap as a fleet agent; empty disables SSH bootstrap.
+    # sources: cli/env/file
+    ssh_bootstrap_target: ''
+    # Server-only root used to resolve file SecretRefs for remote-SSH bootstrap; never sent to the browser or remote host.
+    # sources: cli/env/file
+    secret_root: ''
+    # SSH connection/bootstrap timeout in milliseconds.
+    # sources: cli/env/file
+    ssh_connect_timeout_ms: 15000
     # Container network mode; `host` is forbidden by the security floor and `network_policy=none` allows only `none`.
     # sources: file/http/ui; security-floor
     network: none

@@ -16,7 +16,7 @@
  * - `required` is `true` when all preconditions are met, otherwise the list
  *   of missing precondition codes (e.g. `['approved_contract']`).
  * - `route` is the UI tab / operation path the action maps to
- *   (`gates` | `runs` | `evidence` | `manuscript` | `budget` | `ideas` |
+ *   (`chat` | `gates` | `runs` | `evidence` | `manuscript` | `budget` | `ideas` |
  *   `contracts` | `release` | `overview`).
  * - `revision` is the revision of the dependency object the action is
  *   pinned to (project revision for gate decisions, contract version for

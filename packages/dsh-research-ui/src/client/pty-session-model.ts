@@ -51,9 +51,9 @@
  *   N polls, or a stream-mode timer) and surface a close-reason notice
  *   (pty.notice.* keys).
  *
- * Real browser terminal rendering (ANSI/xterm-class), keyboard input and
- * narrow-viewport acceptance stay NOT_RUN_MANUAL_PENDING (hardening §5) —
- * the output is rendered as plain text only.
+ * Browser rendering and input are connected by web-terminal-adapter.ts to a
+ * real xterm-compatible emulator. Narrow-viewport and real TUI behaviour still
+ * require the manual browser acceptance recorded in hardening §13.
  */
 import { getLocale, t, type Locale } from './i18n/index'
 import { SseClient, type SseClientStatus, type SseEvent, type SseFetch, type SseScheduler } from './sse-client'
@@ -218,8 +218,8 @@ export interface PtyClientOptions {
 
 export type PtyDisplayKind = 'output' | 'exit' | 'gap'
 
-/** One row of the plain-text output buffer (server-sanitized hint: output
- *  bytes are rendered verbatim — ANSI styling is NOT_RUN_MANUAL_PENDING). */
+/** One retained PTY display entry. Output text is fed verbatim to the browser
+ *  emulator; gap/exit metadata stays outside its ANSI byte channel. */
 export interface PtyDisplayEntry {
   kind: PtyDisplayKind
   seq: number

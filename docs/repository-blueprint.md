@@ -7,8 +7,8 @@
 - Node.js 24、TypeScript 5.9、pnpm 11、ESM；
 - workspace：packages/*、workers/*、apps/*；
 - Zod 3、Vitest、node:sqlite、原生 fetch/http；
-- 浏览器 UI 只使用 standalone 全屏形态，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；
-- browser bundle 使用 tsdown 输出 standalone classic-script handoff，不声明 `dshClient`；
+- 完整科研浏览器 UI 只使用 standalone 全屏形态，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；DSH 配置卡是独立的窄 client half，不承载业务页面；
+- browser bundle 使用 tsdown 输出 classic-script handoff；根配置卡使用 `dsh.client`，禁止 legacy `dshClient` 字段；
 - 所有包 strict TypeScript，不使用 skipLibCheck 掩盖本项目错误。
 
 ## 2. 目标文件树
@@ -221,7 +221,7 @@ configs/research-dev-selfmod.cordis.yml 只插入 @deepseek-ai/dsh-tool-cordis�
 - Terminal、TeX、PDF、binary proxy 和 SSE 在 standalone 模式完整验收；
 - Init/Resume/Upload、Grill Me、NextAction、Workspace/PTY、远端 Runner、Settings、Trajectory/Subagent 拓扑在 standalone 模式完整验收；
 - archived 项目可由 PI 经 exact-name 确认删除，UI/Kernel 重启后均不可见；tombstone/Outbox/retention 与共享 CAS 安全通过；
-- 根插件无 browser export/dshClient/HTTP bridge，UI 包无 Cordis host/patch；
+- 根插件的 browser export 仅含 Plugin config 卡片，且无 legacy dshClient/HTTP bridge；UI 包无 Cordis host/patch；
 - docs/README.md 的所有文档链接和规范条目可达；
 - hardening 状态没有未实现、部分或已实现未验收的 P0/P1；每个已验收条目绑定当前 commit、CI job 和 acceptance 报告；
 - CI 所有 blocking jobs `skip_count=0`、实际断言数大于 0，缺 Docker/TeX/DSH fixture/git base 必须 fail closed；

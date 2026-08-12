@@ -46,6 +46,16 @@ export type ClaimedJobRecord = JobRecord & { run_id?: string | null }
  * 转发 frames 共用同一 lease 头路径），此处保持 re-export。
  */
 export { appendTerminalFramesWithLease } from './kernel-client.js'
+export {
+  buildSshBootstrapArgs,
+  parseRemoteSshEndpoint,
+  resolveSshBootstrap,
+  startSshAgentBootstrap,
+  SshBootstrapError,
+  type RemoteSshTargetView,
+  type ResolvedSshBootstrap,
+  type SshBootstrapHandle,
+} from './ssh-bootstrap.js'
 
 /**
  * §4 P0 (RUN-02/TEX-02): the TeX build engine is a FIXED enum — a raw string
@@ -88,6 +98,8 @@ export interface RunnerOptions {
   signingKey?: RunnerSigningKey
   /** §12.6 lease generation of the claim; carried on terminal frames. */
   leaseGeneration?: number | null
+  /** Exact local RunnerTarget identity configured for this runner process. */
+  targetId?: string
 }
 
 /**
@@ -606,6 +618,45 @@ async function runDocker(plan: ExecutionPlan, exec: DockerExecContext): Promise<
   return { run_id: runId, exit_code: result.exitCode, started_at: startedAt, finished_at: new Date().toISOString(), stdout: result.stdout, stderr: result.stderr, error: result.error }
 }
 
+/** Re-read the authoritative RunnerTarget safe view immediately before a
+ * local spawn. Claim-time validation alone is insufficient because an
+ * operator may disable, drain or revise a target after the lease was issued. */
+export async function runnerTargetPinFailure(
+  client: Pick<ResearchClient, 'getRunnerTarget'>,
+  payload: Record<string, unknown>,
+  expectedKind: 'local-process' | 'local-docker',
+  configuredTargetId: string | null,
+): Promise<string | null> {
+  const targetId = typeof payload.runner_target_id === 'string' && payload.runner_target_id !== ''
+    ? payload.runner_target_id
+    : null
+  const kind = typeof payload.runner_target_kind === 'string' ? payload.runner_target_kind : null
+  if (targetId === null) return kind === null ? null : 'runner target pin has a kind without an id'
+  if ((kind !== 'local-process' && kind !== 'local-docker' && kind !== 'remote-ssh')
+    || typeof payload.runner_target_revision !== 'number'
+    || typeof payload.runner_target_hash !== 'string'
+    || payload.runner_target_hash === '') {
+    return `target ${targetId} has an incomplete pin; id/kind/revision/hash are required together`
+  }
+  if (kind !== expectedKind || configuredTargetId !== targetId) {
+    return `local ${expectedKind} runner target ${configuredTargetId ?? '(legacy)'} refuses ${kind} target ${targetId}; no local fallback is permitted`
+  }
+  try {
+    const current = await client.getRunnerTarget(targetId)
+    if (!current.enabled || current.draining) {
+      return `runner target ${targetId} is ${current.draining ? 'draining' : 'disabled'} at spawn time`
+    }
+    if (current.kind !== kind
+      || current.revision !== payload.runner_target_revision
+      || current.config_hash !== payload.runner_target_hash) {
+      return `runner target ${targetId} changed after claim; pinned kind/revision/hash no longer match the registry`
+    }
+  } catch (error) {
+    return `runner target ${targetId} could not be revalidated before spawn: ${(error as Error).message ?? String(error)}`
+  }
+  return null
+}
+
 /**
  * Execute one claimed job and persist its outcomes as CAS artifacts.
  * Returns the completed Kernel job record.
@@ -649,6 +700,31 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     } else if (frameFlushTimer === undefined) {
       frameFlushTimer = setTimeout(() => { frameFlushTimer = undefined; flushFrames() }, 200)
     }
+  }
+  const targetPayload = job.payload as Record<string, unknown>
+  const pinnedTargetId = typeof targetPayload.runner_target_id === 'string' && targetPayload.runner_target_id !== ''
+    ? targetPayload.runner_target_id
+    : null
+  const expectedLocalKind = mode === 'docker' ? 'local-docker' : 'local-process'
+  const configuredTargetId = options.targetId ?? pinnedTargetId
+  const targetPinFailure = await runnerTargetPinFailure(client, targetPayload, expectedLocalKind, configuredTargetId)
+  if (targetPinFailure !== null) {
+    const reason = `job ${job.job_id}: ${targetPinFailure}`
+    const rejected = await client.completeJob({
+      job_id: job.job_id,
+      owner,
+      status: 'failed',
+      failure_class: 'environment',
+      error: reason,
+      lease_generation: job.lease_generation,
+      lease_token: job.lease_token,
+    }).catch(() => null)
+    if (rejected !== null) return { job: rejected, run: {
+      run_id: runId, exit_code: -1,
+      started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+      stdout: '', stderr: '', error: `rejected: ${reason}`,
+    } }
+    throw new Error(`job ${job.job_id} rejected before execution (${reason})`)
   }
   // §3.2 / ADR-004: formal-class jobs must run in a container runtime.
   // Subprocess is only for trusted smoke fixtures and echoes — never for
@@ -724,6 +800,27 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       throw new Error(`job ${job.job_id} rejected before execution (runner profile validation)`)
     }
     resolvedProfile = candidate
+  }
+  if (resolvedProfile !== null) {
+    const expectedMode = resolvedProfile.runner_mode === 'local-docker' ? 'docker' : 'subprocess'
+    if (mode !== expectedMode) {
+      const reason = `runner profile ${resolvedProfile.profile_id} requires ${expectedMode} mode, but this runner is ${mode}`
+      const rejected = await client.completeJob({
+        job_id: job.job_id,
+        owner,
+        status: 'failed',
+        failure_class: 'environment',
+        error: reason,
+        lease_generation: job.lease_generation,
+        lease_token: job.lease_token,
+      }).catch(() => null)
+      if (rejected !== null) return { job: rejected, run: {
+        run_id: runId, exit_code: -1,
+        started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+        stdout: '', stderr: '', error: `rejected: ${reason}`,
+      } }
+      throw new Error(`job ${job.job_id} rejected before execution (${reason})`)
+    }
   }
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-scholar-run-'))
   // Container mode runs as a non-root uid (65534): the workdir and the
@@ -868,12 +965,17 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       image_digest: image,
       timeout_ms: timeoutMs,
       config_pin: null,
-      target_id: 'local-docker',
+      target_id: configuredTargetId ?? (mode === 'docker' ? 'target_local_docker_v1' : 'target_local_process_v1'),
       profile_id: resolvedProfile?.profile_id ?? 'local-docker',
       profile: resolvedProfile ?? undefined,
     })
     const planForExecution = signingKey !== undefined ? signExecutionPlan(plan, signingKey) : plan
-    const dockerTarget = new LocalDockerAdapter({ jobId: job.job_id, dockerRun: runDocker, cancel: cancelRun })
+    const dockerTarget = new LocalDockerAdapter({
+      jobId: job.job_id,
+      dockerRun: runDocker,
+      cancel: cancelRun,
+      targetId: configuredTargetId ?? 'target_local_docker_v1',
+    })
     run = mode === 'docker'
       ? await dockerTarget.execute(planForExecution, { cwd: workDir, signal, onChunk, runEnv })
       : await runSubprocess(trustedSubprocessCommand, workDir, timeoutMs, maxLogBytes, job.job_id, signal, onChunk, runId, runEnv)

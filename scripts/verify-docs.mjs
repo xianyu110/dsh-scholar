@@ -55,7 +55,7 @@ const requiredFragments = new Map([
   ['docs/api-contracts.md', ['Terminal SSE', '/v2/documents/{id}/moves']],
   ['docs/gui-plugin-plan.md', ['实时终端', 'i18n 硬约束']],
   ['docs/security-baseline.md', ['Cordis self-referential', 'Terminal 安全']],
-  ['docs/acceptance-tests.md', ['docs-contract-sync', 'TeX Workbench', '根包无 `dshClient`']],
+  ['docs/acceptance-tests.md', ['docs-contract-sync', 'TeX Workbench', '根包无 legacy `dshClient`']],
   ['docs/manual-acceptance.md', ['代码优先、人工后验', 'NOT_RUN_MANUAL_PENDING', '人工验收记录模板']],
   ['docs/init-grill-upload-models.md', ['Name-only Init', 'Chat Grill Me', '批量分块队列']],
   ['docs/reproduction-contracts.md', ['PaperReproductionSpec', 'metric comparators', 'ReproducibilityReport']],
@@ -78,7 +78,6 @@ for (const [relative, fragments] of requiredFragments) {
 const forbiddenEmbeddedPaths = [
   'src/client-panel.ts',
   'src/plugin/web-bridge.ts',
-  'tsdown.client.config.ts',
   'scripts/start-test-dsh.sh',
   'scripts/verify-client-bundle.mjs',
   'packages/dsh-research-ui/cordis.patch.yml',
@@ -95,7 +94,12 @@ for (const relative of forbiddenEmbeddedPaths) {
 
 const rootPackage = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
 if (rootPackage.dshClient !== undefined) errors.push('root package must not declare dshClient')
-if (rootPackage.exports?.['./client'] !== undefined) errors.push('root package must not export ./client')
+if (rootPackage.exports?.['./client']?.default !== './lib/client.js') {
+  errors.push('root package must export the narrow DSH configuration client at ./lib/client.js')
+}
+if (rootPackage.dsh?.client?.platform !== 'web') {
+  errors.push('root package must declare the DSH Web configuration client')
+}
 
 const uiPackage = JSON.parse(readFileSync(resolve(root, 'packages/dsh-research-ui/package.json'), 'utf8'))
 if (uiPackage.dshClient !== undefined) errors.push('research-ui package must not declare dshClient')

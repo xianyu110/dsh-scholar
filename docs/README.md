@@ -5,6 +5,8 @@
 > 目标成熟度：Security Alpha，默认 gate-only
 > 用途：仅依赖本目录 Markdown，即可重新实现、测试和部署 DSH Scholar。
 
+UI 品牌硬规则：正式产品名为 `DSH Scholar`，组合字标为 `dsh Scholar`；不得显示旧组合品牌 `dsh Research`。技术名 `Research Kernel` 和 research API 不随品牌重命名。
+
 ## 1. 文档契约
 
 本目录描述的是目标系统，不是对当前源码的逐行注释。生成或重构项目时，按以下优先级处理冲突：
@@ -53,22 +55,28 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 
 从本规范生成项目时必须满足：
 
+- 根 `README.md` 只介绍产品定位、使用边界、启动与使用方式，并显著说明产品仍在开发中；不得把实现账本、测试计数、提交记录或长篇能力状态复制进 README，这些内容只进入 hardening、acceptance 和使用指南；
+
 - 使用 TypeScript、Node.js、pnpm workspace、ESM 和严格类型检查；
 - 权威输入模型使用 Zod；HTTP 适配和 Kernel 写入各校验一次；
 - Research Kernel 是唯一业务写入权威，浏览器、插件、Runner 和 Worker 都不能直接写数据库；
 - SQLite 为桌面默认实现，Artifact 内容使用 SHA-256 CAS；
 - 所有正式计算从不可变代码/数据快照物化，不能挂载 Agent 当前工作目录；
 - baseline、pilot、formal、reproduce、latex-compile 必须在受限容器中执行；
-- 浏览器 UI 只支持独立模式，由独立 HTTP host 和同源 BFF 提供；不得发布 `dshClient`、DSH Web slot、`/research-api` 或 `/research-ui-api` 嵌入面；
-- DSH Adapter 只保留 Agent tools、commands、subagents、Skills、Session 和 headless 能力，不托管浏览器 UI；
+- 完整科研浏览器 UI 只支持独立模式，由独立 HTTP host 和同源 BFF 提供；根插件可以发布只服务 Settings → Plugin config 的窄配置半侧，但不得发布 legacy `dshClient`、科研业务 Web slot、`/research-api` 或 `/research-ui-api` 嵌入面；
+- DSH Adapter 保留 Agent tools、commands、subagents、Skills、Session、headless 与插件配置卡能力，不托管科研业务 UI；
 - Run Terminal 必须显示可恢复的只读执行账本；Interactive Terminal 必须提供真实 PTY 输入、resize、signal、重连与审计，二者不得混为同一权威语义；
+- Interactive Terminal 的浏览器面必须使用真实 xterm-compatible emulator，把键盘/粘贴/IME 输入接到 PTY bytes control，并增量解释 ANSI/VT/TUI 输出；普通文本日志区、未接线的输入 API 或按钮式控制面不得称为 Web Terminal；
 - Interactive Terminal 必须绑定权威 Research/Chat/Subagent session，并允许每个 context 有多个 PTY 标签；禁止用 project 级单例把输入发送到错误 session；
 - Workspace 必须提供 VS Code 式文件树、标签页、搜索、编辑、版本冲突与二进制预览；Manuscript 必须提供保存后增量 LaTeX 预览、权威编译日志、诊断和 PDF freshness；
-- Runner 必须通过同一 Execution interface 支持本机 Docker 与受控远端 Runner；远端机器不能成为业务权威或绕过 Snapshot、lease、Manifest 和 Artifact 契约；
+- Chat、Overview、Approvals、Runs、Artifacts、Evidence、Budget、Manuscript、Run Terminal、Trajectory、Topology、Workspace、Interactive Terminal 等全部当前业务页面必须可在主区、右侧 Panel Dock 与底部 Panel Dock 间移动；同页只有一个活实例，右/底互换不 remount，主区/Dock 变换的流按游标安全续接；左侧 Project Sidebar 与 Panel Dock 不得混为同一概念；
+- Runner 必须通过同一 Execution interface 支持显式本机进程、本机 Docker 与受控远端 SSH Runner；本机进程只用于 trusted dev/smoke，远端机器不能成为业务权威或绕过 Snapshot、lease、Manifest 和 Artifact 契约；
 - 实验/复现只选择 opaque runner profile/target ID；远端 SSH/mTLS endpoint 与 credential 只在服务端 Settings/SecretRef，离线或能力不匹配不得静默回退本机；
 - 所有可配置行为必须登记到版本化 Config Schema，声明 scope、默认值、约束、来源、secret 属性、热更新/重启规则，并由同一 Schema 生成文件配置、HTTP 校验和 Settings UI；
 - 首次进入必须提供 Init、Resume、Upload 三入口；既有研究先进入隔离 Intake，经 Grill Me 和 Human adoption 后才能写入项目，导入历史不得伪造 Gate、Run、TerminalLog 或 accepted Evidence；
-- Chat 必须支持附件按钮、拖拽和粘贴，附件复用隔离 Intake/分块 scan/OCR；slash command 直接使用 `/new`、`/reproduce` 等一级命令；DSH 不注册聚合 descriptor，standalone 只可在 parser 内兼容旧输入且不展示；
+- Chat 必须支持自由自然语言、按权威 NextAction 的阶段引导、canonical intent 路由、附件按钮、拖拽和粘贴；slash command 直接使用 `/new`、`/reproduce` 等一级命令，DSH 与 standalone 都不注册旧聚合前缀。Natural turn 不得绕过 Grill、Gate、adoption、release 或凭模型文本猜 mutation；
+- Chat 是项目内上下文：session、active id、transcript、草稿、引用、附件、搜索与异步回写必须按 `project_id` 分区；固定全局 storage、跨项目 session 复用或把 A 的延迟结果写入 B 一律视为隔离缺陷；
+- Chat 滚动也属于 project/session/surface 上下文：底部跟随新消息，查看历史时刷新/新消息保持锚点并提供 Jump latest，不得反复回顶或抢到底部；
 - 论文复现必须持久化 Spec/Attempt/Report，固定 paper/code/data/environment/Contract/RunManifest，并区分 execution 成功与科学比较 pass；
 - 使用过程中必须由 Kernel 权威投影提供结构化 NextAction，页面给出一项主要下一步与原因/阻断/目标路由，未知动作只读展示，不能由 LLM 或浏览器猜测推进；
 - Trajectory 必须区分 Kernel Research Outbox 与展示性的 DSH Session；subagent 以父子拓扑展示并可进入授权 child 查看，one-shot 只读，continuable follow-up 必须 exact-parent 授权且默认脱敏；

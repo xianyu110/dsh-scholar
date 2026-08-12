@@ -467,6 +467,8 @@ export class ResearchClient {
     data_artifact_ids?: string[]
     image_digest?: string
     output_contract?: { metrics: string; logs: string }
+    runner_profile_id?: string | null
+    runner_target_id?: string | null
   }): Promise<JobRecord> {
     return this.request('POST', `/v1/projects/${input.project_id}/jobs`, input)
   }
@@ -521,8 +523,22 @@ export class ResearchClient {
     return this.request('POST', `/v1/jobs/${jobId}/terminal-frames`, { run_id: runId, frames })
   }
 
-  claimJobs(owner: string, limit = 1, leaseTtlSeconds = 300): Promise<JobRecord[]> {
-    return this.request('POST', '/v1/jobs-claim/run', { owner, limit, lease_ttl_seconds: leaseTtlSeconds })
+  claimJobs(
+    owner: string,
+    limit = 1,
+    leaseTtlSeconds = 300,
+    targetFilter?: {
+      runner_target_kinds?: Array<'local-process' | 'local-docker' | 'remote-ssh'>
+      runner_target_ids?: string[]
+      include_unpinned?: boolean
+    },
+  ): Promise<JobRecord[]> {
+    return this.request('POST', '/v1/jobs-claim/run', {
+      owner,
+      limit,
+      lease_ttl_seconds: leaseTtlSeconds,
+      ...(targetFilter ?? {}),
+    })
   }
 
   /** §12.7: register a runner Ed25519 public key for manifest verification. */
@@ -532,6 +548,25 @@ export class ResearchClient {
 
   listRunnerKeys(): Promise<RunnerKey[]> {
     return this.request('GET', '/v1/runner-keys')
+  }
+
+  getRunnerTarget(targetId: string): Promise<{
+    target_id: string
+    display_name: string
+    kind: 'local-process' | 'local-docker' | 'remote-ssh'
+    enabled: boolean
+    draining: boolean
+    capabilities: string[]
+    connection?: {
+      endpoint: { scheme: 'file' | 'keyring' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
+      credential: { scheme: 'file' | 'keyring' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
+      known_hosts: { scheme: 'file' | 'keyring' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
+    }
+    health: 'unknown' | 'online' | 'offline'
+    revision: number
+    config_hash: string
+  }> {
+    return this.request('GET', `/v1/runner-targets/${encodeURIComponent(targetId)}`)
   }
 
   recoverExpiredLeases(): Promise<{ recovered: number }> {

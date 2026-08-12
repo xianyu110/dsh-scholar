@@ -136,6 +136,15 @@ class FakeFleetKernel implements FleetKernelClient {
   manifestPublicKeyPem: string | null = null
   /** secure kinds 的 required-facts 校验开关（默认开——镜像 kernel verifySecureRunFacts）。 */
   enforceSecureFacts = true
+  runnerTarget = {
+    target_id: 'remote-gpu-1', kind: 'remote-ssh' as const, enabled: true,
+    draining: false, revision: 1, config_hash: 'sha256:remote-target-v1',
+  }
+
+  async getRunnerTarget(targetId: string) {
+    if (targetId !== this.runnerTarget.target_id) throw kernelError(404, 'runner_target_unknown', `unknown target ${targetId}`)
+    return this.runnerTarget
+  }
 
   seedJob(overrides: Partial<JobRecord> & { job_id: string; project_id: string } & Record<string, unknown>): JobRecord & { run_id?: string | null } {
     const record: JobRecord & { run_id?: string | null } = {
@@ -654,6 +663,44 @@ describe('wire claim 匹配（POST /v1/agents/{id}/claims）', () => {
     })
     expect(verifyExecutionPlanSignature(claim.plan, fixture.fleetKey.publicKeyPem).valid).toBe(true)
     expect(fixture.fleet.stats().pending).toBe(0)
+  })
+
+  it('revalidates a pinned remote target immediately before dispatch', async () => {
+    const fixture = makeFleet()
+    fixture.kernel.seedJob({
+      job_id: 'job_stale_remote_target', project_id: 'prj_1',
+      payload: {
+        runner_target_id: 'remote-gpu-1', runner_target_kind: 'remote-ssh',
+        runner_target_revision: 1, runner_target_hash: 'sha256:remote-target-v1',
+        image_digest: DIGEST,
+      },
+    })
+    const { agent } = makeAgent(fixture)
+    await agent.register()
+    fixture.kernel.runnerTarget = { ...fixture.kernel.runnerTarget, revision: 2, config_hash: 'sha256:remote-target-v2' }
+    await expect(agent.claimOnce(1)).resolves.toEqual([])
+    expect(fixture.kernel.jobs.get('job_stale_remote_target')).toMatchObject({ status: 'failed' })
+    expect(fixture.kernel.completes.at(-1)).toMatchObject({
+      job_id: 'job_stale_remote_target', status: 'failed', failure_class: 'environment',
+    })
+  })
+
+  it('closes the lease when remote ExecutionPlan construction rejects a pinned profile', async () => {
+    const fixture = makeFleet()
+    fixture.kernel.seedJob({
+      job_id: 'job_bad_remote_profile', project_id: 'prj_1',
+      payload: {
+        target_id: 'remote-gpu-1', runner_profile_id: 'profile_missing',
+        profile_config_hash: 'sha256:not-a-profile', image_digest: DIGEST,
+      },
+    })
+    const { agent } = makeAgent(fixture)
+    await agent.register()
+    await expect(agent.claimOnce(1)).resolves.toEqual([])
+    expect(fixture.kernel.jobs.get('job_bad_remote_profile')).toMatchObject({ status: 'failed' })
+    expect(fixture.kernel.completes.at(-1)).toMatchObject({
+      job_id: 'job_bad_remote_profile', status: 'failed', failure_class: 'environment',
+    })
   })
 
   it('agent 断连期间服务端保留 outstanding；恢复后 resume 返回同一 claim（同一 run_id/lease）', async () => {

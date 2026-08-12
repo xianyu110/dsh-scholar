@@ -712,6 +712,12 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
   /** 校验 plan 签名（fail closed）+ zod 解析 + 深度冻结 + fingerprint。 */
   async prepare(plan: ExecutionPlan): Promise<ExecutionPreparation> {
     const parsed = ExecutionPlanSchema.parse(plan)
+    if (parsed.target_id !== this.target_id) {
+      throw new RemoteRunnerAgentError(`remote target ${this.target_id} refuses plan pinned to ${parsed.target_id}`)
+    }
+    if (parsed.target_kind !== null && parsed.target_kind !== 'remote-ssh') {
+      throw new RemoteRunnerAgentError(`remote target ${this.target_id} refuses ${parsed.target_kind} plan ${parsed.plan_id}`)
+    }
     const verification = verifyExecutionPlanSignature(parsed, this.publicKeyPem ?? '')
     if (!verification.valid) {
       throw new RemoteRunnerAgentError(`refusing to prepare plan ${parsed.plan_id}: ${verification.reason}`)
@@ -726,6 +732,9 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
       throw new ExecutionPlanMutationError('start() called before prepare() — target requires a prepared plan')
     }
     const parsed = ExecutionPlanSchema.parse(plan)
+    if (parsed.target_id !== this.target_id) {
+      throw new ExecutionPlanMutationError(`remote target ${this.target_id} refuses plan pinned to ${parsed.target_id}`)
+    }
     if (executionPlanFingerprint(parsed) !== this.preparedFingerprint) {
       throw new ExecutionPlanMutationError('ExecutionPlan mutated between prepare() and start() — targets never rewrite the plan')
     }

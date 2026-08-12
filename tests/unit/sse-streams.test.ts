@@ -254,7 +254,12 @@ describe('SSE stream: GET /v1/pty/sessions/{id}/frames/stream (PTY-01)', () => {
         { type: 'output', text: 'ddddddd\n', byte_length: 8 },
       ])
       const gapc = await SseClient.open(`${base.replace(session.pty_session_id, small.pty_session_id)}?after_seq=0`, auth)
-      const evsGap = await gapc.until(evs => evs.some(e => e.event === 'gap'))
+      // gap and the retained frames are written in order, but fetch/SSE may
+      // surface them in separate network chunks. Wait for both observable
+      // contract events instead of assuming the first gap chunk contains
+      // every subsequent retained frame.
+      const evsGap = await gapc.until(evs =>
+        evs.some(e => e.event === 'gap') && evs.some(e => e.event === 'frame'))
       const gap = evsGap.find(e => e.event === 'gap')
       expect(gap?.data).toMatchObject({ session_id: small.pty_session_id, gap_from_seq: 1 })
       expect(Number(gap?.data.dropped_bytes)).toBeGreaterThan(0)

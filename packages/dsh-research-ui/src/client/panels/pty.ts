@@ -10,9 +10,9 @@
  *     shell preset, relative cwd, cols/rows, pinned profile/target chips;
  *   - the session toolbar: resize, INT/TERM/KILL signals, detach/reconnect,
  *     close;
- *   - the output area: PLAIN TEXT only (the server's bytes are rendered
- *     verbatim; ANSI/xterm-class rendering and keyboard input are
- *     NOT_RUN_MANUAL_PENDING — the panel shows the honest note);
+ *   - a real xterm-compatible Web Terminal: keyboard/paste/IME input is
+ *     forwarded as PTY bytes, ANSI/VT and alternate-screen output is rendered
+ *     incrementally, and container changes automatically resize the PTY;
  *   - the status line: session state, in/out seq, masked lease + expiry,
  *     generation, byte totals, frames-consumption copy (SSE stream
  *     connecting/live/reconnecting/disconnected or poll fallback —
@@ -21,15 +21,18 @@
  * All chrome copy goes through the `pty` i18n namespace (zh/en parity);
  * wire codes and enum values are displayed via mapped keys, never raw.
  */
+import { Terminal, type ITheme } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
 import { apiResult, authHeaders, base } from '../api'
 import { t } from '../i18n/index'
 import { el } from '../ui'
 import {
   PtyClientModel, ptyStatusView,
   type PtyControlFrame, type PtyErrorEnvelope, type PtyFramesPageWire,
-  type PtyOpenParams, type PtyPreset, type PtyResult, type PtySessionWire,
+  type PtyDisplayEntry, type PtyOpenParams, type PtyPreset, type PtyResult, type PtySessionWire,
   type PtySignal, type PtyStreamTransport, type PtyTransport,
 } from '../pty-session-model'
+import { createWebTerminalAdapter, type WebTerminalAdapter } from '../web-terminal-adapter'
 import type { SseFetch } from '../sse-client'
 import type { Projection, WorkspaceInfoLite } from '../types'
 
@@ -53,6 +56,7 @@ interface PtyPanelState {
   workspacesLoading: boolean
   openInflight: boolean
   form: PtyFormState
+  live: PtyLiveRefs | null
 }
 
 /** Per-project panel state (survives panel re-renders / locale switches). */
@@ -60,21 +64,44 @@ const panelStates = new Map<string, PtyPanelState>()
 
 /** Live DOM refs for in-place stream/status paints between full renders. */
 interface PtyLiveRefs {
-  stream: HTMLElement
+  body: HTMLElement
+  panel: HTMLElement
+  sessionId: string
+  terminal: Terminal
+  terminalAdapter: WebTerminalAdapter
+  terminalHost: HTMLElement
+  terminalMeta: HTMLElement
+  resizeObserver: ResizeObserver | null
+  resizeFrame: number | null
   status: HTMLElement
   notice: HTMLElement
   error: HTMLElement
-  detachBtn: HTMLElement | null
-  attachBtn: HTMLElement | null
-  closeBtn: HTMLButtonElement | null
+  sessionChip: HTMLElement
+  note: HTMLElement
+  resizeBtn: HTMLElement
+  signalButtons: Map<PtySignal, HTMLElement>
+  detachBtn: HTMLElement
+  attachBtn: HTMLElement
+  closeBtn: HTMLButtonElement
+  reopenBtn: HTMLElement
 }
-const liveRefs = new WeakMap<PtyClientModel, PtyLiveRefs>()
+
+function disposeTerminalView(st: PtyPanelState): void {
+  const live = st.live
+  if (live === null) return
+  st.live = null
+  st.model.onChange = null
+  live.resizeObserver?.disconnect()
+  if (live.resizeFrame !== null) cancelAnimationFrame(live.resizeFrame)
+  live.terminalAdapter.dispose()
+}
 
 /** Tab-leave hygiene (index.ts): every open session detaches (the process
  *  keeps running server-side; the next visit reconnects via after_seq). */
 export function ptyPanelDetachAll(): void {
   for (const st of panelStates.values()) {
     if (st.model.state === 'open') st.model.detach()
+    disposeTerminalView(st)
   }
 }
 
@@ -95,6 +122,7 @@ function ensureState(projectId: string): PtyPanelState {
       workspacesLoading: false,
       openInflight: false,
       form: { workspaceId: '', preset: 'bash', cwd: '', cols: '80', rows: '24' },
+      live: null,
     }
     panelStates.set(projectId, st)
   }
@@ -174,38 +202,28 @@ function ptyStreamTransport(): PtyStreamTransport {
 
 /* ────────────────────────────── paint helpers ────────────────────────────── */
 
-function outputRow(entry: PtyDisplayEntryLike, model: PtyClientModel): HTMLElement {
+function outputRow(entry: PtyDisplayEntry, model: PtyClientModel): HTMLElement {
   const row = el('div')
   row.style.cssText = 'white-space:pre'
-  if (entry.kind === 'output') {
-    row.style.color = entry.channel === 'stderr' ? 'var(--tone-red)' : 'var(--text)'
-    row.textContent = entry.text ?? ''
-  } else if (entry.kind === 'gap') {
+  if (entry.kind === 'gap') {
     row.style.cssText += ';color:var(--tone-amber);font-weight:700'
     row.textContent = entry.gapFrom !== undefined && entry.gapTo !== undefined && entry.gapTo >= entry.gapFrom
       ? t('pty', 'pty.gap.frames', { from: String(entry.gapFrom), to: String(entry.gapTo), count: String(entry.droppedFrames ?? 0) })
       : t('pty', 'pty.gap.warning', { dropped: String(entry.droppedBytes ?? 0), retained: String(model.retainedFromSeq) })
-  } else {
+  } else if (entry.kind === 'exit') {
     row.style.cssText += ';color:var(--text-3);font-weight:700'
     row.textContent = ptyStatusView(model).exitText
   }
   return row
 }
 
-interface PtyDisplayEntryLike {
-  kind: 'output' | 'exit' | 'gap'
-  channel?: 'stdout' | 'stderr'
-  text?: string
-  gapFrom?: number
-  gapTo?: number
-  droppedBytes?: number
-  droppedFrames?: number
-}
-
-function paintStream(streamEl: HTMLElement, model: PtyClientModel): void {
-  streamEl.replaceChildren()
-  for (const entry of model.display) streamEl.appendChild(outputRow(entry, model))
-  streamEl.scrollTop = streamEl.scrollHeight
+/** Retention gaps and process exit are UI metadata, never ANSI input. */
+function paintTerminalMeta(metaEl: HTMLElement, model: PtyClientModel): void {
+  metaEl.replaceChildren()
+  for (const entry of model.display) {
+    if (entry.kind !== 'output') metaEl.appendChild(outputRow(entry, model))
+  }
+  metaEl.style.display = metaEl.childElementCount > 0 ? '' : 'none'
 }
 
 function paintStatusLine(statusEl: HTMLElement, model: PtyClientModel): void {
@@ -220,24 +238,61 @@ function paintStatusLine(statusEl: HTMLElement, model: PtyClientModel): void {
 /** In-place dynamic paint (model.onChange): output stream + status line +
  *  notices + toolbar enablement — no structural rebuild (the 8s panel
  *  refresh re-paints structure). */
-function paintDynamic(body: HTMLElement, model: PtyClientModel): void {
-  void body
-  const refs = liveRefs.get(model)
-  if (refs === undefined) return
-  paintStream(refs.stream, model)
+function terminalTheme(body: HTMLElement): ITheme {
+  const styles = getComputedStyle(body)
+  const color = (name: string, fallback: string): string => styles.getPropertyValue(name).trim() || fallback
+  return {
+    background: color('--bg-3', '#1b1b1c'),
+    foreground: color('--text', '#f9fafb'),
+    cursor: color('--text', '#f9fafb'),
+    cursorAccent: color('--bg-3', '#1b1b1c'),
+    selectionBackground: color('--accent-soft', '#34415b'),
+    black: '#151517',
+    red: color('--tone-red', '#f87171'),
+    green: color('--tone-green', '#34d399'),
+    yellow: color('--tone-amber', '#fbbf24'),
+    blue: color('--tone-blue', '#4d9fff'),
+    magenta: color('--tone-violet', '#a78bfa'),
+    cyan: color('--tone-cyan', '#22d3ee'),
+    white: color('--text', '#f9fafb'),
+  }
+}
+
+function paintDynamic(st: PtyPanelState): void {
+  const model = st.model
+  const refs = st.live
+  if (refs === null) return
+  refs.terminalAdapter.render(model.display)
+  paintTerminalMeta(refs.terminalMeta, model)
   paintStatusLine(refs.status, model)
   const view = ptyStatusView(model)
+  refs.terminal.options.disableStdin = view.state !== 'open'
+  refs.terminal.options.theme = terminalTheme(refs.body)
+  refs.terminalHost.setAttribute('aria-label', t('pty', 'pty.streamAria'))
+  refs.sessionChip.textContent = t('pty', 'pty.status.session', { id: model.sessionId ?? '' })
+  refs.note.textContent = t('pty', 'pty.ansi.note')
+  refs.detachBtn.textContent = t('pty', 'pty.action.detach')
+  refs.detachBtn.title = t('pty', 'pty.action.detach')
+  refs.attachBtn.textContent = t('pty', 'pty.action.attach')
+  refs.attachBtn.title = t('pty', 'pty.action.attach')
+  refs.closeBtn.textContent = t('pty', 'pty.action.close')
+  refs.closeBtn.title = t('pty', 'pty.action.close')
+  refs.reopenBtn.textContent = t('pty', 'pty.action.reopen')
+  refs.reopenBtn.title = t('pty', 'pty.action.reopen')
+  refs.resizeBtn.textContent = t('pty', 'pty.action.resize')
+  for (const [signal, button] of refs.signalButtons) {
+    button.textContent = t('pty', 'pty.action.signal', { signal })
+  }
   refs.notice.textContent = view.noticeText
   refs.notice.style.display = view.noticeText !== '' ? '' : 'none'
   const errText = view.errorText !== '' ? view.errorText : view.controlErrorText
   refs.error.textContent = errText
   refs.error.style.display = errText !== '' ? '' : 'none'
-  if (refs.detachBtn !== null) refs.detachBtn.style.display = view.state === 'open' ? '' : 'none'
-  if (refs.attachBtn !== null) refs.attachBtn.style.display = view.state === 'detached' ? '' : 'none'
-  if (refs.closeBtn !== null) {
-    refs.closeBtn.disabled = view.state !== 'open' && view.state !== 'detached'
-    refs.closeBtn.style.opacity = refs.closeBtn.disabled ? '.45' : ''
-  }
+  refs.detachBtn.style.display = view.state === 'open' ? '' : 'none'
+  refs.attachBtn.style.display = view.state === 'detached' ? '' : 'none'
+  refs.reopenBtn.style.display = view.state === 'closed' ? '' : 'none'
+  refs.closeBtn.disabled = view.state !== 'open' && view.state !== 'detached'
+  refs.closeBtn.style.opacity = refs.closeBtn.disabled ? '.45' : ''
 }
 
 /* ────────────────────────────── open form ────────────────────────────── */
@@ -252,6 +307,7 @@ async function loadWorkspaces(st: PtyPanelState, projectId: string): Promise<voi
 
 function paintOpenForm(body: HTMLElement, st: PtyPanelState, projection: Projection, projectId: string): void {
   const model = st.model
+  disposeTerminalView(st)
   body.replaceChildren()
   const panel = el('div')
   const view = ptyStatusView(model)
@@ -403,14 +459,24 @@ function paintOpenForm(body: HTMLElement, st: PtyPanelState, projection: Project
 function paintSession(body: HTMLElement, st: PtyPanelState, projection: Projection, projectId: string): void {
   const model = st.model
   const view = ptyStatusView(model)
+  const sessionId = model.sessionId ?? ''
+  const existing = st.live
+  if (existing !== null && existing.body === body && existing.sessionId === sessionId && body.contains(existing.panel)) {
+    paintDynamic(st)
+    existing.terminalAdapter.fit()
+    if (model.state === 'detached' && model.hasSession) model.reconnect()
+    return
+  }
+  disposeTerminalView(st)
   body.replaceChildren()
   const panel = el('div')
-  panel.style.cssText = 'display:flex;flex-direction:column;min-height:380px'
+  panel.dataset.webTerminalSession = sessionId
+  panel.style.cssText = 'display:flex;flex-direction:column;min-height:300px;height:min(66vh,620px)'
 
   // toolbar row 1: session identity + lifecycle actions.
   const toolbar = el('div', 'row')
   toolbar.style.cssText = 'align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px'
-  const sessionChip = el('span', 'artifact-kind', t('pty', 'pty.status.session', { id: model.sessionId ?? '' }))
+  const sessionChip = el('span', 'artifact-kind', t('pty', 'pty.status.session', { id: sessionId }))
   const detachBtn = el('button', 'hbtn', t('pty', 'pty.action.detach'))
   detachBtn.title = t('pty', 'pty.action.detach')
   detachBtn.onclick = () => { model.detach(); paintFull(body, st, projection, projectId) }
@@ -449,26 +515,35 @@ function paintSession(body: HTMLElement, st: PtyPanelState, projection: Projecti
     model.resize(cols, rows)
   }
   controls.append(colsInput, el('span', 'muted', '×'), rowsInput, resizeBtn)
+  const signalButtons = new Map<PtySignal, HTMLElement>()
   for (const sig of SIGNALS) {
     const btn = el('button', 'hbtn', t('pty', 'pty.action.signal', { signal: sig }))
     btn.style.cssText = 'border-color:var(--tone-amber);color:var(--tone-amber)'
     btn.onclick = () => { model.signal(sig) }
+    signalButtons.set(sig, btn)
     controls.appendChild(btn)
   }
   panel.appendChild(controls)
 
-  // ANSI note (honest: rendering is NOT_RUN_MANUAL_PENDING).
+  // Web Terminal boundary note: interactive PTY, not authoritative Run log.
   const note = el('div', 'muted', t('pty', 'pty.ansi.note'))
   note.style.cssText = 'font-size:10px;margin-bottom:6px'
   panel.appendChild(note)
 
-  // output viewport.
-  const stream = el('div')
-  stream.style.cssText = 'flex:1;overflow:auto;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:11px/1.5 ui-monospace,Menlo,monospace'
-  stream.setAttribute('aria-label', t('pty', 'pty.streamAria'))
-  stream.setAttribute('aria-live', 'polite')
-  paintStream(stream, model)
-  panel.appendChild(stream)
+  // xterm viewport. The emulator owns cursor/selection/IME/ANSI/TUI state;
+  // only gap and exit metadata is painted in ordinary DOM below it.
+  const terminalFrame = el('div', 'web-terminal-frame')
+  terminalFrame.style.cssText = 'position:relative;flex:1;min-height:180px;overflow:hidden;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:8px'
+  const terminalHost = el('div', 'web-terminal-host')
+  terminalHost.style.cssText = 'width:100%;height:100%;min-width:0;min-height:0'
+  terminalHost.setAttribute('role', 'application')
+  terminalHost.setAttribute('aria-label', t('pty', 'pty.streamAria'))
+  terminalFrame.appendChild(terminalHost)
+  panel.appendChild(terminalFrame)
+  const terminalMeta = el('div')
+  terminalMeta.style.cssText = 'display:none;margin-top:5px;font:10px/1.4 ui-monospace,Menlo,monospace'
+  terminalMeta.setAttribute('aria-live', 'polite')
+  panel.appendChild(terminalMeta)
 
   // status line + notices + errors.
   const statusRow = el('div', 'row')
@@ -498,16 +573,80 @@ function paintSession(body: HTMLElement, st: PtyPanelState, projection: Projecti
   panel.appendChild(errorEl)
 
   body.appendChild(panel)
-  liveRefs.set(model, {
-    stream,
+
+  const terminal = new Terminal({
+    allowProposedApi: false,
+    allowTransparency: false,
+    convertEol: false,
+    cursorBlink: true,
+    disableStdin: view.state !== 'open',
+    drawBoldTextInBrightColors: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 12,
+    lineHeight: 1.2,
+    minimumContrastRatio: 4.5,
+    rightClickSelectsWord: true,
+    screenReaderMode: false,
+    scrollback: 3000,
+    scrollOnUserInput: true,
+    theme: terminalTheme(body),
+  })
+  const fitAddon = new FitAddon()
+  terminal.loadAddon(fitAddon)
+  terminal.open(terminalHost)
+  const terminalAdapter = createWebTerminalAdapter({
+    terminal,
+    sendText: text => model.sendText(text),
+    resize: (cols, rows) => {
+      colsInput.value = String(cols)
+      rowsInput.value = String(rows)
+      return model.state === 'open' ? model.resize(cols, rows) : false
+    },
+    fit: () => {
+      try { fitAddon.fit() } catch { /* hidden/zero-size surface; next resize retries */ }
+    },
+  })
+  terminalHost.onclick = () => terminalAdapter.focus()
+
+  let liveRef: PtyLiveRefs | null = null
+  const scheduleFit = (): void => {
+    if (liveRef === null || st.live !== liveRef || liveRef.resizeFrame !== null) return
+    liveRef.resizeFrame = requestAnimationFrame(() => {
+      if (liveRef === null || st.live !== liveRef) return
+      liveRef.resizeFrame = null
+      liveRef.terminalAdapter.fit()
+    })
+  }
+  const resizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleFit) : null
+  const live: PtyLiveRefs = {
+    body,
+    panel,
+    sessionId,
+    terminal,
+    terminalAdapter,
+    terminalHost,
+    terminalMeta,
+    resizeObserver,
+    resizeFrame: null,
     status: statusEl,
     notice: noticeEl,
     error: errorEl,
+    sessionChip,
+    note,
+    resizeBtn,
+    signalButtons,
     detachBtn,
     attachBtn,
     closeBtn,
-  })
-  model.onChange = () => paintDynamic(body, model)
+    reopenBtn,
+  }
+  liveRef = live
+  st.live = live
+  resizeObserver?.observe(terminalFrame)
+  terminalAdapter.render(model.display)
+  paintTerminalMeta(terminalMeta, model)
+  scheduleFit()
+  model.onChange = () => paintDynamic(st)
   // Reconnect a detached session (tab return): after_seq replay resumes.
   if (model.state === 'detached' && model.hasSession) model.reconnect()
 }

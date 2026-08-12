@@ -43,6 +43,20 @@ describe('i18n runtime: locale switching (acceptance §8 line 135)', () => {
     expect(localeParityReport()).toEqual([])
   })
 
+  it('uses the dsh Scholar wordmark consistently in both locales', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      setLocale(locale)
+      expect(t('shell', 'shell.brand.mark')).toBe('dsh')
+      expect(t('shell', 'shell.brand.name')).toBe('Scholar')
+      expect(t('shell', 'shell.sidebar.product')).toBe('Scholar')
+      expect(t('shell', 'shell.documentTitle', { project: '', tab: 'Chat' })).toBe('dsh Scholar — Chat')
+      expect(t('shell', 'shell.chat.welcome')).toContain('dsh Scholar')
+      expect(t('shell', 'shell.chat.welcome')).not.toContain('Research OS')
+      expect(t('standalone', 'standalone.pageTitle')).toBe('dsh Scholar')
+      expect(t('standalone', 'standalone.brand.name')).toBe('Scholar')
+    }
+  })
+
   it('setLocale bumps the revision, notifies listeners and persists the locale', () => {
     let notified = 0
     const unsubscribe = subscribeLocale(() => { notified += 1 })
@@ -145,17 +159,21 @@ describe('i18n runtime: locale switching (acceptance §8 line 135)', () => {
   it('status pill labels re-evaluate; unknown enums stay raw verbatim', () => {
     setLocale('zh')
     const zhDraft = statusLabel('DRAFT')
+    const zhSurveyReady = statusLabel('SURVEYING')
     const zhExperiment = statusLabel('EXPERIMENTING')
     const zhPending = statusLabel('pending')
     expect(zhDraft).not.toBe('')
+    expect(zhSurveyReady).toBe('调研已就绪')
     expect(zhExperiment).not.toBe('')
     setLocale('en')
     // en mirrors the kernel enum values exactly (as before).
     expect(statusLabel('DRAFT')).toBe('DRAFT')
+    expect(statusLabel('SURVEYING')).toBe('SURVEY READY')
     expect(statusLabel('EXPERIMENTING')).toBe('EXPERIMENT')
     expect(statusLabel('pending')).toBe('PENDING')
     // zh actually translates them.
     expect(statusLabel('DRAFT')).not.toBe(zhDraft)
+    expect(statusLabel('SURVEYING')).not.toBe(zhSurveyReady)
     expect(statusLabel('EXPERIMENTING')).not.toBe(zhExperiment)
     expect(statusLabel('pending')).not.toBe(zhPending)
     // unknown future enum → raw wire value (§8 line 115).

@@ -16,11 +16,16 @@ import { state, tabSave } from '../state'
 import { DEEP_LINK_TAB_PREFIX } from '../nav'
 import { nextActionCardModel, resolveNextActionInput, type NextActionCardModel } from '../next-action-cards'
 import { openIntakeModal } from '../modals/intake'
+import { runChatLine } from '../modals/commands'
 
 /** Navigate to a panel tab through the existing nav mechanism: direct tab
  *  switch (immediate) + the stable deep link (survives reload/back-forward).
  *  Intake actions (route 'intake') open the intake wizard modal instead. */
 function navigateTo(model: NextActionCardModel): void {
+  if (model.commandDraft !== null) {
+    runChatLine(model.commandDraft)
+    return
+  }
   if (model.route === 'intake') {
     openIntakeModal(rootHost(), {
       projectId: model.intakeProjectId ?? undefined,
@@ -133,7 +138,9 @@ export function renderNextActionSection(body: HTMLElement, p: Projection): void 
     return
   }
   for (const action of input.actions) {
-    body.appendChild(nextActionCardNode(nextActionCardModel(action)))
+    body.appendChild(nextActionCardNode(nextActionCardModel(action, undefined, {
+      briefProblem: p.project?.brief?.problem,
+    })))
   }
 }
 

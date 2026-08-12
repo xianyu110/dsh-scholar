@@ -673,3 +673,5 @@ stage 创建按 expected_size 事务预留 Intake 配额；finalize 与 intake_a
 追加 `reproduction_specs`、`reproduction_attempts`、`reproduction_reports`、material/source link、`runner_targets`/`runner_profiles`/Config revision，并为 `pty_sessions` 增加 context_kind/context_id/parent_session_id 与 `(project_id,context_kind,context_id)` 索引。Spec/Attempt/Report 各自保存 canonical hash、revision/idempotency、Principal、Artifact refs；Report 不可变。Target/PTY 只保存 SecretRef metadata/token hash，不保存 SSH key/token 明文。
 
 恢复检查开放 attempt/lease/report ref、target/environment pin、PTY context/generation/lease expiry；同一 context 多 PTY 不互相覆盖。删除/retention 不得破坏 Report、signed RunManifest、released Bundle 或共享 Blob。
+
+**EXEC-ENV-02 追加迁移 0023（本轮）**：新增 `runner_targets`，保存 opaque `target_id`、`kind(local-process|local-docker|remote-ssh)`、display name、enabled/draining、capabilities JSON、`connection_json`（仅三项 SecretRef metadata：endpoint/credential/known_hosts）、health/last_seen、revision、created_by/created_at/updated_at；内置本机进程与本机 Docker 目标用 `INSERT OR IGNORE` 建立。表内严禁 hostname/private key/token/ProxyCommand 明文。迁移只追加，不修改 0022 以前 checksum；SCHEMA_VERSION 随迁移集合增加。完整性检查至少覆盖 remote-ssh 三个 SecretRef、kind/connection 一致性、revision 正数和内置目标存在。

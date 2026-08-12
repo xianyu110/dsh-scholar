@@ -1,5 +1,5 @@
-import type { Projection } from '../types'
-import { api, base } from '../api'
+import type { ProjectExecutionSettingsLite, Projection, RunnerTargetKindLite, RunnerTargetSafeViewLite, SecretRefViewLite } from '../types'
+import { api, apiResult, base } from '../api'
 import { getLocale, registerOverlayRebuild, setLocale, t } from '../i18n/index'
 import { openShortcutsModal } from '../modals/commands'
 import { accentColor, accentSet, autoRefreshEnabled, autoRefreshSet, chatClear, radiusSet, radiusValue, readTheme, state, textureSet, textureValue, writeTheme } from '../state'
@@ -11,6 +11,12 @@ import {
   settingsFieldDisplay, settingsKey, settingsSectionsForData,
 } from '../settings-model'
 import type { SettingsConfigField, SettingsEffectiveWire, SettingsSchemaWire } from '../settings-model'
+import {
+  runnerTargetSecretRefDraft,
+  runnerTargetSecretRefPayload,
+  type RunnerTargetSecretRefPayload,
+  type RunnerTargetSecretRefScheme,
+} from '../runner-target-settings-model'
 /* ─────────────────────────── settings modal ─────────────────────────── */
 
 /**
@@ -38,7 +44,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
   const overlay = el('div', 'overlay')
   overlay.onclick = (event) => { if (event.target === overlay) overlay.remove() }
   const modal = el('div', 'modal')
-  modal.style.cssText = 'width:560px;max-width:92vw'
+  modal.style.cssText = 'width:680px;max-width:92vw'
   const header = el('div', 'modal-header', t('shell', 'shell.settings.title'))
   const closeBtn = el('button', 'hbtn ghost', '×')
   closeBtn.onclick = () => overlay.remove()
@@ -63,10 +69,14 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
 
   // One kernel health probe serves the connection section; the CONFIG-01
   // surface (schema + effective) drives the dynamic config sections.
-  const [health, schema, effective] = await Promise.all([
+  const [health, schema, effective, runnerTargets, activeProject] = await Promise.all([
     api<{ ok?: boolean; instance?: string; config_pin?: string }>('/v1/health'),
     api<SettingsSchemaWire>('/v1/config/schema'),
     api<SettingsEffectiveWire>('/v1/config/effective'),
+    api<RunnerTargetSafeViewLite[]>('/v1/runner-targets'),
+    state.projectId === undefined
+      ? Promise.resolve(null)
+      : api<ProjectExecutionSettingsLite>(`/v2/projects/${encodeURIComponent(state.projectId)}`),
   ])
   const hasConfig = schema !== null && effective !== null &&
     typeof effective.config === 'object' && effective.config !== null
@@ -127,6 +137,252 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       rowEl.appendChild(slot)
       body.appendChild(rowEl)
     }
+    modal.appendChild(acc)
+  }
+
+  // EXEC-ENV-02: the persisted runner target registry is a writable,
+  // dedicated accordion. It deliberately sits outside CONFIG-01: project
+  // config selects an opaque target id, while this global operator surface
+  // manages the actual local-process/local-docker/remote-ssh descriptors.
+  if (runnerTargets !== null) {
+    const { acc, body } = makeAccordion(
+      'runner-targets',
+      t('shell', 'shell.settings.targets.title'),
+      t('shell', 'shell.settings.targets.summary', { count: String(runnerTargets.length) }),
+      true,
+    )
+    const error = el('div', 'settings-readonly-note')
+    error.style.cssText = 'display:none;color:var(--tone-red)'
+    body.appendChild(error)
+    const setError = (message: string): void => {
+      error.textContent = message
+      error.style.display = message === '' ? 'none' : 'block'
+    }
+    if (activeProject !== null) {
+      const projectTarget = el('div', 'settings-row settings-row-stack')
+      projectTarget.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);gap:7px'
+      projectTarget.append(
+        el('div', 'settings-row-label', t('shell', 'shell.settings.targets.projectDefault')),
+        el('div', 'muted', t('shell', 'shell.settings.targets.projectDefaultHint', { project: activeProject.name })),
+      )
+      const select = document.createElement('select')
+      select.className = 'field-input'
+      select.style.cssText = 'width:100%'
+      for (const target of runnerTargets) {
+        const option = document.createElement('option')
+        option.value = target.target_id
+        option.textContent = t('shell', 'shell.settings.targets.option', {
+          name: target.display_name,
+          kind: t('shell', `shell.settings.targets.kind.${target.kind}`),
+          health: t('shell', `shell.settings.targets.health.${target.health}`),
+        })
+        option.selected = target.target_id === activeProject.execution.runner_target_id
+        option.disabled = !target.enabled || target.draining
+        select.appendChild(option)
+      }
+      const saveDefault = el('button', 'hbtn', t('shell', 'shell.settings.targets.saveProjectDefault')) as HTMLButtonElement
+      saveDefault.onclick = async () => {
+        setError('')
+        saveDefault.disabled = true
+        const result = await apiResult<ProjectExecutionSettingsLite>(
+          `/v2/projects/${encodeURIComponent(activeProject.project_id)}/execution`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+              expected_revision: activeProject.revision,
+              runner_target_id: select.value,
+            }),
+          },
+        )
+        saveDefault.disabled = false
+        if (!result.ok) {
+          setError(result.error.message ?? t('shell', 'shell.settings.targets.projectDefaultFailed'))
+          return
+        }
+        overlay.remove()
+        void state.rerender()
+        void openSettingsModal(root)
+      }
+      projectTarget.append(select, saveDefault)
+      body.appendChild(projectTarget)
+    } else {
+      const noProject = el('div', 'settings-readonly-note', t('shell', 'shell.settings.targets.noActiveProject'))
+      body.appendChild(noProject)
+    }
+    const textInput = (value: string, placeholder: string): HTMLInputElement => {
+      const input = document.createElement('input')
+      input.className = 'field-input mono'
+      input.value = value
+      input.placeholder = placeholder
+      input.style.cssText = 'width:100%;box-sizing:border-box'
+      return input
+    }
+    const kindSelect = (value: RunnerTargetKindLite): HTMLSelectElement => {
+      const select = document.createElement('select')
+      select.className = 'field-input'
+      for (const kind of ['local-process', 'local-docker', 'remote-ssh'] as const) {
+        const option = document.createElement('option')
+        option.value = kind
+        option.textContent = t('shell', `shell.settings.targets.kind.${kind}`)
+        option.selected = kind === value
+        select.appendChild(option)
+      }
+      return select
+    }
+    const secretRefEditor = (
+      roleKey: string,
+      ref?: SecretRefViewLite,
+    ): { root: HTMLElement; payload: () => RunnerTargetSecretRefPayload | null } => {
+      const draft = runnerTargetSecretRefDraft(ref)
+      const root = el('div')
+      root.style.cssText = 'padding:7px;border:1px solid var(--border);border-radius:var(--radius-sm)'
+      root.appendChild(el('div', 'settings-row-label', t('shell', roleKey)))
+      const grid = el('div')
+      grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:6px'
+      const scheme = document.createElement('select')
+      scheme.className = 'field-input mono'
+      for (const value of ['file', 'keyring', 'vault'] as const) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = value
+        option.selected = value === draft.scheme
+        scheme.appendChild(option)
+      }
+      const name = textInput(draft.name, t('shell', 'shell.settings.targets.ref.namePlaceholder'))
+      const version = textInput(draft.version, t('shell', 'shell.settings.targets.ref.optionalPlaceholder'))
+      const scope = textInput(draft.scope, t('shell', 'shell.settings.targets.ref.optionalPlaceholder'))
+      const field = (labelKey: string, control: HTMLElement): HTMLElement => {
+        const wrapper = el('label')
+        wrapper.style.cssText = 'display:flex;flex-direction:column;gap:3px;min-width:0'
+        wrapper.append(el('span', 'muted', t('shell', labelKey)), control)
+        return wrapper
+      }
+      grid.append(
+        field('shell.settings.targets.ref.scheme', scheme),
+        field('shell.settings.targets.ref.name', name),
+        field('shell.settings.targets.ref.version', version),
+        field('shell.settings.targets.ref.scope', scope),
+      )
+      root.appendChild(grid)
+      return {
+        root,
+        payload: () => runnerTargetSecretRefPayload({
+          scheme: scheme.value as RunnerTargetSecretRefScheme,
+          name: name.value,
+          version: version.value,
+          scope: scope.value,
+        }),
+      }
+    }
+    const targetForm = (
+      target?: RunnerTargetSafeViewLite,
+    ): { form: HTMLElement; save: HTMLButtonElement } => {
+      const form = el('div', 'settings-row settings-row-stack')
+      form.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);gap:7px'
+      const id = textInput(target?.target_id ?? '', t('shell', 'shell.settings.targets.idPlaceholder'))
+      id.disabled = target !== undefined
+      const name = textInput(target?.display_name ?? '', t('shell', 'shell.settings.targets.namePlaceholder'))
+      const kind = kindSelect(target?.kind ?? 'local-docker')
+      const caps = textInput(target?.capabilities.join(', ') ?? '', t('shell', 'shell.settings.targets.capabilitiesPlaceholder'))
+      const endpoint = secretRefEditor('shell.settings.targets.ref.endpoint', target?.connection?.endpoint)
+      const credential = secretRefEditor('shell.settings.targets.ref.credential', target?.connection?.credential)
+      const knownHosts = secretRefEditor('shell.settings.targets.ref.knownHosts', target?.connection?.known_hosts)
+      const remoteFields = el('div')
+      remoteFields.style.cssText = 'display:grid;grid-template-columns:1fr;gap:6px'
+      remoteFields.append(
+        el('span', 'muted', t('shell', 'shell.settings.targets.secretRefHint')),
+        endpoint.root,
+        credential.root,
+        knownHosts.root,
+      )
+      const refreshRemote = (): void => { remoteFields.style.display = kind.value === 'remote-ssh' ? 'grid' : 'none' }
+      kind.onchange = refreshRemote
+      refreshRemote()
+      const flags = el('label', 'row')
+      flags.style.cssText = 'gap:14px;font-size:11px'
+      const enabled = document.createElement('input')
+      enabled.type = 'checkbox'; enabled.checked = target?.enabled ?? true
+      const draining = document.createElement('input')
+      draining.type = 'checkbox'; draining.checked = target?.draining ?? false
+      const enabledWrap = el('span', 'row'); enabledWrap.append(enabled, document.createTextNode(t('shell', 'shell.settings.targets.enabled')))
+      const drainingWrap = el('span', 'row'); drainingWrap.append(draining, document.createTextNode(t('shell', 'shell.settings.targets.draining')))
+      flags.append(enabledWrap, drainingWrap)
+      const save = el('button', 'hbtn', target === undefined
+        ? t('shell', 'shell.settings.targets.create')
+        : t('common', 'common.action.save')) as HTMLButtonElement
+      save.onclick = async () => {
+        setError('')
+        const targetKind = kind.value as RunnerTargetKindLite
+        const connection = targetKind === 'remote-ssh'
+          ? { endpoint: endpoint.payload(), credential: credential.payload(), known_hosts: knownHosts.payload() }
+          : undefined
+        if (targetKind === 'remote-ssh' && (connection?.endpoint === null || connection?.credential === null || connection?.known_hosts === null)) {
+          setError(t('shell', 'shell.settings.targets.secretRefInvalid'))
+          return
+        }
+        save.disabled = true
+        const shared = {
+          display_name: name.value.trim(),
+          kind: targetKind,
+          enabled: enabled.checked,
+          draining: draining.checked,
+          capabilities: caps.value.split(',').map(value => value.trim()).filter(Boolean),
+          ...(connection !== undefined ? { connection } : { ...(target?.connection !== undefined ? { connection: null } : {}) }),
+        }
+        const result = target === undefined
+          ? await apiResult<RunnerTargetSafeViewLite>('/v1/runner-targets', {
+            method: 'POST', body: JSON.stringify({ target_id: id.value.trim(), ...shared }),
+          })
+          : await apiResult<RunnerTargetSafeViewLite>(`/v1/runner-targets/${encodeURIComponent(target.target_id)}`, {
+            method: 'PATCH', body: JSON.stringify({ expected_revision: target.revision, ...shared }),
+          })
+        save.disabled = false
+        if (!result.ok) {
+          setError(result.error?.message ?? t('shell', 'shell.settings.targets.saveFailed'))
+          return
+        }
+        overlay.remove()
+        void openSettingsModal(root)
+      }
+      form.append(id, name, kind, caps, remoteFields, flags, save)
+      return { form, save }
+    }
+    for (const target of runnerTargets) {
+      const row = el('div', 'settings-row settings-row-stack')
+      row.style.cssText = 'gap:5px'
+      const title = el('div', 'row')
+      title.style.cssText = 'justify-content:space-between;width:100%'
+      const identity = el('div')
+      identity.append(
+        el('div', 'settings-row-label', target.display_name),
+        el('div', 'mono muted', t('shell', 'shell.settings.targets.identity', {
+          id: target.target_id,
+          kind: t('shell', `shell.settings.targets.kind.${target.kind}`),
+          revision: String(target.revision),
+        })),
+      )
+      const status = el('span', 'settings-chip', target.draining
+        ? t('shell', 'shell.settings.targets.statusDraining')
+        : target.enabled ? t('shell', `shell.settings.targets.health.${target.health}`) : t('shell', 'shell.settings.targets.statusDisabled'))
+      title.append(identity, status)
+      const meta = el('div', 'muted', target.capabilities.length > 0 ? target.capabilities.join(' · ') : '—')
+      meta.style.cssText = 'font-size:10px'
+      if (target.connection !== undefined) {
+        const available = [target.connection.endpoint, target.connection.credential, target.connection.known_hosts].every(ref => ref.available)
+        meta.appendChild(document.createTextNode(` · ${t('shell', available ? 'shell.settings.targets.secretsAvailable' : 'shell.settings.targets.secretsUnavailable')}`))
+      }
+      const edit = el('button', 'hbtn', t('shell', 'shell.settings.targets.edit')) as HTMLButtonElement
+      edit.style.cssText = 'align-self:flex-start;padding:2px 10px'
+      const form = targetForm(target).form
+      form.style.display = 'none'
+      edit.onclick = () => { form.style.display = form.style.display === 'none' ? 'flex' : 'none' }
+      row.append(title, meta, edit, form)
+      body.appendChild(row)
+    }
+    const create = el('button', 'hbtn', t('shell', 'shell.settings.targets.add')) as HTMLButtonElement
+    const createForm = targetForm().form
+    createForm.style.display = 'none'
+    create.onclick = () => { createForm.style.display = createForm.style.display === 'none' ? 'flex' : 'none' }
+    body.append(create, createForm)
     modal.appendChild(acc)
   }
 

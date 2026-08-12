@@ -10,7 +10,7 @@
 /reproduce <doi|arxiv|paper-artifact-id>
 ~~~
 
-所有功能子项直接使用 `/new`、`/status`、`/confirm-brief`、`/run`、`/evidence`、`/write`、`/release` 等一级命令。DSH 不注册聚合 descriptor；standalone 的旧输入兼容只能存在于隐藏 parser 分支，不得进入帮助、补全、文档示例或新 provenance。
+所有功能子项直接使用 `/new`、`/status`、`/confirm-brief`、`/run`、`/evidence`、`/write`、`/release` 等一级命令。DSH 与 standalone 都不注册、不解析或兼容旧聚合 descriptor/prefix；旧形式返回 unknown command，且不得进入帮助、补全、文档示例或新 provenance。
 
 `/reproduce` 创建或恢复 `PaperReproductionSpec`，打开 Chat 驱动的复现向导：解析论文标识/上传 PDF → 关联官方或用户上传代码 → 固定数据与环境 → 提取待复现声明 → Human 确认复现计划/合同 → 在选定 Runner 执行 → 比较论文目标与本次结果 → 生成报告。Agent 可以准备计划、提交 Job 和解释差异，不能批准 Gate、伪造 RunManifest、把 Interactive PTY 输出当正式结果或把“接近”改写为成功。
 
@@ -33,6 +33,8 @@ source paper ref 接受 DOI、arXiv ID 或已扫描 PDF Artifact；外部 metada
 - `bundle_only`：仅验证 Bundle 结构/hash，不等同科学复现。
 
 ### 2.2 EnvironmentLock 与 ExecutionBinding
+
+`execution_binding.target_id` 必须解析到 RunnerTarget Registry 中 enabled、非 draining 且与 runner profile 类型兼容的目标。创建/更新 Spec 与启动 attempt 都必须重新核对 target revision/config hash；EnvironmentLock 中冲突、伪造或过期的 pin 一律拒绝，目标变更后不能静默回退本机，只能显式更新 Spec 或创建新的 attempt。
 
 实验/复现只能选择 opaque `runner_profile_id` 与 `target_id`。Target adapter 首版为 `local-docker` 或 `remote-ssh-runner`；SSH host/port/user/private key/jump host/known-hosts/mTLS material 只存在服务端 Settings/SecretRef，不进入 Project、Spec、Contract、Job、ExecutionPlan、argv、浏览器、日志或 Bundle。
 

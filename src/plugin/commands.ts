@@ -19,6 +19,8 @@ export interface CommandContext {
   client: ResearchClient
   cache: ConnectorCache
   unattended: boolean
+  /** Project governance mode inherited by /new unless its JSON overrides mode. */
+  defaultMode?: 'gate-only' | 'full-auto'
 }
 
 /** Extract a JSON object literal from anywhere in the remainder: the JSON
@@ -48,7 +50,7 @@ function fmt(value: unknown): string {
 /** §9: every direct slash command below has a REAL handler — this text is
  * only the help/documentation payload, never a catch-all for unimplemented
  * subcommands (help|list|status|gates|jobs|claims are all implemented). */
-const RESEARCH_HELP = 'DSH Research OS — direct slash commands:\n'
+const RESEARCH_HELP = 'dsh Scholar — direct slash commands:\n'
   + '  /help                  this help text\n'
   + '  /new <name> [json]     create project + Scope Gate\n'
   + '  /list                  list all research projects (kernel data)\n'
@@ -68,7 +70,7 @@ const RESEARCH_HELP = 'DSH Research OS — direct slash commands:\n'
   + '  /release               create the human Release Gate'
 
 const DIRECT_COMMANDS = [
-  ['help', 'List Research OS commands', ''],
+  ['help', 'List dsh Scholar commands', ''],
   ['new', 'Create a Research Project', '<name> [json]'],
   ['list', 'List Research Projects', ''],
   ['status', 'Show project status and next actions', '[project_id]'],
@@ -90,7 +92,7 @@ const DIRECT_COMMANDS = [
 /** Register direct top-level commands. The DSH registry has no hidden-command
  * flag, so the old aggregate descriptor is deliberately not registered. */
 export function registerResearchCommands(ctx: Context, commandCtx: CommandContext): void {
-  const { client, cache, unattended } = commandCtx
+  const { client, cache, unattended, defaultMode = 'gate-only' } = commandCtx
 
   const execute = async (sub: string, rest: string, invocation: CommandInvocation) => {
     const sessionId = invocation.agent.id
@@ -104,6 +106,9 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               return { kind: 'error' as const, text: '/new <name> [<brief-json>] — name is required' }
             }
             const brief = briefFromJson(json)
+            const requestedMode = brief?.mode === 'full-auto' || brief?.mode === 'gate-only'
+              ? brief.mode
+              : defaultMode
             const project = await client.createProject({
               name,
               workspace: `/research/${name}`,
@@ -119,6 +124,10 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
                 baseline_repo: brief?.baseline_repo !== undefined ? String(brief.baseline_repo) : null,
                 domain: String(brief?.domain ?? 'machine-learning'),
               },
+              mode: requestedMode,
+              ...(brief?.fixture_id !== undefined && brief.fixture_id !== ''
+                ? { execution: { fixture_id: String(brief.fixture_id) } }
+                : {}),
               session_id: sessionId,
             })
             const gate = await client.createGate({
@@ -170,6 +179,8 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               project_id: project.project_id,
               queries: result.queries,
               papers: result.hits.map(h => h.paper),
+              citation_edges: result.citation_edges,
+              source_status: result.source_status.some(source => source.status === 'failed') ? 'pending' : 'complete',
             })
             const samples = result.hits.slice(0, 5).map(h => `  - ${h.paper.paper_id}: ${h.paper.title} (${h.paper.year ?? 'n.d.'})`).join('\n')
             const text = `Survey complete: **${snapshot.snapshot_id}** — ${snapshot.papers.length} papers after dedup (${result.dedup_removed} removed).\n\n`

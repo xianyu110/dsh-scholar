@@ -99,9 +99,24 @@ describe('nextActionCardModel: missing-list mapping', () => {
 })
 
 describe('nextActionCardModel: route mapping (kernel route → panel tab)', () => {
+  it('survey_run opens project Chat with a prefilled slash command, even for an older kernel that says runs', () => {
+    const m = nextActionCardModel(action({ code: 'survey_run', route: 'runs', required_by: 'agent' }), 'zh', {
+      briefProblem: '  object   recognition under domain shift  ',
+    })
+    expect(m.route).toBe('chat')
+    expect(m.requiredBy).toBe('agent')
+    expect(m.commandDraft).toBe('/survey object recognition under domain shift')
+  })
+
+  it('survey_run without a Brief problem still opens Chat with an editable command prefix', () => {
+    const m = nextActionCardModel(action({ code: 'survey_run', route: 'runs' }), 'en', {})
+    expect(m.route).toBe('chat')
+    expect(m.commandDraft).toBe('/survey ')
+  })
+
   it('panel routes map to the same tab', () => {
     for (const route of ['gates', 'runs', 'evidence', 'manuscript', 'budget']) {
-      const m = nextActionCardModel(action({ route }))
+      const m = nextActionCardModel(action({ code: 'scope_gate_submit', route }))
       expect(m.route).toBe(route)
       expect(m.hasRoute).toBe(true)
     }
@@ -109,24 +124,24 @@ describe('nextActionCardModel: route mapping (kernel route → panel tab)', () =
 
   it('non-panel kernel routes converge on the Overview tab (phase)', () => {
     for (const route of ['ideas', 'contracts', 'release', 'overview']) {
-      const m = nextActionCardModel(action({ route }))
+      const m = nextActionCardModel(action({ code: 'idea_generate', route }))
       expect(m.route).toBe('phase')
       expect(m.hasRoute).toBe(true)
     }
   })
 
   it('unknown/future kernel routes fall back to the Overview tab', () => {
-    const m = nextActionCardModel(action({ route: 'workspace' }))
+    const m = nextActionCardModel(action({ code: 'idea_generate', route: 'workspace' }))
     expect(m.route).toBe('phase')
   })
 
   it('missing route degrades to the Overview tab', () => {
-    const m = nextActionCardModel(action({ route: undefined }))
+    const m = nextActionCardModel(action({ code: 'idea_generate', route: undefined }))
     expect(m.route).toBe('phase')
   })
 
   it('done actions keep their route but stay disabled', () => {
-    const m = nextActionCardModel(action({ state: 'done', route: 'gates' }))
+    const m = nextActionCardModel(action({ code: 'scope_gate_submit', state: 'done', route: 'gates' }))
     expect(m.route).toBe('gates')
     expect(m.hasRoute).toBe(true)
     expect(m.disabled).toBe(true)
@@ -243,7 +258,7 @@ describe('intake_* overlay actions (ONBOARD-01 landing — wizard CTA)', () => {
   it('non-intake codes never get intake ids', () => {
     const m = nextActionCardModel(action({ code: 'survey_run', refs: [{ kind: 'intake', id: 'intk_1' }] }))
     expect(m.intakeId).toBeNull()
-    expect(m.route).toBe('runs')
+    expect(m.route).toBe('chat')
   })
 })
 

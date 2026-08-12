@@ -34,9 +34,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 // Module augmentations: ctx.tools (ToolRegistry), ctx.commands (CommandService).
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { Settings } from '@deepseek-ai/dsh-settings'
 import * as SkillLocal from '@deepseek-ai/dsh-skill-local'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -51,7 +54,13 @@ import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type Sk
 
 export const name = 'research-plugin'
 
-export const inject = ['tools', 'commands', 'subagents']
+/** DSH Settings namespace owned by the research plugin. */
+export const RESEARCH_SETTINGS_NAMESPACE = settingsNamespace(name)
+
+// Settings is a boot dependency, not an opportunistic lookup: the persisted
+// restart-scoped section must be registered and resolved before the kernel is
+// constructed. DSH's loader activates this fiber once all four services exist.
+export const inject = ['tools', 'commands', 'subagents', 'settings']
 
 export interface ResearchPluginConfig {
   kernel?: {
@@ -70,7 +79,80 @@ export interface ResearchPluginConfig {
   cacheDir?: string
 }
 
-declare module 'cordis' {
+type ConfigIssue = { message: string; path: PropertyKey[] }
+
+const ROOT_CONFIG_KEYS = new Set(['kernel', 'defaultMode', 'unattended', 'models', 'cacheDir'])
+const KERNEL_CONFIG_KEYS = new Set(['host', 'port', 'dataDir', 'token'])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Reject config drift instead of silently accepting misspelled or v2-only fields. */
+function unknownConfigIssues(value: unknown): ConfigIssue[] {
+  if (!isRecord(value)) return []
+  const issues: ConfigIssue[] = []
+  for (const key of Object.keys(value)) {
+    if (!ROOT_CONFIG_KEYS.has(key)) {
+      issues.push({ message: `unknown config key "${key}"`, path: [key] })
+    }
+  }
+  if (isRecord(value.kernel)) {
+    for (const key of Object.keys(value.kernel)) {
+      if (!KERNEL_CONFIG_KEYS.has(key)) {
+        issues.push({ message: `unknown config key "kernel.${key}"`, path: ['kernel', key] })
+      }
+    }
+  }
+  return issues
+}
+
+/**
+ * Schemastery supplies the DSH config editor metadata and defaults. Its object
+ * validator intentionally preserves unknown properties, while Scholar's
+ * canonical config contract is fail-closed, so the Standard Schema seam adds
+ * strict-key issues without changing the host-visible Schemastery shape.
+ */
+function strictPluginConfig(schema: z<ResearchPluginConfig>): z<ResearchPluginConfig> {
+  const standard = schema['~standard']
+  Object.defineProperty(schema, '~standard', {
+    value: {
+      version: standard.version,
+      vendor: standard.vendor,
+      validate(value: unknown) {
+        const result = standard.validate(value)
+        if (result instanceof Promise) {
+          return result.then(resolved => resolved.issues !== undefined
+            ? resolved
+            : (unknownConfigIssues(value).length > 0 ? { issues: unknownConfigIssues(value) } : resolved))
+        }
+        if (result.issues !== undefined) return result
+        const issues = unknownConfigIssues(value)
+        return issues.length > 0 ? { issues } : result
+      },
+    },
+  })
+  return schema
+}
+
+/** Runtime config schema discovered by the real DSH/Cordis plugin loader. */
+export const Config: z<ResearchPluginConfig> = strictPluginConfig(z.object({
+  kernel: z.object({
+    host: z.string().min(1).default('127.0.0.1').description('Research Kernel bind host.'),
+    port: z.natural().max(65_535).default(7412).description('Research Kernel port; 0 requests an ephemeral loopback port.'),
+    dataDir: z.string().min(1).description('Directory containing kernel.db, CAS, runtime identity and token files.'),
+    token: z.string().min(1).role('secret').description('Optional initial Kernel bearer token; persisted in a 0600 token file.'),
+  }).default({} as never).description('Managed Research Kernel sidecar.'),
+  defaultMode: z.union(['gate-only', 'full-auto'] as const).default('gate-only')
+    .description('Default project governance mode; full-auto remains fixture-only.'),
+  unattended: z.boolean().default(false)
+    .description('Park at human gates instead of waiting for interactive answers.'),
+  models: z.dict(z.string().min(1)).default({})
+    .description('Per-role model routing for research subagents.'),
+  cacheDir: z.string().min(1).description('Connector response cache directory.'),
+}).default({} as never))
+
+declare module '@deepseek-ai/cordis' {
   interface Context {
     research: {
       client: ResearchClient
@@ -128,14 +210,24 @@ function modelForRole(config: ResearchPluginConfig, role: string): string | unde
  * (tools/commands/services pointing at a dead kernel) survives.
  */
 export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Promise<void> {
-  const unattended = config.unattended ?? false
+  // Cordis entry Config and the durable user section are distinct layers.
+  // Register before sidecar construction so a restart applies the persisted
+  // section to every closure and process option created by this fiber.
+  const settings = typeof ctx.get === 'function' ? ctx.get('settings') as Settings | undefined : undefined
+  const settingsScope = settings?.register(RESEARCH_SETTINGS_NAMESPACE, Config, {
+    base: config,
+    applies: 'restart',
+    exposeToConfigurationClients: true,
+  })
+  const effectiveConfig = settingsScope?.get() ?? config
+  const unattended = effectiveConfig.unattended ?? false
   // True once this fiber's disposer ran (dispose/reload mid-startup).
   let disposed = false
   const sidecar = new KernelSidecar({
-    host: config.kernel?.host,
-    port: config.kernel?.port,
-    dataDir: config.kernel?.dataDir,
-    token: config.kernel?.token,
+    host: effectiveConfig.kernel?.host,
+    port: effectiveConfig.kernel?.port,
+    dataDir: effectiveConfig.kernel?.dataDir,
+    token: effectiveConfig.kernel?.token,
     log: line => ctx.logger('research').info(line.replace(/^\[research-plugin\] /, '')),
   })
   // Disposer FIRST (effect model): sidecar.stop() runs on fiber unload; the
@@ -177,7 +269,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     // handed the kernel (0600 <dataDir>/service-token).
     serviceToken: sidecar.serviceToken,
   })
-  const cacheDir = config.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
+  const cacheDir = effectiveConfig.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
   const cache = new DiskCache(cacheDir)
   const roles = new RoleRegistry()
 
@@ -197,7 +289,14 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   // Model routing: explicit config.models[role] wins; otherwise the standalone
   // UI preference (model.json in the standalone data dir) applies to the
   // primary role; '' means the agent default.
-  registerResearchTools({ tools: ctx.tools }, { client, cache, ctx: ctx as never, roles, modelFor: (role) => modelForRole(config, role) })
+  registerResearchTools({ tools: ctx.tools }, {
+    client,
+    cache,
+    ctx: ctx as never,
+    roles,
+    modelFor: role => modelForRole(effectiveConfig, role),
+    defaultMode: effectiveConfig.defaultMode ?? 'gate-only',
+  })
 
   // Role-based ACL: deny research tools outside the caller role's surface.
   const researchToolSet = new Set<string>(RESEARCH_TOOLS)
@@ -213,7 +312,12 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   })
 
   // Direct slash commands (design 附录 A).
-  registerResearchCommands(ctx, { client, cache, unattended })
+  registerResearchCommands(ctx, {
+    client,
+    cache,
+    unattended,
+    defaultMode: effectiveConfig.defaultMode ?? 'gate-only',
+  })
 
   // Skill pack mount: methodology plus deterministic domain/venue packs.
   // §9: the provider resolves the four groups from the PUBLISHED PACKAGE
@@ -225,14 +329,20 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   if (missingSkills.length > 0) {
     ctx.logger('research').warn(`skill groups missing from package root: ${missingSkills.join(', ')}`)
   }
-  void ctx.plugin(SkillLocal, {
-    providerName: 'dsh-scholar:research-skills',
-    includeDefaultRoots: false,
-    customSkillDirs: skillDirs,
-    watch: false,
-  }).then(undefined, error => {
-    ctx.logger('research').warn(`skill mount failed: ${(error as Error).message}`)
-  })
+  try {
+    await ctx.plugin(SkillLocal, {
+      providerName: 'dsh-scholar:research-skills',
+      includeDefaultRoots: false,
+      customSkillDirs: skillDirs,
+      watch: false,
+    })
+  } catch (error) {
+    ctx.logger('research').error(`skill mount failed: ${(error as Error).message}`)
+    // A plugin advertised as ACTIVE must have its documented Skill surface.
+    // Rethrowing makes Cordis unload the already registered child effects,
+    // tools, commands, research service and sidecar in one lifecycle rollback.
+    throw error
+  }
 }
 
 /** Helper for tests: build a scratch cache dir. */

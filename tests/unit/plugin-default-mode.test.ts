@@ -1,0 +1,79 @@
+/** DSH-visible project creation honors the plugin row's defaultMode. */
+import { describe, expect, it } from 'vitest'
+import type { ResearchClient } from '@dsh-scholar/research-client'
+import { registerResearchTools, type ResearchToolContext } from '../../src/plugin/tools.js'
+import { registerResearchCommands, type CommandContext } from '../../src/plugin/commands.js'
+
+const BRIEF = {
+  problem: 'compatibility',
+  scope: 'plugin config',
+  questions: [],
+  primary_metrics: [],
+  resources: '',
+  risks: [],
+  target_outputs: ['paper'],
+  target_venue: null,
+  baseline_repo: null,
+  domain: 'machine-learning',
+}
+
+describe('DSH plugin defaultMode', () => {
+  it('applies full-auto to research_project create when the tool call omits mode', async () => {
+    let createdMode: unknown
+    const client = {
+      createProject: async (input: { mode?: string }) => {
+        createdMode = input.mode
+        return { project_id: 'rsp_fixture', name: 'fixture', brief: BRIEF }
+      },
+    } as unknown as ResearchClient
+    const registered: Array<{ name: string; execute(args: Record<string, unknown>, exec: { agent?: { id: string }; signal: AbortSignal }): Promise<unknown> }> = []
+    const toolContext = {
+      client,
+      cache: { get: async () => undefined, set: async () => undefined },
+      ctx: {},
+      roles: { set() {} },
+      modelFor: () => undefined,
+      defaultMode: 'full-auto',
+    } as unknown as ResearchToolContext
+
+    registerResearchTools({ tools: { register: tool => registered.push(tool as never) } }, toolContext)
+    const create = registered.find(tool => tool.name === 'research_project')
+    expect(create).toBeDefined()
+    await create?.execute({
+      action: 'create',
+      name: 'fixture',
+      brief_json: JSON.stringify(BRIEF),
+      fixture_id: 'golden-path-v2',
+    }, { agent: { id: 'pi' }, signal: new AbortController().signal })
+
+    expect(createdMode).toBe('full-auto')
+  })
+
+  it('applies full-auto to /new when the command omits a per-project mode', async () => {
+    let createdMode: unknown
+    const client = {
+      createProject: async (input: { mode?: string }) => {
+        createdMode = input.mode
+        return { project_id: 'rsp_command', name: 'fixture', status: 'DRAFT', brief: BRIEF }
+      },
+      createGate: async () => ({ gate_id: 'gate_scope' }),
+    } as unknown as ResearchClient
+    const commands = new Map<string, { handler(invocation: { agent: { id: string }; rawInput: string }): Promise<unknown> }>()
+    const ctx = {
+      commands: { register: (definition: { name: string; handler(invocation: { agent: { id: string }; rawInput: string }): Promise<unknown> }) => commands.set(definition.name, definition) },
+    }
+
+    registerResearchCommands(ctx as never, {
+      client,
+      cache: { get: async () => undefined, set: async () => undefined },
+      unattended: false,
+      defaultMode: 'full-auto',
+    } as CommandContext)
+    await commands.get('new')?.handler({
+      agent: { id: 'pi' },
+      rawInput: `fixture ${JSON.stringify({ ...BRIEF, fixture_id: 'golden-path-v2' })}`,
+    })
+
+    expect(createdMode).toBe('full-auto')
+  })
+})

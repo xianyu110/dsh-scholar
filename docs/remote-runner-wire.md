@@ -240,17 +240,19 @@ sandbox 隔离验收、跨主机网络分区故障注入、Remote PTY 与浏览�
 
 wire 协议已接入 `runner-gateway` 真实 CLI（`node lib/bin/runner.js`，
 Config Registry runner-profile scope 解析；见 hardening-v0.2-status.md §8
-FLEET-01 行）。三个互斥角色由 flag 决定，同一二进制：
+FLEET-01 行）。本地、Fleet 服务端、直接 Agent 与受控 SSH bootstrap 四种互斥角色由 flag 决定，同一二进制：
 
 | 角色 | 启动方式 | 行为 |
 |---|---|---|
 | 本地 claim 循环（默认） | `--kernel <url> [--mode subprocess\|docker]` | 既有本地 runner 行为完全不变（§12.6/§12.7） |
 | Fleet 服务端 | `--fleet-server <port>` | RemoteFleetServer：从 kernel 按既有 claimJobs 路径拉取 Job、固定并签名 ExecutionPlan、按 target 分发；wire 挂真实 HTTP 路由（/v1/agents/*） |
 | Fleet 代理端 | `--agent <fleet-url>` | RemoteRunnerAgentImpl 客户端循环：register → heartbeat → poll claims → 执行 → frames/artifacts/complete；离线有界 spool 复用 AgentOutboundSpool |
+| SSH 引导端 | `--agent <fleet-url> --ssh-bootstrap-target <target_id> --secret-root <dir> --fleet-public-key <pem>` | 从持久 RunnerTarget 的服务端 file SecretRef 严格解析 endpoint/key/known_hosts，以 pinned host key 建 SSH，只启动远端 `dsh-scholar-runner` Agent；不接受任意命令 |
 
 互斥校验（启动时 fail fast，exit 1）：
 
 - `--fleet-server` 与 `--agent` 不能同时给（一个进程只服务一个角色）；
+- `--ssh-bootstrap-target` 必须与 `--agent`、`--secret-root`、`--fleet-public-key` 一起使用，且不能与 `--fleet-server` 组合；
 - 任一 fleet 角色与 `--mode` 不能同时给（`--mode` 只对本地 claim 循环
   有意义——远端执行由 agent 侧 executor 决定，计划由 ExecutionPlan 固定）；
 - 未知 flag / 非法值仍由 parseCli/validateConfig 拒绝（CONFIG-01）。
@@ -314,4 +316,3 @@ node:http listener + HttpRemoteFleetTransport 覆盖该拓扑的全链
 真实 mTLS 证书链（CA 签发/吊销/轮换、服务端与客户端证书身份校验）、
 跨主机部署（非 loopback 接口、网络分区故障注入）、真实远端 sandbox 隔离
 验收、Remote PTY 与浏览器 UI——本阶段环境无 CA/第二主机，保持 🌐 状态。
-

@@ -4,16 +4,11 @@ import { t } from '../i18n/index'
 import { state, tabSave } from '../state'
 import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast } from '../ui'
 import { terminalLoadSeq } from '../terminal'
+import { runsEmptyStateModel, runsFilterDefinitions } from '../runs-model'
 export let runsSelecting = false
 export let runsSelected = new Set<string>()
 /** Runs status filter (dsh-web filter chips). */
 export let runsFilter = 'all'
-export const RUNS_FILTERS: Array<[string, string]> = [
-  ['all', t('runs', 'runs.filter.all')], ['queued', t('runs', 'runs.filter.queued')], ['running', t('runs', 'runs.filter.running')],
-  ['succeeded', t('runs', 'runs.filter.succeeded')], ['failed', t('runs', 'runs.filter.failed')], ['cancelled', t('runs', 'runs.filter.cancelled')],
-]
-
-
 export function renderRuns(body: HTMLElement, p: Projection): void {
   const allJobs = p.jobs ?? []
   const jobs = (runsFilter === 'all' ? allJobs : allJobs.filter(j => j.status === runsFilter)).slice(-12).reverse()
@@ -37,7 +32,7 @@ export function renderRuns(body: HTMLElement, p: Projection): void {
   // dsh-web filter chips: one-click status filter with live counts.
   const chipsRow = el('div')
   chipsRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 6px;flex-wrap:wrap'
-  for (const [key, label] of RUNS_FILTERS) {
+  for (const [key, label] of runsFilterDefinitions()) {
     const count = key === 'all' ? allJobs.length : allJobs.filter(j => j.status === key).length
     const chip = el('button', 'hbtn', `${label} (${count})`)
     chip.style.cssText = 'padding:2px 8px;font-size:10px'
@@ -47,10 +42,36 @@ export function renderRuns(body: HTMLElement, p: Projection): void {
     chipsRow.appendChild(chip)
   }
   body.appendChild(chipsRow)
-  if (jobs.length === 0) {
-    body.appendChild(el('div', 'empty', allJobs.length === 0
-      ? t('runs', 'runs.empty')
-      : t('runs', 'runs.noMatch', { status: runsFilter })))
+  const emptyState = runsEmptyStateModel(
+    p.project?.status,
+    p.counts?.corpus_snapshots ?? 0,
+    p.next_actions_v2?.some(action => action.code === 'idea_generate') ?? false,
+    allJobs.length,
+    jobs.length,
+  )
+  if (emptyState !== null) {
+    if (emptyState.kind === 'survey-ready') {
+      const guidance = el('div', 'card')
+      guidance.style.cssText = 'margin-top:10px;padding:18px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap'
+      const copy = el('div')
+      copy.append(
+        el('div', 'section-label', t('runs', 'runs.surveyReady.title')),
+        el('div', 'muted', t('runs', 'runs.surveyReady.body')),
+      )
+      const overview = el('button', 'hbtn', t('runs', 'runs.surveyReady.cta'))
+      overview.onclick = () => {
+        state.activeTab = 'phase'
+        tabSave()
+        try { history.replaceState(null, '', '#tab=phase') } catch { /* sandboxed */ }
+        state.rerender()
+      }
+      guidance.append(copy, overview)
+      body.appendChild(guidance)
+    } else {
+      body.appendChild(el('div', 'empty', emptyState.kind === 'empty'
+        ? t('runs', 'runs.empty')
+        : t('runs', 'runs.noMatch', { status: runsFilter })))
+    }
     return
   }
   if (allJobs.length > 12) {
@@ -70,7 +91,7 @@ export function renderRuns(body: HTMLElement, p: Projection): void {
       for (const id of runsSelected) {
         await api(`/v1/jobs/${encodeURIComponent(id)}/cancel`, {
           method: 'POST',
-          body: JSON.stringify({ actor: 'web-user', reason: 'bulk cancelled from Research OS panel' }),
+          body: JSON.stringify({ actor: 'web-user', reason: 'bulk cancelled from dsh Scholar panel' }),
         })
       }
       showToast(rootHost(), t('runs', 'runs.cancelledToast', { count: String(runsSelected.size) }))
@@ -214,7 +235,7 @@ export function renderRuns(body: HTMLElement, p: Projection): void {
       cancel.onclick = async () => {
         const ok = await api(`/v1/jobs/${encodeURIComponent(job.job_id ?? '')}/cancel`, {
           method: 'POST',
-          body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from Research OS panel' }),
+          body: JSON.stringify({ actor: 'web-user', reason: 'cancelled from dsh Scholar panel' }),
         })
         if (ok === null) {
           state.lastError = t('runs', 'runs.cancelFailedError')
@@ -340,4 +361,3 @@ export async function openJobDetailModal(root: ShadowRoot, jobId: string): Promi
     modal.appendChild(cancelRow)
   }
 }
-

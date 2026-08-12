@@ -231,6 +231,16 @@ if [ "$memready" = 1 ]; then
   [ "$R" = "200" ] && ok "API-01: PI reads own project -> 200" || fail "API-01: PI read -> $R"
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/jobs")
   [ "$R" = "200" ] && ok "API-01: PI reads project jobs -> 200" || fail "API-01: PI jobs -> $R"
+  TOPOLOGY=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/topology?limit=100")
+  TOPOLOGY_CODE=$(printf '%s' "$TOPOLOGY" | tail -1)
+  TOPOLOGY_SHAPE=$(printf '%s' "$TOPOLOGY" | sed '$d' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);console.log(Array.isArray(j.items)&&j.project_id==='$MP'?'children':'invalid')}catch{console.log('invalid')}})")
+  [ "$TOPOLOGY_CODE" = "200" ] && [ "$TOPOLOGY_SHAPE" = "children" ] && ok "SUBAGENT-01: member project topology BFF injects principal -> 200" || fail "SUBAGENT-01: member topology bridge -> status=$TOPOLOGY_CODE shape=$TOPOLOGY_SHAPE"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'x-principal-id: forged-browser-user' "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/topology")
+  [ "$R" = "200" ] && ok "SUBAGENT-01: browser-forged topology principal ignored; server identity still works" || fail "SUBAGENT-01: forged topology principal affected BFF -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/trajectory?limit=100")
+  [ "$R" = "200" ] && ok "TRAJ-01: member project trajectory BFF injects principal -> 200" || fail "TRAJ-01: member trajectory bridge -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP/trajectory-lanes?limit=100")
+  [ "$R" = "200" ] && ok "TRAJ-01: member project trajectory lanes BFF injects principal -> 200" || fail "TRAJ-01: member trajectory lanes bridge -> $R"
   L=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a.some(p=>p.project_id==='$MP')?'included':'missing')})")
   [ "$L" = "included" ] && ok "API-01: project list includes member project" || fail "API-01: list filter -> $L"
 fi
@@ -247,6 +257,10 @@ if [ -n "$MP" ]; then
   [ "$R" = "404" ] && ok "API-01: non-member project read -> 404" || fail "API-01: non-member read -> $R"
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/$MP/jobs")
   [ "$R" = "404" ] && ok "API-01: non-member project jobs -> 404" || fail "API-01: non-member jobs -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/$MP/topology")
+  [ "$R" = "404" ] && ok "SUBAGENT-01: non-member project topology -> 404" || fail "SUBAGENT-01: non-member topology -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects/$MP/trajectory-lanes")
+  [ "$R" = "404" ] && ok "TRAJ-01: non-member project trajectory lanes -> 404" || fail "TRAJ-01: non-member trajectory lanes -> $R"
   L=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$((MEM_WEB + 2))/v1/projects" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d);console.log(a.some(p=>p.project_id==='$MP')?'leaked':'filtered')})")
   [ "$L" = "filtered" ] && ok "API-01: non-member project list filtered" || fail "API-01: list leak -> $L"
   # Unknown project id also 404 (no enumeration).
@@ -280,13 +294,24 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
     -d '{"name":"foreign-b","workspace":"/w/foreign-b","mode":"gate-only","creator_principal_id":"ops-other","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
   [ -n "$PB" ] && ok "SEC: foreign project B created on kernel ($PB)" || fail "SEC: foreign project B create"
+  # A separate member-owned SCOPED project exercises the real survey phase
+  # closure without changing MP, which is reused by the role matrix below.
+  SP=$(curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
+    -d '{"name":"survey-scoped","workspace":"/w/survey-scoped","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"object recognition","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
+  SG=$(curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$SP/gates" \
+    -d '{"type":"scope","title":"survey scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.gate_id||'')})")
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/gates/$SG/decisions" \
+    -d '{"actor":"ops-1","principal":{"principal_id":"ops-1","auth_method":"dsh-session","session_id":"sess_survey"},"decision":"approved"}')
+  [ -n "$SP" ] && [ -n "$SG" ] && [ "$R" = "200" ] && ok "GUIDE-01: scoped survey fixture ready ($SP)" || fail "GUIDE-01: scoped survey fixture -> project=$SP gate=$SG status=$R"
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$PB")
   [ "$R" = "404" ] && ok "SEC: ops-1 cannot read foreign project B -> 404" || fail "SEC: B read -> $R"
   count_json() { curl -s -H "Authorization: Bearer $MEMKTOKEN" "http://127.0.0.1:$MEM_KERNEL/v1/projects/$1/$2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(Array.isArray(a)?a.length:'ERR')}catch(e){console.log('ERR')}})"; }
   B_SNAP_BEFORE=$(count_json "$PB" corpus-snapshots)
   B_EVT_BEFORE=$(count_json "$PB" events)
-  A_SNAP_BEFORE=$(count_json "$MP" corpus-snapshots)
-  A_EVT_BEFORE=$(count_json "$MP" events)
+  A_SNAP_BEFORE=$(count_json "$SP" corpus-snapshots)
+  A_EVT_BEFORE=$(count_json "$SP" events)
   BODY=$(curl -s -X POST "http://127.0.0.1:$MEM_WEB/api/chat/survey" \
     -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $MEMCSRF" -H "Origin: http://127.0.0.1:$MEM_WEB" \
     -H 'content-type: application/json' -d "{\"project_id\":\"$PB\",\"query\":\"temporal action localization\"}")
@@ -307,13 +332,19 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
     *'"ok":false'*'project not found or access denied'*) ok "SEC: unknown project survey -> 404 fail-closed body" ;;
     *) fail "SEC: unknown survey body -> $BODY" ;;
   esac
-  # Member's OWN project: survey runs and writes exactly one new snapshot.
+  # Member's OWN SCOPED project: survey writes one snapshot and atomically
+  # advances to SURVEYING (corpus + transition produce two Outbox events).
   R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$MEM_WEB/api/chat/survey" \
     -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $MEMCSRF" -H "Origin: http://127.0.0.1:$MEM_WEB" \
-    -H 'content-type: application/json' -d "{\"project_id\":\"$MP\",\"query\":\"temporal action localization\"}" -m 90)
+    -H 'content-type: application/json' -d "{\"project_id\":\"$SP\",\"query\":\"temporal action localization\"}" -m 90)
   [ "$R" = "200" ] && ok "SEC: member project survey -> 200" || fail "SEC: member survey -> $R"
-  [ "$(count_json "$MP" corpus-snapshots)" = "$((A_SNAP_BEFORE + 1))" ] && ok "SEC: member survey writes exactly one corpus snapshot ($((A_SNAP_BEFORE + 1)))" || fail "SEC: A snapshot count after survey"
-  [ "$(count_json "$MP" events)" = "$((A_EVT_BEFORE + 1))" ] && ok "SEC: member survey emits exactly one outbox event ($((A_EVT_BEFORE + 1)))" || fail "SEC: A events after survey"
+  [ "$(count_json "$SP" corpus-snapshots)" = "$((A_SNAP_BEFORE + 1))" ] && ok "SEC: member survey writes exactly one corpus snapshot ($((A_SNAP_BEFORE + 1)))" || fail "SEC: A snapshot count after survey"
+  [ "$(count_json "$SP" events)" = "$((A_EVT_BEFORE + 2))" ] && ok "GUIDE-01: survey emits corpus + transition events ($((A_EVT_BEFORE + 2)))" || fail "GUIDE-01: survey event count"
+  SURVEY_PROJ=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$SP/projection")
+  SURVEY_FLOW=$(printf '%s' "$SURVEY_PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project?.status==='SURVEYING'&&j.next_actions_v2?.[0]?.code==='idea_generate'?'advanced':'stale')})")
+  [ "$SURVEY_FLOW" = "advanced" ] && ok "GUIDE-01: survey projection advances to SURVEYING/idea_generate" || fail "GUIDE-01: stale survey projection -> $SURVEY_FLOW"
+  SNAP_SHAPE=$(curl -s -H "Authorization: Bearer $MEMKTOKEN" "http://127.0.0.1:$MEM_KERNEL/v1/projects/$SP/corpus-snapshots" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const a=JSON.parse(d),s=a[a.length-1];console.log((s&&(s.source_status==='complete'||s.source_status==='pending')&&Array.isArray(s.citation_edges))?'preserved':'missing')})")
+  [ "$SNAP_SHAPE" = "preserved" ] && ok "GUIDE-01: survey preserves aggregate source status + citation edges" || fail "GUIDE-01: survey snapshot shape -> $SNAP_SHAPE"
   # Stable error codes: the fail-closed body never echoes internal detail.
   for NEEDLE in '/home/' '/dev/' 'http://' 'at ' 'env'; do
     if printf '%s' "$BODY" | grep -qF "$NEEDLE"; then
@@ -362,6 +393,18 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
     done
   done
   ok "API-01: role BFFs (viewer/researcher/auditor) started"
+  VROLE_CSRF=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$VROLE_WEB/api/session/csrf" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
+  AROLE_CSRF=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$AROLE_WEB/api/session/csrf" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
+  ROLE_SURVEY_BEFORE=$(count_json "$MP" corpus-snapshots)
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$VROLE_WEB/api/chat/survey" \
+    -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $VROLE_CSRF" -H "Origin: http://127.0.0.1:$VROLE_WEB" \
+    -H 'content-type: application/json' -d "{\"project_id\":\"$MP\",\"query\":\"must not run\"}")
+  [ "$R" = "403" ] && ok "API-01: viewer survey write -> 403 before connector" || fail "API-01: viewer survey -> $R"
+  R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$AROLE_WEB/api/chat/survey" \
+    -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $AROLE_CSRF" -H "Origin: http://127.0.0.1:$AROLE_WEB" \
+    -H 'content-type: application/json' -d "{\"project_id\":\"$MP\",\"query\":\"must not run\"}")
+  [ "$R" = "403" ] && ok "API-01: auditor survey write -> 403 before connector" || fail "API-01: auditor survey -> $R"
+  [ "$(count_json "$MP" corpus-snapshots)" = "$ROLE_SURVEY_BEFORE" ] && ok "API-01: read-only survey attempts have zero corpus side effects" || fail "API-01: read-only survey changed corpus"
   # PI (ops-1): non-project-scoped passthrough + v2 reads + governance writes.
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v2/health")
   [ "$R" = "200" ] && ok "API-01: /v2/health passthrough (no project scope) -> 200" || fail "API-01: v2 health -> $R"
@@ -933,13 +976,16 @@ for _ in $(seq 1 60); do
 done
 [ "$sprinc_ready" = 1 ] && ok "GOV-01: BFF with --principal sprinc-ops starts" || fail "GOV-01: BFF start"
 if [ "$sprinc_ready" = 1 ]; then
+  SPRINC_CSRF=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$SPRINC_WEB/api/session/csrf" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.csrf_token||'')})")
+  [ -n "$SPRINC_CSRF" ] && ok "GOV-01: Human BFF CSRF token issued" || fail "GOV-01: Human BFF CSRF token missing"
   SP=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects" \
     -d '{"name":"sprinc","workspace":"/w","mode":"gate-only","creator_principal_id":"sprinc-ops","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id||''))")
   SG=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/gates" -d '{"type":"scope","title":"sprinc gate"}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id||''))")
-  DEC_BODY=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/v1/gates/$SG/decisions" \
-    -d '{"actor":"sprinc-ops","principal":{"principal_id":"sprinc-ops","auth_method":"dsh-session"},"decision":"approved"}')
+  DEC_BODY=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $SPRINC_CSRF" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' -X POST "http://127.0.0.1:$SPRINC_WEB/bff/research/gates/$SG/decision" \
+    -d '{"decision":"approved"}')
   CODE=$(printf '%s' "$DEC_BODY" | tail -1)
   [ "$CODE" = "200" ] && ok "GOV-01: gate decision through BFF -> 200" || fail "GOV-01: decision -> $CODE body=$(printf '%s' "$DEC_BODY" | head -c 200)"
   SESS=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/decisions" \
@@ -960,8 +1006,8 @@ if [ "$sprinc_ready" = 1 ]; then
     -X POST "http://127.0.0.1:$SPRINC_WEB/v1/projects/$SP/gates" -d '{"type":"scope","title":"forged identity gate"}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id||''))")
   [ -n "$FG" ] && ok "GOV-01: forgery gate created ($FG)" || fail "GOV-01: forgery gate create"
-  FDEC=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' \
-    -X POST "http://127.0.0.1:$SPRINC_WEB/v1/gates/$FG/decisions" \
+  FDEC=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $SPRINC_CSRF" -H "Origin: http://127.0.0.1:$SPRINC_WEB" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$SPRINC_WEB/bff/research/gates/$FG/decision" \
     -d '{"actor":"evil-actor","principal":{"principal_id":"evil","tenant_id":"evil-tenant","auth_method":"forged","session_id":"sess_forged"},"session_id":"sess_forged","decision":"approved"}')
   CODE=$(printf '%s' "$FDEC" | tail -1)
   [ "$CODE" = "200" ] && ok "GOV-01: forged-identity decision accepted (identity rewritten by BFF) -> 200" || fail "GOV-01: forged decision -> $CODE body=$(printf '%s' "$FDEC" | head -c 200)"

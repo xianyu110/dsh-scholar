@@ -38,6 +38,7 @@ export const KernelEventKind = z.enum([
   'project.created',
   'project.transitioned',
   'project.renamed',
+  'project.execution.configured',
   'project.deleted',
   'project.brief.confirmed',
   'gate.created',
@@ -114,6 +115,8 @@ export const ExecutionConfig = z.object({
    * opaque profile id，不能携带 docker flags / endpoint。
    */
   runner_profile_id: z.string().nullable().default(null),
+  /** Opaque configurable RunnerTarget id; endpoint/credentials never appear here. */
+  runner_target_id: z.string().min(1).default('target_local_docker_v1'),
   network_policy: z.enum(['allowlist', 'none']).default('allowlist'),
   artifact_store: z.enum(['local-cas']).default('local-cas'),
   /**

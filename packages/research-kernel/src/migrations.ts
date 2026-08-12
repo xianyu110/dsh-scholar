@@ -19,10 +19,11 @@ import { TRAJECTORY_DDL } from './trajectory.js'
 import { PROVIDER_DDL } from './provider.js'
 import { CHUNKED_UPLOAD_DDL } from './chunked-upload.js'
 import { REPRODUCTION_DDL } from './reproduction.js'
+import { RUNNER_TARGET_DDL, seedBuiltinRunnerTargets } from './runner-target-registry.js'
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 19
+export const SCHEMA_VERSION = 20
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1157,6 +1158,14 @@ const providerAndChunkedUpload = (db: DatabaseSync, report: MigrationReport): vo
   ).get() as { n: number }).n)
 }
 
+/** 0023 — EXEC-ENV-02 configurable local/Docker/remote-SSH target registry. */
+const runnerTargetRegistry = (db: DatabaseSync, report: MigrationReport): void => {
+  db.exec(RUNNER_TARGET_DDL)
+  seedBuiltinRunnerTargets(db)
+  if (report.rows === undefined) report.rows = {}
+  report.rows.runner_targets = Number((db.prepare('SELECT COUNT(*) AS n FROM runner_targets').get() as { n: number }).n)
+}
+
 /**
  * 0022 — REPRO-01 (docs/reproduction-contracts.md §2/§4): the paper
  * reproduction aggregate — reproduction_specs (PaperReproductionSpec rows,
@@ -1310,6 +1319,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'REPRO-01 (docs/reproduction-contracts.md §2/§4): reproduction_specs / reproduction_attempts / reproduction_reports + reproduction_links (source/material links; report body lives in the CAS — the row keeps hash + ref)',
     body: reproductionTables.toString(),
     up: reproductionTables,
+  },
+  {
+    id: '0023_runner_target_registry',
+    description: 'EXEC-ENV-02: configurable local-process/local-docker/remote-ssh runner targets with SecretRef-only connection metadata and revision CAS',
+    body: `${runnerTargetRegistry.toString()}\n\n${RUNNER_TARGET_DDL}\n${seedBuiltinRunnerTargets.toString()}`,
+    up: runnerTargetRegistry,
   },
 ]
 

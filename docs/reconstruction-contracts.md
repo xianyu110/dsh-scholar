@@ -459,7 +459,7 @@ layer 顺序 fixed：built-in < instance < user < project < workspace < session 
 | `orchestrator.*` | poll/lease/retry/backoff/concurrency、phase action enablement |
 | `connectors.*` | per-source enable/timeout/retry/cache/query limits、endpoint allowlist；credential 为 SecretRef |
 | `analysis.*` | algorithm schema version 和 worker profile；正式 resamples/rounding 不可由项目任意改写 |
-| `ui.*` | locale=auto→zh、theme=system、density=normal、refresh=8s、sidebar/tabs/layout；只影响展示 |
+| `ui.*` | locale=auto→zh、theme=system、density=normal、refresh=8s、Project Sidebar/tabs/layout；只影响展示。Panel Dock 的 open panel/position/right size/bottom size 是当前浏览器本地 preference，不进入 canonical Config Registry 或运行 config pin |
 | `telemetry.*` | log level、redaction、metrics/export/retention；默认 loopback/no external export |
 | `selfmod.*` | production 固定 false；dev overlay opt-in、vmTimeout/allowed services，不能由 project/session 开启 |
 

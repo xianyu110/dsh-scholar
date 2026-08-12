@@ -4,8 +4,8 @@
 # layer stack (`dsh plugin --profile <name> add <path|github:...>`).
 #
 # The plugin itself: spawns/reuses the Research Kernel sidecar, registers the
-# research tool surface with per-role ACL, the /research command family and
-# the research-core skill pack.
+# research tool surface with per-role ACL, direct slash commands and all four
+# packaged research skill groups.
 #
 # Security stance (design §1.2, §4.9): this bundle only ADDS rows; it never
 # touches sandbox/approval/web_fetch rows, so the profile keeps its shipped
@@ -17,8 +17,7 @@
       config:
         kernel:
           host: 127.0.0.1
-          # 7412 is the Local Desktop Kernel port (design §9.1). The current
-          # sidecar requires a positive fixed port until endpoint handshake
-          # support is implemented; do not configure 0 here.
+          # 7412 is the Local Desktop Kernel port (design §9.1). Set 0 to use
+          # the sidecar's endpoint-file handshake and an ephemeral port.
           port: 7412
         defaultMode: gate-only

@@ -3,8 +3,8 @@ import { api, apiResult, authHeaders, base, ensureCsrfToken } from './api'
 import { getLocale, t } from './i18n/index'
 import { CHAT_COMMANDS } from './modals/commands'
 import { openCommandHistoryModal, openGlobalSearchModal, openSessionSearchModal } from './modals/search'
-import { CHAT_MAX, chatClear, chatPersist, chatPush, chatSessionArchive, chatSessionClose, chatSessionEnsure, chatSessionNew, chatSessionRename, chatSessionSelect, chatSessionsPersist, chatSyncActive, favCommands, historyPush, state, tabSave } from './state'
-import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast } from './ui'
+import { CHAT_MAX, activeChatProjectId, chatClear, chatPersist, chatPush, chatPushToProjectSession, chatSessionArchive, chatSessionClose, chatSessionEnsure, chatSessionNew, chatSessionRename, chatSessionSelect, chatSessionsPersist, chatSyncActive, chatUpsertAttachmentForProjectSession, favCommands, historyPush, state, tabSave } from './state'
+import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast, statusLabel } from './ui'
 import {
   browserTransport, chatAttachmentRef, driveUpload, enqueueFiles, fileByteProvider, markHashed,
   pauseItem, registerByteProvider, resumeItem, retryItem, sha256Hex, unregisterByteProvider,
@@ -15,13 +15,22 @@ import {
   loadGrillGuideState,
   type GrillDisposition, type GrillGuideLoaded, type GrillProjection,
 } from './grill-guide-model'
+import { planNaturalChatTurn, projectStageGuidance, type ChatTurnProjection } from './chat-turn-model'
+import { captureChatScroll, restoreChatScrollTop, type ChatScrollPosition } from './chat-scroll-model'
 export let dragSessionId: string | null = null
 
+export type ChatSurface = 'main' | 'dock'
+
+const chatScrollPositions = new Map<string, ChatScrollPosition>()
+
+function chatScrollKey(surface: ChatSurface, projectId: string, sessionId: string): string {
+  return `${surface}:${projectId}:${sessionId}`
+}
+
 /**
- * Chat transcript + built-in direct slash-command executor. Mirrors the dsh web
- * dialogue feel (message bubbles + composer) while talking straight to the
- * Kernel API through the same bridge the panels use — no agent loop needed.
- * The composer persists across 8s panel refreshes via state.chatDraft.
+ * Project-scoped Chat transcript, deterministic Grill, natural-language intent
+ * adapter and direct slash executor. Canonical operations still go through the
+ * same Kernel/BFF APIs; natural prose never invents state or Human decisions.
  */
 
 export function fmtProjectRow(p: { project_id?: string; name?: string; status?: string }): string {
@@ -53,16 +62,23 @@ export function chatRunKind(rest: string, json: Record<string, unknown> | null, 
   return typeof kind === 'string' && kind !== '' ? kind : fallback
 }
 
+/** Optional one-shot RunnerTarget override. It is sent at the Job schema's
+ * top level so the kernel resolves it before freezing the ExecutionPlan. */
+export function chatRunnerTargetId(json: Record<string, unknown> | null): string | undefined {
+  const value = json?.runner_target_id
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
 /** Public pure seams for the name-only Init and prose-vs-command router. */
 export function projectCreatePayload(name: string): { name: string } {
   return { name: name.trim() }
 }
 
-export function chatInputKind(line: string): { kind: 'command'; line: string } | { kind: 'grill-answer'; text: string } {
+export function chatInputKind(line: string): { kind: 'command'; line: string } | { kind: 'prose'; text: string } {
   const trimmed = line.trim()
   return trimmed.startsWith('/')
     ? { kind: 'command', line: trimmed }
-    : { kind: 'grill-answer', text: trimmed }
+    : { kind: 'prose', text: trimmed }
 }
 
 interface ProjectGrillProjection {
@@ -338,30 +354,60 @@ function renderGrillGuideCard(host: HTMLElement, projectId: string, loaded: Gril
   host.appendChild(card)
 }
 
-/**
- * Route ordinary prose to the current deterministic Grill question. Confirmed
- * projects keep the legacy bare-command behavior for compatibility.
- */
+function naturalGuidanceText(projection: ChatTurnProjection): string {
+  const guidance = projectStageGuidance(projection)
+  if (guidance === null) return ''
+  const requiredBy = guidance.requiredBy === 'human' || guidance.requiredBy === 'agent' || guidance.requiredBy === 'runner'
+    ? t('overview', `overview.nextaction.requiredBy.${guidance.requiredBy}`)
+    : guidance.requiredBy || '—'
+  const parts = [t('shell', 'shell.chat.natural.guidance', {
+    status: statusLabel(guidance.status),
+    label: guidance.label,
+    code: guidance.code,
+    reason: guidance.reason || '—',
+    requiredBy,
+  })]
+  if (Array.isArray(guidance.required) && guidance.required.length > 0) {
+    parts.push(t('shell', 'shell.chat.natural.gaps', { gaps: guidance.required.join(', ') }))
+  }
+  return parts.join('\n')
+}
+
+/** Route slash, deterministic Grill answers, and project-scoped prose. */
 export async function executeChatInput(line: string, activeProjectId: string | undefined): Promise<string> {
   const input = chatInputKind(line)
-  if (input.kind === 'command' || activeProjectId === undefined || activeProjectId === '') {
-    return executeChatCommand(input.kind === 'command' ? input.line : input.text, activeProjectId)
-  }
+  if (input.kind === 'command') return executeChatCommand(input.line, activeProjectId)
+  if (activeProjectId === undefined || activeProjectId === '') return t('shell', 'shell.chat.natural.noProjection')
   const current = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill`)
-  if (current === null || (current.question === null && !current.ready_to_confirm)) {
-    return executeChatCommand(input.text, activeProjectId)
+  if (current !== null && (current.question !== null || current.ready_to_confirm)) {
+    if (current.question === null) return grillPrompt(current)
+    const answered = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill/answers`, {
+      method: 'POST',
+      body: JSON.stringify({
+        question_code: current.question.question_code,
+        question_revision: current.question.question_revision,
+        value: input.text,
+      }),
+    })
+    if (answered === null) return t('intake', 'grill.answerFailed')
+    return grillPrompt(answered)
   }
-  if (current.question === null) return grillPrompt(current)
-  const answered = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill/answers`, {
-    method: 'POST',
-    body: JSON.stringify({
-      question_code: current.question.question_code,
-      question_revision: current.question.question_revision,
-      value: input.text,
-    }),
-  })
-  if (answered === null) return t('intake', 'grill.answerFailed')
-  return grillPrompt(answered)
+
+  const projection = await api<Projection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/projection`)
+  if (projection === null) return t('shell', 'shell.chat.natural.noProjection')
+  const plan = planNaturalChatTurn(input.text, projection)
+  let answer: string
+  if (plan.kind === 'command') {
+    answer = await executeChatCommand(plan.command, activeProjectId)
+  } else if (plan.effect === 'human-only') {
+    answer = t('shell', 'shell.chat.natural.humanOnly')
+  } else if (plan.suggestedCommand !== undefined) {
+    answer = t('shell', 'shell.chat.natural.suggested', { command: plan.suggestedCommand })
+  } else {
+    answer = t('shell', 'shell.chat.natural.freeform')
+  }
+  const guidance = naturalGuidanceText(projection)
+  return guidance === '' ? answer : `${answer}\n\n${guidance}`
 }
 
 /**
@@ -528,6 +574,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
             ...(json ?? {}),
           },
           contract_id: typeof json?.contract_id === 'string' ? json.contract_id : null,
+          runner_target_id: chatRunnerTargetId(json),
         }),
       })
       if (job === null || job.job_id === undefined) return 'baseline reproduction submission failed'
@@ -548,6 +595,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
           payload: { message: `chat /run ${kind}`, ...(json ?? {}) },
           contract_id: typeof json?.contract_id === 'string' ? json.contract_id : null,
           code_snapshot_id: typeof json?.code_snapshot_id === 'string' ? json.code_snapshot_id : null,
+          runner_target_id: chatRunnerTargetId(json),
         }),
       })
       if (job === null || job.job_id === undefined) return 'job submission failed'
@@ -624,18 +672,16 @@ export async function executeChatCommand(line: string, activeProjectId: string |
  * Clicking a message opens the dsh-web "details" side panel.
  */
 
-export let chatSearchQuery = ''
-/** dsh-web quote-reply: pending quote attached to the next user message. */
-
-export let chatCommandsOnly = false
-/** Global search state (dsh-web cross-session search). */
-
 export async function renderChat(
   body: HTMLElement,
   dock: HTMLElement,
   projectId: string,
   modelSelect?: HTMLSelectElement,
+  surface: ChatSurface = 'main',
 ): Promise<void> {
+  if (activeChatProjectId() !== projectId) return
+  const renderedSessionId = state.chatActiveId
+  if (renderedSessionId === null) return
   // Rebuild the persistent footer synchronously. Its old geometry stays in
   // place throughout async refresh work, and this swap cannot paint halfway.
   dock.replaceChildren()
@@ -818,8 +864,8 @@ export async function renderChat(
         {
           label: t('common', 'common.action.exportMd'),
           onPick: () => {
-            const lines = [`# Research OS conversation — ${s.name}`, '', ...s.messages.map(m => {
-              const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**Research OS**'
+            const lines = [`# dsh Scholar conversation — ${s.name}`, '', ...s.messages.map(m => {
+              const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**dsh Scholar**'
               return `## ${role} · ${m.time}\n\n${m.text}\n`
             })]
             const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
@@ -888,6 +934,7 @@ export async function renderChat(
         const list = Array.isArray(parsed.sessions) ? parsed.sessions : null
         if (list === null || list.length === 0) throw new Error('no sessions')
         const cleaned = list.filter((s): s is ChatSession => typeof s === 'object' && s !== null
+          && (s as ChatSession).project_id === projectId
           && typeof (s as ChatSession).id === 'string' && Array.isArray((s as ChatSession).messages))
         if (cleaned.length === 0) throw new Error('invalid shape')
         state.chatSessions = cleaned
@@ -918,16 +965,17 @@ export async function renderChat(
   const searchInput = document.createElement('input')
   searchInput.type = 'text'
   searchInput.placeholder = t('shell', 'shell.chat.searchPlaceholder')
-  searchInput.value = chatSearchQuery
+  searchInput.value = state.chatSearchQuery
   searchInput.style.cssText = 'flex:1;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font:11px/1.4 system-ui,sans-serif;outline:none'
   searchInput.onfocus = () => { searchInput.style.borderColor = 'var(--accent)' }
   searchInput.onblur = () => { searchInput.style.borderColor = 'var(--border)' }
-  searchInput.oninput = () => { chatSearchQuery = searchInput.value; state.rerender() }
+  searchInput.oninput = () => { state.chatSearchQuery = searchInput.value; chatSessionsPersist(); state.rerender() }
   const clearSearch = el('button', 'hbtn', '×')
   clearSearch.title = t('shell', 'shell.chat.clearSearchTitle')
   clearSearch.style.cssText = 'padding:0 7px'
   clearSearch.onclick = () => {
-    chatSearchQuery = ''
+    state.chatSearchQuery = ''
+    chatSessionsPersist()
     state.rerender()
   }
   searchRow.append(searchInput, clearSearch)
@@ -950,12 +998,13 @@ export async function renderChat(
   searchRow.appendChild(globalBtn)
   searchRow.appendChild(allBtn)
   // dsh-web "commands only" filter: a compact list of just the commands.
-  const commandsOnlyBtn = el('button', 'hbtn', chatCommandsOnly ? t('shell', 'shell.chat.commandsOnlyOn') : t('shell', 'shell.chat.commandsOnly'))
+  const commandsOnlyBtn = el('button', 'hbtn', state.chatCommandsOnly ? t('shell', 'shell.chat.commandsOnlyOn') : t('shell', 'shell.chat.commandsOnly'))
   commandsOnlyBtn.title = t('shell', 'shell.chat.commandsOnlyTitle')
-  commandsOnlyBtn.setAttribute('aria-pressed', chatCommandsOnly ? 'true' : 'false')
+  commandsOnlyBtn.setAttribute('aria-pressed', state.chatCommandsOnly ? 'true' : 'false')
   commandsOnlyBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   commandsOnlyBtn.onclick = () => {
-    chatCommandsOnly = !chatCommandsOnly
+    state.chatCommandsOnly = !state.chatCommandsOnly
+    chatSessionsPersist()
     state.rerender()
   }
   searchRow.appendChild(commandsOnlyBtn)
@@ -978,8 +1027,8 @@ export async function renderChat(
   exportChatBtn.style.cssText = 'padding:0 8px;flex-shrink:0'
   exportChatBtn.onclick = () => {
     const activeName = state.chatSessions.find(x => x.id === state.chatActiveId)?.name ?? 'conversation'
-    const lines = [`# Research OS conversation — ${activeName}`, '', ...state.chatMessages.map(m => {
-      const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**Research OS**'
+    const lines = [`# dsh Scholar conversation — ${activeName}`, '', ...state.chatMessages.map(m => {
+      const role = m.role === 'user' ? '**You**' : m.role === 'error' ? '**Error**' : '**dsh Scholar**'
       return `## ${role} · ${m.time}\n\n${m.text}\n`
     })]
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
@@ -1045,14 +1094,21 @@ export async function renderChat(
   // dsh-web a11y: announce assistant replies as they land.
   stream.setAttribute('aria-live', 'polite')
   stream.setAttribute('aria-label', t('shell', 'shell.chat.conversationAria'))
+  const scrollKey = chatScrollKey(surface, projectId, renderedSessionId)
+  let scrollPosition = chatScrollPositions.get(scrollKey) ?? { scrollTop: 0, followBottom: true }
   const jumpBottom = el('button', 'hbtn', '↓')
   jumpBottom.title = t('shell', 'shell.chat.jumpNewest')
   jumpBottom.setAttribute('aria-label', t('shell', 'shell.chat.jumpNewestAria'))
   jumpBottom.style.cssText = 'position:absolute;right:10px;bottom:10px;padding:2px 10px;font-size:12px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.25)'
-  jumpBottom.onclick = () => { stream.scrollTop = stream.scrollHeight }
+  jumpBottom.onclick = () => {
+    scrollPosition = { scrollTop: stream.scrollHeight, followBottom: true }
+    chatScrollPositions.set(scrollKey, scrollPosition)
+    stream.scrollTop = stream.scrollHeight
+  }
   stream.onscroll = () => {
-    const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 120
-    jumpBottom.style.display = nearBottom ? 'none' : 'inline-block'
+    scrollPosition = captureChatScroll(stream)
+    chatScrollPositions.set(scrollKey, scrollPosition)
+    jumpBottom.style.display = scrollPosition.followBottom ? 'none' : 'inline-block'
   }
   streamWrap.append(stream, jumpBottom)
   if (state.chatMessages.length === 0) {
@@ -1084,10 +1140,10 @@ export async function renderChat(
     }
     stream.appendChild(starters)
   }
-  const searchQ = chatSearchQuery.trim().toLowerCase()
+  const searchQ = state.chatSearchQuery.trim().toLowerCase()
   // dsh-web virtualized feel: window the transcript to the newest 80
   // messages (search/commands-only views render everything).
-  const windowed = searchQ === '' && !chatCommandsOnly && state.chatMessages.length > 80
+  const windowed = searchQ === '' && !state.chatCommandsOnly && state.chatMessages.length > 80
   const startIdx = windowed ? state.chatMessages.length - 80 : 0
   if (windowed) {
     const notice = el('div', 'muted', t('shell', 'shell.chat.showingNewest', { count: String(state.chatMessages.length) }))
@@ -1096,7 +1152,7 @@ export async function renderChat(
   }
   // dsh-web pinned: starred messages surface in a 📌 box (click to jump).
   const pinnedMsgs = state.chatMessages.filter(m => m.pinned === true)
-  if (pinnedMsgs.length > 0 && searchQ === '' && !chatCommandsOnly) {
+  if (pinnedMsgs.length > 0 && searchQ === '' && !state.chatCommandsOnly) {
     const pinBox = el('div')
     pinBox.style.cssText = 'border:1px dashed var(--tone-amber);border-radius:10px;padding:6px 10px;display:flex;flex-direction:column;gap:4px;background:var(--tone-amber-bg)'
     pinBox.appendChild(el('div', 'muted', t('shell', 'shell.chat.pinned', { count: String(pinnedMsgs.length) })))
@@ -1119,7 +1175,7 @@ export async function renderChat(
   for (let i = startIdx; i < state.chatMessages.length; i++) {
     const msg = state.chatMessages[i]!
     if (searchQ !== '' && !msg.text.toLowerCase().includes(searchQ)) continue
-    if (chatCommandsOnly && msg.role !== 'user') continue
+    if (state.chatCommandsOnly && msg.role !== 'user') continue
     shownCount += 1
     // dsh-web quote-reply: quoted message preview above the bubble.
     if (msg.quote !== undefined) {
@@ -1656,18 +1712,16 @@ export async function renderChat(
     stream.appendChild(stamp)
   }
   // dsh-web match counter: reflect the active filter.
-  if (searchQ !== '' || chatCommandsOnly) {
+  if (searchQ !== '' || state.chatCommandsOnly) {
     matchLabel.textContent = t('shell', 'shell.chat.shown', { shown: String(shownCount), total: String(state.chatMessages.length) })
   }
-  if (stream.childElementCount === 0 && (searchQ !== '' || chatCommandsOnly)) {
-    const empty = el('div', 'empty', chatCommandsOnly
+  if (stream.childElementCount === 0 && (searchQ !== '' || state.chatCommandsOnly)) {
+    const empty = el('div', 'empty', state.chatCommandsOnly
       ? t('shell', 'shell.chat.emptyCommands')
-      : t('shell', 'shell.chat.emptyNoMatch', { query: chatSearchQuery.trim() }))
+      : t('shell', 'shell.chat.emptyNoMatch', { query: state.chatSearchQuery.trim() }))
     empty.style.cssText = 'padding:10px 2px'
     stream.appendChild(empty)
   }
-  // dsh-web behavior: always scroll to the newest message.
-  stream.scrollTop = stream.scrollHeight
   column.appendChild(streamWrap)
 
   // dsh-web "details" side panel: raw transcript of the selected message.
@@ -1875,6 +1929,7 @@ export async function renderChat(
     state.chatQuoteTarget = null
     // The session that launched this command (the reply lands back here
     // even if the user switched sessions while it ran).
+    const originProjectId = projectId
     const originSessionId = state.chatActiveId
     chatPush('user', line, quote ?? undefined)
     input.disabled = true
@@ -1887,6 +1942,8 @@ export async function renderChat(
     runningBubble.append(spinner, runningText)
     const streamEl = stream
     streamEl.appendChild(runningBubble)
+    scrollPosition = { scrollTop: streamEl.scrollHeight, followBottom: true }
+    chatScrollPositions.set(scrollKey, scrollPosition)
     streamEl.scrollTop = streamEl.scrollHeight
     try {
       const answer = await executeChatInput(line, projectId)
@@ -1904,27 +1961,20 @@ export async function renderChat(
         const next = done + 1
         if (next >= lines.length) {
           answerBubble.replaceChildren(...formatChatText(answer))
-          // dsh-web session unread: if the user switched sessions while
-          // the command ran, the reply lands in the origin session and the
-          // current session gets no unread.
-          if (originSessionId !== null && originSessionId !== state.chatActiveId) {
-            const origin = state.chatSessions.find(x => x.id === originSessionId)
-            if (origin !== undefined) {
-              origin.messages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString(getLocale()) })
-              origin.unread = (origin.unread ?? 0) + 1
-            }
-            chatSessionsPersist()
-          } else {
-            state.chatMessages.push({ role: 'assistant' as const, text: answer, time: new Date().toLocaleTimeString(getLocale()) })
-            chatPersist()
-          }
+          chatPushToProjectSession(originProjectId, originSessionId, {
+            role: 'assistant',
+            text: answer,
+            time: new Date().toLocaleTimeString(getLocale()),
+          }, true)
           state.rerender()
-          showToast(rootHost(), `✓ ${line.slice(0, 40)}${line.length > 40 ? '…' : ''}`)
+          if (activeChatProjectId() === originProjectId) showToast(rootHost(), `✓ ${line.slice(0, 40)}${line.length > 40 ? '…' : ''}`)
           return
         }
         answerBubble.replaceChildren(...formatChatText(lines.slice(0, next).join('\n') + '\n'))
         answerBubble.setAttribute('data-lines', String(next))
-        streamEl.scrollTop = streamEl.scrollHeight
+        if (chatScrollPositions.get(scrollKey)?.followBottom !== false) {
+          streamEl.scrollTop = streamEl.scrollHeight
+        }
         setTimeout(reveal, chunkMs)
       }
       streamEl.appendChild(answerBubble)
@@ -1933,9 +1983,13 @@ export async function renderChat(
       input.disabled = false
       send.disabled = false
       runningBubble.remove()
-      chatPush('error', t('shell', 'shell.chat.commandFailedDetail', { detail: (error as Error).message }))
+      chatPushToProjectSession(originProjectId, originSessionId, {
+        role: 'error',
+        text: t('shell', 'shell.chat.commandFailedDetail', { detail: (error as Error).message }),
+        time: new Date().toLocaleTimeString(getLocale()),
+      }, true)
       state.rerender()
-      showToast(rootHost(), t('shell', 'shell.chat.commandFailed'))
+      if (activeChatProjectId() === originProjectId) showToast(rootHost(), t('shell', 'shell.chat.commandFailed'))
     }
   }
   send.onclick = () => { void run() }
@@ -2069,16 +2123,18 @@ export async function renderChat(
       queueStrip.appendChild(chip)
     }
   }
+  const uploadOrigins = new Map<string, { projectId: string; sessionId: string | null }>()
   const pushRef = (item: UploadQueueItem): void => {
     const ref = chatAttachmentRef(item)
     if (ref === null) return
-    const idx = state.chatMessages.findIndex(m => m.attachment?.upload_id === ref.upload_id)
-    if (idx >= 0) {
-      state.chatMessages[idx] = { ...state.chatMessages[idx]!, attachment: ref }
-      chatPersist()
-    } else {
-      chatPush('user', `📎 ${item.fileName}`, undefined, ref)
-    }
+    const origin = uploadOrigins.get(item.fileId)
+    if (origin === undefined || ref.project_id !== origin.projectId) return
+    chatUpsertAttachmentForProjectSession(origin.projectId, origin.sessionId, {
+      role: 'user',
+      text: `📎 ${item.fileName}`,
+      time: new Date().toLocaleTimeString(getLocale()),
+      attachment: ref,
+    })
   }
   const onUploadState = (item: UploadQueueItem): void => {
     queueItems = queueItems.map(x => x.fileId === item.fileId ? item : x)
@@ -2097,6 +2153,8 @@ export async function renderChat(
       return
     }
     const items = enqueueFiles(files.map(f => ({ name: f.name, size: f.size, type: f.type })))
+    const originSessionId = state.chatActiveId
+    for (const item of items) uploadOrigins.set(item.fileId, { projectId, sessionId: originSessionId })
     queueItems.push(...items)
     renderQueue()
     for (const item of items) {
@@ -2123,9 +2181,17 @@ export async function renderChat(
       queueItems = queueItems.map(x => x.fileId === item.fileId ? fin : x)
       pushRef(fin)
       if (fin.state === 'failed') {
-        chatPush('error', t('shell', 'shell.chat.attachFailed', { name: fin.fileName, reason: fin.lastError ?? 'unknown' }))
+        chatPushToProjectSession(projectId, originSessionId, {
+          role: 'error',
+          text: t('shell', 'shell.chat.attachFailed', { name: fin.fileName, reason: fin.lastError ?? 'unknown' }),
+          time: new Date().toLocaleTimeString(getLocale()),
+        }, true)
       } else if (fin.state === 'scanning') {
-        chatPush('assistant', t('shell', 'shell.chat.attachStaged', { name: fin.fileName }))
+        chatPushToProjectSession(projectId, originSessionId, {
+          role: 'assistant',
+          text: t('shell', 'shell.chat.attachStaged', { name: fin.fileName }),
+          time: new Date().toLocaleTimeString(getLocale()),
+        }, true)
       }
       renderQueue()
     }
@@ -2191,6 +2257,16 @@ export async function renderChat(
   dock.hidden = false
 
   body.appendChild(shell)
+  const restoreScroll = (): void => {
+    const top = restoreChatScrollTop(scrollPosition, stream.scrollHeight, stream.clientHeight)
+    stream.scrollTop = top
+    scrollPosition = { scrollTop: top, followBottom: scrollPosition.followBottom }
+    chatScrollPositions.set(scrollKey, scrollPosition)
+    jumpBottom.style.display = scrollPosition.followBottom ? 'none' : 'inline-block'
+  }
+  // The stream must be mounted before its scrollHeight is meaningful.
+  restoreScroll()
+  queueMicrotask(restoreScroll)
 }
 
 /** Convert a chat answer back to markdown source (dsh-web copy-as-md). */

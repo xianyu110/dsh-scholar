@@ -313,7 +313,7 @@ describe('PaperReproductionSpec lifecycle (kernel)', () => {
         claims_to_reproduce: [{ claim_ref: 'primary', statement: 'main result' }],
         code_source: { kind: 'snapshot', code_snapshot_id: snap.snapshot_id },
         data_inputs: [{ kind: 'artifact', artifact_id: art.artifact_id }],
-        execution_binding: { runner_profile_id: 'profile_local_docker_cpu_v1', target_id: 'tgt-1' },
+        execution_binding: { runner_profile_id: 'profile_local_docker_cpu_v1', target_id: 'target_local_docker_v1' },
         environment_lock: { image_digest: 'sha256:' + 'a'.repeat(64) },
         metric_comparators: [metric('mAP', 58.4, { absolute: 0.5 })],
       })
@@ -322,6 +322,12 @@ describe('PaperReproductionSpec lifecycle (kernel)', () => {
       expect(spec.revision).toBe(1)
       expect(spec.schema_version).toBe(1)
       expect(spec.paper_ref.doi).toBe('10.48550/arXiv.2401.12345')
+      expect(spec.environment_lock).toMatchObject({
+        runner_profile_id: 'profile_local_docker_cpu_v1',
+        target_id: 'target_local_docker_v1',
+        target_revision: '1',
+      })
+      expect(spec.environment_lock.target_hash).toMatch(/^sha256:[0-9a-f]{64}$/)
       expect(kernel.listReproductionSpecs(p.project_id).map(s => s.spec_id)).toEqual([spec.spec_id])
       expect(kernel.getReproductionSpec(p.project_id, spec.spec_id).spec_id).toBe(spec.spec_id)
       // Outbox event emitted with ids only.
@@ -376,6 +382,16 @@ describe('PaperReproductionSpec lifecycle (kernel)', () => {
         throw new Error('expected KernelError')
       } catch (error) {
         expect((error as KernelError).code).toBe('runner_profile_unknown')
+      }
+      try {
+        kernel.createReproductionSpec({
+          project_id: p.project_id, owner: { principal_id: 'pi-1' },
+          paper_ref: DOI_REF, claims_to_reproduce: [{ claim_ref: 'c' }],
+          execution_binding: { runner_profile_id: 'profile_local_docker_cpu_v1', target_id: 'target_does_not_exist' },
+        })
+        throw new Error('expected KernelError')
+      } catch (error) {
+        expect((error as KernelError).code).toBe('runner_target_unknown')
       }
     } finally {
       kernel.close()
@@ -535,6 +551,30 @@ describe('ReproductionAttempt lifecycle + fencing (contract §2.3/§4)', () => {
       const row = kernel.db.prepare('SELECT lease_token_hash FROM reproduction_attempts WHERE attempt_id = ?').get(started.attempt.attempt_id) as { lease_token_hash: string }
       expect(row.lease_token_hash).toBe(createHash('sha256').update(started.lease_token!).digest('hex'))
       expect(row.lease_token_hash).not.toContain(started.lease_token!)
+    } finally {
+      kernel.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a confirmed reproduction when its pinned runner target changed', () => {
+    const { kernel, dir } = freshKernel()
+    try {
+      const p = project(kernel)
+      const spec = kernel.createReproductionSpec({
+        ...specInput(),
+        project_id: p.project_id,
+        execution_binding: {
+          runner_profile_id: 'profile_local_docker_cpu_v1',
+          target_id: 'target_local_docker_v1',
+        },
+      } as never)
+      kernel.updateReproductionSpec(p.project_id, spec.spec_id, { expected_revision: 1, patch: { status: 'confirmed' } })
+      kernel.updateRunnerTarget('target_local_docker_v1', { expected_revision: 1, display_name: 'changed after confirmation' })
+      expect(() => kernel.startReproductionAttempt(p.project_id, spec.spec_id, {
+        submitter_principal: 'pi-1', reason: 'must not run stale target pin',
+      })).toThrowError(KernelError)
+      expect(kernel.listReproductionAttempts(p.project_id, spec.spec_id)).toHaveLength(0)
     } finally {
       kernel.close()
       rmSync(dir, { recursive: true, force: true })

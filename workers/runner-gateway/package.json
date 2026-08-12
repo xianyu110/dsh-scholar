@@ -13,6 +13,9 @@
     },
     "./bin/runner.js": "./lib/bin/runner.js"
   },
+  "bin": {
+    "dsh-scholar-runner": "lib/bin/runner.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",

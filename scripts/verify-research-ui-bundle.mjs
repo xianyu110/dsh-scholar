@@ -28,9 +28,21 @@ const window = {
     },
   },
 }
+// Browser-only dependencies may perform capability detection while their
+// module is materialized. Keep this verifier DOM-free while providing the
+// minimal standards-shaped globals needed for those read-only probes.
+const navigator = { userAgent: '', platform: '', language: 'en-US', maxTouchPoints: 0, clipboard: undefined }
+const document = { queryCommandSupported: () => false }
 
 try {
-  new Script(bundle, { filename: bundleUrl.pathname }).runInNewContext({ window })
+  new Script(bundle, { filename: bundleUrl.pathname }).runInNewContext({
+    window,
+    document,
+    navigator,
+    queueMicrotask,
+    setTimeout,
+    clearTimeout,
+  })
 } catch (cause) {
   throw new Error(`${clientPath} is not executable as a classic browser bundle`, { cause })
 }

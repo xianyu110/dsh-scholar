@@ -1,7 +1,7 @@
 /**
  * DSH Scholar — standalone web application server.
  *
- * Serves the Research OS UI at its own origin, completely independent of
+ * Serves the DSH Scholar UI at its own origin, completely independent of
  * the `dsh web` host: it spawns (or reuses) the Research Kernel sidecar,
  * serves the built client bundle plus a minimal bootstrap page, proxies
  * `/v1/*` to the kernel and protects every state-changing call with a
@@ -39,6 +39,35 @@ import {
   withinBodyLimit,
 } from './security.js'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
+
+export interface SurveyConnectorResult {
+  queries: unknown[]
+  hits: Array<{ paper: unknown }>
+  citation_edges: unknown[]
+  source_status: Array<{ source: string; status: 'ok' | 'failed'; error?: string }>
+}
+
+/** Convert connector output to the stable CorpusSnapshot write shape. Error
+ * text stays server-side; any failed source makes aggregate coverage pending. */
+export function surveySnapshotBody(result: SurveyConnectorResult): {
+  queries: unknown[]
+  papers: unknown[]
+  citation_edges: unknown[]
+  source_status: 'pending' | 'complete'
+} {
+  return {
+    queries: result.queries,
+    papers: result.hits.map(hit => hit.paper),
+    citation_edges: result.citation_edges,
+    source_status: result.source_status.some(source => source.status === 'failed') ? 'pending' : 'complete',
+  }
+}
+
+/** Survey freezes project research data, so read-only project roles cannot
+ * trigger it even though execution is initiated from Chat. */
+export function surveyWriteRoleAllowed(role: string | null): boolean {
+  return role === 'pi' || role === 'operator' || role === 'researcher'
+}
 
 const DEFAULT_PORT = 18610
 const DEFAULT_KERNEL_PORT = 17413
@@ -106,6 +135,20 @@ function isSseStreamForward(pathname: string): boolean {
   return SSE_STREAM_FORWARD_ROUTES.some(re => re.test(pathname))
 }
 
+/** Project-scoped Trajectory/Topology JSON routes that use the same Kernel
+ * membership guard as their SSE/child counterparts. The browser cannot
+ * supply identity; the standalone BFF derives it from its operator session. */
+const PROJECT_TRAJECTORY_TOPOLOGY_FORWARD_ROUTES: ReadonlyArray<RegExp> = [
+  /^\/v1\/projects\/[^/]+\/trajectory\/?$/,
+  /^\/v1\/projects\/[^/]+\/trajectory-lanes\/?$/,
+  /^\/v1\/projects\/[^/]+\/topology\/?$/,
+  /^\/v1\/projects\/[^/]+\/topology\/children\/?$/,
+]
+
+export function isProjectTrajectoryTopologyForward(pathname: string): boolean {
+  return PROJECT_TRAJECTORY_TOPOLOGY_FORWARD_ROUTES.some(re => re.test(pathname))
+}
+
 /** Models this Scholar surface may route the research agent onto. Mirrors the
  * DSH harness advisory catalog (llm-deepseek): ''/auto = agent default. */
 const MODEL_CATALOG = ['deepseek-v4-flash', 'deepseek-v4-pro']
@@ -140,6 +183,49 @@ export interface OperatorSession {
   auth_method: 'dsh-session'
   created_at: string
   updated_at: string
+}
+
+export interface HumanGateDecisionBody {
+  decision: 'approved' | 'rejected' | 'revised'
+  reason?: string
+  diff?: string
+  principal: {
+    principal_id: string
+    tenant_id: string
+    auth_method: 'dsh-session'
+    session_id: string
+  }
+}
+
+/** Human Gate errors always carry the server-generated correlation id, even
+ * when the request is rejected before the Kernel is contacted. */
+export function humanGateBffError(requestId: string, code: string, message: string): {
+  error: { code: string; message: string; request_id: string }
+} {
+  return { error: { code, message, request_id: requestId } }
+}
+
+/** Build the only Gate Decision body allowed to cross the Human BFF.
+ * Client actor/principal/session/request identity fields are deliberately
+ * ignored; identity always comes from the durable operator session. */
+export function humanGateDecisionBody(input: unknown, session: OperatorSession): HumanGateDecisionBody | null {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return null
+  const value = input as Record<string, unknown>
+  const decision = value.decision
+  if (decision !== 'approved' && decision !== 'rejected' && decision !== 'revised') return null
+  if (value.reason !== undefined && typeof value.reason !== 'string') return null
+  if (value.diff !== undefined && typeof value.diff !== 'string') return null
+  return {
+    decision,
+    ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+    ...(typeof value.diff === 'string' ? { diff: value.diff } : {}),
+    principal: {
+      principal_id: session.principal_id,
+      tenant_id: session.tenant_id ?? '',
+      auth_method: session.auth_method,
+      session_id: session.session_id,
+    },
+  }
 }
 
 /**
@@ -359,7 +445,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title data-i18n="standalone.pageTitle">Research OS — DSH Scholar</title>
+<title data-i18n="standalone.pageTitle">dsh Scholar</title>
 <script>
   // Unlock-page locale (gui-plugin-plan §13.4 / acceptance §8): pick BEFORE
   // first paint, same choice order as the client adapter: persisted
@@ -389,8 +475,8 @@ const BOOTSTRAP_HTML = `<!doctype html>
     // Keys mirror the client standalone namespace (i18n/locales/standalone.ts)
     // so the unlock page and the locale dictionaries stay in lockstep.
     var ZH = {
-      'standalone.pageTitle': '研究 OS — DSH Scholar',
-      'standalone.brand.name': '研究',
+      'standalone.pageTitle': 'dsh Scholar',
+      'standalone.brand.name': 'Scholar',
       'standalone.brand.meta': '工作区',
       'standalone.operatorAccess': '操作员访问',
       'standalone.welcomeBack': '欢迎回来。',
@@ -405,8 +491,8 @@ const BOOTSTRAP_HTML = `<!doctype html>
       'standalone.theme.light': '浅色',
     };
     var EN = {
-      'standalone.pageTitle': 'Research OS — DSH Scholar',
-      'standalone.brand.name': 'Research',
+      'standalone.pageTitle': 'dsh Scholar',
+      'standalone.brand.name': 'Scholar',
       'standalone.brand.meta': 'Workspace',
       'standalone.operatorAccess': 'Operator access',
       'standalone.welcomeBack': 'Welcome back.',
@@ -473,7 +559,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <button id="theme-toggle" class="theme-toggle">Dark</button>
 <div id="boot-screen">
   <div class="card">
-    <div class="brand"><span class="brand-mark">dsh</span><span class="brand-name" data-i18n="standalone.brand.name">Research</span><span class="brand-meta" data-i18n="standalone.brand.meta">Workspace</span></div>
+    <div class="brand"><span class="brand-mark">dsh</span><span class="brand-name" data-i18n="standalone.brand.name">Scholar</span><span class="brand-meta" data-i18n="standalone.brand.meta">Workspace</span></div>
     <div class="eyebrow" data-i18n="standalone.operatorAccess">Operator access</div>
     <h1 data-i18n="standalone.welcomeBack">Welcome back.</h1>
     <p data-i18n="standalone.intro">Open your evidence workspace. Human gate decisions are recorded with your operator identity.</p>
@@ -694,6 +780,26 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     const members = await projectMembers(projectId)
     if (members === null) return null
     return members.find(m => m.principal_id === options.principal)?.role ?? null
+  }
+  /** Global registry writes are allowed only when the authenticated local
+   * principal is currently a PI/operator in at least one authoritative
+   * project membership. This is evaluated fresh per write: a browser session
+   * is never unconditionally promoted to operator and revocation is immediate. */
+  async function globalConfigRole(): Promise<'pi' | 'operator' | null> {
+    if (options.principal === null) return null
+    const projects = await fetch(`${endpoint}/v1/projects`, {
+      headers: { accept: 'application/json', ...upstreamAuthHeaders },
+    }).then(async response => response.ok ? await response.json() as Array<{ project_id?: string }> : [])
+      .catch(() => [] as Array<{ project_id?: string }>)
+    let pi = false
+    for (const project of projects) {
+      if (typeof project.project_id !== 'string') continue
+      const role = (await projectMembers(project.project_id))
+        ?.find(member => member.principal_id === options.principal)?.role
+      if (role === 'operator') return 'operator'
+      if (role === 'pi') pi = true
+    }
+    return pi ? 'pi' : null
   }
   // Job-scoped routes (/v1/jobs/:id/*, e.g. the terminal SSE) resolve the
   // job's project through the kernel first — the BFF checks membership
@@ -920,6 +1026,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
+      const humanGateMatch = /^\/bff\/research\/gates\/([^/]+)\/decision$/.exec(url.pathname)
+
       // API-01/GOV-01 (hardening §4 P0): in token mode the loopback operator
       // identity (--principal) is REQUIRED. A token without a principal is a
       // misconfiguration, not an anonymous mode: every surface except the
@@ -930,9 +1038,126 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         options.token !== null &&
         options.principal === null &&
         url.pathname !== '/v1/health' &&
-        url.pathname !== '/v2/health'
+        url.pathname !== '/v2/health' &&
+        !(method === 'POST' && humanGateMatch !== null)
       ) {
         sendJson(res, 401, bffError('principal_required', 'principal required'))
+        return
+      }
+
+      // GOV-01: browser Gate decisions use a dedicated Human BFF route.
+      // The browser submits business fields only; this adapter resolves the
+      // Gate's project, checks fresh membership/role, injects the durable
+      // Principal + request id, then calls the fail-closed Kernel v1 route.
+      if (method === 'POST' && humanGateMatch !== null) {
+        const requestId = `req_${randomBytes(12).toString('hex')}`
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, humanGateBffError(requestId, 'unauthorized', 'unauthorized'))
+            return
+          }
+        }
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken)) {
+          sendJson(res, 403, humanGateBffError(requestId, 'csrf_rejected', 'missing or invalid csrf token'))
+          return
+        }
+        if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, humanGateBffError(requestId, 'csrf_rejected', 'cross-origin write rejected'))
+          return
+        }
+        if (options.principal === null) {
+          sendJson(res, 401, humanGateBffError(requestId, 'principal_required', 'principal required'))
+          return
+        }
+        let gateId = ''
+        try {
+          gateId = decodeURIComponent(humanGateMatch[1] ?? '')
+        } catch {
+          sendJson(res, 400, humanGateBffError(requestId, 'invalid_gate_id', 'invalid gate id'))
+          return
+        }
+        if (gateId === '' || gateId.includes('/')) {
+          sendJson(res, 400, humanGateBffError(requestId, 'invalid_gate_id', 'invalid gate id'))
+          return
+        }
+        const gateProjectId = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}`, {
+          headers: { accept: 'application/json', ...upstreamAuthHeaders },
+        }).then(async response => {
+          if (!response.ok) return null
+          const gate = await response.json() as { project_id?: unknown }
+          return typeof gate.project_id === 'string' && gate.project_id !== '' ? gate.project_id : null
+        }).catch(() => null)
+        if (gateProjectId === null || !(await isProjectMember(gateProjectId))) {
+          sendJson(res, 404, humanGateBffError(requestId, 'project_not_found', 'project not found or access denied'))
+          return
+        }
+        const role = await projectRole(gateProjectId)
+        if (role !== 'pi' && role !== 'operator') {
+          sendJson(res, 403, humanGateBffError(requestId, 'role_forbidden', 'role forbidden'))
+          return
+        }
+        const read = await readBody(req)
+        if (read.tooLarge) {
+          sendJson(res, 413, humanGateBffError(requestId, 'payload_too_large', 'payload too large'))
+          return
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(read.body)
+        } catch {
+          sendJson(res, 400, humanGateBffError(requestId, 'invalid_json', 'bad request'))
+          return
+        }
+        const opSession = operatorSession(options.dataDir, options.principal)
+        const decisionBody = humanGateDecisionBody(parsed, opSession)
+        if (decisionBody === null) {
+          sendJson(res, 422, humanGateBffError(requestId, 'validation_error', 'invalid gate decision'))
+          return
+        }
+        let upstream: Response
+        try {
+          upstream = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}/decisions`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json',
+              ...upstreamAuthHeaders,
+              'x-principal-id': opSession.principal_id,
+              'x-principal-role': role,
+              'x-principal-session': opSession.session_id,
+              'x-request-id': requestId,
+            },
+            body: JSON.stringify(decisionBody),
+          })
+        } catch {
+          sendJson(res, 502, humanGateBffError(requestId, 'kernel_unreachable', 'research kernel unavailable'))
+          return
+        }
+        let payload: unknown
+        try {
+          payload = await upstream.json()
+        } catch {
+          sendJson(res, 502, humanGateBffError(requestId, 'kernel_error', 'invalid kernel response'))
+          return
+        }
+        if (!upstream.ok) {
+          const envelope = payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+          const error = envelope.error !== null && typeof envelope.error === 'object'
+            ? envelope.error as Record<string, unknown>
+            : {}
+          const candidate = error.code
+          const code = typeof candidate === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(candidate)
+            ? candidate
+            : upstream.status >= 500 ? 'kernel_error' : 'request_rejected'
+          const message = typeof error.message === 'string' && error.message.length <= 500
+            ? error.message
+            : 'research request rejected'
+          sendJson(res, upstream.status, humanGateBffError(requestId, code, message))
+          return
+        }
+        sendJson(res, upstream.status, payload)
         return
       }
 
@@ -1023,13 +1248,18 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           sendJson(res, 403, bffError('csrf_rejected', 'cross-origin write rejected'))
           return
         }
-        const { body } = await readBody(req)
+        const read = await readBody(req)
+        if (read.tooLarge) {
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
+          return
+        }
+        const { body } = read
         let projectId = ''
         let query = ''
         try {
           const parsed = JSON.parse(body) as { project_id?: unknown; query?: unknown }
           projectId = typeof parsed.project_id === 'string' ? parsed.project_id : ''
-          query = typeof parsed.query === 'string' ? parsed.query : ''
+          query = typeof parsed.query === 'string' ? parsed.query.trim() : ''
         } catch {
           sendJson(res, 400, bffError('invalid_json', 'bad request'))
           return
@@ -1041,19 +1271,23 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // SEC-UI-01 fail-closed: with a loopback operator principal, membership
         // is enforced BEFORE the connector runs or the corpus is written —
         // unknown/foreign project -> 404, no side effects.
-        if (options.principal !== null && !(await isProjectMember(projectId))) {
-          sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
-          return
+        if (options.principal !== null) {
+          const role = await projectRole(projectId)
+          if (role === null) {
+            sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
+            return
+          }
+          if (!surveyWriteRoleAllowed(role)) {
+            sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
+            return
+          }
         }
         try {
           const result = await multiSourceSearch(query, { limit: 20 })
           const snapshotResponse = await fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/corpus`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', accept: 'application/json', ...upstreamAuthHeaders },
-            body: JSON.stringify({
-              queries: result.queries,
-              papers: result.hits.map(h => h.paper),
-            }),
+            body: JSON.stringify(surveySnapshotBody(result)),
           })
           if (!snapshotResponse.ok) {
             sendJson(res, 502, bffError('kernel_unreachable', 'corpus snapshot failed'))
@@ -1065,6 +1299,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             snapshot_id: snapshot.snapshot_id,
             papers: Array.isArray(snapshot.papers) ? snapshot.papers.length : 0,
             removed: result.dedup_removed,
+            sources: result.source_status.map(source => ({ source: source.source, status: source.status })),
             top: result.hits.slice(0, 5).map(h => ({ paper_id: h.paper.paper_id, title: h.paper.title, year: h.paper.year })),
           })
       } catch {
@@ -1281,6 +1516,20 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         if (options.principal !== null && method === 'POST' && /^\/v1\/projects\/[^/]+\/jobs$/.test(url.pathname)) {
           proxyHeaders['x-principal-id'] = options.principal
         }
+        // Global runner target configuration is a PI/operator administration
+        // surface. Resolve the role from fresh authoritative memberships;
+        // never promote an arbitrary authenticated browser principal.
+        if (options.principal !== null && url.pathname.startsWith('/v1/runner-targets')) {
+          proxyHeaders['x-principal-id'] = options.principal
+          if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            const role = await globalConfigRole()
+            if (role === null) {
+              sendJson(res, 403, bffError('role_forbidden', 'runner target configuration requires PI or operator role'))
+              return
+            }
+            proxyHeaders['x-principal-role'] = role
+          }
+        }
         // PTY-01 (execution-runtime.md §6.1, hardening §5 P0-2): the kernel
         // demands the authenticated principal on EVERY pty operation — open,
         // session read, control and frames (fail-closed: 422
@@ -1344,13 +1593,15 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             }
           }
         }
-        // SUBAGENT-01 (trajectory-subagents.md §7): the kernel demands the
-        // authenticated principal on /v1/topology/* (fail-closed) — the BFF
-        // injects the loopback operator identity (server-derived, never a
-        // client-supplied value). Membership was already enforced above via
-        // childProjectId; viewer/auditor write attempts (followup) are
-        // rejected by the role policy (read-only roles block all writes).
-        if (options.principal !== null && url.pathname.startsWith('/v1/topology/')) {
+        // TRAJ-01/SUBAGENT-01 (trajectory-subagents.md §7): the kernel
+        // demands the authenticated principal for BOTH project-scoped JSON
+        // routes and child/global topology routes. Membership was already
+        // checked above; identity is derived server-side and a browser-
+        // supplied x-principal-id is never forwarded.
+        if (options.principal !== null && (
+          isProjectTrajectoryTopologyForward(url.pathname) ||
+          url.pathname.startsWith('/v1/topology/')
+        )) {
           proxyHeaders['x-principal-id'] = options.principal
         }
         // API-01/§22 (acceptance-tests.md §21 SSE 实时流替代轮询): the new
