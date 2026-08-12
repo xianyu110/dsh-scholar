@@ -4,6 +4,7 @@
 
 ## 1. 技术基线
 
+- GitHub 仓库元数据必须包含 `dsh` 与 `dsh-plugin` 两个 Topics，对应产品约定中的 `#dsh` 与 `@dsh-plugin`；Topic 值本身不接受 `#` 或 `@` 前缀，便于 DSH 与 DSH Plugin 生态检索；
 - Node.js 24、TypeScript 5.9、pnpm 11、ESM；
 - workspace：packages/*、workers/*、apps/*；
 - Zod 3、Vitest、node:sqlite、原生 fetch/http；
