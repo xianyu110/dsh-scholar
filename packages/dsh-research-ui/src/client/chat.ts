@@ -2179,11 +2179,14 @@ export async function renderChat(
   listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
   if (modelSelect !== undefined) toolbar.appendChild(modelSelect)
   toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, attachBtn, clear)
-  composerRow.insertBefore(queueStrip, composer)
   const composerActions = el('div', 'chat-composer-actions')
   composerActions.append(toolbar, send)
   composer.appendChild(composerActions)
+  // ORDER MATTERS: append composer FIRST, then insert the upload queue strip
+  // before it — insertBefore(ref) throws NotFoundError when ref is not yet a
+  // child of the parent (observed on every real render).
   composerRow.appendChild(composer)
+  composerRow.insertBefore(queueStrip, composer)
   dock.append(completionBox, composerRow)
   dock.hidden = false
 
