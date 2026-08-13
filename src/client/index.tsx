@@ -1,5 +1,5 @@
 /** DSH browser half: contributes Settings plus the Scholar conversation view. */
-import { useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { ClientContext, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -13,6 +13,7 @@ import {
   DEFAULT_STANDALONE_URL,
   DISABLED_STANDALONE_SHORTCUT,
   normalizeStandaloneUrl,
+  standaloneChatBridgeOrigin,
   type StandaloneShortcut,
 } from '../shared/standalone.js'
 import type { ResearchSettings } from '../shared/settings-rpc.js'
@@ -118,6 +119,7 @@ type ResearchCardProps =
 interface ScholarViewFace {
   hooks: { researchSettings: SettingsScope<ResearchSettings> }
   openStandalone: (url: string) => void
+  callHostChatTurn: (payload: unknown, signal?: AbortSignal) => Promise<unknown>
 }
 
 type ScholarViewProps = ConvViewProps
@@ -177,7 +179,50 @@ const style = {
 } satisfies Record<string, CSSProperties>
 
 type RpcCaller = {
-  call(channel: string, endpoint: string, payload: unknown): Promise<unknown>
+  call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<unknown>
+}
+
+const CHAT_BRIDGE_REQUEST = 'dsh-scholar/chat-turn-request'
+const CHAT_BRIDGE_RESPONSE = 'dsh-scholar/chat-turn-response'
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export interface ScholarChatBridgeRequest {
+  requestId: string
+  payload: Record<string, unknown>
+}
+
+/** Accept requests only from this exact Scholar iframe and configured origin. */
+export function parseScholarChatBridgeRequest(
+  event: { source?: unknown; origin?: unknown; data?: unknown },
+  expectedSource: unknown,
+  expectedOrigin: string,
+): ScholarChatBridgeRequest | null {
+  if (event.source !== expectedSource || event.origin !== expectedOrigin) return null
+  const envelope = isRecord(event.data) ? event.data : null
+  if (envelope?.type !== CHAT_BRIDGE_REQUEST || typeof envelope.request_id !== 'string') return null
+  const requestId = envelope.request_id
+  if (requestId.length === 0 || requestId.length > 256 || !isRecord(envelope.payload)) return null
+  return { requestId, payload: envelope.payload }
+}
+
+/** Loopback-only browser seam for the Host-owned, tool-free chat model RPC. */
+export async function callScholarChatTurn(
+  rpc: RpcCaller,
+  isLoopback: boolean,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  if (!isLoopback) throw new Error('Scholar Chat model is unavailable')
+  const response = signal === undefined
+    ? await rpc.call('/dsh-scholar', 'chat-turn', payload)
+    : await rpc.call('/dsh-scholar', 'chat-turn', payload, signal)
+  if (!isRecord(response) || response.ok !== true || !('value' in response)) {
+    throw new Error('Scholar Chat model is unavailable')
+  }
+  return response.value
 }
 
 function isEditableTarget(target: unknown): boolean {
@@ -247,6 +292,64 @@ function resolvedStandaloneUrl(settings: ResearchSettings | undefined): string |
 function ScholarView(props: ScholarViewProps) {
   const snapshot = props.useResearchSettings(value => value)
   const url = resolvedStandaloneUrl(snapshot.status === 'ready' ? snapshot.value : undefined)
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  useEffect(() => {
+    if (url === null) return
+    const source = frameRef.current?.contentWindow
+    if (source === null || source === undefined) return
+    const origin = standaloneChatBridgeOrigin(url, window.location.origin)
+    if (origin === null) return
+    const pending = new Map<string, AbortController>()
+    const completed: string[] = []
+    const completedSet = new Set<string>()
+    const remember = (requestId: string): void => {
+      completed.push(requestId)
+      completedSet.add(requestId)
+      if (completed.length <= 128) return
+      const evicted = completed.shift()
+      if (evicted !== undefined) completedSet.delete(evicted)
+    }
+    const replyUnavailable = (requestId: string): void => {
+      if (frameRef.current?.contentWindow !== source) return
+      source.postMessage({
+        type: CHAT_BRIDGE_RESPONSE,
+        request_id: requestId,
+        error: { code: 'unavailable' },
+      }, origin)
+    }
+    const onMessage = (event: MessageEvent): void => {
+      const request = parseScholarChatBridgeRequest(event, source, origin)
+      if (request === null) return
+      if (pending.has(request.requestId) || completedSet.has(request.requestId)) {
+        replyUnavailable(request.requestId)
+        return
+      }
+      if (pending.size >= 1) {
+        replyUnavailable(request.requestId)
+        return
+      }
+      const controller = new AbortController()
+      pending.set(request.requestId, controller)
+      remember(request.requestId)
+      const timer = window.setTimeout(() => { controller.abort() }, 20_000)
+      void props.callHostChatTurn(request.payload, controller.signal).then(
+        value => {
+          if (frameRef.current?.contentWindow !== source) return
+          source.postMessage({ type: CHAT_BRIDGE_RESPONSE, request_id: request.requestId, value }, origin)
+        },
+        () => { replyUnavailable(request.requestId) },
+      ).finally(() => {
+        window.clearTimeout(timer)
+        if (pending.get(request.requestId) === controller) pending.delete(request.requestId)
+      })
+    }
+    window.addEventListener('message', onMessage)
+    return () => {
+      window.removeEventListener('message', onMessage)
+      for (const controller of pending.values()) controller.abort()
+      pending.clear()
+    }
+  }, [props.callHostChatTurn, url])
   return (
     <section style={style.view} aria-label={props.t('title')}>
       <header style={style.viewHeader}>
@@ -264,10 +367,11 @@ function ScholarView(props: ScholarViewProps) {
         ? <p role="alert" style={style.unavailable}>{props.t('viewUnavailable')}</p>
         : (
           <iframe
+            ref={frameRef}
             src={url}
             title={props.t('viewFrameTitle')}
             style={style.frame}
-            referrerPolicy="no-referrer"
+            referrerPolicy="origin"
             sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-modals"
           />
         )}
@@ -469,6 +573,12 @@ export function apply(ctx: ClientContext): void {
     typeof navigator === 'undefined' ? undefined : navigator.clipboard,
     connection.isLoopback,
   )
+  const callHostChatTurn = (payload: unknown, signal?: AbortSignal): Promise<unknown> => callScholarChatTurn(
+    connection.rpc,
+    connection.isLoopback,
+    payload,
+    signal,
+  )
   ctx.effect(() => ctx.locale.register(LOCALE_NAMESPACE, { zh, en }), 'dsh-scholar: configuration dictionaries')
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
@@ -495,6 +605,7 @@ export function apply(ctx: ClientContext): void {
     inject: (): ScholarViewFace => ({
       hooks: { researchSettings: scope },
       openStandalone,
+      callHostChatTurn,
     }),
   }, ScholarView))
 

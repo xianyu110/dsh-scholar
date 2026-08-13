@@ -77,7 +77,7 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 
 `/new` 是 name-only Init 引导入口；Grill 回答与 PI `/confirm-brief` 目前属于 authenticated standalone Human Chat/BFF 面，不冒充 Agent command。Agent Intake tool 只操作 observation/question/proposal，不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 与 Brief confirm 只能由 Human PI 完成。
 
-自然语言 Chat 是 project-scoped turn adapter，不新增 `/research` 聚合 descriptor，也不改变上述 direct command Registry。DSH host 可用 agent/LLM loop 生成回答或 intent，standalone 可在无模型 adapter 时返回确定性阶段引导；两者都必须把 intent 映射到同一 canonical ResearchClient operation。模型不能直接调用 Gate Decision、Brief confirm、adopt 或 release decision，不能把 DSH session 状态当作 Kernel NextAction。
+自然语言 Chat 是 project-scoped turn adapter，不新增 `/research` 聚合 descriptor，也不改变上述 direct command Registry。DSH 浏览器插件只为与 Host 不同 origin 的 loopback standalone iframe 暴露 request-id/source/origin 受控的 `postMessage` seam，再通过 loopback-only `/dsh-scholar` RPC 动态使用可选 `ctx.llm`。LLM 调用不携带 tools，模型路由只从 Host registry/插件配置解析；浏览器不能指定 provider/model/credential。同一 iframe 最多一个 in-flight turn，RPC `AbortSignal` 贯通到 provider。模型不可用、顶层 standalone 或远程 HTTPS iframe 返回确定性阶段引导。模型不能直接调用 Gate Decision、Brief confirm、adopt 或 release decision，不能把 DSH session 状态当作 Kernel NextAction，也不能建议 Human-only direct command。
 
 命令只是 ResearchClient adapter，不重复业务逻辑。它使用 invocation.agent.id 解析 session link。错误输出 research: 加稳定错误摘要，不能泄漏内部路径、Token 或上游响应。帮助文本与 i18n 资源生成；宿主命令描述若在注册时固化语言，locale change 时重新注册或保持语言无关。
 

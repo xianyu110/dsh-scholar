@@ -113,8 +113,9 @@
 1. `MANUAL-REPRO-PAPER`：用 DOI、arXiv 和扫描 PDF 各建一次 `/reproduce`；上传官方代码/数据并核对 source locator、commit/CodeSnapshot、license、environment pin；在真实本机 Docker 运行，比较论文目标指标/表/图并生成 Report。exit 0 + 指标越界必须显示 fail/inconclusive。
 2. `MANUAL-REPRO-REMOTE-SSH`：Settings 以 SecretRef 登记两台远端 SSH Runner，验证 known-host/credential/health/revision/hash；选择 target A 执行并中途断网/重启；确认同 attempt 不落到本机/B，显式新 attempt 才可改 target。日志/浏览器/argv/Bundle 零 secret。
 3. `MANUAL-CHAT-ATTACH-SLASH`：仅使用 `/new`、`/reproduce`、`/confirm-brief` 等直接命令；help/补全无 `/research`；按钮、拖拽、粘贴混合材料，暂停/刷新/恢复，scan/OCR/引用卡与 zh/en/aria 正确。
-4. `MANUAL-SESSION-MULTI-PTY`：两个 Chat session、一个 Research session、父/子 subagent 各打开两个 PTY；切换/深链/detach/reconnect/resize/signal；确认输入只到对应 terminal。撤权、lease expiry、stale generation、跨 parent/跨项目全部拒绝；远端 PTY 复测同一 fencing。
-5. `MANUAL-REPRO-MANUSCRIPT-CLEANROOM`：新 dataDir/无 checkout 隐式依赖环境重建 TeX/PDF，验证 Bundle preflight/hash、数据自包含、表图/PDF检查、signed RunManifest 与不可变 Report。
+4. `MANUAL-CHAT-HARNESS-FREEFORM`：在 Brief confirmed 项目的 DSH Scholar loopback iframe 分别用 zh/en 输入开放问题、状态问题、要求生成实验命令和要求批准 Gate；开放问题由 Harness 当前模型回答并附最新权威 NextAction，状态问题可自动执行只读 canonical operation，实验命令只显示可编辑“使用命令”，Gate/Brief confirm/Release 请求零 mutation 且不生成 Human-only 候选。在 Host 响应期间切换 project/session，确认请求/回写仍只属于原 session。点击“使用命令”后等异步重绘完成，确认 composer 内容、焦点与 caret 末尾，再手动发送。断开 Host、打开 standalone 新页面、配置远程 HTTPS URL 后复测 deterministic fallback，不得出现 `Unknown command` 或向远程 origin 发送对话。记录 DSH/provider/model、project/session、网络请求与截图，状态 `NOT_RUN_MANUAL_PENDING`。
+5. `MANUAL-SESSION-MULTI-PTY`：两个 Chat session、一个 Research session、父/子 subagent 各打开两个 PTY；切换/深链/detach/reconnect/resize/signal；确认输入只到对应 terminal。撤权、lease expiry、stale generation、跨 parent/跨项目全部拒绝；远端 PTY 复测同一 fencing。
+6. `MANUAL-REPRO-MANUSCRIPT-CLEANROOM`：新 dataDir/无 checkout 隐式依赖环境重建 TeX/PDF，验证 Bundle preflight/hash、数据自包含、表图/PDF检查、signed RunManifest 与不可变 Report。
 
 以上均为 `NOT_RUN_MANUAL_PENDING`，需要记录 commit、环境、操作者、期望/实际结果、Report/截图/日志引用。
 

@@ -119,7 +119,7 @@ export interface IntakeProjectionLite {
 
 export interface Projection {
   project?: {
-    project_id?: string; name?: string; status?: string; revision?: number
+    project_id?: string; name?: string; status?: string; revision?: number; brief_status?: 'collecting' | 'confirmed'
     brief?: { problem?: string; primary_metrics?: string[] }
     constraints?: { max_model_cost_usd?: number; max_gpu_hours?: number; max_parallel_jobs?: number; datasets?: string; external_model_upload?: string }
     execution?: { runner_profile?: string; network_policy?: string; artifact_store?: string }
@@ -308,6 +308,8 @@ export interface ChatMessage {
   quote?: { index: number; text: string }
   /** dsh-web pin: starred messages surface in a 📌 section at the top. */
   pinned?: boolean
+  /** Tool-free model or deterministic router suggestion; always editable and never auto-run. */
+  suggested_command?: string
   /**
    * INIT-GRILL-02 §2: chat 消息只保存 attachment/stage ref —— 附件进入同一
    * active Intake 的批量分块队列；消息本体不携带文件字节。

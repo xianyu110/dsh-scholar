@@ -16,6 +16,14 @@ function isLoopbackHostname(hostname: string): boolean {
   return octets.every(octet => octet >= 0 && octet <= 255) && octets[0] === 127
 }
 
+/** Chat data may cross only to the separately served loopback workbench. */
+export function standaloneChatBridgeOrigin(value: string, parentOrigin?: string): string | null {
+  let parsed: URL
+  try { parsed = new URL(normalizeStandaloneUrl(value)) } catch { return null }
+  if (!isLoopbackHostname(parsed.hostname) || parsed.origin === parentOrigin) return null
+  return parsed.origin
+}
+
 /** Normalize a launcher URL while rejecting credential and token-bearing forms. */
 export function normalizeStandaloneUrl(value: string): string {
   let parsed: URL

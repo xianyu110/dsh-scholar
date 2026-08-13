@@ -81,7 +81,8 @@ describe('DSH research plugin lifecycle', () => {
       }]),
       mutate,
     }
-    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token')
+    const chatTurn = vi.fn().mockResolvedValue({ assistant_text: '可以继续讨论。', suggested_command: '/status' })
+    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token', chatTurn)
 
     const snapshot = await handler('settings-snapshot', {}, new AbortController().signal)
     expect(snapshot).toMatchObject({ ok: true, value: { available: true, snapshot: {
@@ -102,6 +103,17 @@ describe('DSH research plugin lifecycle', () => {
     }, new AbortController().signal)
     expect(rejected).toMatchObject({ ok: false, error: { code: 'internal' } })
     expect(mutate).toHaveBeenCalledTimes(1)
+
+    const controller = new AbortController()
+    const chat = await handler('chat-turn', { text: '下一步是什么？' }, controller.signal)
+    expect(chat).toEqual({ ok: true, value: { assistant_text: '可以继续讨论。', suggested_command: '/status' } })
+    expect(chatTurn).toHaveBeenCalledWith({ text: '下一步是什么？' }, controller.signal)
+
+    const unavailable = createScholarRpcHandler(settings as never, () => 'clipboard-token')
+    await expect(unavailable('chat-turn', {}, controller.signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: 'Scholar Chat model is unavailable' },
+    })
   })
 
   it('does not settle apply until the SkillFilesystem child plugin is active', async () => {

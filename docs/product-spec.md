@@ -69,6 +69,8 @@ Chat 是项目内部工作面，不是跨项目共享的全局收件箱。每个
 
 Chat composer 必须同时接受自由自然语言与一级 slash command。显式 `/...` 是确定性高级入口；普通文本在 active Init Grill 时仍只回答当前唯一问题，其他阶段进入 project-scoped natural turn，由意图路由器结合 Kernel `next_actions_v2` 选择只读查询、可执行 Agent 动作或普通对话，不能把 prose 当成未知命令。自然语言路由不得根据状态 label 猜 mutation：未知/歧义/blocked/权限不足时只解释并给出候选；Gate Decision、Brief confirm、Intake adoption、Release 决定等 Human-only 动作永远不能由模型代做。任何自动触发结果都必须回显解析出的动作、参数、执行状态和最新权威 NextAction；显式 slash 与自然语言必须进入同一 canonical operation/权限/审计语义。
 
+在 DSH 会话页签内，普通对话可以通过受控 Host bridge 调用 Harness 已注册的 LLM adapter；桥仅对与 DSH 不同 origin 的 loopback standalone 开放，任意远端 HTTPS 或与 Host 同 origin 的 iframe 不得获得对话数据。桥接请求只携带当前项目的最小阶段投影、当前文本和在首次 await 前冻结的当前 project/session 有界对话摘要，不携带 Token、SecretRef、Provider endpoint、原始工具参数或跨项目历史。该模型调用不注册工具、不能直接执行 slash 或 mutation，只能返回回答与一个候选一级 slash command；候选必须命中正式 descriptor 且排除 Brief confirm、Release Decision 等 Human-only command，并以可编辑“使用命令”动作填入 composer，仍需用户确认发送。确定性意图路由器可自动执行已明确映射的只读操作；当前 Agent-write 自动集合只有权威投影为 ready 的 `survey_run`，其他 write 只生成候选。模型生成内容永远不能扩大这个自动执行集合。独立新页面、不受信 origin、无法连接 DSH Host 或模型不可用时，仍返回确定性的阶段回答与候选命令，不得退回 slash-only 或 `Unknown command`。
+
 每次 assistant 回答结尾都应给出与当前阶段相符的一项下一步引导，但不得自动跳页或覆盖用户正在编辑的草稿。Chat transcript 在底部时随新消息继续贴底；用户向上查看历史时，新消息、8 秒投影刷新、locale 切换和 Dock 重绘必须保持当前滚动锚点并显示“跳到最新”，不得反复回到顶部或强制拉到底部。滚动/follow 状态按 project + session + surface 隔离，切换回来恢复各自位置。
 
 ### 5.3 执行可观测性

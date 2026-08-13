@@ -2,11 +2,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
+  callScholarChatTurn,
   copyStandaloneAccessToken,
   inject,
+  parseScholarChatBridgeRequest,
   shouldOpenScholarShortcut,
 } from '../../src/client/index.js'
 import { ScholarSettingsScope } from '../../src/client/scholar-settings.js'
+import { standaloneChatBridgeOrigin } from '../../src/shared/standalone.js'
 
 describe('DSH research plugin browser configuration', () => {
   it('uses the Scholar-owned RPC scope and contributes its own plugin card', () => {
@@ -104,5 +107,41 @@ describe('DSH research plugin browser configuration', () => {
     call.mockResolvedValueOnce({ ok: false, error: { code: 'internal' } })
     await expect(copyStandaloneAccessToken({ call }, { writeText }, true)).resolves.toBe(false)
     expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('accepts chat bridge requests only from the configured Scholar iframe origin', () => {
+    const source = {}
+    const data = {
+      type: 'dsh-scholar/chat-turn-request',
+      request_id: 'chat_1',
+      payload: { text: '解释当前阶段' },
+    }
+    expect(parseScholarChatBridgeRequest(
+      { source, origin: 'http://127.0.0.1:18610', data },
+      source,
+      'http://127.0.0.1:18610',
+    )).toEqual({ requestId: 'chat_1', payload: { text: '解释当前阶段' } })
+    expect(parseScholarChatBridgeRequest(
+      { source: {}, origin: 'http://127.0.0.1:18610', data },
+      source,
+      'http://127.0.0.1:18610',
+    )).toBeNull()
+    expect(parseScholarChatBridgeRequest(
+      { source, origin: 'https://attacker.invalid', data },
+      source,
+      'http://127.0.0.1:18610',
+    )).toBeNull()
+    expect(standaloneChatBridgeOrigin('http://127.0.0.1:18610/', 'http://127.0.0.1:3080')).toBe('http://127.0.0.1:18610')
+    expect(standaloneChatBridgeOrigin('https://scholar.example/', 'http://127.0.0.1:3080')).toBeNull()
+    expect(standaloneChatBridgeOrigin('http://127.0.0.1:3080/', 'http://127.0.0.1:3080')).toBeNull()
+  })
+
+  it('uses the loopback Scholar RPC for host chat and rejects remote browsers', async () => {
+    const call = vi.fn().mockResolvedValue({ ok: true, value: { assistant_text: '回答' } })
+    await expect(callScholarChatTurn({ call }, true, { text: '问题' })).resolves.toEqual({ assistant_text: '回答' })
+    expect(call).toHaveBeenCalledWith('/dsh-scholar', 'chat-turn', { text: '问题' })
+    call.mockClear()
+    await expect(callScholarChatTurn({ call }, false, {})).rejects.toThrow('Scholar Chat model is unavailable')
+    expect(call).not.toHaveBeenCalled()
   })
 })

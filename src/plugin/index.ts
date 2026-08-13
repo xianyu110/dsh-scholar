@@ -39,6 +39,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-llm'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
@@ -54,6 +55,7 @@ import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
 import { createScholarRpcHandler } from './settings-rpc.js'
+import { createHarnessChatTurn, type HarnessChatTurnReply } from './chat-turn.js'
 import {
   DEFAULT_STANDALONE_SHORTCUT,
   DEFAULT_STANDALONE_URL,
@@ -272,6 +274,24 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   const effectiveConfig = settingsScope?.get() ?? config
   const unattended = effectiveConfig.unattended ?? false
 
+  // Chat uses the Host's configured model, but remains an optional service:
+  // settings, token copy and the Scholar workbench still load without llm.
+  // The callback is owned by this plugin fiber and cleared when the injected
+  // llm child is unloaded or replaced.
+  let hostChatTurn: ((payload: unknown, signal?: AbortSignal) => Promise<HarnessChatTurnReply>) | undefined
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['llm'], llmCtx => {
+      const handler = createHarnessChatTurn(
+        llmCtx.llm,
+        () => effectiveConfig.models?.pi ?? standaloneModelPreference(),
+      )
+      hostChatTurn = handler
+      return llmCtx.effect(() => () => {
+        if (hostChatTurn === handler) hostChatTurn = undefined
+      }, 'research-plugin.chat-model')
+    })
+  }
+
   // Optional browser Host seam. The registration is lifecycle-owned and only
   // becomes reachable through DSH Connection's loopback authority fence.
   // It accepts no path or token input: the Host resolves the fixed standalone
@@ -279,7 +299,14 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   if (typeof ctx.inject === 'function') {
     ctx.inject(['connection'], connectionCtx => connectionCtx.connection.rpc.handle(
       '/dsh-scholar',
-      createScholarRpcHandler(settings as SettingsProvider, readStandaloneAccessToken),
+      createScholarRpcHandler(
+        settings as SettingsProvider,
+        readStandaloneAccessToken,
+        (payload, signal) => {
+          if (hostChatTurn === undefined) throw new Error('Scholar Chat model is unavailable')
+          return hostChatTurn(payload, signal)
+        },
+      ),
       { authority: 'loopback' },
     ))
   }

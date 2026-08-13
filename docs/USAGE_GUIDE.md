@@ -40,6 +40,8 @@ Chat 对话属于当前项目。切换项目时，会话列表、当前会话、
 
 Chat 同时支持普通自然语言和一级 slash command。直接输入“现在进展怎么样”“看看审批”“有哪些想法”“查看运行任务”会按当前项目投影路由到对应只读操作；明确输入“调研 <主题>”可路由到 survey。显式 `/status`、`/gates`、`/ideas`、`/jobs`、`/survey ...` 仍是完全确定性的高级入口。Init Grill 尚有当前问题时，普通文本仍回答该问题；Brief confirmed 后才作为自由对话处理。系统会在回答后给出当前阶段的一项下一步建议，但不会自动替你批准 Gate、确认 Brief、adopt 导入或决定发布。未知或参数不足时只给候选，不执行副作用。
 
+在 DSH 的 `dsh Scholar` 页签内，当 Scholar 使用与 Host 不同 origin 的 loopback standalone 时，开放问题会使用 Harness 当前可用的模型回答；模型不持有 Scholar 工具，也不能直接执行命令。它生成的非 Human-only 一级 slash command 会以“使用命令”按钮出现，点击后只填入输入框，你可以修改并再次发送。状态查询等确定性只读意图可以自动调用对应 canonical command；当前仅权威投影 ready 的 `survey_run` 可自动触发 Agent write，其他 write 只预填，人工审批及 blocked/歧义动作始终只解释和引导。独立新页面、远程 HTTPS 工作台或 Host 模型暂不可用时会退回基于当前阶段的确定性回答，核心 slash command 仍可正常使用。
+
 对话在底部时会随新消息保持到底部；向上查看历史后，刷新和新消息不会把内容拉回顶部或强制到底部，使用“跳到最新”恢复跟随。项目、Chat session、主区与 Dock 分别保存自己的查看位置。
 
 Chat 使用直接一级 slash command；不要添加聚合前缀：

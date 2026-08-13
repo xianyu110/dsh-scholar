@@ -968,7 +968,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
 
       // Bootstrap page.
       if (method === 'GET' && url.pathname === '/') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-security-policy': "frame-ancestors http://127.0.0.1:* http://localhost:* http://[::1]:*",
+        })
         res.end(BOOTSTRAP_HTML)
         return
       }
@@ -981,7 +985,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
       // Standalone client bundle.
       if (method === 'GET' && url.pathname === '/client.js') {
         const bundle = readFileSync(bundlePath)
-        res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' })
+        res.writeHead(200, {
+          'content-type': 'application/javascript; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-security-policy': "frame-ancestors http://127.0.0.1:* http://localhost:* http://[::1]:*",
+        })
         res.end(bundle)
         return
       }

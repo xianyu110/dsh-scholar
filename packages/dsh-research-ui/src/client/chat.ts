@@ -4,7 +4,7 @@ import { getLocale, t } from './i18n/index'
 import { CHAT_COMMANDS } from './modals/commands'
 import { openCommandHistoryModal, openGlobalSearchModal, openSessionSearchModal } from './modals/search'
 import { CHAT_MAX, activeChatProjectId, chatClear, chatPersist, chatPush, chatPushToProjectSession, chatSessionArchive, chatSessionClose, chatSessionEnsure, chatSessionNew, chatSessionRename, chatSessionSelect, chatSessionsPersist, chatSyncActive, chatUpsertAttachmentForProjectSession, favCommands, historyPush, state, tabSave } from './state'
-import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast, statusLabel } from './ui'
+import { copyText, el, fmtId, focusChatComposerAtEnd, openContextMenu, pill, rootHost, showToast, statusLabel } from './ui'
 import {
   browserTransport, chatAttachmentRef, driveUpload, enqueueFiles, fileByteProvider, markHashed,
   pauseItem, registerByteProvider, resumeItem, retryItem, sha256Hex, unregisterByteProvider,
@@ -16,6 +16,12 @@ import {
   type GrillDisposition, type GrillGuideLoaded, type GrillProjection,
 } from './grill-guide-model'
 import { planNaturalChatTurn, projectStageGuidance, type ChatTurnProjection } from './chat-turn-model'
+import {
+  requestHostChatTurn,
+  safeSuggestedChatCommand,
+  type HostChatTurnReply,
+  type HostChatTurnRequest,
+} from './host-chat-bridge'
 import { captureChatScroll, restoreChatScrollTop, type ChatScrollPosition } from './chat-scroll-model'
 export let dragSessionId: string | null = null
 
@@ -373,14 +379,54 @@ function naturalGuidanceText(projection: ChatTurnProjection): string {
   return parts.join('\n')
 }
 
-/** Route slash, deterministic Grill answers, and project-scoped prose. */
-export async function executeChatInput(line: string, activeProjectId: string | undefined): Promise<string> {
+export interface ChatTurnResult {
+  text: string
+  suggestedCommand?: string
+}
+
+type HostChatTurn = (payload: HostChatTurnRequest) => Promise<HostChatTurnReply | null>
+
+function withGuidance(answer: string, projection: ChatTurnProjection): string {
+  const guidance = naturalGuidanceText(projection)
+  return guidance === '' ? answer : `${answer}\n\n${guidance}`
+}
+
+function commandProjectId(line: string, activeProjectId: string | undefined): string | undefined {
+  const parts = line.trim().replace(/^\//, '').split(/\s+/)
+  const command = (parts[0] ?? '').toLowerCase()
+  if (command === '' || command === 'help' || command === 'list') return undefined
+  if (command === 'new') return state.projectId ?? undefined
+  if (command === 'status' || command === 'gates' || command === 'jobs' || command === 'claims' || command === 'confirm-brief') {
+    return parts[1] ?? activeProjectId
+  }
+  return activeProjectId
+}
+
+/** Route slash, deterministic Grill answers, and project-scoped free conversation. */
+export async function executeChatTurn(
+  line: string,
+  activeProjectId: string | undefined,
+  hostChatTurn: HostChatTurn = requestHostChatTurn,
+): Promise<ChatTurnResult> {
   const input = chatInputKind(line)
-  if (input.kind === 'command') return executeChatCommand(input.line, activeProjectId)
-  if (activeProjectId === undefined || activeProjectId === '') return t('shell', 'shell.chat.natural.noProjection')
+  if (input.kind === 'command') {
+    const answer = await executeChatCommand(input.line, activeProjectId)
+    const guidanceProjectId = commandProjectId(input.line, activeProjectId)
+    if (guidanceProjectId === undefined || guidanceProjectId === '') return { text: answer }
+    const latest = await api<Projection>(`/v2/projects/${encodeURIComponent(guidanceProjectId)}/projection`)
+    return { text: latest === null ? answer : withGuidance(answer, latest) }
+  }
+  if (activeProjectId === undefined || activeProjectId === '') return { text: t('shell', 'shell.chat.natural.noProjection') }
+  // Freeze the active session context before the first await. Switching tabs,
+  // sessions or projects while the request is running must not mix histories.
+  const history = state.chatMessages
+    .filter((message): message is typeof message & { role: 'user' | 'assistant' } => message.role === 'user' || message.role === 'assistant')
+    .slice(-12)
+    .map(message => ({ role: message.role, text: message.text.slice(0, 2_000) }))
   const current = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill`)
+  if (current === null) return { text: t('shell', 'shell.chat.natural.noProjection') }
   if (current !== null && (current.question !== null || current.ready_to_confirm)) {
-    if (current.question === null) return grillPrompt(current)
+    if (current.question === null) return { text: grillPrompt(current) }
     const answered = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill/answers`, {
       method: 'POST',
       body: JSON.stringify({
@@ -389,25 +435,55 @@ export async function executeChatInput(line: string, activeProjectId: string | u
         value: input.text,
       }),
     })
-    if (answered === null) return t('intake', 'grill.answerFailed')
-    return grillPrompt(answered)
+    if (answered === null) return { text: t('intake', 'grill.answerFailed') }
+    return { text: grillPrompt(answered) }
   }
 
   const projection = await api<Projection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/projection`)
-  if (projection === null) return t('shell', 'shell.chat.natural.noProjection')
+  if (projection === null) return { text: t('shell', 'shell.chat.natural.noProjection') }
   const plan = planNaturalChatTurn(input.text, projection)
-  let answer: string
   if (plan.kind === 'command') {
-    answer = await executeChatCommand(plan.command, activeProjectId)
-  } else if (plan.effect === 'human-only') {
-    answer = t('shell', 'shell.chat.natural.humanOnly')
-  } else if (plan.suggestedCommand !== undefined) {
-    answer = t('shell', 'shell.chat.natural.suggested', { command: plan.suggestedCommand })
-  } else {
-    answer = t('shell', 'shell.chat.natural.freeform')
+    const answer = await executeChatCommand(plan.command, activeProjectId)
+    const latest = await api<Projection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/projection`)
+    return { text: withGuidance(answer, latest ?? projection) }
   }
-  const guidance = naturalGuidanceText(projection)
-  return guidance === '' ? answer : `${answer}\n\n${guidance}`
+
+  let hostReply: HostChatTurnReply | null = null
+  try {
+    hostReply = await hostChatTurn({
+      text: input.text,
+      locale: getLocale() === 'en' ? 'en' : 'zh',
+      project: {
+        project_id: activeProjectId,
+        name: projection.project?.name,
+        status: projection.project?.status,
+        brief_status: projection.project?.brief_status,
+        next_actions_v2: projection.next_actions_v2,
+      },
+      history,
+    })
+  } catch {
+    // Standalone/no-model instances keep deterministic guidance available.
+  }
+
+  const deterministicSuggestion = safeSuggestedChatCommand(plan.suggestedCommand)
+  const suggestedCommand = deterministicSuggestion ?? safeSuggestedChatCommand(hostReply?.suggestedCommand)
+  let answer = hostReply?.assistantText
+  if (answer === undefined) {
+    if (plan.effect === 'human-only') answer = t('shell', 'shell.chat.natural.humanOnly')
+    else if (suggestedCommand !== undefined) answer = t('shell', 'shell.chat.natural.suggested', { command: suggestedCommand })
+    else answer = t('shell', 'shell.chat.natural.freeform')
+  } else if (plan.effect === 'human-only') {
+    answer = `${answer}\n\n${t('shell', 'shell.chat.natural.humanOnly')}`
+  }
+  const latest = await api<Projection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/projection`)
+  const text = withGuidance(answer, latest ?? projection)
+  return suggestedCommand === undefined ? { text } : { text, suggestedCommand }
+}
+
+/** Compatibility wrapper retained for command/router unit tests. */
+export async function executeChatInput(line: string, activeProjectId: string | undefined): Promise<string> {
+  return (await executeChatTurn(line, activeProjectId)).text
 }
 
 /**
@@ -1077,11 +1153,7 @@ export async function renderChat(
       state.activeTab = 'chat'
       tabSave()
       state.rerender()
-      setTimeout(() => {
-        const rootEl = rootHost()
-        const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
-        ta?.focus()
-      }, 120)
+      focusChatComposerAtEnd()
     }
     searchRow.appendChild(chip)
   }
@@ -1130,11 +1202,7 @@ export async function renderChat(
       chip.onclick = () => {
         state.chatDraft = line
         state.rerender()
-        setTimeout(() => {
-          const rootEl = rootHost()
-          const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
-          ta?.focus()
-        }, 120)
+        focusChatComposerAtEnd()
       }
       starters.appendChild(chip)
     }
@@ -1613,12 +1681,7 @@ export async function renderChat(
             state.chatDraft = ''
             state.chatQuoteTarget = { index: i, text: msg.text }
             state.rerender()
-            setTimeout(() => {
-              const hostEl = document.querySelector('#dsh-scholar-ui')
-              const rootEl = hostEl !== null ? hostEl.shadowRoot : null
-              const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
-              ta?.focus()
-            }, 120)
+            focusChatComposerAtEnd()
           },
         },
         {
@@ -1685,14 +1748,25 @@ export async function renderChat(
         tabSave()
         state.chatQuoteTarget = { index: i, text: msg.text }
         state.rerender()
-        setTimeout(() => {
-          const hostEl = document.querySelector('#dsh-scholar-ui')
-          const rootEl = hostEl !== null ? hostEl.shadowRoot : null
-          const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
-          ta?.focus()
-        }, 120)
+        focusChatComposerAtEnd()
       }
       actionsRow.appendChild(quote)
+      const suggestedCommand = safeSuggestedChatCommand(msg.suggested_command)
+      if (suggestedCommand !== undefined) {
+        const useCommand = el('button', 'hbtn', t('shell', 'shell.chat.useSuggestedCommand'))
+        useCommand.style.cssText = 'padding:0 6px;font-size:9px'
+        useCommand.title = suggestedCommand
+        useCommand.setAttribute('aria-label', t('shell', 'shell.chat.useSuggestedCommandAria'))
+        useCommand.onclick = () => {
+          state.chatDraft = suggestedCommand
+          state.activeTab = 'chat'
+          tabSave()
+          chatPersist()
+          state.rerender()
+          focusChatComposerAtEnd()
+        }
+        actionsRow.appendChild(useCommand)
+      }
       // dsh-web pin: star the message (📌 section at the top of the chat).
       const pin = el('button', 'hbtn', msg.pinned === true ? '★' : '☆')
       pin.title = msg.pinned === true ? t('shell', 'shell.chat.unpinTitle') : t('shell', 'shell.chat.pinTitle')
@@ -1774,12 +1848,7 @@ export async function renderChat(
         state.activeTab = 'chat'
         tabSave()
         state.rerender()
-        setTimeout(() => {
-          const hostEl = document.querySelector('#dsh-scholar-ui')
-          const rootEl = hostEl !== null ? hostEl.shadowRoot : null
-          const ta = rootEl?.querySelector('textarea[placeholder*="research"]') as HTMLTextAreaElement | null
-          ta?.focus()
-        }, 120)
+        focusChatComposerAtEnd()
       }
       panel.appendChild(rerun)
     }
@@ -1910,6 +1979,7 @@ export async function renderChat(
         state.chatDraft = input.value
         completionBox.style.display = 'none'
         input.focus()
+        input.setSelectionRange(input.value.length, input.value.length)
       }
       completionBox.appendChild(row)
     }
@@ -1946,7 +2016,8 @@ export async function renderChat(
     chatScrollPositions.set(scrollKey, scrollPosition)
     streamEl.scrollTop = streamEl.scrollHeight
     try {
-      const answer = await executeChatInput(line, projectId)
+      const result = await executeChatTurn(line, projectId)
+      const answer = result.text
       input.disabled = false
       send.disabled = false
       runningBubble.remove()
@@ -1965,6 +2036,7 @@ export async function renderChat(
             role: 'assistant',
             text: answer,
             time: new Date().toLocaleTimeString(getLocale()),
+            ...(result.suggestedCommand === undefined ? {} : { suggested_command: result.suggestedCommand }),
           }, true)
           state.rerender()
           if (activeChatProjectId() === originProjectId) showToast(rootHost(), `✓ ${line.slice(0, 40)}${line.length > 40 ? '…' : ''}`)

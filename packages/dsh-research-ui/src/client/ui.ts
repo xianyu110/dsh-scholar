@@ -132,6 +132,22 @@ export function rootHost(): ShadowRoot | null {
   return hostEl !== null ? hostEl.shadowRoot : null
 }
 
+/** Restore composer focus after an async rerender and place the caret at EOF. */
+export function focusChatComposerAtEnd(): void {
+  const previous = rootHost()?.querySelector('textarea.chat-composer-input') as HTMLTextAreaElement | null
+  const expectedValue = state.chatDraft
+  const attempt = (remaining: number): void => {
+    const textarea = rootHost()?.querySelector('textarea.chat-composer-input') as HTMLTextAreaElement | null
+    if (textarea !== null && textarea !== previous && textarea.value === expectedValue) {
+      textarea.focus()
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+      return
+    }
+    if (remaining > 0) window.setTimeout(() => { attempt(remaining - 1) }, 50)
+  }
+  window.setTimeout(() => { attempt(20) }, 0)
+}
+
 
 export function trapFocus(overlay: HTMLElement, trigger: HTMLElement | null): () => void {
   const onKey = (event: KeyboardEvent): void => {

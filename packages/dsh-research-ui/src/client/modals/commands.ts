@@ -1,11 +1,13 @@
 import { registerOverlayRebuild, t } from '../i18n/index'
-import { favCommandToggle, favCommands, state, tabSave } from '../state'
-import { el, trapFocus } from '../ui'
+import { chatPersist, favCommandToggle, favCommands, state, tabSave } from '../state'
+import { el, focusChatComposerAtEnd, trapFocus } from '../ui'
 export function runChatLine(line: string): void {
   state.chatDraft = line
   state.activeTab = 'chat'
   tabSave()
+  chatPersist()
   state.rerender()
+  focusChatComposerAtEnd()
 }
 
 
@@ -167,10 +169,7 @@ export function openCommandsModal(root: ShadowRoot | null | undefined): void {
       row.append(nameEl, bodyEl, favBtn)
       row.onclick = () => {
         overlay.remove()
-        state.chatDraft = line
-        state.activeTab = 'chat'
-        tabSave()
-        state.rerender()
+        runChatLine(line)
       }
       list.appendChild(row)
     }

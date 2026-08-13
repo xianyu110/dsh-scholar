@@ -29,6 +29,8 @@ describe('project-scoped natural Chat turn planning', () => {
 
   it('never auto-executes human-only, ambiguous or parameter-incomplete requests', () => {
     expect(planNaturalChatTurn('帮我批准这个 gate', projection)).toMatchObject({ kind: 'conversation', effect: 'human-only' })
+    expect(planNaturalChatTurn('确认这份 Brief', projection)).toMatchObject({ kind: 'conversation', effect: 'human-only' })
+    expect(planNaturalChatTurn('采纳导入的研究材料', projection)).toMatchObject({ kind: 'conversation', effect: 'human-only' })
     expect(planNaturalChatTurn('运行实验', projection)).toMatchObject({ kind: 'conversation', suggestedCommand: '/run ' })
     expect(planNaturalChatTurn('我想讨论指标选择', projection)).toMatchObject({ kind: 'conversation', effect: 'none' })
   })

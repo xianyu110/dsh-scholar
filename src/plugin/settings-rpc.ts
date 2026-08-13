@@ -76,12 +76,15 @@ function mutation(payload: unknown): ScholarSettingsMutation | undefined {
 
 const internal = (message: string) => ({ ok: false as const, error: { code: 'internal' as const, message, details: {} } })
 
+export type ScholarChatTurnHandler = (payload: unknown, signal: AbortSignal) => Promise<unknown>
+
 /** Public DSH Connection extension handler owned entirely by the Scholar plugin. */
 export function createScholarRpcHandler(
   settings: SettingsProvider,
   readStandaloneToken: () => string,
+  runChatTurn?: ScholarChatTurnHandler,
 ): ConnectionRpcHandler {
-  return async (endpoint, payload) => {
+  return async (endpoint, payload, signal) => {
     if (endpoint === 'standalone-token') {
       try { return { ok: true, value: { token: readStandaloneToken() } } }
       catch { return internal('standalone token is unavailable') }
@@ -103,6 +106,11 @@ export function createScholarRpcHandler(
         )
         return { ok: true, value: snapshot(settings) }
       } catch { return internal('Scholar settings update failed') }
+    }
+    if (endpoint === 'chat-turn') {
+      if (runChatTurn === undefined) return internal('Scholar Chat model is unavailable')
+      try { return { ok: true, value: await runChatTurn(payload, signal) } }
+      catch { return internal('Scholar Chat model is unavailable') }
     }
     return internal('unsupported Scholar endpoint')
   }

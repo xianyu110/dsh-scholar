@@ -1,7 +1,7 @@
 import type { NextActionV2 } from './types'
 
 export interface ChatTurnProjection {
-  project?: { status?: string }
+  project?: { project_id?: string; name?: string; status?: string; brief_status?: string }
   next_actions_v2?: NextActionV2[]
 }
 
@@ -46,6 +46,12 @@ export function planNaturalChatTurn(text: string, projection: ChatTurnProjection
   }
   if (/(?:发布|release).*(?:批准|决定|确认)|(?:批准|决定|确认).*(?:发布|release)/.test(input)) {
     return { kind: 'conversation', intentCode: 'human_release', effect: 'human-only' }
+  }
+  if (/(?:确认|提交).*(?:brief|研究简报)|(?:brief|研究简报).*(?:确认|提交)|\bconfirm\s+(?:the\s+)?brief\b/.test(input)) {
+    return { kind: 'conversation', intentCode: 'human_brief_confirm', effect: 'human-only' }
+  }
+  if (/(?:接纳|采纳|合并|导入).*(?:intake|材料|研究)|\badopt(?:ion)?\b|\baccept\s+intake\b/.test(input)) {
+    return { kind: 'conversation', intentCode: 'human_intake_adopt', effect: 'human-only' }
   }
   if (/(?:状态|进展|进度|下一步|该做什么|现在做什么)|\b(?:status|progress|next\s+step|what\s+next)\b/.test(input)) {
     return { kind: 'command', intentCode: 'status', command: '/status', effect: 'read' }
