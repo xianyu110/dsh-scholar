@@ -66,6 +66,10 @@ node workers/runner-gateway/lib/bin/runner.js \
 
 ### 4. 将 Agent 插件接入 DSH
 
+> **加急开发适配中！**
+
+当前安装兼容性验证基线为 `@deepseek-ai/dsh@0.1.0-rc.6`。该版本已通过全新 npm 安装、`dsh plugin add`、Web 启动、Scholar 客户端加载和 Research Kernel 健康检查。
+
 要获得完整的 DSH Scholar 集成体验，推荐使用 pnpm 安装并构建最新 DSH 源码，再从该源码仓库运行 DSH。先在 DSH 源码根目录执行：
 
 ```bash
