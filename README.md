@@ -1,5 +1,7 @@
 # DSH Scholar
 
+> **加急开发适配中！**
+
 **简体中文** | [English](README.en.md)
 
 DSH Scholar 是面向纯计算研究的 AI 科研工作台。它把研究资料、项目对话、代码与数据、实验运行、证据账本和 TeX 手稿放在同一个可恢复项目中，既可以从新问题开始，也可以接入已经进行到一半的研究。
@@ -65,8 +67,6 @@ node workers/runner-gateway/lib/bin/runner.js \
 ```
 
 ### 4. 将 Agent 插件接入 DSH
-
-> **加急开发适配中！**
 
 当前安装兼容性验证基线为 `@deepseek-ai/dsh@0.1.0-rc.6`。该版本已通过全新 npm 安装、`dsh plugin add`、Web 启动、Scholar 客户端加载和 Research Kernel 健康检查。
 
