@@ -66,18 +66,28 @@ node workers/runner-gateway/lib/bin/runner.js \
 
 ### 4. Install the Agent plugin in DSH
 
-The `@dsh-scholar/*` packages are not published yet, so install the plugin from the local source tree:
+For the complete DSH Scholar integration experience, install and build the latest DSH source with pnpm, then run DSH from that source checkout. From the DSH repository root, run:
 
 ```bash
-dsh plugin --profile web add "$PWD"
-dsh plugin --profile web why @dsh-scholar/research-plugin
-dsh web
+pnpm install
+pnpm run build
 ```
 
-To update it, run `pnpm run build` and `dsh plugin --profile web add "$PWD"` again. To uninstall:
+The `@dsh-scholar/*` packages are not published yet, so add the absolute path of this repository as a local plugin in DSH's `web` profile:
 
 ```bash
-dsh plugin --profile web remove @dsh-scholar/research-plugin
+cd /path/to/dsh-source
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar
+pnpm dsh plugin --profile web why @dsh-scholar/research-plugin
+pnpm dsh web
+```
+
+Here, `/path/to/dsh-source` is the latest DSH source checkout and `/absolute/path/to/dsh-scholar` is this repository. This keeps the plugin APIs, Web UI, Skills, and configuration surface aligned with the latest DSH source. The standalone workspace does not require DSH, but it does not include the full Agent tools, slash commands, Skills, configuration card, and `dsh Scholar` tab integration.
+
+To update Scholar, run `pnpm run build` in this repository, return to the DSH source checkout, and run `pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar` again. To uninstall:
+
+```bash
+pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
 ```
 
 The plugin provides Scholar Agent tools, slash commands, Skills, a configuration card, and the `dsh Scholar` tab. The tab reuses the running standalone workspace.
@@ -133,7 +143,7 @@ Chat supports natural-language messages and top-level slash commands. Common com
 
 ```text
 /new  /status  /survey  /ideas  /gates  /contract  /run
-/evidence  /claims  /write  /review  /export  /release
+/evidence  /claims  /write  /review  /release-bundle  /release
 ```
 
 See the [usage guide](docs/USAGE_GUIDE.md) for complete interactions, commands, and stage-by-stage instructions.

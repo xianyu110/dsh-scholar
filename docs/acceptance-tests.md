@@ -328,8 +328,8 @@ UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 - DSH plugin entry 导出 host-visible `Config` Standard Schema；空 row 得到 kernel loopback/7412、gate-only、非 unattended、空 model map、standalone loopback/18610 与 `Alt+Shift+S`，端口/URL/快捷键/类型错误与未知 root/kernel/standalone key 在 `apply` 前拒绝，kernel token schema 带 secret role；包 peer 使用真实宿主名 `@deepseek-ai/schemastery`；
 - `defaultMode` 不是展示字段：`research_project create` 与 `/new` 省略 mode 时继承插件 row，显式 mode 优先；full-auto 仍必须绑定 registered FixtureProfile；
 - 根包无 legacy `dshClient` 字段；`./client` 导出 DSH Plugin config 卡片和 `conversation.view` 页签的 browser bundle，manifest 声明 `dsh.client` 及 connection/conversation 依赖，打包产物包含 `lib/client.js`；
-- Host 插件在 settings provider 就绪后注册 `research-plugin` namespace，显式允许受信配置客户端访问脱敏 descriptor；未主动暴露的第三方 namespace 仍不可读写；
-- DSH Settings → Plugin config 显示 `dsh Scholar` 卡片，展开后可编辑 `defaultMode`、`unattended`、`standalone.url` 与 `standalone.shortcut`，并明确提示重启生效；URL 拒绝 userinfo/query/hash、unsafe scheme 和非 loopback HTTP；
+- Host 插件在 settings provider 就绪后注册私有 `research-plugin` namespace；配置客户端只通过 Scholar 自有 loopback-only RPC 访问三个 UI 字段的脱敏投影，DSH 中央 settings allowlist 无需修改；
+- DSH Settings → Plugin config 显示 `dsh Scholar` 卡片，且无需修改 DSH 源码或中央 settings allowlist；卡片经 Scholar 自有 loopback-only RPC 读取脱敏投影并以 revision-fenced path mutation 写回。展开后可编辑 `defaultMode`、`unattended`、`standalone.url` 与 `standalone.shortcut`，并明确提示重启生效；URL 拒绝 userinfo/query/hash、unsafe scheme 和非 loopback HTTP；
 - 会话顶部按 `Chat`、`Trajectory`、`dsh Scholar` 顺序显示页签；Scholar 页签以最小权限 iframe 展示同一 standalone 页面，显式按钮和默认 `Alt+Shift+S` 都以 `noopener,noreferrer` 打开同一规范化 URL；editable/IME/repeat 时快捷键不触发，dispose 后 listener 被移除；
 - Plugin config 初始 DOM、aria、Settings snapshot、URL、storage 和日志均无 Token。仅在显式 click/Enter/Space 后调用 loopback-only RPC，Host 固定读取 standalone `0600` 普通非 symlink Token 文件，客户端直接写 `navigator.clipboard.writeText` 并只显示成功/失败状态；缺文件、空值、过大、权限错误、symlink、非 loopback 或 Clipboard 拒绝均 fail closed 且不使用 DOM fallback；
 - 复制出的值只可通过 standalone `/api/token-check`，不得是 `kernel.token`、Kernel/Runner service token、Provider SecretRef、SSH 私钥或任意浏览器提交路径的文件；
@@ -345,7 +345,7 @@ UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 - Skill provider 从发布包根目录解析四组 skill，不得解析到不存在的 `lib/skills`；
 - domain/venue 根据 Brief 确定性选择；
 - 插件停止清理 tool/listener/sidecar ownership，standalone 停止清理 BFF/listener/sidecar。
-- 插件 apply 是 async 且被 Cordis await（cordis 4.0.0-rc.7 的 fiber `_execute` 收集 thenable apply 结果，`ctx.plugin()` 经 `fiber.await()` 在 apply 落定后才 resolve）：`sidecar.start()` 完成（port=0 时解析出真实端口）后才发布 `ctx.research`/client/endpoint 并注册工具、命令；`apply` 必须继续 await SkillLocal child ACTIVE 后才落定，Skill mount 失败触发整 fiber 回滚，不能报告 ACTIVE 但缺 Skills；start 失败有明确日志且不留下半初始化资源（fiber FAILED 并卸载已注册效果）；sidecar disposer 在 apply 开头注册，启动期间 dispose/reload 也能停掉 kernel；
+- 插件 apply 是 async 且被 Cordis await（cordis 4.0.0-rc.7 的 fiber `_execute` 收集 thenable apply 结果，`ctx.plugin()` 经 `fiber.await()` 在 apply 落定后才 resolve）：`sidecar.start()` 完成（port=0 时解析出真实端口）后才发布 `ctx.research`/client/endpoint 并注册工具、命令；`apply` 必须继续 await SkillFilesystem child ACTIVE 后才落定，Skill mount 失败触发整 fiber 回滚，不能报告 ACTIVE 但缺 Skills；start 失败有明确日志且不留下半初始化资源（fiber FAILED 并卸载已注册效果）；sidecar disposer 在 apply 开头注册，启动期间 dispose/reload 也能停掉 kernel；
 - 同一进程加载两个 research 插件实例时 endpoint/client/缓存/角色/ACL 全部独立（实例闭包，无模块级可变 ref），工具执行解析到本实例的 client，dispose 一个不影响另一个；
 - reload/dispose：dispose 后 sidecar 停止、端口释放、owned endpoint.json 清理、工具/命令/skills/pre-execute 监听器全部回收；cordis `update()` 重载先卸载旧 fiber（旧 kernel 停止、注册全部回收）再重新 apply，不重复注册、同 dataDir 数据保留；
 - port=0 时 sidecar 只使用 0600 `runtime/endpoint.json` 返回的实际端口；10 秒无握手、protocol/schema/database/config 不匹配均失败；

@@ -438,7 +438,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
         + '  /run <kind> <json>                submit a job\n'
         + '  /evidence <json>                  ingest evidence\n'
         + '  /claims [project_id]              claims + verification status\n'
-        + '  /write /review /export /release\n'
+        + '  /write /review /release-bundle /release\n'
         + '\nTry: /new demo1 or /status'
     }
     case 'new': {
@@ -644,10 +644,10 @@ export async function executeChatCommand(line: string, activeProjectId: string |
       const checks = (review.checks ?? []).map(c => `- [${c.status}] ${c.check}: ${c.detail}`).join('\n')
       return `Reviewer: ${review.pass === true ? 'PASS' : 'SEE CHECKS'}\n${checks}`
     }
-    case 'export': {
+    case 'release-bundle': {
       if (activeProjectId === undefined) return 'No project selected'
       const bundle = await api<{ bundle_id?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/release-bundle`, { method: 'POST' })
-      if (bundle === null || bundle.bundle_id === undefined) return 'export failed'
+      if (bundle === null || bundle.bundle_id === undefined) return 'release bundle failed'
       return `Release bundle **${bundle.bundle_id}** generated (private export, not publication).`
     }
     case 'release': {
@@ -1122,7 +1122,7 @@ export async function renderChat(
       [t('shell', 'shell.chat.starterStatus'), '/status'],
       [t('shell', 'shell.chat.starterClaims'), '/claims'],
       [t('shell', 'shell.chat.starterWrite'), '/write'],
-      [t('shell', 'shell.chat.starterExport'), '/export'],
+      [t('shell', 'shell.chat.starterReleaseBundle'), '/release-bundle'],
     ]
     for (const [label, line] of starterDefs) {
       const chip = el('button', 'hbtn', label)

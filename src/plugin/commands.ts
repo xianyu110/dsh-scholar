@@ -7,7 +7,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-// Module augmentation: ctx.commands (CommandService).
+// Module augmentation: ctx.commands (CommandRuntime).
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import type { ConnectorCache } from '@dsh-scholar/scholar-connectors'
@@ -66,7 +66,7 @@ const RESEARCH_HELP = 'dsh Scholar — direct slash commands:\n'
   + '  /evidence <json>       ingest a statistical EvidenceItem\n'
   + '  /write                 build manuscript from the read-only ledger\n'
   + '  /review                deterministic reviewer checks + Release Gate status\n'
-  + '  /export                private Release Bundle (not publication)\n'
+  + '  /release-bundle        private Release Bundle (not publication)\n'
   + '  /release               create the human Release Gate'
 
 const DIRECT_COMMANDS = [
@@ -85,7 +85,7 @@ const DIRECT_COMMANDS = [
   ['evidence', 'Ingest a statistical EvidenceItem', '<json>'],
   ['write', 'Build a manuscript from accepted evidence', ''],
   ['review', 'Run deterministic manuscript checks', ''],
-  ['export', 'Generate a private Release Bundle', ''],
+  ['release-bundle', 'Generate a private Release Bundle', ''],
   ['release', 'Create the human Release Gate', ''],
 ] as const
 
@@ -341,11 +341,11 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
               + `Overall: ${review.pass ? 'PASS — manuscript ready for the human Release Gate' : 'SEE CHECKS — fix before writing'}\n`
               + (releaseGates.length > 0
                 ? `Release Gate ${releaseGates.map(g => g.gate_id).join(', ')} pending (human only).`
-                : 'No Release Gate yet — run /export then /release.')
+                : 'No Release Gate yet — run /release-bundle then /release.')
             return { kind: 'success' as const, text }
           }
 
-          case 'export': {
+          case 'release-bundle': {
             const project = await requireProject(client, sessionId, undefined)
             const bundle = await client.releaseBundle(project.project_id)
             const text = `Release bundle **${bundle.bundle_id}** generated (artifact ${bundle.artifact_id}).\n`

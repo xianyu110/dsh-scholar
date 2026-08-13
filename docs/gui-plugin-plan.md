@@ -99,7 +99,7 @@ Composer 输入 `/` 打开命令补全时，textarea 必须保持同一 DOM iden
 
 `.chat-stream` 的滚动策略按 project/session 和 main/dock surface 保存。初次打开或用户本来距底部不足 120 px 时，新增/流式消息后贴底；用户向上滚动后进入 history mode，新消息只显示“跳到最新”，后台 refresh/locale/rerender 必须恢复旧 `scrollTop` 或首条可见消息锚点。滚动恢复只能在 stream 挂载并完成布局后执行；禁止在 detached DOM 上设置 scrollTop 后再挂载。点击“跳到最新”或主动发送消息恢复 follow mode。项目/会话切换恢复各自锚点，右/底 Dock 互换保持同一 DOM，主区/Dock 重建也必须恢复对应 surface 状态。
 
-内置命令直接为 `/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`、`/confirm-brief`；不注册、不解析、不展示旧聚合前缀。DSH 与 standalone 都只接受这些直接 descriptor。命令 descriptor 是 help/补全/执行/i18n 单一来源，description 保存 i18n key 并在渲染/搜索时按当前 locale 求值，禁止在 descriptor 中冻结英文。Composer 还支持附件按钮、拖拽和粘贴，多文件卡显示分块、scan、OCR 与 provenance；不渲染任意 HTML。
+内置命令直接为 `/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/release-bundle`、`/release`、`/confirm-brief`；`/export` 保留给 DSH Web 的 Session 日志下载，不注册、不解析、不展示旧聚合前缀。DSH 与 standalone 都只接受这些直接 descriptor。命令 descriptor 是 help/补全/执行/i18n 单一来源，description 保存 i18n key 并在渲染/搜索时按当前 locale 求值，禁止在 descriptor 中冻结英文。Composer 还支持附件按钮、拖拽和粘贴，多文件卡显示分块、scan、OCR 与 provenance；不渲染任意 HTML。
 
 Chat 中的“运行中”只代表 HTTP 命令未完成。真正命令执行输出必须链接到 Run/Terminal，不在聊天中伪造流。
 

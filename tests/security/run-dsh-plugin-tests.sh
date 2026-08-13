@@ -376,7 +376,7 @@ fi
 # ── hardening §4 row 100: REAL cordis host fixture (minimal host) ───────────
 # The DSH host itself (bundle boot) is not available in this test env, so the
 # fixture boots a MINIMAL CORDIS HOST with the real cordis 4.0.0-rc.7 Context
-# and the REAL @deepseek-ai ToolRegistry / CommandService / SkillService (the
+# and the REAL @deepseek-ai ToolRuntime / CommandRuntime / SkillRegistry (the
 # exact registries the plugin registers into in production). This exercises
 # the REAL lifecycle machinery: async apply awaited by cordis, effect-model
 # disposal of tools/commands/listeners/services/skills, and the sidecar
@@ -406,9 +406,9 @@ const { join } = await import('node:path')
 // this fixture exercises the real cordis effect/lifecycle machinery.
 const require = createRequire(`${repo}/node_modules/@deepseek-ai/dsh-tools/package.json`)
 const { Context } = require('@deepseek-ai/cordis')
-const { ToolRegistry } = await import(`${repo}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`)
-const { CommandService } = await import(`${repo}/node_modules/@deepseek-ai/dsh-commands/lib/index.js`)
-const { SkillService } = await import(`${repo}/node_modules/@deepseek-ai/dsh-skill/lib/index.js`)
+const { ToolRuntime } = await import(`${repo}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`)
+const { CommandRuntime } = await import(`${repo}/node_modules/@deepseek-ai/dsh-commands/lib/index.js`)
+const { SkillRegistry } = await import(`${repo}/node_modules/@deepseek-ai/dsh-skill/lib/index.js`)
 const pluginMod = await import(`${repo}/lib/plugin/index.js`)
 const { readFileSync, mkdtempSync, rmSync, existsSync } = await import('node:fs')
 const { tmpdir } = await import('node:os')
@@ -425,9 +425,9 @@ const projectBrief = { problem: 'test problem', scope: 'test scope', questions: 
 async function makeHost() {
   const root = new Context()
   root.provide('systemPrompt', { tools() {}, section() {} })
-  await root.plugin(ToolRegistry, { mode: 'native' })
-  await root.plugin(CommandService)
-  await root.plugin(SkillService)
+  await root.plugin(ToolRuntime, { mode: 'native' })
+  await root.plugin(CommandRuntime)
+  await root.plugin(SkillRegistry)
   root.provide('subagents', { start: async () => { throw new Error('fixture has no subagent backend') } })
   return root
 }
@@ -471,7 +471,7 @@ try {
   const toolsA = rootA.tools.schemas().map(s => s.name)
   if (toolsA.length !== 37) problems.push(`instance A tool count ${toolsA.length} != 37`)
   if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
-  const expectedCommands = ['help','new','list','status','gates','jobs','claims','survey','ideas','reproduce','contract','run','evidence','write','review','export','release']
+  const expectedCommands = ['help','new','list','status','gates','jobs','claims','survey','ideas','reproduce','contract','run','evidence','write','review','release-bundle','release']
   const registeredCommands = rootA.commands.list({}).map(c => c.name).sort()
   if (registeredCommands.join(',') !== expectedCommands.slice().sort().join(',')) problems.push(`direct command descriptors mismatch: ${registeredCommands.join(',')}`)
   if (registeredCommands.includes('research')) problems.push('aggregate research descriptor must not be registered')

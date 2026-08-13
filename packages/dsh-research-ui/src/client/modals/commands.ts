@@ -82,7 +82,7 @@ export const CHAT_COMMANDS: Array<[string, string, string]> = [
   ['claims', '/claims', 'shell.commands.desc.claims'],
   ['write', '/write', 'shell.commands.desc.write'],
   ['review', '/review', 'shell.commands.desc.review'],
-  ['export', '/export', 'shell.commands.desc.export'],
+  ['release-bundle', '/release-bundle', 'shell.commands.desc.releaseBundle'],
   ['release', '/release', 'shell.commands.desc.release'],
 ]
 

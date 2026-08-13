@@ -6,28 +6,28 @@ import {
   inject,
   shouldOpenScholarShortcut,
 } from '../../src/client/index.js'
+import { ScholarSettingsScope } from '../../src/client/scholar-settings.js'
 
 describe('DSH research plugin browser configuration', () => {
-  it('binds the research namespace and contributes its own plugin card', () => {
-    const scope = { getSnapshot: () => ({ status: 'loading' }), subscribe: () => () => {}, set: vi.fn(), unset: vi.fn() }
-    const bind = vi.fn(() => scope)
+  it('uses the Scholar-owned RPC scope and contributes its own plugin card', () => {
+    const call = vi.fn().mockResolvedValue({ ok: false, error: { code: 'internal', message: 'not ready', details: {} } })
     const register = vi.fn(() => () => {})
     const slotInject = vi.fn((_name: string, install: () => unknown) => install())
     const registerLocale = vi.fn(() => () => {})
     const ctx = {
       get: (name: string) => name === 'connection'
-        ? { isLoopback: true, rpc: { call: vi.fn() } }
+        ? { isLoopback: true, rpc: { call } }
         : undefined,
-      settingsScope: { bind },
       locale: { register: registerLocale },
       slots: { inject: slotInject, register },
       effect: (body: () => unknown) => body(),
+      on: vi.fn(() => () => {}),
     }
 
     apply(ctx as never)
 
-    expect(inject).toEqual(['slots', 'locale', 'settingsScope', 'connection'])
-    expect(bind).toHaveBeenCalledWith({ namespace: 'research-plugin' })
+    expect(inject).toEqual(['slots', 'locale', 'connection'])
+    expect(call).toHaveBeenCalledWith('/dsh-scholar', 'settings-snapshot', {})
     expect(slotInject).toHaveBeenCalledWith('settings.plugin.item', expect.any(Function))
     expect(register.mock.calls[0]?.[0]).toMatchObject({
       name: 'settings.plugin.item',
@@ -46,6 +46,34 @@ describe('DSH research plugin browser configuration', () => {
       zh: { title: 'dsh Scholar' },
       en: { title: 'dsh Scholar' },
     })
+  })
+
+  it('loads and mutates restart-scoped settings through the Scholar RPC channel', async () => {
+    const first = {
+      value: { defaultMode: 'gate-only', unattended: false, standalone: { url: 'http://127.0.0.1:18610/', shortcut: 'Alt+Shift+S' } },
+      base: { defaultMode: 'gate-only' }, user: {}, revision: 4, writable: true, applies: 'restart',
+    }
+    const second = { ...first, value: { ...first.value, defaultMode: 'full-auto' }, user: { defaultMode: 'full-auto' }, revision: 5 }
+    const call = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { available: true, snapshot: first } })
+      .mockResolvedValueOnce({ ok: true, value: { available: true, snapshot: second } })
+    const scope = new ScholarSettingsScope({ call }, true)
+
+    await scope.refresh()
+    expect(scope.getSnapshot()).toMatchObject({ status: 'ready', value: { defaultMode: 'gate-only' }, revision: 4, writable: true })
+    await scope.set('defaultMode', 'full-auto')
+    expect(call).toHaveBeenLastCalledWith('/dsh-scholar', 'settings-mutate', {
+      op: 'set', field: 'defaultMode', value: 'full-auto', expectedRevision: 4,
+    })
+    expect(scope.getSnapshot()).toMatchObject({ status: 'ready', value: { defaultMode: 'full-auto' }, revision: 5 })
+  })
+
+  it('keeps remote browsers unavailable without calling the privileged Scholar settings RPC', async () => {
+    const call = vi.fn()
+    const scope = new ScholarSettingsScope({ call }, false)
+    await scope.refresh()
+    expect(scope.getSnapshot()).toMatchObject({ status: 'unavailable', writable: false, mode: 'memory' })
+    expect(call).not.toHaveBeenCalled()
   })
 
   it('guards the global shortcut from editable, IME and repeated key events', () => {
