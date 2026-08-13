@@ -226,4 +226,4 @@ bash scripts/ci-gate.sh
 
 ## License
 
-本项目采用 [BSD-3-Clause License](LICENSE)。
+本项目采用 [MIT License](LICENSE)。

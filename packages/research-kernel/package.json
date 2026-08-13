@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "DSH Research OS \u2014 Research Kernel: authoritative project state machine, gates, research ledger, artifact CAS, durable job store. Runs as a sidecar process (ADR-002).",
   "type": "module",
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {

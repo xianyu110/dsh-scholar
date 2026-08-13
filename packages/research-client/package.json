@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "DSH Research OS — typed client for the Research Kernel API.",
   "type": "module",
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {

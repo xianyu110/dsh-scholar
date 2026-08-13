@@ -222,4 +222,4 @@ bash scripts/ci-gate.sh
 
 ## License
 
-This project is licensed under the [BSD 3-Clause License](LICENSE).
+This project is licensed under the [MIT License](LICENSE).

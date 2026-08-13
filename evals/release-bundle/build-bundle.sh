@@ -290,7 +290,7 @@ DHSH_NODE
 
 echo "== LICENSES + AI_USAGE =="
 cat > "$OUT/LICENSES/LICENSE.txt" <<EOF
-Project license: BSD-3-Clause (dsh-scholar, see repository LICENSE).
+Project license: MIT (dsh-scholar, see repository LICENSE).
 This bundle was generated from the research kernel API by
 evals/release-bundle/build-bundle.sh (Ticket SCH-REL-001).
 All data, logs, metrics and analysis artifacts are content-addressed

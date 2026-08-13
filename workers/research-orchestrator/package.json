@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "DSH Research OS — Durable Research Orchestrator (v2 §8): state-driven poller over the Research Kernel projection API. Advances projects from their current status toward the next Human Gate and pauses there. Self-contained: own SQLite action store (node:sqlite), talks to the Kernel only over HTTP; no dependency on long-lived sessions or in-process Tasks.",
   "type": "module",
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "bin": {
