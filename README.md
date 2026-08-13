@@ -66,18 +66,28 @@ node workers/runner-gateway/lib/bin/runner.js \
 
 ### 4. 将 Agent 插件接入 DSH
 
-当前 `@dsh-scholar/*` 包尚未发布，需从本地源码安装：
+要获得完整的 DSH Scholar 集成体验，推荐使用 pnpm 安装并构建最新 DSH 源码，再从该源码仓库运行 DSH。先在 DSH 源码根目录执行：
 
 ```bash
-dsh plugin --profile web add "$PWD"
-dsh plugin --profile web why @dsh-scholar/research-plugin
-dsh web
+pnpm install
+pnpm run build
 ```
 
-更新时重新执行 `pnpm run build` 和 `dsh plugin --profile web add "$PWD"`。卸载命令为：
+当前 `@dsh-scholar/*` 包尚未发布，因此随后仍需把本仓库的绝对路径作为本地插件加入 DSH 的 `web` profile：
 
 ```bash
-dsh plugin --profile web remove @dsh-scholar/research-plugin
+cd /path/to/dsh-source
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar
+pnpm dsh plugin --profile web why @dsh-scholar/research-plugin
+pnpm dsh web
+```
+
+这里的 `/path/to/dsh-source` 是最新 DSH 源码仓库，`/absolute/path/to/dsh-scholar` 是本仓库。这样会使用与最新 DSH 源码一致的插件 API、Web UI、Skills 和配置面。只运行 standalone 工作台不要求 DSH，但不会包含 Agent tools、slash commands、Skills、配置卡和 `dsh Scholar` 页签等完整集成能力。
+
+更新 Scholar 时，先在本仓库重新执行 `pnpm run build`，然后回到 DSH 源码仓库再次执行 `pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar`。卸载命令为：
+
+```bash
+pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
 ```
 
 插件向 DSH 提供 Scholar Agent 的 tools、slash commands、Skills、配置卡和 `dsh Scholar` 页签；页签复用已启动的 standalone 工作台。
