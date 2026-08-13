@@ -133,7 +133,7 @@ Chat 支持普通文本和一级 slash command，常用命令包括：
 
 ```text
 /new  /status  /survey  /ideas  /gates  /contract  /run
-/evidence  /claims  /write  /review  /export  /release
+/evidence  /claims  /write  /review  /release-bundle  /release
 ```
 
 完整的交互、命令和各阶段说明见 [使用指南](docs/USAGE_GUIDE.md)。

@@ -18,6 +18,22 @@ const BRIEF = {
 }
 
 describe('DSH plugin defaultMode', () => {
+  it('uses a Scholar-specific release command instead of DSH Web reserved /export', () => {
+    const commands = new Map<string, unknown>()
+    const ctx = {
+      commands: { register: (definition: { name: string }) => commands.set(definition.name, definition) },
+    }
+
+    registerResearchCommands(ctx as never, {
+      client: {} as ResearchClient,
+      cache: { get: async () => undefined, set: async () => undefined },
+      unattended: false,
+    } as CommandContext)
+
+    expect(commands.has('export')).toBe(false)
+    expect(commands.has('release-bundle')).toBe(true)
+  })
+
   it('applies full-auto to research_project create when the tool call omits mode', async () => {
     let createdMode: unknown
     const client = {

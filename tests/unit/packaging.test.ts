@@ -35,10 +35,17 @@ const HOST_PEERS = [
   '@deepseek-ai/schemastery',
   '@deepseek-ai/dsh-commands',
   '@deepseek-ai/dsh-llm',
-  '@deepseek-ai/dsh-skill-local',
+  '@deepseek-ai/dsh-skill-filesystem',
   '@deepseek-ai/dsh-tools',
 ]
-const OPTIONAL_HOST_PEERS = ['@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-skill-local', '@deepseek-ai/dsh-tools']
+const OPTIONAL_HOST_PEERS = [
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/schemastery',
+  '@deepseek-ai/dsh-commands',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-skill-filesystem',
+  '@deepseek-ai/dsh-tools',
+]
 /** Sibling DSH host harness checkout (SELFMOD-01): must never be referenced
  * by a published artifact or a clean consumer install. */
 const HARNESS = join(dirname(REPO), 'test-lzszq')
@@ -320,7 +327,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
         platform: 'web',
         inject: expect.arrayContaining([
           '@deepseek-ai/dsh-client-runtime',
-          '@deepseek-ai/dsh-client-ui-plugin-config',
+          '@deepseek-ai/dsh-client-ui-settings-plugins',
           '@deepseek-ai/dsh-client-ui-settings',
         ]),
       },
@@ -344,7 +351,7 @@ describe('packaging (PACK-01/SKILL-01)', () => {
     // The packed manifest inside node_modules declares the host peers too.
     const installed = JSON.parse(readFileSync(join(pluginPkg, 'package.json'), 'utf8')) as Record<string, unknown>
     const peers = installed['peerDependencies'] as Record<string, string>
-    expect(peers?.['@deepseek-ai/dsh-skill-local']).toBeTruthy()
+    expect(peers?.['@deepseek-ai/dsh-skill-filesystem']).toBeTruthy()
   }, 240_000)
 
   it('PACK-01: installed @dsh-scholar packages are real extracted files, not links into the original checkout', () => {

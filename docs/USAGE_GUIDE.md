@@ -185,11 +185,11 @@ Trajectory 与 Topology 均可停靠。Trajectory 从主区移动到 Dock 时按
 
 ~~~text
 /review
-/export
+/release-bundle
 /release
 ~~~
 
-Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译、负结果、许可和 AI usage。Export 生成私有自包含 Bundle；clean-room 重跑实验、分析和 PDF。release 只创建 Human Release Gate，不自动上传外部平台。
+Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译、负结果、许可和 AI usage。`/release-bundle` 生成私有自包含 Bundle（`/export` 保留给 DSH Web 下载 Session 日志）；clean-room 重跑实验、分析和 PDF。release 只创建 Human Release Gate，不自动上传外部平台。
 
 ## 11. Budget、Settings 与下一步
 

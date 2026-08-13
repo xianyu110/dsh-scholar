@@ -133,7 +133,7 @@ Chat supports natural-language messages and top-level slash commands. Common com
 
 ```text
 /new  /status  /survey  /ideas  /gates  /contract  /run
-/evidence  /claims  /write  /review  /export  /release
+/evidence  /claims  /write  /review  /release-bundle  /release
 ```
 
 See the [usage guide](docs/USAGE_GUIDE.md) for complete interactions, commands, and stage-by-stage instructions.

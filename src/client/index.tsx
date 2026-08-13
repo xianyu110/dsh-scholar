@@ -7,7 +7,7 @@ import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/clie
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type {} from '@deepseek-ai/dsh-client-ui-plugin-config/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import {
   DEFAULT_STANDALONE_SHORTCUT,
   DEFAULT_STANDALONE_URL,
@@ -15,9 +15,8 @@ import {
   normalizeStandaloneUrl,
   type StandaloneShortcut,
 } from '../shared/standalone.js'
-
-/** Must match the Host plugin's settings namespace without importing Host code into the browser bundle. */
-const RESEARCH_SETTINGS_NAMESPACE = 'research-plugin'
+import type { ResearchSettings } from '../shared/settings-rpc.js'
+import { ScholarSettingsScope } from './scholar-settings.js'
 
 const LOCALE_NAMESPACE = 'settings.dshScholar'
 
@@ -98,15 +97,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Copy owned by the Scholar plugin configuration card. */
     'settings.dshScholar': ResearchConfigKey
-  }
-}
-
-interface ResearchSettings {
-  defaultMode?: 'gate-only' | 'full-auto'
-  unattended?: boolean
-  standalone?: {
-    url?: string
-    shortcut?: StandaloneShortcut
   }
 }
 
@@ -462,12 +452,17 @@ function ResearchConfigCard(props: ResearchCardProps) {
 }
 
 /** Browser services required by Settings, the conversation view and token RPC. */
-export const inject = ['slots', 'locale', 'settingsScope', 'connection']
+export const inject = ['slots', 'locale', 'connection']
 
 /** Register the Scholar configuration card, conversation view and shortcut. */
 export function apply(ctx: ClientContext): void {
-  const scope = ctx.settingsScope.bind<ResearchSettings>({ namespace: RESEARCH_SETTINGS_NAMESPACE })
   const connection = ctx.get('connection') as ConnectionHandle
+  const scope = new ScholarSettingsScope(connection.rpc, connection.isLoopback)
+  ctx.effect(() => {
+    void scope.refresh()
+    return () => { scope.dispose() }
+  }, 'dsh-scholar: settings RPC scope')
+  ctx.on('connection/reset', () => { void scope.refresh() })
   const openStandalone = (url: string): void => { openStandaloneWindow(url) }
   const copyToken = (): Promise<boolean> => copyStandaloneAccessToken(
     connection.rpc,

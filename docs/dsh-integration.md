@@ -21,7 +21,7 @@ export async function apply(ctx, config) { /* effect-scoped registrations */ }
 
 ## 3. 目标配置
 
-以下是 v2 生成目标。当前兼容层已把 v0.1 的 `kernel.host/port/dataDir/token`、`defaultMode`、`unattended`、`models`、`cacheDir` 以及 `standalone.url/shortcut` 暴露为 DSH 可发现的运行时 Schemastery schema：空配置生成 loopback/7412、gate-only、非 unattended、空 model map、`http://127.0.0.1:18610/` 与 `Alt+Shift+S`；端口、URL、快捷键和类型在 `apply` 前校验，token 标记为 secret，未知字段拒绝。插件在 `research-plugin` namespace 下显式注册该 schema，并允许受信配置客户端访问脱敏视图；Settings → Plugin config 的卡片编辑 `defaultMode`、`unattended`、standalone URL 与快捷键，保存后在下一次 DSH 重启生效。`defaultMode` 已接入 `research_project create` 与 `/new`，显式调用参数仍优先；`full-auto` 继续要求注册 FixtureProfile。下列 skills/onboarding/trajectory/runner/config 字段仍是 v2 目标，差距记录在 hardening-v0.2-status.md。
+以下是 v2 生成目标。当前兼容层已把 v0.1 的 `kernel.host/port/dataDir/token`、`defaultMode`、`unattended`、`models`、`cacheDir` 以及 `standalone.url/shortcut` 暴露为 DSH 可发现的运行时 Schemastery schema：空配置生成 loopback/7412、gate-only、非 unattended、空 model map、`http://127.0.0.1:18610/` 与 `Alt+Shift+S`；端口、URL、快捷键和类型在 `apply` 前校验，token 标记为 secret，未知字段拒绝。插件在 `research-plugin` namespace 下注册该 schema作为 Host 内部持久化权威；浏览器卡片不依赖或修改 DSH 的 settings allowlist，而是通过 Scholar 自有 loopback-only connection RPC 读取仅含 `defaultMode`、`unattended`、`standalone` 的脱敏投影，并以 revision-fenced path mutation 写回。Settings → Plugin config 的卡片保存后在下一次 DSH 重启生效。`defaultMode` 已接入 `research_project create` 与 `/new`，显式调用参数仍优先；`full-auto` 继续要求注册 FixtureProfile。下列 skills/onboarding/trajectory/runner/config 字段仍是 v2 目标，差距记录在 hardening-v0.2-status.md。
 
 ~~~yaml
 kernel:
@@ -73,7 +73,7 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 
 ## 5. 命令
 
-命令直接注册为一级 slash command：`/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/export`、`/release`。DSH Command Registry 与 standalone parser 都不注册、不解析或兼容旧聚合前缀；帮助、补全、descriptor、文档与新审计 provenance 一律使用直接命令。
+命令直接注册为一级 slash command：`/help`、`/new`、`/list`、`/status`、`/survey`、`/ideas`、`/gates`、`/jobs`、`/reproduce`、`/contract`、`/run`、`/evidence`、`/claims`、`/write`、`/review`、`/release-bundle`、`/release`。DSH Web 保留 `/export` 用于下载 Session 日志，因此 Scholar 用 `/release-bundle` 生成私有 Release Bundle。DSH Command Registry 与 standalone parser 都不注册、不解析或兼容旧聚合前缀；帮助、补全、descriptor、文档与新审计 provenance 一律使用直接命令。
 
 `/new` 是 name-only Init 引导入口；Grill 回答与 PI `/confirm-brief` 目前属于 authenticated standalone Human Chat/BFF 面，不冒充 Agent command。Agent Intake tool 只操作 observation/question/proposal，不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 与 Brief confirm 只能由 Human PI 完成。
 
@@ -83,7 +83,7 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 
 本地开发可运行 `scripts/link-dsh-deps.sh` 解析当前 DSH checkout；脚本必须链接 `@deepseek-ai/*`（包括当前 DSH 的 `@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery`）与 vendored `@cordisjs/*`/`cosmokit`，并且只替换因 DSH 包目录重组产生的 dangling symlink，不覆盖仍有效的链接或真实安装包。该链接只用于本地 typecheck，不能作为 DSH 兼容性 PASS；发布兼容性仍必须由 `tests/integration/run-dsh-private-registry-tests.sh` 在全新目录和全新 DSH_HOME 中安装固定私有 `@deepseek-ai/*` 包验证。
 
-每个发布 Skill 的 YAML frontmatter 必须能被当前私有 `dsh-skill-local` 严格解析；含 `: ` 等 YAML 指示符的 description 必须引用。兼容测试必须从 `ctx.skills.list()` 公共接口核对四个 Skill，而不能读取已经移除的内部 provider collection。
+每个发布 Skill 的 YAML frontmatter 必须能被当前私有 `dsh-skill-filesystem` 严格解析；含 `: ` 等 YAML 指示符的 description 必须引用。兼容测试必须从 `ctx.skills.list()` 公共接口核对四个 Skill，而不能读取内部 provider collection。
 
 ## 6. DSH Session 与事件
 
@@ -117,7 +117,7 @@ DSH Web 的 trajectory/subagent React plugin、slot、SessionHistoryFace 和 loc
 
 1. 主插件运行时以 package URL 解析发布包内 skills，而不是假设 lib/skills 自动存在；
 2. build 明确复制或生成 runtime skill assets，并有测试验证安装包内容；
-3. SkillLocal providerName 唯一，includeDefaultRoots=false，customSkillDirs 显式，watch=false；
+3. SkillFilesystem providerName 唯一，includeDefaultRoots=false，customSkillDirs 显式，watch=false；
 4. domain 和 venue skill 都要注册，不能只挂 research-core；
 5. 静态 GitHub repository plugin 的 dsh.skills 列表包含全部需要发布的 roots；
 6. .dsh-plugin/package.json 声明 prepare 所需的 dsh-repository-plugin 开发依赖；
@@ -141,7 +141,7 @@ Domain/venue 选择必须由项目 brief.domain 和 target_venue 产生确定性
 
 根 package 的 dsh.bundle.patch 只插入 Agent `research-plugin` 行；根 manifest 另声明 `dsh.client` 与 `./client`，由 DSH Web 模块宿主加载配置卡和 `conversation.view` 页签。页签是 standalone 的 iframe/新页面启动器，不插入第二个 BFF 或业务状态层。standalone UI 独立管理自己的 loopback server、BFF、Token、dataDir 和 Kernel sidecar。同一 dataDir 不得同时被 DSH Agent sidecar 和 standalone sidecar 打开。
 
-Plugin config 编辑 `standalone.url` 与 `standalone.shortcut`，并提供显式“复制 standalone 访问 Token”。Host 通过 connection generic RPC 注册固定 channel/endpoint，authority 必须是 loopback；handler 只读取 `DSH_SCHOLAR_STANDALONE_DATA`（或默认 standalone dataDir）下固定文件名，不接受浏览器路径。浏览器只在用户动作中把成功响应直接交给 Clipboard API，随后丢弃；不能把该能力泛化为读取 `kernel.token`、service token、Provider SecretRef 或任意宿主文件。
+Plugin config 编辑 `standalone.url` 与 `standalone.shortcut`，并提供显式“复制 standalone 访问 Token”。Host 通过 connection generic RPC 注册固定 `/dsh-scholar` channel，authority 必须是 loopback；`settings-snapshot` 只投影三个浏览器拥有的配置字段，`settings-mutate` 只接受这三个字段的 set/unset 并携带 expected revision，二者都不暴露 `kernel`、`models`、`cacheDir` 或任何 secret。`standalone-token` handler 只读取 `DSH_SCHOLAR_STANDALONE_DATA`（或默认 standalone dataDir）下固定文件名，不接受浏览器路径。浏览器只在用户动作中把成功响应直接交给 Clipboard API，随后丢弃；不能把该能力泛化为读取 `kernel.token`、service token、Provider SecretRef 或任意宿主文件。
 
 Scholar 包尚未发布时，当前可用的用户安装路径是从本地 checkout 构建后加入 DSH profile：
 

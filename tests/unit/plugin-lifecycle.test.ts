@@ -4,13 +4,14 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, inject, KernelSidecar } from '../../src/plugin/index.js'
+import { createScholarRpcHandler } from '../../src/plugin/settings-rpc.js'
 
 describe('DSH research plugin lifecycle', () => {
   it('waits for the settings provider before applying the host plugin', () => {
     expect(inject).toContain('settings')
   })
 
-  it('registers an exposed restart settings namespace before starting the kernel', async () => {
+  it('registers a private restart settings namespace before starting the kernel', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'dsh-plugin-settings-'))
     const settingsDataDir = join(dataDir, 'from-settings')
     const register = vi.fn(() => ({
@@ -52,8 +53,8 @@ describe('DSH research plugin lifecycle', () => {
       expect(register.mock.calls[0]?.[0]).toBe('research-plugin')
       expect(register.mock.calls[0]?.[2]).toMatchObject({
         applies: 'restart',
-        exposeToConfigurationClients: true,
       })
+      expect(register.mock.calls[0]?.[2]).not.toHaveProperty('exposeToConfigurationClients')
       expect(startedPort).toBe(7521)
       expect(startedDataDir).toBe(settingsDataDir)
     } finally {
@@ -63,7 +64,47 @@ describe('DSH research plugin lifecycle', () => {
     }
   })
 
-  it('does not settle apply until the SkillLocal child plugin is active', async () => {
+  it('serves only the redacted Scholar UI projection through its loopback RPC', async () => {
+    const mutate = vi.fn().mockResolvedValue(undefined)
+    const settings = {
+      writable: true,
+      describe: vi.fn(() => [{
+        ns: 'research-plugin',
+        value: {
+          kernel: { host: '127.0.0.1', token: 'must-not-cross-the-wire' },
+          defaultMode: 'gate-only', unattended: false,
+          standalone: { url: 'http://127.0.0.1:18610/', shortcut: 'Alt+Shift+S' },
+        },
+        base: { defaultMode: 'gate-only', kernel: { token: 'also-secret' } },
+        user: { unattended: false, kernel: { token: 'user-secret' } },
+        applies: 'restart', revision: 7,
+      }]),
+      mutate,
+    }
+    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token')
+
+    const snapshot = await handler('settings-snapshot', {}, new AbortController().signal)
+    expect(snapshot).toMatchObject({ ok: true, value: { available: true, snapshot: {
+      value: { defaultMode: 'gate-only', unattended: false },
+      user: { unattended: false }, revision: 7, writable: true, applies: 'restart',
+    } } })
+    expect(JSON.stringify(snapshot)).not.toContain('must-not-cross-the-wire')
+    expect(JSON.stringify(snapshot)).not.toContain('also-secret')
+    expect(JSON.stringify(snapshot)).not.toContain('user-secret')
+
+    await handler('settings-mutate', {
+      op: 'set', field: 'defaultMode', value: 'full-auto', expectedRevision: 7,
+    }, new AbortController().signal)
+    expect(mutate).toHaveBeenCalledWith('research-plugin', [{ op: 'set', path: ['defaultMode'], value: 'full-auto' }], 7)
+
+    const rejected = await handler('settings-mutate', {
+      op: 'set', field: 'kernel', value: { token: 'attempted-injection' }, expectedRevision: 7,
+    }, new AbortController().signal)
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'internal' } })
+    expect(mutate).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not settle apply until the SkillFilesystem child plugin is active', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'dsh-plugin-lifecycle-'))
     const start = vi.spyOn(KernelSidecar.prototype, 'start').mockResolvedValue()
     const stop = vi.spyOn(KernelSidecar.prototype, 'stop').mockResolvedValue()

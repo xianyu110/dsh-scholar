@@ -35,13 +35,13 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-// Module augmentations: ctx.tools (ToolRegistry), ctx.commands (CommandService).
+// Module augmentations: ctx.tools (ToolRuntime), ctx.commands (CommandRuntime).
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { Settings } from '@deepseek-ai/dsh-settings'
-import * as SkillLocal from '@deepseek-ai/dsh-skill-local'
+import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -53,6 +53,7 @@ import { registerResearchCommands } from './commands.js'
 import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
+import { createScholarRpcHandler } from './settings-rpc.js'
 import {
   DEFAULT_STANDALONE_SHORTCUT,
   DEFAULT_STANDALONE_URL,
@@ -263,11 +264,10 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   // Cordis entry Config and the durable user section are distinct layers.
   // Register before sidecar construction so a restart applies the persisted
   // section to every closure and process option created by this fiber.
-  const settings = typeof ctx.get === 'function' ? ctx.get('settings') as Settings | undefined : undefined
+  const settings = typeof ctx.get === 'function' ? ctx.get('settings') as SettingsProvider | undefined : undefined
   const settingsScope = settings?.register(RESEARCH_SETTINGS_NAMESPACE, Config, {
     base: config,
     applies: 'restart',
-    exposeToConfigurationClients: true,
   })
   const effectiveConfig = settingsScope?.get() ?? config
   const unattended = effectiveConfig.unattended ?? false
@@ -279,16 +279,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   if (typeof ctx.inject === 'function') {
     ctx.inject(['connection'], connectionCtx => connectionCtx.connection.rpc.handle(
       '/dsh-scholar',
-      async (endpoint) => {
-        if (endpoint !== 'standalone-token') {
-          return { ok: false, error: { code: 'internal', message: 'unsupported Scholar endpoint', details: {} } }
-        }
-        try {
-          return { ok: true, value: { token: readStandaloneAccessToken() } }
-        } catch {
-          return { ok: false, error: { code: 'internal', message: 'standalone token is unavailable', details: {} } }
-        }
-      },
+      createScholarRpcHandler(settings as SettingsProvider, readStandaloneAccessToken),
       { authority: 'loopback' },
     ))
   }
@@ -401,7 +392,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     ctx.logger('research').warn(`skill groups missing from package root: ${missingSkills.join(', ')}`)
   }
   try {
-    await ctx.plugin(SkillLocal, {
+    await ctx.plugin(SkillFilesystem, {
       providerName: 'dsh-scholar:research-skills',
       includeDefaultRoots: false,
       customSkillDirs: skillDirs,

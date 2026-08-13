@@ -13,7 +13,7 @@
         unattended: true
 
     - id: research-skill
-      name: '@deepseek-ai/dsh-skill-local'
+      name: '@deepseek-ai/dsh-skill-filesystem'
       config:
         providerName: dsh-scholar-research-core
         includeDefaultRoots: false

@@ -22,6 +22,8 @@ describe('name-only Init and Grill prose routing', () => {
   it('advertises only direct command descriptors', async () => {
     expect(CHAT_COMMANDS.map(([, line]) => line)).not.toContainEqual(expect.stringMatching(/^\/research(?:\s|$)/))
     expect(CHAT_COMMANDS.some(([name, line]) => name === 'confirm-brief' && line === '/confirm-brief')).toBe(true)
+    expect(CHAT_COMMANDS.some(([name]) => name === 'export')).toBe(false)
+    expect(CHAT_COMMANDS.some(([name, line]) => name === 'release-bundle' && line === '/release-bundle')).toBe(true)
     const help = await executeChatCommand('/help', undefined)
     expect(help).toContain('/reproduce')
     expect(help).toContain('/confirm-brief')
