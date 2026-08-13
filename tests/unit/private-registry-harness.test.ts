@@ -23,6 +23,35 @@ function run(args: string[], env: Record<string, string> = {}) {
 }
 
 describe('private @deepseek-ai registry compatibility harness', () => {
+  it('pins source-build DSH peers while keeping the published host surface optional', () => {
+    const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')) as {
+      peerDependencies: Record<string, string>
+      peerDependenciesMeta: Record<string, { optional?: boolean }>
+      devDependencies: Record<string, string>
+    }
+    const dshPeers = Object.keys(manifest.peerDependencies)
+      .filter(name => name.startsWith('@deepseek-ai/'))
+
+    expect(dshPeers.length).toBeGreaterThan(0)
+    for (const name of dshPeers) {
+      expect(manifest.peerDependenciesMeta[name]?.optional, name).toBe(true)
+      expect(manifest.devDependencies[name], name).toBeDefined()
+    }
+    for (const name of dshPeers.filter(name => name.startsWith('@deepseek-ai/dsh-'))) {
+      expect(manifest.peerDependencies[name], name).toContain('^0.1.0-rc.2')
+      expect(manifest.devDependencies[name], name).toBe('0.1.0-rc.2')
+    }
+
+    const scripts = (manifest as typeof manifest & {
+      scripts: Record<string, string>
+    }).scripts
+    expect(scripts.build).toMatch(/^pnpm -r .* && pnpm run build:plugin$/)
+    expect(scripts.prepare).toBe('pnpm run build')
+
+    const workspace = readFileSync(join(repo, 'pnpm-workspace.yaml'), 'utf8')
+    expect(workspace).toMatch(/^autoInstallPeers: true$/m)
+  })
+
   it('is pending locally but fail-closed by default and in CI', () => {
     const local = run(['--allow-pending'])
     expect(local.status).toBe(0)
