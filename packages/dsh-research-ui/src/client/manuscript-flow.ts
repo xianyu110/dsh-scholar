@@ -16,6 +16,40 @@ import type { ManuscriptBuild } from './types'
 export interface OpenDocumentResult { document_id: string }
 
 /**
+ * The build endpoints return newest-first projections. Select the newest
+ * succeeded build before looking at pdf_artifact: a succeeded build with no
+ * PDF is authoritative evidence that an older PDF must be cleared.
+ */
+export function latestSucceededManuscriptBuild(
+  builds: ManuscriptBuild[],
+  projection: 'authoritative' | 'preview',
+): ManuscriptBuild | null {
+  return builds.find(build =>
+    build.status === 'succeeded'
+    && (projection === 'preview' || build.preview !== true),
+  ) ?? null
+}
+
+/** Whether a currently displayed PDF no longer represents the editor/projection. */
+export function displayedManuscriptPdfIsStale(
+  builds: ManuscriptBuild[],
+  displayedBuildId: string | null,
+  documentRevision: number,
+  projection: 'authoritative' | 'preview',
+  editorDirty = false,
+): boolean {
+  if (displayedBuildId === null) return false
+  const scoped = projection === 'authoritative'
+    ? builds.filter(build => build.preview !== true)
+    : builds
+  const displayed = scoped.find(build => build.build_id === displayedBuildId)
+  if (displayed === undefined) return true
+  return editorDirty
+    || displayed.revision < documentRevision
+    || scoped[0]?.build_id !== displayedBuildId
+}
+
+/**
  * P0-3 (TEX-03): fire the save-success preview hook EXACTLY ONCE per
  * successful save. The kernel owns the debounce timer (default 800ms) and
  * coalesces rapid saves — the client never schedules its own timer and

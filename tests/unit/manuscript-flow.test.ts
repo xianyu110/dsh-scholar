@@ -8,7 +8,7 @@
  *    projection (pending debounce / newest build status / stale / PDF).
  */
 import { describe, expect, it } from 'vitest'
-import { resolveOpenDocument, previewPanelModel, triggerPreviewAfterSave } from '../../packages/dsh-research-ui/src/client/manuscript-flow'
+import { displayedManuscriptPdfIsStale, latestSucceededManuscriptBuild, resolveOpenDocument, previewPanelModel, triggerPreviewAfterSave } from '../../packages/dsh-research-ui/src/client/manuscript-flow'
 import type { ManuscriptBuild } from '../../packages/dsh-research-ui/src/client/types'
 
 function build(status: string, revision = 1, pdf: string | null = null): ManuscriptBuild {
@@ -127,5 +127,36 @@ describe('P0-3 preview trigger (TEX-03: save success → hook once)', () => {
     const ok = await triggerPreviewAfterSave('', async () => { fired += 1; return { pending: {} } })
     expect(ok).toBe(false)
     expect(fired).toBe(0)
+  })
+})
+
+describe('Manuscript PDF authority selection', () => {
+  it('selects the newest succeeded build before inspecting PDF availability', () => {
+    const noPdf = build('succeeded', 4, null)
+    const oldPdf = build('succeeded', 3, 'art_old')
+    noPdf.build_id = 'build_new_without_pdf'
+    oldPdf.build_id = 'build_old_with_pdf'
+    expect(latestSucceededManuscriptBuild([noPdf, oldPdf], 'preview')).toBe(noPdf)
+    expect(latestSucceededManuscriptBuild([noPdf, oldPdf], 'preview')?.pdf_artifact).toBeNull()
+  })
+
+  it('keeps preview builds out of authoritative PDF selection', () => {
+    const preview = build('succeeded', 5, 'art_preview')
+    const authoritative = { ...build('succeeded', 4, 'art_authoritative'), preview: false }
+    expect(latestSucceededManuscriptBuild([preview, authoritative], 'authoritative')).toBe(authoritative)
+  })
+
+  it('marks an older displayed PDF stale when a newer build exists or the editor is dirty', () => {
+    const displayed = { ...build('succeeded', 4, 'art_old'), build_id: 'build_old', preview: false }
+    const newer = { ...build('running', 5), build_id: 'build_new', preview: false }
+    expect(displayedManuscriptPdfIsStale([newer, displayed], displayed.build_id, 5, 'authoritative')).toBe(true)
+    expect(displayedManuscriptPdfIsStale([displayed], displayed.build_id, 4, 'authoritative', true)).toBe(true)
+    expect(displayedManuscriptPdfIsStale([displayed], displayed.build_id, 4, 'authoritative')).toBe(false)
+  })
+
+  it('marks an old preview stale when the newer succeeded PDF could not be loaded', () => {
+    const displayed = { ...build('succeeded', 5, 'art_old'), build_id: 'preview_old' }
+    const newer = { ...build('succeeded', 5, 'art_new'), build_id: 'preview_new' }
+    expect(displayedManuscriptPdfIsStale([newer, displayed], displayed.build_id, 5, 'preview')).toBe(true)
   })
 })

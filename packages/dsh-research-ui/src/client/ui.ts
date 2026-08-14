@@ -150,16 +150,20 @@ export function focusChatComposerAtEnd(): void {
 
 
 export function trapFocus(overlay: HTMLElement, trigger: HTMLElement | null): () => void {
+  const focusRoot = overlay.getRootNode()
   const onKey = (event: KeyboardEvent): void => {
     if (event.key !== 'Tab') return
-    const focusables = [...overlay.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')] as HTMLElement[]
+    const focusables = ([...overlay.querySelectorAll('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')] as HTMLElement[])
+      .filter(element => !element.hasAttribute('disabled') && !element.hasAttribute('hidden'))
     if (focusables.length === 0) return
     const first = focusables[0]!
     const last = focusables[focusables.length - 1]!
-    if (event.shiftKey && document.activeElement === first) {
+    const root = overlay.getRootNode() as Document | ShadowRoot
+    const active = root.activeElement ?? document.activeElement
+    if (event.shiftKey && active === first) {
       event.preventDefault()
       last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && active === last) {
       event.preventDefault()
       first.focus()
     }
@@ -167,7 +171,19 @@ export function trapFocus(overlay: HTMLElement, trigger: HTMLElement | null): ()
   overlay.addEventListener('keydown', onKey)
   return () => {
     overlay.removeEventListener('keydown', onKey)
-    trigger?.focus()
+    if (trigger?.isConnected === true) {
+      trigger.focus()
+      return
+    }
+    if (!(focusRoot instanceof ShadowRoot)) return
+    const artifactId = trigger?.dataset.artifactId
+    const replacement = artifactId === undefined
+      ? null
+      : [...focusRoot.querySelectorAll<HTMLElement>('[data-artifact-id]')]
+          .find(element => element.dataset.artifactId === artifactId) ?? null
+    const fallback = replacement
+      ?? focusRoot.querySelector<HTMLElement>('[aria-current="page"], button:not([disabled]), [tabindex="0"]')
+    fallback?.focus()
   }
 }
 

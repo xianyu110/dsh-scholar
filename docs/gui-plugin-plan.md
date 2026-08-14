@@ -13,7 +13,7 @@
 - 会话页签固定 `id=dsh-scholar`、顺序在 `Chat` 与 `Trajectory` 之后，标签、iframe title、按钮、状态和错误均支持简体中文/英文；页签卸载时清理 listener，不得抢占 Chat composer、Terminal、编辑器或任意 `input/textarea/select/contenteditable` 的焦点；
 - standalone URL 是可配置项，默认 `http://127.0.0.1:18610`。只接受无 userinfo、无 query/hash 的 HTTPS URL，或 loopback HTTP URL；拒绝 `javascript:`、`data:`、非 loopback HTTP 和携带凭据/Token 的 URL；
 - `Alt+Shift+S` 为默认全局快捷键，也可在 Plugin config 禁用。仅在非编辑状态、非 IME composition、非按键重复时触发；使用 `noopener,noreferrer` 打开新页面，且与页签内显式按钮指向同一规范化 URL；
-- standalone 响应只允许已配置的 loopback DSH origin 嵌入；非白名单 ancestor 仍由 CSP 拒绝。iframe 使用最小 sandbox/referrer policy，不把 Token 放入 URL、postMessage、DOM attribute 或 boot manifest；
+- standalone 响应只允许 `standalone.frame_ancestors` 配置的精确 loopback DSH origin 嵌入（默认 `127.0.0.1/localhost/[::1]:3080`）；非白名单 ancestor 由无通配符 CSP 拒绝。页面内联 bootstrap script/style 使用每响应 nonce，业务脚本只允许 self；iframe 使用最小 sandbox/referrer policy，不把 Token 放入 URL、postMessage、DOM attribute 或 boot manifest；
 - Plugin config 提供“复制 standalone 访问 Token”。复制必须由用户 click/Enter/Space 显式触发，经 loopback-only Host RPC 读取固定 dataDir 下的 `standalone-token`；Host 必须拒绝 symlink、非普通文件、非 `0600`、空值和过大值；客户端只调用 `navigator.clipboard.writeText`，不得把 Token 放入 React state、DOM、aria、URL、日志、Settings snapshot、localStorage/sessionStorage 或 fallback textarea；
 - 复制对象仅是 standalone access token，绝不是 `kernel.token`、Kernel/Runner service token、Provider SecretRef 或 SSH 私钥。Clipboard API 不可用/拒绝、Token 文件不安全或非 loopback 时只显示本地化失败状态，不回显 Token。
 
@@ -191,14 +191,19 @@ one-shot/diagnostic/parent offline 只读；continuable 仅在 `can_continue` �
 
 | 类型 | 行为 |
 |---|---|
-| text/json/log/tex/bib | textContent，截断，可下载 |
-| PDF | Blob URL embed，application/pdf，下载/新窗口 |
-| raster image | Blob URL img |
-| SVG | 仅以 img 隔离预览；禁止新标签页顶层打开，禁止 inline script |
-| HTML | 不预览，只下载 |
-| binary/model | 元数据和下载 |
+| Markdown / R Markdown / Quarto | 白名单 heading/list/code/paragraph/table DOM，限制 block/list item/表格行列，禁止 HTML sink，截断，可下载 |
+| JSON / NDJSON / Jupyter Notebook | `.ipynb` 按标准单个 JSON 文档而非 NDJSON；有界验证与保留数字/键字面量的格式化，限制嵌套/输出膨胀；解析失败降级安全文本，可下载 |
+| CSV / TSV | RFC4180 风格有界行列预览；超限显示截断，可下载 |
+| text/code/log/tex/bib/yaml | `textContent`/`code`，Artifact `kind=code` 且缺 MIME/文件名时仍按有界文本显示，可下载 |
+| PDF | Blob URL `<iframe>`，`application/pdf`，下载/新窗口 |
+| raster image | PNG/JPEG/GIF/WebP/AVIF/BMP Blob URL `<img>` |
+| audio/video | 明确 allowlist MIME 的原生 controls；Blob URL；下载/新窗口 |
+| SVG / HTML / XML | 原始产物不预览、不顶层打开，只显示安全说明与下载 |
+| Office / ODF / archive / model / scientific binary / unknown binary | 格式、媒体类型、大小等安全元数据与按需下载；打开预览不读取 body、不创建 Blob URL、不调用 `Blob.text()`、不执行、不解包、不反序列化 |
 
-Artifact 列表、预览、单文件下载、批量下载和 Range 请求全部携带当前 `project_id`；共享 CAS blob 不得依赖无 scope 的全局反查。下载文件名优先使用服务端安全 `Content-Disposition`/artifact `file_name`，不得退化为 artifact ID 或无条件 `.bin`。BFF 透传 `Content-Range`、`Accept-Ranges`、`Content-Disposition`、ETag 与媒体类型，保持 206/416 语义。关闭 modal、切项目和卸载时 revoke 全部 Blob URL；独立代理必须保持二进制，禁止先 text()。
+Artifact 列表、预览、单文件下载、批量下载和 Range 请求全部携带当前 `project_id`；共享 CAS blob 不得依赖无 scope 的全局反查。下载文件名优先使用服务端安全 `Content-Disposition`/artifact `file_name`；服务端名称无扩展名而 MIME/kind 有明确安全后缀时由客户端补齐，不能退化为 artifact ID、无扩展名或无条件 `.bin`。BFF 对 206 透传 `Content-Range`、`Accept-Ranges`、`Content-Disposition`、ETag 与媒体类型；对无 body 的 416 至少透传 `Content-Range`、`Accept-Ranges` 与 ETag，保持 Range 语义，不虚构下载实体头。关闭 modal、切项目和卸载时取消预览/显式下载并 revoke 全部 Blob URL；独立代理必须保持二进制，禁止先 text()。
+
+分类优先取非空响应 MIME essence，响应头为空或缺失时回退登记 MIME；服务端缺省为 `application/octet-stream` 时可用安全扩展名和 Artifact kind 辅助。`text/plain` 可由安全结构化文本扩展名细化，`application/json` 只允许 `.jsonl`/`.ndjson` 细化为 NDJSON；任何冲突都不能把 active content 或未知二进制提升为可执行/可嵌入类型。单次文本读取上限 1 MiB、显示上限 100,000 字符；缺失/错误 Content-Length 时使用有界流读取并在超限后 cancel，CSV/TSV 最多 100 行×50 列，Markdown 最多 2,000 个块、2,000 个 list item，超出的整段必须消费并显示截断，不能退化成无界 paragraph。超过上限只显示元数据、截断说明与按需下载。预览 fetch、读取、解析或浏览器原生解码失败使用 `role=alert`/`aria-live` 的稳定 zh/en 文案。
 
 ## 10. Evidence
 

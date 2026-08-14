@@ -646,6 +646,17 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     description: 'Operator principal identity (GOV-01 local resolver).',
   },
   {
+    key: 'standalone.frame_ancestors',
+    scope: 'standalone',
+    schema: z.string().min(1),
+    default: 'http://127.0.0.1:3080,http://localhost:3080,http://[::1]:3080',
+    cli: { flag: 'frame-ancestors' },
+    env: 'DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS',
+    securityFloor: true,
+    sources: ['cli', 'env', 'file'],
+    description: 'Comma-separated exact loopback DSH origins allowed by CSP frame-ancestors; no wildcard, path, query, fragment, or credentials.',
+  },
+  {
     key: 'standalone.no_token',
     scope: 'standalone',
     schema: z.boolean(),

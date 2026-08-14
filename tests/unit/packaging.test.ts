@@ -246,7 +246,7 @@ function freePort(): Promise<number> {
 }
 
 /** Poll the standalone homepage until the server answers (or the child dies). */
-async function fetchHomepage(port: number, child: ChildProcess, getErr: () => string): Promise<string> {
+async function fetchHomepage(port: number, child: ChildProcess, getErr: () => string): Promise<{ html: string; headers: Headers }> {
   const deadline = Date.now() + 45_000
   let lastErr = 'not yet reachable'
   while (Date.now() < deadline) {
@@ -255,7 +255,7 @@ async function fetchHomepage(port: number, child: ChildProcess, getErr: () => st
     }
     try {
       const res = await fetch(`http://127.0.0.1:${port}/`)
-      if (res.ok) return await res.text()
+      if (res.ok) return { html: await res.text(), headers: res.headers }
       lastErr = `http ${res.status}`
     } catch (error) {
       lastErr = error instanceof Error ? error.message : String(error)
@@ -461,7 +461,22 @@ describe('standalone unlock page i18n (UI-03)', () => {
     let serverErr = ''
     child.stderr?.on('data', (d: Buffer) => { serverErr += String(d) })
     try {
-      const html = await fetchHomepage(webPort, child, () => serverErr)
+      const { html, headers } = await fetchHomepage(webPort, child, () => serverErr)
+
+      // The HTML response owns the preview security policy. It must allow
+      // only the Blob-backed passive renderers and exact loopback embedders,
+      // and every inline bootstrap block must carry the response nonce.
+      const csp = headers.get('content-security-policy') ?? ''
+      expect(headers.get('x-content-type-options')).toBe('nosniff')
+      expect(csp).toContain("object-src 'none'")
+      expect(csp).toContain("frame-src 'self' blob:")
+      expect(csp).toContain("media-src 'self' blob:")
+      expect(csp).toContain("frame-ancestors 'self' http://127.0.0.1:3080 http://localhost:3080 http://[::1]:3080")
+      expect(csp).not.toContain(':*')
+      const nonce = /script-src 'self' 'nonce-([^']+)'/.exec(csp)?.[1]
+      expect(nonce).toBeTruthy()
+      expect(html.match(new RegExp(`<script nonce="${nonce}"`, 'g'))?.length).toBeGreaterThan(0)
+      expect(html).toContain(`<style nonce="${nonce}">`)
 
       // Token-gate copy is keyed through data-i18n attributes.
       for (const key of ['standalone.pageTitle', 'standalone.brand.name', 'standalone.brand.meta', 'standalone.operatorAccess', 'standalone.welcomeBack', 'standalone.intro', 'standalone.accessToken', 'standalone.openWorkspace', 'standalone.tokenHint']) {

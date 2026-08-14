@@ -52,6 +52,8 @@ bash scripts/start-standalone-ui.sh
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
 ```
 
+若 DSH Web 不在默认的本机 `3080` 端口，启动前通过 `DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS` 配置允许嵌入的精确 loopback origin（逗号分隔，不支持通配符）。
+
 `--no-token` 只用于 loopback、隔离且有人监督的开发环境。
 
 ### 3. 启动实验 Runner

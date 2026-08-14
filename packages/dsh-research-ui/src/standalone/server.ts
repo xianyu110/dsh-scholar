@@ -279,6 +279,49 @@ interface StandaloneOptions {
   /** API-01: loopback operator identity. When set, the BFF enforces project
    * membership on project-scoped /v1 routes (non-member -> 404). */
   principal: string | null
+  /** Exact loopback DSH origins allowed to embed the standalone page. */
+  frameAncestors: string
+}
+
+export function standaloneFrameAncestorSources(value: string): string[] {
+  const sources: string[] = []
+  for (const raw of value.split(',').map(item => item.trim()).filter(item => item !== '')) {
+    if (raw.includes('*')) throw new Error('frame ancestors must not contain wildcards')
+    let parsed: URL
+    try { parsed = new URL(raw) } catch { throw new Error(`invalid frame ancestor origin: ${raw}`) }
+    if (!['http:', 'https:'].includes(parsed.protocol) || !isLoopbackHost(parsed.hostname)) {
+      throw new Error(`frame ancestor must be an http(s) loopback origin: ${raw}`)
+    }
+    if (parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+      throw new Error(`frame ancestor must be an exact origin without credentials/path/query/fragment: ${raw}`)
+    }
+    if (!sources.includes(parsed.origin)) sources.push(parsed.origin)
+  }
+  if (sources.length === 0) throw new Error('at least one frame ancestor origin is required')
+  return sources
+}
+
+export function standaloneContentSecurityPolicy(nonce: string, frameAncestors: readonly string[]): string {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}'`,
+    `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
+    "img-src 'self' blob: data:",
+    "media-src 'self' blob:",
+    "frame-src 'self' blob:",
+    "connect-src 'self'",
+    "font-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    `frame-ancestors 'self' ${frameAncestors.join(' ')}`,
+  ].join('; ')
+}
+
+function bootstrapHtmlWithNonce(nonce: string): string {
+  return BOOTSTRAP_HTML
+    .replaceAll('<script', `<script nonce="${nonce}"`)
+    .replace('<style>', `<style nonce="${nonce}">`)
 }
 
 /** Constant-time token comparison (values never appear in logs). */
@@ -684,6 +727,7 @@ export function loadOptions(argv: string[]): StandaloneOptions {
     dataDir,
     token,
     principal: ((values['standalone.principal'] as string | undefined) ?? null) as string | null,
+    frameAncestors: (values['standalone.frame_ancestors'] as string | undefined) ?? 'http://127.0.0.1:3080,http://localhost:3080,http://[::1]:3080',
   }
 }
 
@@ -701,8 +745,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     'standalone.token': options.token ?? '',
     'standalone.no_token': options.token === null,
     'standalone.principal': options.principal ?? '',
+    'standalone.frame_ancestors': options.frameAncestors,
   }, { scopes: ['standalone'] })
   const configPin = resolvedConfig.pinHash
+  const frameAncestorSources = standaloneFrameAncestorSources(options.frameAncestors)
   console.error(`[standalone] config pin ${configPin} (${options.host}:${options.port}, kernel=${options.kernelPort})`)
   const sidecar = new UiKernelSidecar({
     host: '127.0.0.1',
@@ -968,12 +1014,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
 
       // Bootstrap page.
       if (method === 'GET' && url.pathname === '/') {
+        const nonce = randomBytes(18).toString('base64url')
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'no-store',
-          'content-security-policy': "frame-ancestors http://127.0.0.1:* http://localhost:* http://[::1]:*",
+          'content-security-policy': standaloneContentSecurityPolicy(nonce, frameAncestorSources),
+          'x-content-type-options': 'nosniff',
         })
-        res.end(BOOTSTRAP_HTML)
+        res.end(bootstrapHtmlWithNonce(nonce))
         return
       }
       // Favicon: 204 so the browser does not log a 404 per request.
@@ -988,7 +1036,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         res.writeHead(200, {
           'content-type': 'application/javascript; charset=utf-8',
           'cache-control': 'no-store',
-          'content-security-policy': "frame-ancestors http://127.0.0.1:* http://localhost:* http://[::1]:*",
+          'x-content-type-options': 'nosniff',
         })
         res.end(bundle)
         return

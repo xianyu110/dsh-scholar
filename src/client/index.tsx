@@ -372,7 +372,7 @@ function ScholarView(props: ScholarViewProps) {
             title={props.t('viewFrameTitle')}
             style={style.frame}
             referrerPolicy="origin"
-            sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-modals"
+            sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-modals allow-popups"
           />
         )}
     </section>

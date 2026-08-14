@@ -13,7 +13,7 @@ export function artifactContentPath(projectId: string, artifactId: string): stri
 }
 
 function safeBaseName(value: string): string | null {
-  const clean = value.replaceAll('\0', '').replaceAll('\\', '/').split('/').pop()?.trim() ?? ''
+  const clean = value.replace(/[\u0000-\u001f\u007f]/g, '').replaceAll('\\', '/').split('/').pop()?.trim() ?? ''
   if (clean === '' || clean === '.' || clean === '..') return null
   return clean.slice(0, 255)
 }
@@ -39,16 +39,40 @@ function fallbackExtension(record: ArtifactTransferRecord): string {
   if (record.kind === 'log' || record.kind === 'compile-log' || media?.startsWith('text/')) return '.txt'
   if (record.kind === 'bib') return '.bib'
   if (record.kind === 'tex-source') return '.tex'
-  if (media === 'image/png') return '.png'
-  if (media === 'image/jpeg') return '.jpg'
-  if (media === 'image/svg+xml') return '.svg'
+  if (record.kind === 'code' || record.kind === 'manifest') return '.json'
+  const mediaExtensions: Record<string, string> = {
+    'application/json': '.json',
+    'application/x-ndjson': '.ndjson',
+    'application/zip': '.zip',
+    'application/gzip': '.gz',
+    'application/x-tar': '.tar',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/avif': '.avif',
+    'image/svg+xml': '.svg',
+    'audio/mpeg': '.mp3',
+    'audio/wav': '.wav',
+    'audio/ogg': '.ogg',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm',
+  }
+  if (media !== undefined && mediaExtensions[media] !== undefined) return mediaExtensions[media]!
   return '.bin'
 }
 
 /** Prefer the server's Content-Disposition, then the registry file_name. */
 export function artifactDownloadName(record: ArtifactTransferRecord, contentDisposition: string | null): string {
   const served = dispositionName(contentDisposition)
-  if (served !== null) return served
+  if (served !== null) {
+    const extension = fallbackExtension(record)
+    if (extension !== '.bin' && !served.toLowerCase().endsWith(extension)) return `${served}${extension}`
+    return served
+  }
   const registered = safeBaseName(record.file_name ?? '')
   if (registered !== null) return registered
   const digest = (record.artifact_id ?? 'artifact').replace(/^sha256:/, '').slice(0, 12) || 'artifact'

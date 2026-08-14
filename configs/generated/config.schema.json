@@ -482,6 +482,15 @@
           "default": "",
           "x-dsh-scope": "standalone"
         },
+        "frame_ancestors": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Comma-separated exact loopback DSH origins allowed by CSP frame-ancestors; no wildcard, path, query, fragment, or credentials.",
+          "default": "http://127.0.0.1:3080,http://localhost:3080,http://[::1]:3080",
+          "x-dsh-scope": "standalone",
+          "x-dsh-security-floor": true,
+          "x-dsh-env": "DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS"
+        },
         "no_token": {
           "type": "boolean",
           "description": "Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).",

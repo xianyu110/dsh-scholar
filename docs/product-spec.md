@@ -110,7 +110,18 @@ Run Terminal 是正式 Job 的只读、可恢复账本。Interactive Terminal �
 - 实时编译终端、结构化诊断、点击跳到文件和行；
 - PDF 安全预览、下载、过期提示和输入版本追踪。
 
-LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可取消、可取代的 preview build，实时显示同一 build 的编译输出和诊断，并在成功时刷新 PDF；编辑发生后旧 PDF 立即标记 stale。preview build 不得进入 Evidence。显式 Compile 仍创建冻结输入、固定镜像和完整 RunManifest 的权威 latex-compile Job。
+LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可取消、可取代的 preview build，实时显示同一 build 的编译输出和诊断，并在成功时刷新 PDF；编辑发生后旧 PDF 必须在不重建编辑器 DOM、不打断焦点/选区的前提下立即标记 stale。preview build 不得进入 Evidence。显式 Compile 仍创建冻结输入、固定镜像和完整 RunManifest 的权威 latex-compile Job。
+
+Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 generation + project + document + request sequence 拒绝乱序迟到响应。权威 PDF 只从 `preview=false` 的最新成功 Compile build 选择，并按 build_id 替换/回收旧 URL；live preview 只使用 preview projection，二者不得串区。若最新成功的 Compile 或 preview build 明确没有 `pdf_artifact`，必须立即回收并清空该区域上一 build 的 PDF，不能把旧稿继续显示为当前成功结果；较新的 queued/running/failed build 仍可保留上一成功 PDF，但必须在 PDF 区本身显示 stale。较新 succeeded build 的 PDF fetch/解码失败时可以保留上一 PDF 供参考，但必须按 build_id 明确标为 stale，不能因最新状态仍为 succeeded 而显示为 fresh。Save→Compile、Regenerate、Reload 等跨 await 操作必须钉定发起时上下文，保存后的 preview hook 也必须属于可取消的 manuscript generation；切项目、切文档、离面板后不得继续对新上下文提交动作或重启旧轮询；读取 manuscript workspace 只有明确 404 才允许首次创建，401/500/网络错误不得降级成写操作。
+
+### 5.5.1 Artifact 多格式预览
+
+- Artifact 预览必须按服务端 MIME essence、登记文件名扩展名与 Artifact kind 的保守组合分类，MIME/扩展名冲突时采用更安全的行为；不能把未知二进制调用 `Blob.text()` 后显示乱码；
+- 原生只读预览至少覆盖 PDF、安全栅格图（PNG/JPEG/GIF/WebP/AVIF/BMP）、音频与视频；结构化只读预览至少覆盖 Markdown/R Markdown/Quarto、JSON/NDJSON/Jupyter Notebook、CSV/TSV、纯文本、代码、TeX、BibTeX 与日志；
+- Markdown 只使用白名单块/行内节点并分别限制 block、list item、表格行列；JSON/NDJSON 的格式化必须保留原始数字字面量、重复键和 `-0`，不得通过 JS number round-trip 改写科研数据，同时设置嵌套深度与格式化输出上限，超限时回退原始有界文本，不能因缩进放大造成主线程或内存拒绝服务；CSV/TSV 有界行列解析。所有动态内容使用 DOM text node/属性，不使用 `innerHTML`；文本、JSON 和表格必须有字节/字符/行列上限和明确截断提示；
+- `text/plain` 可由安全的结构化文本扩展名细化为 Markdown/JSON/NDJSON/CSV/TSV；`application/json` 只允许由 `.jsonl`/`.ndjson` 细化为 NDJSON，不能被扩展名提升为 Markdown 或表格。空或缺失的响应 `Content-Type` 必须回退登记 MIME 再分类，active/binary 冲突始终向安全侧降级。HTML、SVG、XML、Office/ODF、压缩包、模型、科学二进制数据与未知二进制首期只显示安全元数据、格式说明和按需下载，不执行、不解包、不反序列化、不顶层打开；SVG 只有经受控转换产生的安全栅格衍生物才能预览；
+- 下载型格式和超过文本预览上限的产物不得为了打开预览弹窗而完整读取响应体或创建 Blob URL；只显示响应/登记元数据，用户明确点击下载时才读取原始字节。文本响应即使缺失或伪报 `Content-Length`，客户端也必须以流式字节预算在 1 MiB 处停止并取消 reader，不能先完整缓冲后检查上限。浏览器无法解码 PDF、图片或音视频时必须给出可访问的错误和原文件下载，不能留下空白控件；
+- 预览失败必须显示可访问的 zh/en 错误，不得静默变成空面板；关闭、切项目、卸载、切换产物、离开 Artifacts 或离开 Manuscript 面板时必须取消预览、批量/单项下载、TeX PDF fetch 与轮询，并释放全部 Blob URL；任何跨项目或跨文档迟到结果不得覆盖当前页面。Artifact 详情与预览弹窗都必须随 locale 重建，并在遮罩/Escape/按钮关闭时统一恢复焦点；同项目背景重绘替换了原触发行时，必须按 Artifact ID 找到新行或安全的面板控件作为焦点回退，不能把焦点交给已脱离 DOM 的旧节点。Shadow DOM 内的初始焦点、Tab 圈闭和关闭恢复必须以所属 ShadowRoot 的 active element 为准。下载、预览和 Range 始终携带当前 `project_id` 并经过 BFF membership 校验；服务端生成的无扩展名 `Content-Disposition` 不能遮蔽已知安全格式的下载扩展名。
 
 ### 5.6 Runner Fleet
 

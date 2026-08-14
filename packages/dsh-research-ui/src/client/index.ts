@@ -39,7 +39,7 @@ import { renderRuns } from './panels/runs'
 import { closeArtifactPreview, renderArtifacts, retainArtifactPreviewForProject } from './panels/artifacts'
 import { renderEvidence } from './panels/evidence'
 import { renderBudget } from './panels/budget'
-import { renderManuscript } from './panels/manuscript'
+import { msCleanup, renderManuscript } from './panels/manuscript'
 import { renderTrajectory, stopTrajectoryStream } from './panels/trajectory'
 import { renderTopology } from './panels/topology'
 import { renderWorkspace, stopWorkspaceWatch } from './panels/workspace'
@@ -69,6 +69,7 @@ let modalObserver: MutationObserver | null = null
 
 export function apply(): void {
   closeArtifactPreview()
+  msCleanup(true)
   // dsh-web i18n: locale resolves before the first render (§13.4); the
   // document lang reflects the active locale and chrome re-paints on
   // change (subscription installed at the end of apply(), once every
@@ -571,6 +572,7 @@ export function apply(): void {
     else if (key === 'workspace') stopWorkspaceWatch()
     else if (key === 'trajectory') stopTrajectoryStream()
     else if (key === 'pty') ptyPanelDetachAll()
+    else if (key === 'manuscript') msCleanup(true)
   }
 
   // ── header ──
@@ -1197,6 +1199,7 @@ export function apply(): void {
       deactivatePanelTransport('workspace')
       deactivatePanelTransport('trajectory')
       deactivatePanelTransport('pty')
+      deactivatePanelTransport('manuscript')
       syncTitle(undefined)
       // UI-SIMPLE-01 Start 三卡 (acceptance §8 ui-start, §5 P1 ONBOARD-01):
       // the first screen offers exactly three primary actions — 新建研究 /
@@ -1237,6 +1240,7 @@ export function apply(): void {
       deactivatePanelTransport('workspace')
       deactivatePanelTransport('trajectory')
       deactivatePanelTransport('pty')
+      deactivatePanelTransport('manuscript')
       chatDock.hidden = true
       chatDock.replaceChildren()
       dockBody.replaceChildren()
@@ -1261,6 +1265,12 @@ export function apply(): void {
     // TRAJ-01: leaving the Trajectory tab closes both lane streams (SSE +
     // pagination fallback) — same hygiene as stopWorkspaceWatch.
     if (!panelVisible('trajectory')) stopTrajectoryStream()
+    // Artifact previews/details and downloads are panel-owned; hiding the
+    // panel must cancel them even when the active project did not change.
+    if (!panelVisible('artifacts')) closeArtifactPreview()
+    // TEX-03: PDF fetch/polls belong to the visible Manuscript document.
+    // Leaving the panel invalidates late callbacks and releases Blob URLs.
+    if (!panelVisible('manuscript')) msCleanup(true)
     // PTY-01: leaving the PTY tab detaches the session wire (the process
     // keeps running server-side; the next visit reconnects via after_seq).
     if (!panelVisible('pty')) ptyPanelDetachAll()
@@ -1484,7 +1494,9 @@ export function apply(): void {
       if (overlays.length > 0) {
         const latest = overlays[overlays.length - 1]
         if (latest instanceof HTMLElement && latest.dataset.artifactPreview === 'true') closeArtifactPreview()
-        else latest?.remove()
+        else if (latest instanceof HTMLElement && latest.dataset.overlayDismiss === 'event') {
+          latest.dispatchEvent(new Event('dsh-overlay-dismiss'))
+        } else latest?.remove()
       } else if (state.chatDetailIndex >= 0) {
         state.chatDetailIndex = -1
         state.rerender()
@@ -1531,6 +1543,7 @@ export function apply(): void {
   window.addEventListener('resize', onResize)
   window.addEventListener('beforeunload', () => {
     closeArtifactPreview()
+    msCleanup(true)
     if (state.refreshTimer !== null) window.clearInterval(state.refreshTimer)
     state.refreshTimer = null
     window.removeEventListener('keydown', onKey)

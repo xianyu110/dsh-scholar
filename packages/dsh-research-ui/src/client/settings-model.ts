@@ -307,6 +307,7 @@ const CONFIG_SOURCE_OVERRIDES: Readonly<Record<string, readonly string[]>> = {
   'standalone.port': ['cli', 'env', 'file'],
   'standalone.kernel_port': ['cli', 'env', 'file'],
   'standalone.data_dir': ['cli', 'env', 'file'],
+  'standalone.frame_ancestors': ['cli', 'env', 'file'],
 }
 
 /** Declared sources of one canonical key (scope default + per-key

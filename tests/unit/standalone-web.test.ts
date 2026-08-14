@@ -10,7 +10,8 @@ import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  loadOptions, bffError, isProjectTrajectoryTopologyForward, surveySnapshotBody, surveyWriteRoleAllowed,
+  loadOptions, bffError, isProjectTrajectoryTopologyForward, standaloneContentSecurityPolicy,
+  standaloneFrameAncestorSources, surveySnapshotBody, surveyWriteRoleAllowed,
 } from '../../packages/dsh-research-ui/lib/standalone/server.js'
 // @ts-expect-error re-export surface
 
@@ -21,6 +22,7 @@ describe('standalone web application', () => {
     expect(o.port).toBe(18610)
     expect(o.kernelPort).toBe(17413)
     expect(o.host).toBe('127.0.0.1')
+    expect(o.frameAncestors).toContain('http://127.0.0.1:3080')
   })
 
   it('loads explicit --port / --kernel-port / --data-dir', () => {
@@ -99,6 +101,26 @@ describe('standalone web application', () => {
     expect(typeof mod.loadOptions).toBe('function')
     void mkdirSync
     void writeFileSync
+  })
+
+  it('builds a nonce CSP from exact configured loopback frame ancestors', () => {
+    const sources = standaloneFrameAncestorSources('http://127.0.0.1:3080, http://localhost:3080/,http://[::1]:3080')
+    expect(sources).toEqual(['http://127.0.0.1:3080', 'http://localhost:3080', 'http://[::1]:3080'])
+    const csp = standaloneContentSecurityPolicy('nonce-value', sources)
+    expect(csp).toContain("script-src 'self' 'nonce-nonce-value'")
+    expect(csp).toContain("object-src 'none'")
+    expect(csp).toContain("frame-src 'self' blob:")
+    expect(csp).toContain("media-src 'self' blob:")
+    expect(csp).toContain("frame-ancestors 'self' http://127.0.0.1:3080")
+    expect(csp).not.toContain('*')
+  })
+
+  it.each([
+    '', 'http://127.0.0.1:*', 'http://example.test:3080',
+    'http://user@127.0.0.1:3080', 'http://127.0.0.1:3080/path',
+    'http://127.0.0.1:3080/?query=1',
+  ])('rejects unsafe frame ancestor config %j', value => {
+    expect(() => standaloneFrameAncestorSources(value)).toThrow()
   })
 
   it('BFF-native errors carry the api-contracts §2 envelope (ok:false + stable code)', () => {

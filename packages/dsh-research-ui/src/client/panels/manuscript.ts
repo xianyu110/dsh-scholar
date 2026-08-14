@@ -1,11 +1,11 @@
 import type { ManuscriptBuild, ManuscriptFile, Projection } from '../types'
-import { api, authHeaders, base } from '../api'
+import { api, apiResult, authHeaders, base } from '../api'
 import { t } from '../i18n/index'
 import { el } from '../ui'
 import { state, tabSave } from '../state'
 import { terminalLoadSeq } from '../terminal'
 import { isEditorDirty } from '../manuscript-dirty'
-import { resolveOpenDocument, previewPanelModel, triggerPreviewAfterSave } from '../manuscript-flow'
+import { displayedManuscriptPdfIsStale, latestSucceededManuscriptBuild, previewPanelModel, triggerPreviewAfterSave } from '../manuscript-flow'
 /* ─────────────────────────── Manuscript Workbench ─────────────────────────── */
 
 /**
@@ -29,6 +29,7 @@ export let msBuildPoll: number | undefined
 export let msPdfUrl: string | null = null
 /** Document the main-build PDF blob was loaded for (blob lifetime guard). */
 let msPdfDocId: string | null = null
+let msPdfBuildId: string | null = null
 // TEX-03 (P0-3): live-preview projection (GET /v1/documents/{id}/preview-builds).
 export let msPreviews: ManuscriptBuild[] = []
 export let msPreviewPending: { document_id: string; revision: number; debounce_ms: number } | null = null
@@ -37,48 +38,88 @@ export let msPreviewPdfUrl: string | null = null
 export let msPreviewPdfBuildId: string | null = null
 /** Document the preview PDF blob was loaded for (blob lifetime guard). */
 let msPreviewPdfDocId: string | null = null
+let msProjectId: string | null = null
+let msGeneration = 0
+const msControllers = new Set<AbortController>()
+let msBuildPollToken: symbol | null = null
+let msPreviewPollToken: symbol | null = null
 
-export function msCleanup(): void {
+function msReleaseMainPdfUrl(): void {
+  if (msPdfUrl !== null) URL.revokeObjectURL(msPdfUrl)
+  msPdfUrl = null
+  msPdfDocId = null
+  msPdfBuildId = null
+}
+
+function msReleasePreviewPdfUrl(): void {
+  if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
+  msPreviewPdfUrl = null
+  msPreviewPdfBuildId = null
+  msPreviewPdfDocId = null
+}
+
+function msReleasePdfUrls(): void {
+  msReleaseMainPdfUrl()
+  msReleasePreviewPdfUrl()
+}
+
+function msTrackController(): AbortController {
+  const controller = new AbortController()
+  msControllers.add(controller)
+  return controller
+}
+
+function msReleaseController(controller: AbortController): void {
+  msControllers.delete(controller)
+}
+
+function msContextIsCurrent(generation: number, documentId: string | null, projectId: string | null = msProjectId): boolean {
+  return generation === msGeneration && documentId === msDocId && projectId === msProjectId
+}
+
+/** Stop the current render generation. Leaving the panel additionally frees
+ * every PDF URL; a same-document rerender keeps the already loaded PDF. */
+export function msCleanup(releaseUrls = false): void {
+  msGeneration += 1
   if (msBuildPoll !== undefined) { window.clearInterval(msBuildPoll); msBuildPoll = undefined }
   if (msPreviewPoll !== undefined) { window.clearInterval(msPreviewPoll); msPreviewPoll = undefined }
-  // P0 (hot-loop guard): the PDF blob URLs are owned by the DOCUMENT they
-  // were loaded for. A same-document re-render must NOT revoke them —
-  // render → poll → "PDF not loaded yet" → fetch → set URL → rerender →
-  // revoke → poll again … is an infinite loop once any build has a PDF,
-  // and it floods the loopback rate limit within seconds (page keeps
-  // "refreshing" and then freezes on 429s). Blobs are freed only when the
-  // document actually changes (or the panel is left: msDocId !== owner).
-  if (msPdfDocId !== null && msPdfDocId !== msDocId) {
-    if (msPdfUrl !== null) URL.revokeObjectURL(msPdfUrl)
-    msPdfUrl = null
-    msPdfDocId = null
-  }
-  if (msPreviewPdfDocId !== null && msPreviewPdfDocId !== msDocId) {
-    if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
-    msPreviewPdfUrl = null
-    msPreviewPdfBuildId = null
-    msPreviewPdfDocId = null
+  for (const controller of msControllers) controller.abort()
+  msControllers.clear()
+  msBuildPollToken = null
+  msPreviewPollToken = null
+  if (releaseUrls) {
+    msReleasePdfUrls()
+    msProjectId = null
   }
 }
 
-export async function msLoadDocument(projectId: string): Promise<{ document_id: string }> {
+export async function msLoadDocument(projectId: string, signal?: AbortSignal): Promise<{ document_id: string }> {
   // P0-3 (TEX-01): opening a manuscript is READ-ONLY — GET the existing
   // workspace first; only when nothing exists yet do we POST to create it.
   // A render/rerender therefore never writes: no regeneration, no revision
   // bump, no overwrite of saved content.
-  return resolveOpenDocument(
-    () => api<{ document_id: string }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`),
-    () => api<{ document_id: string }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }),
-  )
+  const path = `/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`
+  const existing = await apiResult<{ document_id: string }>(path, { signal })
+  if (existing.ok) return existing.data
+  // Only the explicit absence contract may turn a read into first-time
+  // creation. Auth, server and transport errors stay read-only/fail-closed.
+  if (existing.status !== 404 || signal?.aborted === true) return { document_id: '' }
+  return (await api<{ document_id: string }>(path, {
+    method: 'POST',
+    signal,
+    body: JSON.stringify({}),
+  })) ?? { document_id: '' }
 }
 
 export async function msLoadTree(): Promise<void> {
   if (msDocId === null) return
-  const tree = await api<{ document: { revision: number }; files: ManuscriptFile[] }>(`/v1/documents/${encodeURIComponent(msDocId)}/tree`)
-  if (tree !== null) {
+  const documentId = msDocId
+  const generation = msGeneration
+  const projectId = msProjectId
+  const controller = msTrackController()
+  const tree = await api<{ document: { revision: number }; files: ManuscriptFile[] }>(`/v1/documents/${encodeURIComponent(documentId)}/tree`, { signal: controller.signal })
+  msReleaseController(controller)
+  if (tree !== null && msContextIsCurrent(generation, documentId, projectId)) {
     msRevision = tree.document.revision
     msFiles = tree.files
   }
@@ -90,8 +131,13 @@ export async function msOpenFile(path: string): Promise<void> {
     const keep = window.confirm(t('manuscript', 'manuscript.editor.discard', { path: msOpenPath }))
     if (!keep) return
   }
-  const file = await api<{ path: string; version: number; content: string }>(`/v1/documents/${encodeURIComponent(msDocId)}/file?path=${encodeURIComponent(path)}`)
-  if (file === null) return
+  const documentId = msDocId
+  const generation = msGeneration
+  const projectId = msProjectId
+  const controller = msTrackController()
+  const file = await api<{ path: string; version: number; content: string }>(`/v1/documents/${encodeURIComponent(documentId)}/file?path=${encodeURIComponent(path)}`, { signal: controller.signal })
+  msReleaseController(controller)
+  if (file === null || !msContextIsCurrent(generation, documentId, projectId)) return
   msOpenPath = path
   msContent = file.content
   msSavedVersion = file.version
@@ -103,10 +149,19 @@ export async function msOpenFile(path: string): Promise<void> {
 
 export async function msSaveFile(): Promise<void> {
   if (msDocId === null || msOpenPath === null) return
-  const result = await api<{ version: number; content_hash: string }>(`/v1/documents/${encodeURIComponent(msDocId)}/file`, {
+  const documentId = msDocId
+  const openPath = msOpenPath
+  const generation = msGeneration
+  const projectId = msProjectId
+  const savedContent = msContent
+  const controller = msTrackController()
+  const result = await api<{ version: number; content_hash: string }>(`/v1/documents/${encodeURIComponent(documentId)}/file`, {
     method: 'PUT',
-    body: JSON.stringify({ path: msOpenPath, content: msContent, expected_version: msSavedVersion }),
+    signal: controller.signal,
+    body: JSON.stringify({ path: openPath, content: savedContent, expected_version: msSavedVersion }),
   })
+  msReleaseController(controller)
+  if (!msContextIsCurrent(generation, documentId, projectId) || msOpenPath !== openPath) return
   if (result === null) {
     // 409 conflict (or transport error): surface the conflict banner.
     msConflict = t('manuscript', 'manuscript.conflict.text', { path: msOpenPath })
@@ -116,26 +171,41 @@ export async function msSaveFile(): Promise<void> {
   msSavedVersion = result.version
   // The server stored exactly the content we sent: that is the new baseline
   // (revert-to-saved must read clean, including a revert to '').
-  msSavedContent = msContent
-  msDirty = false
+  msSavedContent = savedContent
+  msDirty = msContent !== savedContent
   msConflict = null
   await msLoadTree()
   // P0-3 (TEX-03): save success triggers the live-preview hook ONCE. The
   // kernel owns the debounce (default 800ms) and coalesces rapid saves —
   // the client never schedules its own timer. Best-effort: a failed hook
   // call never fails the already-committed save.
-  await triggerPreviewAfterSave(msDocId, id => api(`/v1/documents/${encodeURIComponent(id)}/preview-builds`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  }))
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
+  const previewController = msTrackController()
+  try {
+    await triggerPreviewAfterSave(documentId, id => api(`/v1/documents/${encodeURIComponent(id)}/preview-builds`, {
+      method: 'POST',
+      signal: previewController.signal,
+      body: JSON.stringify({}),
+    }))
+  } finally {
+    msReleaseController(previewController)
+  }
+  if (!msContextIsCurrent(generation, documentId, projectId) || msOpenPath !== openPath) return
   await msPollPreviews()
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
   state.rerender()
 }
 
 export async function msReloadFile(): Promise<void> {
   if (msDocId === null || msOpenPath === null) return
-  const file = await api<{ path: string; version: number; content: string }>(`/v1/documents/${encodeURIComponent(msDocId)}/file?path=${encodeURIComponent(msOpenPath)}`)
-  if (file !== null) {
+  const documentId = msDocId
+  const openPath = msOpenPath
+  const generation = msGeneration
+  const projectId = msProjectId
+  const controller = msTrackController()
+  const file = await api<{ path: string; version: number; content: string }>(`/v1/documents/${encodeURIComponent(documentId)}/file?path=${encodeURIComponent(openPath)}`, { signal: controller.signal })
+  msReleaseController(controller)
+  if (file !== null && msContextIsCurrent(generation, documentId, projectId) && msOpenPath === openPath) {
     msContent = file.content
     msSavedVersion = file.version
     msSavedContent = file.content
@@ -147,17 +217,25 @@ export async function msReloadFile(): Promise<void> {
 
 export async function msCompile(): Promise<void> {
   if (msDocId === null) return
+  const documentId = msDocId
+  const generation = msGeneration
+  const projectId = msProjectId
   // §4 row 95 (TEX-01): a failed save (409 conflict) must TERMINATE the
   // compile — the workspace revision moved under us and the frozen manifest
   // would not match what the editor holds. Save first, abort on conflict.
   if (msDirty) {
     await msSaveFile()
-    if (msConflict !== null) return
+    if (msConflict !== null || !msContextIsCurrent(generation, documentId, projectId)) return
   }
-  const result = await api<{ build: ManuscriptBuild }>(`/v1/documents/${encodeURIComponent(msDocId)}/builds`, {
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
+  const controller = msTrackController()
+  const result = await api<{ build: ManuscriptBuild }>(`/v1/documents/${encodeURIComponent(documentId)}/builds`, {
     method: 'POST',
+    signal: controller.signal,
     body: JSON.stringify({ expected_document_revision: msRevision, root_file: 'paper.tex' }),
   })
+  msReleaseController(controller)
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
   if (result === null) {
     // The kernel rejects a stale-revision compile with 409
     // document_version_conflict (no job, no build row) — surface it instead
@@ -172,11 +250,28 @@ export async function msCompile(): Promise<void> {
 }
 
 export async function msPollBuilds(): Promise<void> {
+  if (msBuildPollToken !== null) return
+  const token = Symbol('manuscript-build-poll')
+  msBuildPollToken = token
+  try {
+    await msPollBuildsOnce()
+  } finally {
+    if (msBuildPollToken === token) msBuildPollToken = null
+  }
+}
+
+async function msPollBuildsOnce(): Promise<void> {
   if (msDocId === null) return
+  const documentId = msDocId
+  const generation = msGeneration
+  const projectId = msProjectId
   const before = JSON.stringify(msBuilds)
-  const builds = await api<ManuscriptBuild[]>(`/v1/documents/${encodeURIComponent(msDocId)}/builds`)
+  const controller = msTrackController()
+  const builds = await api<ManuscriptBuild[]>(`/v1/documents/${encodeURIComponent(documentId)}/builds`, { signal: controller.signal })
+  msReleaseController(controller)
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
   if (builds !== null) msBuilds = builds
-  const running = msBuilds.some(b => b.status === 'queued' || b.status === 'running')
+  const running = msBuilds.some(b => b.preview !== true && (b.status === 'queued' || b.status === 'running'))
   if (running) {
     if (msBuildPoll === undefined) {
       msBuildPoll = window.setInterval(() => { void msPollBuilds() }, 2000)
@@ -184,19 +279,43 @@ export async function msPollBuilds(): Promise<void> {
   } else {
     if (msBuildPoll !== undefined) { window.clearInterval(msBuildPoll); msBuildPoll = undefined }
   }
-  // PDF preview for the newest successful build.
+  // PDF preview for the newest successful authoritative build. A succeeded
+  // build with no PDF supersedes and clears the old PDF; searching only for
+  // builds that already have a PDF would incorrectly present an old draft as
+  // the current successful result.
   let pdfNow = false
-  const ok = msBuilds.find(b => b.status === 'succeeded' && b.pdf_artifact !== null)
-  if (ok !== null && ok !== undefined && msPdfUrl === null && ok.pdf_artifact !== null) {
-    const projectId = document.querySelector('#dsh-scholar-ui')?.getAttribute('data-project') ?? ''
-    const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(ok.pdf_artifact)}?project_id=${encodeURIComponent(projectId)}`, {
-      headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
-    })
-    if (response.ok) {
-      const blob = await response.blob()
-      msPdfUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
-      msPdfDocId = msDocId
-      pdfNow = true
+  const ok = latestSucceededManuscriptBuild(msBuilds, 'authoritative')
+  if (ok?.pdf_artifact === null && (msPdfUrl !== null || msPdfBuildId !== null)) {
+    msReleaseMainPdfUrl()
+    pdfNow = true
+  } else if (ok !== null && ok.pdf_artifact !== null && msPdfBuildId !== ok.build_id) {
+    const pdfController = msTrackController()
+    try {
+      const headers = await authHeaders()
+      if (!msContextIsCurrent(generation, documentId, projectId)) return
+      const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(ok.pdf_artifact)}?project_id=${encodeURIComponent(projectId ?? '')}`, {
+        signal: pdfController.signal,
+        headers: { accept: 'application/octet-stream', ...headers },
+      })
+      if (response.ok) {
+        const blob = await response.blob()
+        if (!msContextIsCurrent(generation, documentId, projectId)) return
+        const url = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+        if (!msContextIsCurrent(generation, documentId, projectId)) {
+          URL.revokeObjectURL(url)
+          return
+        }
+        if (msPdfUrl !== null) URL.revokeObjectURL(msPdfUrl)
+        msPdfUrl = url
+        msPdfDocId = documentId
+        msPdfBuildId = ok.build_id
+        pdfNow = true
+      }
+    } catch {
+      // Cancellation is expected when the user switches document/panel;
+      // transport/decode failures leave the previous projection untouched.
+    } finally {
+      msReleaseController(pdfController)
     }
   }
   // Rerender ONLY when something visibly changed. An unconditional
@@ -211,9 +330,26 @@ export async function msPollBuilds(): Promise<void> {
  * per build id; a newer succeeded build replaces it. Same hot-loop guard
  * as msPollBuilds: rerender only on visible change. */
 export async function msPollPreviews(): Promise<void> {
+  if (msPreviewPollToken !== null) return
+  const token = Symbol('manuscript-preview-poll')
+  msPreviewPollToken = token
+  try {
+    await msPollPreviewsOnce()
+  } finally {
+    if (msPreviewPollToken === token) msPreviewPollToken = null
+  }
+}
+
+async function msPollPreviewsOnce(): Promise<void> {
   if (msDocId === null) return
+  const documentId = msDocId
+  const generation = msGeneration
+  const projectId = msProjectId
   const before = JSON.stringify({ p: msPreviewPending, b: msPreviews })
-  const status = await api<{ pending: { document_id: string; revision: number; debounce_ms: number } | null; builds: ManuscriptBuild[] }>(`/v1/documents/${encodeURIComponent(msDocId)}/preview-builds`)
+  const controller = msTrackController()
+  const status = await api<{ pending: { document_id: string; revision: number; debounce_ms: number } | null; builds: ManuscriptBuild[] }>(`/v1/documents/${encodeURIComponent(documentId)}/preview-builds`, { signal: controller.signal })
+  msReleaseController(controller)
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
   if (status !== null) {
     msPreviewPending = status.pending
     msPreviews = status.builds
@@ -227,19 +363,38 @@ export async function msPollPreviews(): Promise<void> {
     if (msPreviewPoll !== undefined) { window.clearInterval(msPreviewPoll); msPreviewPoll = undefined }
   }
   let pdfNow = false
-  const ok = msPreviews.find(b => b.status === 'succeeded' && b.pdf_artifact !== null)
-  if (ok !== undefined && ok.pdf_artifact !== null && msPreviewPdfBuildId !== ok.build_id) {
-    const projectId = document.querySelector('#dsh-scholar-ui')?.getAttribute('data-project') ?? ''
-    const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(ok.pdf_artifact)}?project_id=${encodeURIComponent(projectId)}`, {
-      headers: { accept: 'application/octet-stream', ...(await authHeaders()) },
-    })
-    if (response.ok) {
-      const blob = await response.blob()
-      if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
-      msPreviewPdfUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
-      msPreviewPdfBuildId = ok.build_id
-      msPreviewPdfDocId = msDocId
-      pdfNow = true
+  const ok = latestSucceededManuscriptBuild(msPreviews, 'preview')
+  if (ok?.pdf_artifact === null && (msPreviewPdfUrl !== null || msPreviewPdfBuildId !== null)) {
+    msReleasePreviewPdfUrl()
+    pdfNow = true
+  } else if (ok !== null && ok.pdf_artifact !== null && msPreviewPdfBuildId !== ok.build_id) {
+    const pdfController = msTrackController()
+    try {
+      const headers = await authHeaders()
+      if (!msContextIsCurrent(generation, documentId, projectId)) return
+      const response = await fetch(`${base()}/v1/artifacts/${encodeURIComponent(ok.pdf_artifact)}?project_id=${encodeURIComponent(projectId ?? '')}`, {
+        signal: pdfController.signal,
+        headers: { accept: 'application/octet-stream', ...headers },
+      })
+      if (response.ok) {
+        const blob = await response.blob()
+        if (!msContextIsCurrent(generation, documentId, projectId)) return
+        const url = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+        if (!msContextIsCurrent(generation, documentId, projectId)) {
+          URL.revokeObjectURL(url)
+          return
+        }
+        if (msPreviewPdfUrl !== null) URL.revokeObjectURL(msPreviewPdfUrl)
+        msPreviewPdfUrl = url
+        msPreviewPdfBuildId = ok.build_id
+        msPreviewPdfDocId = documentId
+        pdfNow = true
+      }
+    } catch {
+      // See msPollBuilds: stale/aborted PDF reads must not reject an
+      // intentionally fire-and-forget poll or mutate the current document.
+    } finally {
+      msReleaseController(pdfController)
     }
   }
   if (before !== JSON.stringify({ p: msPreviewPending, b: msPreviews }) || pdfNow) state.rerender()
@@ -251,10 +406,17 @@ export async function msPollPreviews(): Promise<void> {
  * revertable (GET /v1/documents/{id}/snapshot-files?revision=&path=). */
 export async function msRegenerate(projectId: string): Promise<void> {
   if (!window.confirm(t('manuscript', 'manuscript.regenerate.confirm'))) return
+  if (msDocId === null || msProjectId !== projectId) return
+  const documentId = msDocId
+  const generation = msGeneration
+  const controller = msTrackController()
   const result = await api<{ document_id: string; revision: number }>(`/v1/projects/${encodeURIComponent(projectId)}/manuscript-drafts`, {
     method: 'POST',
+    signal: controller.signal,
     body: JSON.stringify({ regenerate: true }),
   })
+  msReleaseController(controller)
+  if (!msContextIsCurrent(generation, documentId, projectId)) return
   if (result === null) {
     window.alert(t('manuscript', 'manuscript.regenerate.failed'))
     return
@@ -263,11 +425,10 @@ export async function msRegenerate(projectId: string): Promise<void> {
   // the tree and reopen the current file at the new bytes. The old preview
   // PDF belongs to the pre-regeneration revision — drop it (the next
   // preview poll shows the fresh projection).
-  if (msPreviewPdfUrl !== null) { URL.revokeObjectURL(msPreviewPdfUrl); msPreviewPdfUrl = null }
-  msPreviewPdfBuildId = null
-  msPreviewPdfDocId = null
+  msReleasePdfUrls()
   msDocId = result.document_id
   await msLoadTree()
+  if (!msContextIsCurrent(generation, result.document_id, projectId)) return
   if (msOpenPath !== null) {
     await msOpenFile(msOpenPath)
   } else {
@@ -275,26 +436,48 @@ export async function msRegenerate(projectId: string): Promise<void> {
     if (root !== undefined) await msOpenFile(root.path)
   }
   await msPollPreviews()
+  if (!msContextIsCurrent(generation, result.document_id, projectId)) return
   state.rerender()
 }
 
 /** dsh-web Manuscript page: tree | editor | diagnostics+PDF. */
 export async function renderManuscript(body: HTMLElement, _p: Projection, projectId: string): Promise<void> {
   msCleanup()
+  const generation = msGeneration
+  msProjectId = projectId
   const host = document.querySelector('#dsh-scholar-ui') as HTMLElement | null
   host?.setAttribute('data-project', projectId)
-  const doc = await msLoadDocument(projectId)
+  const controller = msTrackController()
+  const doc = await msLoadDocument(projectId, controller.signal)
+  msReleaseController(controller)
+  if (generation !== msGeneration || msProjectId !== projectId) return
   if (doc.document_id === '') {
     body.appendChild(el('div', 'error-banner', t('manuscript', 'manuscript.workspaceUnavailable')))
     return
   }
   const firstLoad = msDocId !== doc.document_id
+  if (firstLoad) {
+    msReleasePdfUrls()
+    msFiles = []
+    msRevision = 1
+    msOpenPath = null
+    msContent = ''
+    msSavedVersion = 0
+    msSavedContent = ''
+    msDirty = false
+    msConflict = null
+    msBuilds = []
+    msPreviews = []
+    msPreviewPending = null
+  }
   msDocId = doc.document_id
   await msLoadTree()
-  if (firstLoad && msOpenPath === null) {
+  if (!msContextIsCurrent(generation, doc.document_id, projectId)) return
+  if (firstLoad) {
     const root = msFiles.find(f => f.path === 'paper.tex') ?? msFiles[0]
     if (root !== undefined) await msOpenFile(root.path)
   }
+  if (!msContextIsCurrent(generation, doc.document_id, projectId)) return
   const docId = msDocId
 
   // Header: document, revision, save state, actions.
@@ -311,7 +494,7 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   const compileBtn = el('button', 'btn approve', t('manuscript', 'manuscript.action.compile'))
   compileBtn.style.cssText = 'padding:4px 14px'
   // §4 row 95: prevent duplicate submits while a build is queued/running.
-  compileBtn.disabled = msBuilds.some(b => b.status === 'queued' || b.status === 'running')
+  compileBtn.disabled = msBuilds.some(b => b.preview !== true && (b.status === 'queued' || b.status === 'running'))
   compileBtn.onclick = () => { void msCompile() }
   const refreshBtn = el('button', 'hbtn', '⟳')
   refreshBtn.title = t('manuscript', 'manuscript.action.refresh')
@@ -391,6 +574,12 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
       msDirty = isEditorDirty(ta.value, msSavedContent)
       const save = [...(editorCol.querySelectorAll('button') ?? [])].find(b => b.textContent === t('manuscript', 'manuscript.action.save'))
       if (save !== undefined) save.disabled = !msDirty
+      // Mark the PDF stale in place. Re-rendering here would replace the
+      // textarea and break focus, selection and IME composition.
+      const stale = body.querySelector<HTMLElement>('[data-manuscript-main-pdf-stale]')
+      if (stale !== null) {
+        stale.hidden = !displayedManuscriptPdfIsStale(msBuilds, msPdfBuildId, msRevision, 'authoritative', msDirty)
+      }
     }
     ta.onkeydown = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
@@ -418,10 +607,16 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   previewLine.style.cssText = 'font-size:10.5px;margin:2px 0 6px'
   previewLine.textContent = t('manuscript', previewModel.headline)
   rightCol.appendChild(previewLine)
-  // The embed shows the last SUCCEEDED preview PDF; it is stale whenever the
+  // The iframe shows the last SUCCEEDED preview PDF; it is stale whenever the
   // newest preview moved past it (newer queued/running/succeeded revision or
   // the document revision itself advanced past the PDF's build).
-  const pdfStale = previewModel.stale || (msPreviewPdfUrl !== null && previewModel.status !== 'succeeded')
+  const pdfStale = previewModel.stale || (
+    msPreviewPdfUrl !== null
+    && (
+      previewModel.status !== 'succeeded'
+      || displayedManuscriptPdfIsStale(msPreviews, msPreviewPdfBuildId, msRevision, 'preview')
+    )
+  )
   if (pdfStale) {
     const stale = el('span', 'muted')
     stale.style.cssText = 'color:var(--tone-amber);font-size:10px;font-weight:700'
@@ -429,11 +624,11 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
     rightCol.appendChild(stale)
   }
   if (msPreviewPdfUrl !== null) {
-    const embed = document.createElement('embed')
-    embed.src = msPreviewPdfUrl
-    embed.type = 'application/pdf'
-    embed.style.cssText = 'width:100%;height:280px;border:1px solid var(--border);border-radius:8px'
-    rightCol.appendChild(embed)
+    const frame = document.createElement('iframe')
+    frame.src = msPreviewPdfUrl
+    frame.title = t('manuscript', 'manuscript.preview.title')
+    frame.style.cssText = 'width:100%;height:280px;border:1px solid var(--border);border-radius:8px'
+    rightCol.appendChild(frame)
     const dl = el('button', 'hbtn', t('manuscript', 'manuscript.preview.download'))
     dl.style.cssText = 'margin:6px 0 10px'
     dl.onclick = () => {
@@ -450,7 +645,7 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   if (msBuilds.length === 0) {
     rightCol.appendChild(el('div', 'muted', t('manuscript', 'manuscript.builds.none')))
   }
-  for (const b of msBuilds.slice(0, 6)) {
+  for (const b of msBuilds.filter(build => build.preview !== true).slice(0, 6)) {
     const card = el('div', 'card')
     card.style.cssText = 'padding:6px 8px;margin:4px 0'
     const head = el('div', 'row')
@@ -506,11 +701,17 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   }
   if (msPdfUrl !== null) {
     rightCol.appendChild(el('div', 'section-label', t('manuscript', 'manuscript.pdf.title')))
-    const embed = document.createElement('embed')
-    embed.src = msPdfUrl
-    embed.type = 'application/pdf'
-    embed.style.cssText = 'width:100%;height:420px;border:1px solid var(--border);border-radius:8px'
-    rightCol.appendChild(embed)
+    const stale = el('span', 'muted')
+    stale.dataset.manuscriptMainPdfStale = 'true'
+    stale.style.cssText = 'color:var(--tone-amber);font-size:10px;font-weight:700;margin-bottom:4px'
+    stale.textContent = t('manuscript', 'manuscript.builds.stale')
+    stale.hidden = !displayedManuscriptPdfIsStale(msBuilds, msPdfBuildId, msRevision, 'authoritative', msDirty)
+    rightCol.appendChild(stale)
+    const frame = document.createElement('iframe')
+    frame.src = msPdfUrl
+    frame.title = t('manuscript', 'manuscript.pdf.title')
+    frame.style.cssText = 'width:100%;height:420px;border:1px solid var(--border);border-radius:8px'
+    rightCol.appendChild(frame)
     const dl = el('button', 'hbtn', t('manuscript', 'manuscript.pdf.download'))
     dl.style.cssText = 'margin-top:6px'
     dl.onclick = () => {
@@ -528,4 +729,3 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   void msPollBuilds()
   void msPollPreviews()
 }
-

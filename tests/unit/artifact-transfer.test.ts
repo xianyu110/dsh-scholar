@@ -30,6 +30,7 @@ describe('Artifact panel transfer model', () => {
     const row = { artifact_id: 'sha256:abcdef', kind: 'data', file_name: null }
     expect(artifactDownloadName(row, "attachment; filename*=UTF-8''%E8%AE%BA%E6%96%87.pdf")).toBe('论文.pdf')
     expect(artifactDownloadName(row, 'attachment; filename="../escape.bin"')).toBe('escape.bin')
+    expect(artifactDownloadName(row, 'attachment; filename="bad\r\nname.bin"')).toBe('badname.bin')
   })
 
   it('falls back to a stable kind/id name with a useful extension', () => {
@@ -38,5 +39,9 @@ describe('Artifact panel transfer model', () => {
       kind: 'pdf',
       file_name: null,
     }, null)).toBe('pdf-abcdef123456.pdf')
+    expect(artifactDownloadName({ artifact_id: 'sha256:abcdef1234567890', kind: 'data', media_type: 'audio/mpeg' }, null)).toBe('data-abcdef123456.mp3')
+    expect(artifactDownloadName({ artifact_id: 'sha256:abcdef1234567890', kind: 'data', media_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }, null)).toBe('data-abcdef123456.xlsx')
+    expect(artifactDownloadName({ artifact_id: 'sha256:abcdef1234567890', kind: 'code', media_type: 'application/octet-stream' }, 'attachment; filename="code-sha256abcdef"')).toBe('code-sha256abcdef.json')
+    expect(artifactDownloadName({ artifact_id: 'sha256:abcdef1234567890', kind: 'pdf', media_type: 'application/pdf' }, 'inline; filename="pdf-sha256abcdef"')).toBe('pdf-sha256abcdef.pdf')
   })
 })

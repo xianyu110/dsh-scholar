@@ -30,7 +30,7 @@ describe('config registry — key coverage', () => {
       expect(keys.has(key)).toBe(true)
     }
     // standalone CLI (--host/--port/--token/--principal/--data-dir/--kernel-port/--no-token).
-    for (const key of ['standalone.host', 'standalone.port', 'standalone.token', 'standalone.principal', 'standalone.data_dir', 'standalone.kernel_port', 'standalone.no_token']) {
+    for (const key of ['standalone.host', 'standalone.port', 'standalone.token', 'standalone.principal', 'standalone.frame_ancestors', 'standalone.data_dir', 'standalone.kernel_port', 'standalone.no_token']) {
       expect(keys.has(key)).toBe(true)
     }
     // images.lock path + digests + network_policy.
@@ -48,6 +48,7 @@ describe('config registry — key coverage', () => {
     expect(envs.get('standalone.port')).toBe('DSH_SCHOLAR_STANDALONE_PORT')
     expect(envs.get('standalone.kernel_port')).toBe('DSH_SCHOLAR_STANDALONE_KERNEL_PORT')
     expect(envs.get('standalone.data_dir')).toBe('DSH_SCHOLAR_STANDALONE_DATA')
+    expect(envs.get('standalone.frame_ancestors')).toBe('DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS')
   })
 
   it('registry invariants: unique keys, valid scopes, schema+default present', () => {
@@ -181,13 +182,14 @@ describe('config registry — parseCli (binary CLI parsing)', () => {
 
   it('standalone: every registry flag maps to its canonical key (booleans included)', () => {
     expect(parseCli(['--host', '127.0.0.1', '--port', '18611', '--kernel-port', '17414',
-      '--data-dir', '/tmp/d', '--token', 'st', '--principal', 'ops-1'], 'standalone')).toEqual({
+      '--data-dir', '/tmp/d', '--token', 'st', '--principal', 'ops-1', '--frame-ancestors', 'http://127.0.0.1:3080'], 'standalone')).toEqual({
       'standalone.host': '127.0.0.1',
       'standalone.port': 18611,
       'standalone.kernel_port': 17414,
       'standalone.data_dir': '/tmp/d',
       'standalone.token': 'st',
       'standalone.principal': 'ops-1',
+      'standalone.frame_ancestors': 'http://127.0.0.1:3080',
     })
     expect(parseCli(['--no-token'], 'standalone')).toEqual({ 'standalone.no_token': true })
   })
@@ -468,7 +470,16 @@ describe('config registry — generated artifacts', () => {
     for (const def of CONFIG_REGISTRY) {
       const segments = def.key.split('.')
       const last = segments.at(-1) as string
-      expect(yaml).toContain(`${last}: ${def.default}`)
+      const renderedDefault = typeof def.default === 'string'
+        ? def.default === ''
+          ? "''"
+          : /^[A-Za-z0-9._:/@-]+$/.test(def.default)
+            ? def.default
+            : JSON.stringify(def.default)
+        : def.default === null
+          ? 'null'
+          : JSON.stringify(def.default)
+      expect(yaml).toContain(`${last}: ${renderedDefault}`)
       expect(yaml).toContain(def.description)
     }
     for (const scope of CONFIG_SCOPES) expect(yaml).toContain(`${scope}:`)

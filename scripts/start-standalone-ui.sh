@@ -20,6 +20,7 @@ WEB_HOST="${DSH_SCHOLAR_STANDALONE_HOST:-127.0.0.1}"
 WEB_PORT="${DSH_SCHOLAR_STANDALONE_PORT:-18610}"
 KERNEL_PORT="${DSH_SCHOLAR_STANDALONE_KERNEL_PORT:-17413}"
 DATA_DIR="${DSH_SCHOLAR_STANDALONE_DATA:-$HOME/.dsh-scholar-standalone}"
+FRAME_ANCESTORS="${DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS:-http://127.0.0.1:3080,http://localhost:3080,http://[::1]:3080}"
 SERVER_DATA_DIR="$DATA_DIR/research-ui-standalone"
 PASSTHROUGH=()
 TOKEN_VALUE=''
@@ -39,6 +40,8 @@ while [ "$#" -gt 0 ]; do
     --no-token) PASSTHROUGH+=(--no-token); shift ;;
     --principal) PASSTHROUGH+=(--principal "$2"); shift 2 ;;
     --principal=*) PASSTHROUGH+=(--principal "${1#*=}"); shift ;;
+    --frame-ancestors) FRAME_ANCESTORS=$2; shift 2 ;;
+    --frame-ancestors=*) FRAME_ANCESTORS=${1#*=}; shift ;;
     *) PASSTHROUGH+=("$1"); shift ;;
   esac
 done
@@ -77,6 +80,7 @@ if ! [[ " ${PASSTHROUGH[*]} " == *" --no-token "* ]] && ! [[ " ${PASSTHROUGH[*]}
 fi
 DSH_HOME="$DATA_DIR" setsid nohup node "$BIN" \
   --host "$WEB_HOST" --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$SERVER_DATA_DIR" \
+  --frame-ancestors "$FRAME_ANCESTORS" \
   "${PASSTHROUGH[@]}" \
   >> "$DATA_DIR/standalone.log" 2>&1 < /dev/null &
 SERVER_PID=$!
