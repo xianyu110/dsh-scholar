@@ -3,10 +3,10 @@
 The Research Kernel owns its schema version and ordered migration steps in
 `packages/research-kernel/src/migrations.ts` (storage-migrations.md §8):
 
-- `SCHEMA_VERSION` — the current database schema version (integer, currently 16
-  after migrations 0001–0018).
+- `SCHEMA_VERSION` — the current database schema version (integer, currently 21
+  after migrations 0001–0024).
 - `MIGRATIONS` — the ordered, checksummed, idempotent migration steps
-  (`0001_schema_v2_initial` … `0018_workspace_recovery_quarantine`). Each step records
+  (`0001_schema_v2_initial` … `0024_topology_cancelled_state`). Each step records
   `(id, checksum, applied_at, report_json)` in `schema_migrations`; re-running
   the same id+checksum is a no-op, a different checksum fails loud.
 - The legacy v1 fixture for upgrade drills lives at
@@ -21,7 +21,7 @@ order and rejects a stored `schema_version` above the supported version loudly
 ## Adding a migration (v2+)
 
 1. Append a new step to `MIGRATIONS` in `packages/research-kernel/src/migrations.ts`
-   (`id: '0018_...'`, runnable body, checksum auto-derived).
+   (`id: '0024_...'`, runnable body, checksum auto-derived).
    Note (STORE-08): a released step's canonical `body` must bind the DDL it
    actually executes — migrations that run shared DDL constants embed a FROZEN
    inline snapshot (see 0003's `TERMINAL_DDL_0003`/`TEX_DDL_0003`); never

@@ -108,7 +108,7 @@ export type ChildMode = z.infer<typeof ChildMode>
 /** Subagent activity state (trajectory-subagents.md §3 running/inactive/
  * diagnostic; succeeded/failed/redacted/unknown keep the projection honest). */
 export const ChildState = z.enum([
-  'running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown',
+  'running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'cancelled', 'redacted', 'unknown',
 ])
 export type ChildState = z.infer<typeof ChildState>
 

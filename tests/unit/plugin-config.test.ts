@@ -20,6 +20,15 @@ describe('DSH research plugin Config', () => {
         defaultMode: 'gate-only',
         unattended: false,
         models: {},
+        subagents: {
+          enabled: false,
+          provider: 'spawn',
+          maxConcurrency: 4,
+          maxFanoutPerAction: 6,
+          maxDepth: 1,
+          timeoutMs: 300000,
+          maxOutputBytes: 131072,
+        },
         standalone: {
           url: 'http://127.0.0.1:18610/',
           shortcut: 'Alt+Shift+S',
@@ -49,6 +58,21 @@ describe('DSH research plugin Config', () => {
       message: 'unknown config key "standalone.tokenFile"',
       path: ['standalone', 'tokenFile'],
     })
+
+    const unknownSubagent = validate({ subagents: { recursive: true } })
+    expect(unknownSubagent.issues?.[0]).toMatchObject({
+      message: 'unknown config key "subagents.recursive"',
+      path: ['subagents', 'recursive'],
+    })
+  })
+
+  it('bounds the stage subagent execution policy', () => {
+    expect(validate({ subagents: { enabled: true, maxConcurrency: 4, maxFanoutPerAction: 6 } }).value)
+      .toMatchObject({ subagents: { enabled: true, provider: 'spawn', maxDepth: 1 } })
+    expect(validate({ subagents: { maxConcurrency: 0 } }).issues?.[0]?.path).toEqual(['subagents', 'maxConcurrency'])
+    expect(validate({ subagents: { maxFanoutPerAction: 17 } }).issues?.[0]?.path).toEqual(['subagents', 'maxFanoutPerAction'])
+    expect(validate({ subagents: { maxDepth: 2 } }).issues?.[0]?.path).toEqual(['subagents', 'maxDepth'])
+    expect(validate({ subagents: { timeoutMs: 999 } }).issues?.[0]?.path).toEqual(['subagents', 'timeoutMs'])
   })
 
   it('rejects unsafe standalone URLs and unsupported shortcuts', () => {

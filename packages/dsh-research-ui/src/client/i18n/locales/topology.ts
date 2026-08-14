@@ -54,6 +54,7 @@ export const zh = {
   'topology.state.diagnostic': '诊断',
   'topology.state.succeeded': '已成功',
   'topology.state.failed': '失败',
+  'topology.state.cancelled': '已取消',
   'topology.state.redacted': '已脱敏',
   'topology.state.unknown': '未知',
 } as const
@@ -106,6 +107,7 @@ export const en: Record<TopologyKey, string> = {
   'topology.state.diagnostic': 'diagnostic',
   'topology.state.succeeded': 'succeeded',
   'topology.state.failed': 'failed',
+  'topology.state.cancelled': 'cancelled',
   'topology.state.redacted': 'redacted',
   'topology.state.unknown': 'unknown',
 }

@@ -66,6 +66,8 @@ Token 四桶互斥，reasoning 已属于 output；父节点汇总不得与子节
 
 Topology node 可增加 stage/action、perspective、attempt 和安全输入/输出 hash，但 Research phase、NextAction、Gate、Evidence 与 Release 只能来自 Kernel Research Outbox。页面中的 running/succeeded/failed/cancelled 计数是观察性投影，不能反向推进 Project。阶段矩阵、准入、预算、tool filter、provenance 与实施顺序见 subagent-stage-execution.md。
 
+DSH plugin 的 lifecycle bridge 只走 service-token + `x-service-principal: dsh-plugin` 的 internal route，并再次校验 session→project 与 exact parent。route 规范化必须先于 service-token 判定；child id 已属于其他 project/parent 时禁止重绑，terminal state 单调且同状态重放幂等。`cancelled` 由 migration 0024 追加为 durable terminal state；旧库已有 history/followup 时迁移必须保留外键引用与审计行。
+
 ## 4. 事件、历史与实时恢复
 
 统一事件 envelope：

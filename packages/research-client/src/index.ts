@@ -932,14 +932,53 @@ export class ResearchClient {
     kind?: 'subagent' | 'task'
     mode?: 'one-shot' | 'continuable' | 'read-only'
     role?: string | null
-    state?: 'running' | 'inactive' | 'diagnostic' | 'succeeded' | 'failed' | 'redacted' | 'unknown'
+    state?: 'running' | 'inactive' | 'diagnostic' | 'succeeded' | 'failed' | 'cancelled' | 'redacted' | 'unknown'
   } & { project_id: string }): Promise<Record<string, unknown>> {
     const { project_id: projectId, ...body } = input
     return this.request('POST', `/v1/projects/${projectId}/topology/children`, body)
   }
 
   /** Transition a child's state (append-only history + outbox). */
-  updateChildState(childId: string, state: 'running' | 'inactive' | 'diagnostic' | 'succeeded' | 'failed' | 'redacted' | 'unknown'): Promise<Record<string, unknown>> {
-    return this.request('PATCH', `/v1/topology/${encodeURIComponent(childId)}/state`, { state })
+  updateChildState(childId: string, state: 'running' | 'inactive' | 'diagnostic' | 'succeeded' | 'failed' | 'cancelled' | 'redacted' | 'unknown', detail?: string): Promise<Record<string, unknown>> {
+    return this.request('PATCH', `/v1/topology/${encodeURIComponent(childId)}/state`, { state, ...detail === undefined ? {} : { detail } })
+  }
+
+  /** DSH host lifecycle bridge, fenced by service identity + exact linked
+   * session. This does not impersonate a Human project principal. */
+  registerChildLinkFromSession(input: {
+    project_id: string
+    child_id: string
+    parent_id: string
+    label?: string | null
+    summary?: string
+    kind?: 'subagent' | 'task'
+    mode?: 'one-shot' | 'continuable' | 'read-only'
+    role?: string | null
+    state?: 'running'
+  }, sessionId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const { project_id: projectId, ...body } = input
+    return this.request(
+      'POST',
+      `/internal/projects/${encodeURIComponent(projectId)}/topology/children`,
+      { ...body, session_id: sessionId },
+      { 'x-service-principal': 'dsh-plugin' },
+      signal,
+    )
+  }
+
+  updateChildStateFromSession(
+    childId: string,
+    state: 'succeeded' | 'failed' | 'cancelled',
+    sessionId: string,
+    detail?: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      'PATCH',
+      `/internal/topology/${encodeURIComponent(childId)}/state`,
+      { state, session_id: sessionId, ...detail === undefined ? {} : { detail } },
+      { 'x-service-principal': 'dsh-plugin' },
+      signal,
+    )
   }
 }

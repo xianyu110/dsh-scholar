@@ -48,6 +48,8 @@ const idSchema = z.string().min(1)
 /** TRAJ-01/SUBAGENT-01 (trajectory-subagents.md §3): register one spawned
  * subagent child link. `project_id` comes from the route path (never the
  * body — the kernel binds the child to the path project). */
+const childStateSchema = z.enum(['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'cancelled', 'redacted', 'unknown'])
+
 const registerChildSchema = z.object({
   child_id: z.string().min(1),
   parent_id: z.string().nullable().optional(),
@@ -56,7 +58,17 @@ const registerChildSchema = z.object({
   kind: z.enum(['subagent', 'task']).optional(),
   mode: z.enum(['one-shot', 'continuable', 'read-only']).optional(),
   role: z.string().nullable().optional(),
-  state: z.enum(['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown']).optional(),
+  state: childStateSchema.optional(),
+}).strict()
+
+const registerChildFromSessionSchema = registerChildSchema.extend({
+  session_id: z.string().min(1).max(256),
+}).strict()
+
+const updateChildFromSessionSchema = z.object({
+  session_id: z.string().min(1).max(256),
+  state: childStateSchema,
+  detail: z.string().max(2000).optional(),
 }).strict()
 
 /** One-shot READ-ONLY followup (recorded, never executed by the standalone
@@ -688,8 +700,11 @@ function errorEnvelope(code: string, message: string): Record<string, unknown> {
  * self-reported `x-service-principal` headers do NOT satisfy it, so a
  * browser session can never claim jobs, register runner keys, recover
  * leases, write verified evidence, accept evidence or freeze contracts.
- * Route patterns are matched on the RAW pathname; the handlers below also
- * require the correct x-service-principal on the evidence routes.
+ * Route patterns are matched on the canonical decoded-segment path; the
+ * handlers below also require the correct x-service-principal on the
+ * evidence routes. Matching raw pathname here would let percent-encoding or
+ * duplicate slashes bypass the service-token gate while reaching the same
+ * decoded handler.
  */
 const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string }> = [
   { method: 'POST', re: /^\/v1\/jobs-claim\/run$/, label: 'jobs-claim' },
@@ -701,6 +716,8 @@ const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string 
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/[^/]+\/accept$/, label: 'evidence/accept' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/contracts\/[^/]+\/approve$/, label: 'contracts/approve' },
   { method: 'POST', re: /^\/internal\/reproduction-attempts\/[^/]+\/reports$/, label: 'reproduction/reports' },
+  { method: 'POST', re: /^\/internal\/projects\/[^/]+\/topology\/children$/, label: 'topology/children' },
+  { method: 'PATCH', re: /^\/internal\/topology\/[^/]+\/state$/, label: 'topology/state' },
 ]
 
 function isServiceRoute(method: string, pathname: string): boolean {
@@ -1034,11 +1051,13 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   }
 
   const method = req.method ?? 'GET'
+  const [version, resource, id, sub, subId, subSubId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
+  const canonicalPath = '/' + parts.map(part => encodeURIComponent(part)).join('/')
   // §4 P0 (API-01/EVID-01): internal service routes require the configured
   // service token via `x-service-token` — the loopback bearer (Authorization)
   // and any self-reported x-service-principal do NOT unlock these routes.
   // A missing/wrong/misplaced credential is 403 service_token_required.
-  if (kernel.serviceToken !== undefined && isServiceRoute(method, url.pathname)) {
+  if (kernel.serviceToken !== undefined && (version === 'internal' || isServiceRoute(method, canonicalPath))) {
     const provided = req.headers['x-service-token']
     if (typeof provided !== 'string' || !serviceTokenEquals(provided, kernel.serviceToken)) {
       send(res, 403, {
@@ -1048,7 +1067,6 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
       return
     }
   }
-  const [version, resource, id, sub, subId, subSubId] = parts as [string | undefined, string | undefined, string | undefined, string | undefined, string | undefined, string | undefined]
   // REPRO-01 (docs/reproduction-contracts.md §4): POST
   // /internal/reproduction-attempts/{attempt}/reports — verifier service
   // identity (x-service-token gate above + x-service-principal: verifier
@@ -1074,6 +1092,52 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           request_hash: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
         })
         send(res, 201, report)
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  if (version === 'internal' && resource === 'projects' && id !== undefined && sub === 'topology' && subId === 'children' && method === 'POST') {
+    void readJson(req).then((body) => {
+      try {
+        if (req.headers['x-service-principal'] !== 'dsh-plugin') {
+          send(res, 403, { error: errorEnvelope('service_identity_required', 'topology registration requires x-service-principal: dsh-plugin') })
+          return
+        }
+        const input = registerChildFromSessionSchema.parse(body)
+        const linked = kernel.getProjectBySession(input.session_id)
+        if (linked?.project_id !== id) {
+          send(res, 409, { error: errorEnvelope('session_link_conflict', 'DSH session is not linked to the topology project') })
+          return
+        }
+        if (input.parent_id !== input.session_id) {
+          send(res, 403, { error: errorEnvelope('exact_parent_required', 'topology child parent must be the exact linked DSH session') })
+          return
+        }
+        const { session_id: _sessionId, ...child } = input
+        send(res, 201, kernel.registerChildLink({ project_id: id, ...child }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  if (version === 'internal' && resource === 'topology' && id !== undefined && sub === 'state' && method === 'PATCH') {
+    void readJson(req).then((body) => {
+      try {
+        if (req.headers['x-service-principal'] !== 'dsh-plugin') {
+          send(res, 403, { error: errorEnvelope('service_identity_required', 'topology state update requires x-service-principal: dsh-plugin') })
+          return
+        }
+        const input = updateChildFromSessionSchema.parse(body)
+        const child = kernel.getChildLink(id)
+        const linked = kernel.getProjectBySession(input.session_id)
+        if (linked?.project_id !== child.project_id || child.parent_id !== input.session_id) {
+          send(res, 409, { error: errorEnvelope('session_link_conflict', 'DSH session is no longer the exact parent of this topology child') })
+          return
+        }
+        ok(res, kernel.updateChildState(id, input.state, input.detail))
       } catch (error) {
         fail(res, error)
       }
@@ -1900,7 +1964,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           }
           if (method === 'PATCH' && sub === 'state') {
             const input = z.object({
-              state: z.enum(['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown']),
+              state: childStateSchema,
               detail: z.string().max(2000).optional(),
             }).strict().parse(body)
             ok(res, kernel.updateChildState(id, input.state, input.detail))

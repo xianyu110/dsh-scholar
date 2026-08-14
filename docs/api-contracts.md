@@ -10,6 +10,7 @@
 - 所有 mutation 接受 X-Request-Id；创建类请求接受 Idempotency-Key。
 - BFF 从登录会话解析 Principal，忽略浏览器提交的 actor 或 principal 字段。
 - Kernel 内部调用使用短期 Bearer 或 mTLS/Unix identity；Token 使用恒定时间比较。
+- `/internal/*` 的 service-token 判定基于解析后的 route class，不基于可被 `%xx` 或重复斜杠改变的原始 pathname；非规范路径不能绕过 service gate。
 - 列表统一接受 cursor、limit，limit 默认 50、最大 200；响应为 items、next_cursor。
 - 所有 project-scoped 路由先执行 membership/AuthZ，再查资源；跨项目不存在与无权限都返回 404，避免枚举。
 
@@ -79,6 +80,13 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 | POST | `/bff/research/projects/{id}/chat/turns` | project-scoped 自然语言 turn；读取权威 projection，返回 assistant text、intent/effect、canonical operation/confirmation 状态与最新 `next_actions_v2`；不能直接决定 Human Gate |
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
+
+### 4.1 DSH plugin internal topology bridge
+
+- `POST /internal/projects/{project_id}/topology/children`：只接受 service token 与 `x-service-principal: dsh-plugin`；body 的 `session_id` 必须已精确链接 path project，且 `parent_id === session_id`。既有 `child_id` 若属于其他 project/parent 返回 409，终态 re-register 不复活；
+- `PATCH /internal/topology/{child_id}/state`：同样要求 service token/service principal，body `session_id` 必须仍等于 child 的 parent 且链接 child project；terminal state 单调，同状态重放幂等，其他 terminal transition 返回 409；
+- 百分号编码的 `internal`、重复斜杠或其他非规范等价路径必须与 canonical route 使用相同 service-token gate，不能退化为仅信任可伪造 header；
+- public `/v1/.../topology` 仍使用 Human principal + membership 契约，不能用 internal bridge 替代浏览器授权。
 
 Chat turn 请求最小为 `{session_id, turn_id, text}`，`turn_id` 在 project + session 内幂等；path project 是唯一 scope，body 中任何 project/principal/role 均忽略或拒绝。分派顺序为 direct slash、active Grill answer、natural intent。响应为 `{assistant_text, intent:{code,confidence,effect,canonical_command?}, execution:{status:'answered'|'executed'|'confirmation_required'|'blocked',refs:[]}, next_actions_v2}`。没有模型 adapter 时允许返回 phase-aware deterministic answer，但不得把 prose 交给 slash parser。BFF 必须在执行任何 connector/Job/write 前重新校验 membership、role、NextAction/revision 与 idempotency；Human-only intent 始终 `confirmation_required` 并导航专用 Human BFF 页面。
 

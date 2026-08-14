@@ -2,7 +2,7 @@
 
 > 规范版本：1.0  
 > 更新日期：2026-08-15  
-> 状态：目标契约；当前仅有 research_panel 基础并行调用与 standalone 拓扑 API，尚未完成阶段准入、生命周期回写、预算预留和完整验收。
+> 状态：部分实现、未完成验收。当前已实现 Survey/Idea/Evidence/Writing/Review 的确定性 policy、基础阶段准入、one-shot lifecycle、内部 topology 回写、结构化 draft 聚合、进程内并发/幂等与 fan-in revision 检查；十阶段覆盖、可信 Human confirmation receipt、原子预算预留/四桶对账、持久化幂等恢复、完整 provenance 与真实 DSH/browser 验收仍未完成。
 
 本文规定 DSH Scholar 如何在不改变 Research Kernel 权威边界的前提下，按研究阶段启动 DSH subagent 加速读取、检索、审阅和草稿生产。实现完成前，产品不得宣称已经支持自动阶段并行。
 
@@ -31,7 +31,7 @@
 | Review | 高 | claim、数字、引用、license、AI usage、artifact、clean-room 专项审阅 | review finding | 缺陷聚合、release readiness 与最终决策 |
 | Release | 中 | manifest、hash、license、引用、artifact 完整性核验 | release finding | Bundle 冻结、Release Gate、发布 |
 
-默认优先落地 Survey、Idea、Writing、Review 四个高收益面板；Reproduce、Contract、Evidence 在领域对象与 provenance 校验齐备后接入。Experiment 的计算并行由 Runner 的 seed/ablation Job 完成，subagent 只辅助规划、监控和诊断。
+默认优先落地 Survey、Idea、Writing、Review 四个高收益面板；当前另有 Evidence 的只读诊断 policy。Init、Reproduce、Contract、Experiment、Release 尚未接入，不能由未知 action 猜测启动。Experiment 的计算并行由 Runner 的 seed/ablation Job 完成，subagent 只辅助规划、监控和诊断。
 
 ## 3. 阶段准入
 
@@ -45,6 +45,8 @@
 6. 本次调用来自用户明确要求或由父 Agent 展示并确认的阶段加速动作，不能仅凭模型文本静默扩大执行面。
 
 任何一项不满足都 fail closed，返回结构化阻断原因和下一步，不创建 child、不扣费、不改变 Research 状态。重试使用新的 attempt/node；同一个 idempotency key 与输入 hash 只允许一次预算预留和一次 fan-out。
+
+当前 `research_panel` 不再接受模型自报的 `user_confirmed`；DSH `tools/pre-execute` 必须返回 Host `ask`，无 approval provider 时自动 deny，只有人工批准后才进入 coordinator。该确认尚未形成持久化、session/action/revision 绑定的 receipt，因此 explicit-authority 的 durable provenance 仍未关闭，能力继续默认关闭。每个 child 还必须绑定创建时的 project scope，所有允许工具都拒绝显式跨项目 ID/job ID，不能只在 spawn 与 topology 层校验 session。
 
 ## 4. Fan-out / Fan-in 流程
 
@@ -62,6 +64,8 @@
 10. 预算按实际 usage 对账并释放剩余预留；父子 token/cost 不得重复计数。
 
 DSH stop reason 必须显式映射：completed → succeeded；aborted → cancelled；error|max-tokens|refusal|unknown → failed。未知状态不能猜测为成功。
+
+超时与取消必须以 AbortSignal 优先：signal 已取消时，即使 provider 延迟返回 `completed` 也只能记 `cancelled`。`start()`、`result`、terminal update 与 `dispose()` 都必须有有界等待；非协作 provider 不得永久挂起父 panel，terminal update 卡住也不得阻塞 dispose。结构化输出只有通过 schema、大小和脱敏校验后才可把节点置为 `succeeded`。fan-in 发现 session/revision/action/Gate 变化时不得把旧 structured members 返回给当前 session。
 
 ## 5. DSH 公开接口约束
 
@@ -110,6 +114,7 @@ try {
 - Idea panel 的结果只能是 proposed，Writing panel 只能是 draft/patch，Evidence panel 只能是 draft analysis；
 - child 不能批准 Gate、创建 accepted Evidence、把 Claim 标为 supported、写 canonical manuscript 数字、提交正式 Runner Job、adopt Intake、删除项目或发布；
 - role/membership/relink/revision 在 fan-in 后必须重新校验，防止长任务结果跨项目或跨 session 回写。
+- task、completion、perspective 在进入 provider prompt 前同样必须做 secret/path/credential 脱敏；只清理输出不能修复输入泄漏。
 
 ## 9. 配置契约
 
@@ -118,21 +123,23 @@ try {
 ~~~yaml
 subagents:
   enabled: false
-  default_provider: spawn
-  max_concurrency: 4
-  max_fanout_per_action: 6
-  max_depth: 1
-  timeout_ms: 300000
-  max_output_bytes: 131072
-  browser_spawn: false
-  role_models: {}
-  phase_policies: {}
-  tool_filters: {}
-  budget:
-    reserve_before_start: true
+  provider: spawn
+  maxConcurrency: 4
+  maxFanoutPerAction: 6
+  maxDepth: 1
+  timeoutMs: 300000
+  maxOutputBytes: 131072
 ~~~
 
-默认 fail closed：未配置的 phase/action 不启动，browser_spawn=false，深度为 1，tool filter 为空不等于允许所有工具。配置 revision/hash 固定到每次 child run，配置变更只影响新 run。
+以上是当前严格 schema；未知字段会被拒绝。`roleModels`、phase policy 覆盖、browser spawn 与 budget reservation 等仍是目标字段，尚不能写入当前配置。默认 fail closed：`enabled=false`，未配置的 phase/action 不启动，深度为 1，tool filter 为空不等于允许所有工具。当前 config hash 只覆盖上述 subagent 配置，尚未完整固定 model/provider/snapshot pins。
+
+## 9.1 合并前安全修复约束（2026-08-15）
+
+- 所有 `/internal/*` 路由必须按解析后的 canonical route 进入 service-token gate；百分号编码或重复斜杠不得绕过鉴权；
+- internal topology 注册必须拒绝把既有 child id 从其他 project/parent 重新绑定，终态不得通过 re-register 复活；
+- migration `0024_topology_cancelled_state` 必须在已有 child history/followup 的旧库升级时保留三表数据、索引和外键完整性；
+- child project scope、timeout/cancel、terminal update/dispose、stale fan-in 与 prompt redaction 的负向自动测试必须通过后才可合并；
+- 原子预算预留、durable idempotency 和 Human confirmation receipt 未实现前继续保持“部分”、默认关闭，不得作为生产安全能力宣传。
 
 ## 10. 实施顺序
 

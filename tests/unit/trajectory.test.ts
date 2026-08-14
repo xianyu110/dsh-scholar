@@ -330,16 +330,20 @@ describe('child topology (kernel)', () => {
     const succeeded = kernel.updateChildState('sess_s', 'succeeded', 'finished cleanly')
     expect(succeeded.state).toBe('succeeded')
     expect(succeeded.ended_at).not.toBeNull()
-    // A later non-terminal update keeps the pinned ended_at.
-    const again = kernel.updateChildState('sess_s', 'inactive')
-    expect(again.state).toBe('inactive')
-    expect(again.ended_at).not.toBeNull()
-    // Re-registration (e.g. plugin reload) preserves the current state.
+    // Terminal state is monotonic; retry uses a new child node.
+    expectKernelError(() => kernel.updateChildState('sess_s', 'inactive'), 409, 'child_state_terminal')
+    expect(kernel.updateChildState('sess_s', 'succeeded')).toEqual(succeeded)
+    // Re-registration (e.g. plugin reload) preserves the terminal state.
     const re = kernel.registerChildLink({ project_id: pid, child_id: 'sess_s', label: 'worker', summary: 'fresh summary', mode: 'one-shot' })
-    expect(re.state).toBe('inactive')
+    expect(re.state).toBe('succeeded')
     expect(re.ended_at).not.toBeNull()
     expect(re.summary).toBe('fresh summary')
     expectKernelError(() => kernel.updateChildState('sess_missing', 'failed'), 404, 'child_not_found')
+    kernel.registerChildLink({ project_id: pid, child_id: 'sess_cancelled', label: 'cancelled worker', mode: 'one-shot' })
+    const cancelled = kernel.updateChildState('sess_cancelled', 'cancelled', 'parent aborted')
+    expect(cancelled.state).toBe('cancelled')
+    expect(cancelled.ended_at).not.toBeNull()
+    expectKernelError(() => kernel.updateChildState('sess_cancelled', 'failed'), 409, 'child_state_terminal')
     kernel.close()
   })
 
@@ -484,6 +488,86 @@ describe('trajectory/topology HTTP surface', () => {
         body: JSON.stringify({ state: 'failed' }),
       })
       expect(stateAnon.status).toBe(422)
+    } finally {
+      server.close()
+      kernel.close()
+    }
+  })
+
+  it('lets only the exact linked DSH parent service write observational lifecycle', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-topology-service-'))
+    const kernel = new ResearchKernel({
+      dbPath: join(dir, 'kernel.db'),
+      casRoot: join(dir, 'cas'),
+      requireSignedManifest: false,
+      serviceToken: 'service-secret',
+    })
+    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), session_id: 'parent-session' })
+    const otherProject = kernel.createProject({ name: 'other', workspace: '/w2', brief: makeBrief(), session_id: 'other-session' })
+    const { server, port } = await startKernelServer({ kernel, port: 0, token: 'bearer-secret' })
+    const base = 'http://127.0.0.1:' + port
+    const request = (path: string, method: 'POST' | 'PATCH', body: unknown, headers: Record<string, string> = {}): Promise<Response> =>
+      fetch(base + path, {
+        method,
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer bearer-secret',
+          'x-service-token': 'service-secret',
+          'x-service-principal': 'dsh-plugin',
+          ...headers,
+        },
+        body: JSON.stringify(body),
+      })
+    try {
+      const wrongToken = await request('/internal/projects/' + project.project_id + '/topology/children', 'POST', {
+        child_id: 'child-wrong-token', parent_id: 'parent-session', session_id: 'parent-session',
+      }, { 'x-service-token': 'wrong' })
+      expect(wrongToken.status).toBe(403)
+
+      const encodedInternal = await request('/%69nternal/projects/' + project.project_id + '/topology/children', 'POST', {
+        child_id: 'child-encoded-path', parent_id: 'parent-session', session_id: 'parent-session',
+      }, { 'x-service-token': '' })
+      expect(encodedInternal.status).toBe(403)
+
+      const duplicateSlash = await request('/internal//projects/' + project.project_id + '/topology/children', 'POST', {
+        child_id: 'child-duplicate-path', parent_id: 'parent-session', session_id: 'parent-session',
+      }, { 'x-service-token': '' })
+      expect(duplicateSlash.status).toBe(403)
+
+      const wrongParent = await request('/internal/projects/' + project.project_id + '/topology/children', 'POST', {
+        child_id: 'child-wrong-parent', parent_id: 'other-session', session_id: 'parent-session',
+      })
+      expect(wrongParent.status).toBe(403)
+
+      const registered = await request('/internal/projects/' + project.project_id + '/topology/children', 'POST', {
+        child_id: 'child-service', parent_id: 'parent-session', session_id: 'parent-session',
+        label: 'survey/classics', summary: 'safe', mode: 'one-shot', role: 'scholar', state: 'running',
+      })
+      expect(registered.status).toBe(201)
+
+      const rebound = await request('/internal/projects/' + otherProject.project_id + '/topology/children', 'POST', {
+        child_id: 'child-service', parent_id: 'other-session', session_id: 'other-session',
+        label: 'foreign', summary: 'must not replace ownership', state: 'running',
+      })
+      expect(rebound.status).toBe(409)
+      expect((await rebound.json() as { error: { code: string } }).error.code).toBe('child_link_conflict')
+
+      const wrongStateSession = await request('/internal/topology/child-service/state', 'PATCH', {
+        session_id: 'other-session', state: 'cancelled',
+      })
+      expect(wrongStateSession.status).toBe(409)
+
+      const cancelled = await request('/internal/topology/child-service/state', 'PATCH', {
+        session_id: 'parent-session', state: 'cancelled', detail: 'parent aborted',
+      })
+      expect(cancelled.status).toBe(200)
+      expect((await cancelled.json() as { state: string }).state).toBe('cancelled')
+
+      const revived = await request('/internal/topology/child-service/state', 'PATCH', {
+        session_id: 'parent-session', state: 'failed',
+      })
+      expect(revived.status).toBe(409)
+      expect((await revived.json() as { error: { code: string } }).error.code).toBe('child_state_terminal')
     } finally {
       server.close()
       kernel.close()

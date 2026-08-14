@@ -142,26 +142,21 @@ else
 fi
 
 echo "== kernel-submit-rejects-subprocess =="
-P2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-sub\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+P2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-sub\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\",\"runner_target_id\":\"target_local_process_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$P2/jobs" -H 'content-type: application/json' -d "{\"idempotency_key\":\"f1\",\"kind\":\"formal\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}")
 [[ "$CODE" == "422" ]] && ok "kernel rejects formal job on isolated-subprocess profile (422)" || bad "expected 422 got $CODE"
 
 echo "== formal-run-rejects-subprocess (runner layer) =="
-J1=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"f2\",\"kind\":\"formal\",\"contract_id\":\"$CT\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
-for _ in $(seq 1 60); do
-  S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J1" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
-  [[ "$S" == "failed" ]] && break
-  sleep 0.3
-done
-C=$(api "http://127.0.0.1:$PORT/v1/jobs/$J1" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.failure_class??'')+'|'+(j.error??'').slice(0,60))})")
-[[ "$C" == environment* ]] && ok "formal + subprocess runner -> failed/environment: ${C#*|}" || bad "expected environment got $C"
+FORMAL_SUB=$(curl -s -o "$WORK/formal-sub.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -H 'content-type: application/json' -d "{\"idempotency_key\":\"f2\",\"kind\":\"formal\",\"contract_id\":\"$CT\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\",\"runner_profile_id\":\"profile_isolated_subprocess_v1\",\"runner_target_id\":\"target_local_process_v1\"}")
+FORMAL_ERR=$(node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).error?.code??'')}catch(e){console.log('')}})" < "$WORK/formal-sub.json")
+[[ "$FORMAL_SUB" == "422" && "$FORMAL_ERR" == "container_execution_required" ]] && ok "formal + subprocess override rejected at Kernel admission (422 container_execution_required)" || bad "formal subprocess expected 422 container_execution_required, got HTTP $FORMAL_SUB ($FORMAL_ERR)"
 
 echo "== non-echo must-execute-real-code / message-only rejected =="
 # RUN-02: smoke defaults to container — the subprocess runner only accepts
 # smoke jobs explicitly marked payload.trusted_fixture=true (execution-runtime.md
 # §1). This message-only fixture is marked trusted so the test exercises the
 # empty-command invariant below, not the container gate.
-J2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"b1","kind":"smoke","payload":{"trusted_fixture":true,"message":"{\"metric\":\"f1\",\"value\":0.8}"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+J2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"b1","kind":"smoke","runner_profile_id":"profile_isolated_subprocess_v1","runner_target_id":"target_local_process_v1","payload":{"trusted_fixture":true,"message":"{\"metric\":\"f1\",\"value\":0.8}"}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 for _ in $(seq 1 60); do
   S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J2" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
   [[ "$S" == "failed" ]] && break
@@ -178,7 +173,7 @@ echo "== smoke-rejects-host-subprocess (RUN-02: smoke defaults to container) =="
 # would `touch` a host marker file — if the runner ever executed it on the
 # host, the marker would exist and the assertion below fails loudly.
 MARKER="/tmp/dsh-smoke-host-executed-$RANDOM"
-J3=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"s1\",\"kind\":\"smoke\",\"payload\":{\"script\":\"touch $MARKER\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+J3=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"s1\",\"kind\":\"smoke\",\"runner_profile_id\":\"profile_isolated_subprocess_v1\",\"runner_target_id\":\"target_local_process_v1\",\"payload\":{\"script\":\"touch $MARKER\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 for _ in $(seq 1 60); do
   S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J3" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
   [[ "$S" == "failed" ]] && break
@@ -197,7 +192,7 @@ else
 fi
 
 echo "== smoke-trusted-fixture-ok (RUN-02: explicit trusted fixture may use subprocess) =="
-J4=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"s2","kind":"smoke","payload":{"trusted_fixture":true,"script":"echo \"{\\\"metric\\\":\\\"f1\\\",\\\"value\\\":0.5}\""}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
+J4=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"s2","kind":"smoke","runner_profile_id":"profile_isolated_subprocess_v1","runner_target_id":"target_local_process_v1","payload":{"trusted_fixture":true,"script":"echo \"{\\\"metric\\\":\\\"f1\\\",\\\"value\\\":0.5}\""}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 for _ in $(seq 1 60); do
   S=$(api "http://127.0.0.1:$PORT/v1/jobs/$J4" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
   [[ "$S" == "succeeded" ]] && break
@@ -224,7 +219,7 @@ for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT2/v1/health" > /dev/nul
 nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT2" --owner harden2 --poll-ms 150 --timeout-ms 30000 --heartbeat-ms 1500 --cancel-poll-ms 1000 > "$WORK/runner2.log" 2>&1 &
 RUNNER2_PID=$!
 sleep 0.5
-PROJ2=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects" -d "{\"name\":\"harden2\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+PROJ2=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects" -d "{\"name\":\"harden2\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\",\"runner_target_id\":\"target_local_process_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 ok "durable-jobs project $PROJ2"
 
 # Long-running subprocess (node timeout 90s; the runner's 30s timeout would

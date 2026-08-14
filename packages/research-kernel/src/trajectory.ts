@@ -50,7 +50,7 @@ export const TRAJECTORY_SUMMARY_MAX_CHARS = 240
 export const BREADCRUMB_MAX_DEPTH = 32
 
 /** Terminal child states that pin `ended_at` once. */
-const TERMINAL_CHILD_STATES: ReadonlySet<ChildState> = new Set(['succeeded', 'failed', 'redacted'])
+const TERMINAL_CHILD_STATES: ReadonlySet<ChildState> = new Set(['succeeded', 'failed', 'cancelled', 'redacted'])
 
 /** Migration 0013 DDL — shared with migrations.ts so both connections
  * converge (CREATE IF NOT EXISTS + additive = idempotent). */
@@ -334,7 +334,7 @@ function nodeFromRow(row: ChildLinkNodeRow): TopologyNode {
     summary: redactTrajectorySummary(row.summary),
     kind: row.kind === 'task' ? 'task' : 'subagent',
     mode: (['one-shot', 'continuable', 'read-only'].includes(row.mode) ? row.mode : 'one-shot') as ChildMode,
-    state: (['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown'].includes(row.state) ? row.state : 'unknown') as ChildState,
+    state: (['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'cancelled', 'redacted', 'unknown'].includes(row.state) ? row.state : 'unknown') as ChildState,
     role: row.role,
     started_at: row.created_at,
     ended_at: row.ended_at,
@@ -354,7 +354,7 @@ function linkFromRow(row: ChildLinkRow): ChildLink {
     summary: redactTrajectorySummary(row.summary),
     kind: row.kind === 'task' ? 'task' : 'subagent',
     mode: (['one-shot', 'continuable', 'read-only'].includes(row.mode) ? row.mode : 'one-shot') as ChildMode,
-    state: (['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown'].includes(row.state) ? row.state : 'unknown') as ChildState,
+    state: (['running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'cancelled', 'redacted', 'unknown'].includes(row.state) ? row.state : 'unknown') as ChildState,
     role: row.role,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -485,11 +485,22 @@ export class TrajectoryStore {
   registerChildLink(input: ChildLinkInput): ChildLink {
     this.assertProject(input.project_id)
     const now = new Date().toISOString()
-    const existing = this.db.prepare('SELECT child_id FROM child_links WHERE child_id = ?').get(input.child_id) as { child_id: string } | undefined
+    const existing = this.db.prepare('SELECT child_id, project_id, parent_id, state FROM child_links WHERE child_id = ?').get(input.child_id) as {
+      child_id: string
+      project_id: string
+      parent_id: string | null
+      state: ChildState
+    } | undefined
+    const requestedParent = input.parent_id ?? null
+    if (existing !== undefined && (existing.project_id !== input.project_id || existing.parent_id !== requestedParent)) {
+      throw new KernelError(409, 'child_link_conflict', `subagent child ${input.child_id} is already bound to another project or parent`)
+    }
     const summary = redactTrajectorySummary(input.summary)
+    const initialState = input.state ?? 'running'
+    const initialEndedAt = TERMINAL_CHILD_STATES.has(initialState) ? now : null
     this.db.prepare(
       `INSERT INTO child_links (child_id, project_id, parent_id, label, summary, kind, mode, state, role, created_at, updated_at, ended_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(child_id) DO UPDATE SET
          project_id = excluded.project_id,
          parent_id = excluded.parent_id,
@@ -501,12 +512,12 @@ export class TrajectoryStore {
          updated_at = excluded.updated_at`,
     ).run(
       input.child_id, input.project_id, input.parent_id ?? null, input.label ?? null, summary,
-      input.kind ?? 'subagent', input.mode ?? 'one-shot', input.state ?? 'running', input.role ?? null,
-      now, now,
+      input.kind ?? 'subagent', input.mode ?? 'one-shot', initialState, input.role ?? null,
+      now, now, initialEndedAt,
     )
     const kind = input.kind ?? 'subagent'
     const mode = input.mode ?? 'one-shot'
-    const state = input.state ?? 'running'
+    const state = initialState
     if (existing === undefined) {
       this.appendHistory(input.child_id, 'started', { label: input.label, mode, kind, state, project_id: input.project_id, child_id: input.child_id })
       this.emitEvent(input.project_id, 'trajectory.child.started', {
@@ -530,13 +541,22 @@ export class TrajectoryStore {
    * the first terminal state. Never touches child_followups/history reads. */
   updateChildState(childId: string, state: ChildState, detail?: string): ChildLink {
     const row = this.assertChild(childId)
+    if (TERMINAL_CHILD_STATES.has(row.state as ChildState)) {
+      if (row.state === state) return this.getChildLink(childId)
+      throw new KernelError(409, 'child_state_terminal', `subagent child ${childId} is already terminal (${row.state})`)
+    }
     const now = new Date().toISOString()
     const terminal = TERMINAL_CHILD_STATES.has(state)
-    this.db.prepare(
+    const changed = this.db.prepare(
       `UPDATE child_links SET state = ?, updated_at = ?,
          ended_at = CASE WHEN ? THEN COALESCE(child_links.ended_at, ?) ELSE child_links.ended_at END
-       WHERE child_id = ?`,
+       WHERE child_id = ? AND state NOT IN ('succeeded','failed','cancelled','redacted')`,
     ).run(state, now, terminal ? 1 : 0, terminal ? now : null, childId)
+    if (changed.changes === 0) {
+      const current = this.getChildLink(childId)
+      if (current.state === state) return current
+      throw new KernelError(409, 'child_state_terminal', `subagent child ${childId} is already terminal (${current.state})`)
+    }
     this.appendHistory(childId, 'state', { state, detail: detail ?? null, child_id: childId })
     this.emitEvent(row.project_id, 'trajectory.child.updated', { child_id: childId, state, detail: detail ?? null })
     return this.getChildLink(childId)

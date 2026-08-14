@@ -51,12 +51,17 @@ import { DiskCache } from '@dsh-scholar/scholar-connectors'
 import { KernelSidecar, resolveDshHome } from './sidecar.js'
 import { registerResearchTools } from './tools.js'
 import { registerResearchCommands } from './commands.js'
-import { RoleRegistry, RESEARCH_TOOLS, type ResearchRole } from './acl.js'
+import { RoleRegistry, RESEARCH_TOOLS, stageProjectScopeDenial, type ResearchRole } from './acl.js'
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
 import { createScholarRpcHandler } from './settings-rpc.js'
 import { createHarnessChatTurn, type HarnessChatTurnReply } from './chat-turn.js'
 import { buildScholarSessionProjection, type ScholarSessionProjection } from '../shared/research-stage.js'
+import {
+  DEFAULT_STAGE_SUBAGENT_CONFIG,
+  StageSubagentCoordinator,
+  type StageSubagentConfig,
+} from './stage-subagents.js'
 import {
   DEFAULT_STANDALONE_SHORTCUT,
   DEFAULT_STANDALONE_URL,
@@ -88,6 +93,8 @@ export interface ResearchPluginConfig {
   unattended?: boolean
   /** Per-role model routing for spawned panel children (design §8.5). */
   models?: Record<string, string>
+  /** Stage-aware, bounded DSH subagent execution. Disabled until explicitly enabled. */
+  subagents?: Partial<StageSubagentConfig>
   /** Directory for connector response caches (defaults under dataDir). */
   cacheDir?: string
   /** Standalone workbench launcher shown by the DSH browser half. */
@@ -99,9 +106,10 @@ export interface ResearchPluginConfig {
 
 type ConfigIssue = { message: string; path: PropertyKey[] }
 
-const ROOT_CONFIG_KEYS = new Set(['kernel', 'defaultMode', 'unattended', 'models', 'cacheDir', 'standalone'])
+const ROOT_CONFIG_KEYS = new Set(['kernel', 'defaultMode', 'unattended', 'models', 'subagents', 'cacheDir', 'standalone'])
 const KERNEL_CONFIG_KEYS = new Set(['host', 'port', 'dataDir', 'token'])
 const STANDALONE_CONFIG_KEYS = new Set(['url', 'shortcut'])
+const SUBAGENT_CONFIG_KEYS = new Set(['enabled', 'provider', 'maxConcurrency', 'maxFanoutPerAction', 'maxDepth', 'timeoutMs', 'maxOutputBytes'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -127,6 +135,13 @@ function unknownConfigIssues(value: unknown): ConfigIssue[] {
     for (const key of Object.keys(value.standalone)) {
       if (!STANDALONE_CONFIG_KEYS.has(key)) {
         issues.push({ message: `unknown config key "standalone.${key}"`, path: ['standalone', key] })
+      }
+    }
+  }
+  if (isRecord(value.subagents)) {
+    for (const key of Object.keys(value.subagents)) {
+      if (!SUBAGENT_CONFIG_KEYS.has(key)) {
+        issues.push({ message: `unknown config key "subagents.${key}"`, path: ['subagents', key] })
       }
     }
   }
@@ -197,6 +212,22 @@ export const Config: z<ResearchPluginConfig> = strictPluginConfig(z.object({
     .description('Park at human gates instead of waiting for interactive answers.'),
   models: z.dict(z.string().min(1)).default({})
     .description('Per-role model routing for research subagents.'),
+  subagents: z.object({
+    enabled: z.boolean().default(false)
+      .description('Enable stage-aware DSH subagent panels; disabled is the fail-closed default.'),
+    provider: z.union(['spawn'] as const).default('spawn')
+      .description('One-shot DSH subagent provider.'),
+    maxConcurrency: z.natural().min(1).max(16).default(4)
+      .description('Maximum concurrent panel children across this plugin instance.'),
+    maxFanoutPerAction: z.natural().min(1).max(16).default(6)
+      .description('Maximum perspectives accepted by one stage action.'),
+    maxDepth: z.union([1] as const).default(1)
+      .description('Absolute subagent delegation depth cap; stage panels do not recurse.'),
+    timeoutMs: z.natural().min(1_000).max(3_600_000).default(300_000)
+      .description('Per-child timeout in milliseconds.'),
+    maxOutputBytes: z.natural().min(1_024).max(1_048_576).default(131_072)
+      .description('Maximum validated structured output bytes per child.'),
+  }).default({} as never).description('Stage-aware DSH subagent execution policy.'),
   cacheDir: z.string().min(1).description('Connector response cache directory.'),
   standalone: z.object({
     url: z.string().min(1).default(DEFAULT_STANDALONE_URL)
@@ -367,6 +398,11 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   const cacheDir = effectiveConfig.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
   const cache = new DiskCache(cacheDir)
   const roles = new RoleRegistry()
+  const projectScopes = new Map<string, string>()
+  const stageSubagents = new StageSubagentCoordinator({
+    ...DEFAULT_STAGE_SUBAGENT_CONFIG,
+    ...effectiveConfig.subagents,
+  })
 
   const projectionReader = async (sessionId: string, signal: AbortSignal): Promise<ScholarSessionProjection> => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -408,7 +444,9 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     cache,
     ctx: ctx as never,
     roles,
+    projectScopes,
     modelFor: role => modelForRole(effectiveConfig, role),
+    stageSubagents,
     defaultMode: effectiveConfig.defaultMode ?? 'gate-only',
   })
 
@@ -420,6 +458,14 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
       const role = roles.get(agentId)
       if (!roles.allows(role, exec.name)) {
         return { kind: 'deny', reason: `research tool ${exec.name} is outside the ${role} role's tool surface (least privilege, design §4.1)` }
+      }
+      if (exec.name === 'research_panel') {
+        return { kind: 'ask', reason: 'Start the stage-aware subagent panel for the current ready research action?' }
+      }
+      const projectScope = projectScopes.get(agentId)
+      if (projectScope !== undefined) {
+        const denial = await stageProjectScopeDenial(projectScope, exec.arguments, async jobId => (await client.getJob(jobId)).project_id)
+        if (denial !== undefined) return { kind: 'deny', reason: denial }
       }
     }
     return next()

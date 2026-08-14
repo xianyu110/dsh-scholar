@@ -35,7 +35,7 @@ import type { ChildDetail, FollowupReceipt, TopologyChildren, TopologyNode } fro
  *  the topology namespace (zh/en parity); unknown future states render the
  *  raw wire value verbatim (§8 line 115). */
 export const CHILD_STATE_VALUES = [
-  'running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'redacted', 'unknown',
+  'running', 'inactive', 'diagnostic', 'succeeded', 'failed', 'cancelled', 'redacted', 'unknown',
 ] as const
 
 /** Wire child modes (ChildMode) with chrome copy in the topology namespace. */

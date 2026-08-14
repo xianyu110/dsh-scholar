@@ -173,7 +173,7 @@ Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 g
 - child 只产出 observation、proposal、draft、review finding 或 diagnostic，不能批准 Gate、提交正式 Runner、接受 Evidence、支撑 Claim、合并 canonical manuscript 或发布；
 - 每次 fan-out 必须钉定 project/session/revision/NextAction/snapshot/config/model，校验 exact live parent、membership、pending Gate、幂等、预算、并发和 allowlist；fan-in 后再次校验，过期结果不得回写权威对象；
 - DSH child 使用公开 ctx.subagents 一次性 spawn、maxDepth=1 和最小 tool filter；所有路径必须 dispose，并把 running/terminal state 回写既有 observational topology；
-- 当前 research_panel 只有基础并行启动，未完成上述生命周期、阶段准入与预算闭环；完整生成级契约见 subagent-stage-execution.md。
+- 当前 research_panel 已部分完成 Survey/Idea/Evidence/Writing/Review 的阶段 policy、DSH Host `ask` 审批、生命周期与 topology 回写，但 durable confirmation receipt、原子预算/四桶对账、durable idempotency、十阶段覆盖和真实宿主验收未完成，默认关闭；child 工具必须绑定创建时 project scope，取消/超时/重注册与 stale fan-in 均 fail closed。完整生成级契约见 subagent-stage-execution.md。
 
 ### 5.11 Model Provider 与 OCR
 

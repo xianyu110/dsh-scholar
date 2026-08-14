@@ -23,7 +23,7 @@ import { RUNNER_TARGET_DDL, seedBuiltinRunnerTargets } from './runner-target-reg
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 20
+export const SCHEMA_VERSION = 21
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1187,6 +1187,41 @@ const reproductionTables = (db: DatabaseSync, report: MigrationReport): void => 
 }
 
 /**
+ * 0024 — SUBAGENT-STAGE-02: cancelled is a durable terminal child state.
+ * SQLite cannot widen a CHECK constraint in place, so rebuild child_links
+ * while preserving ids, timestamps and the child_history/followup FKs.
+ */
+const topologyCancelledState = (db: DatabaseSync, report: MigrationReport): void => {
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'child_links'").get() as { sql: string } | undefined
+  if (table !== undefined && !table.sql.includes("'cancelled'")) {
+    db.exec([
+      "CREATE TABLE child_links_0024 (child_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, label TEXT, summary TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'subagent', mode TEXT NOT NULL DEFAULT 'one-shot', state TEXT NOT NULL DEFAULT 'running', role TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ended_at TEXT, FOREIGN KEY (project_id) REFERENCES projects(project_id), CHECK (kind IN ('subagent','task')), CHECK (mode IN ('one-shot','continuable','read-only')), CHECK (state IN ('running','inactive','diagnostic','succeeded','failed','cancelled','redacted','unknown')))",
+      "CREATE TABLE child_history_0024 (child_id TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', occurred_at TEXT NOT NULL, PRIMARY KEY (child_id, seq), FOREIGN KEY (child_id) REFERENCES child_links_0024(child_id))",
+      "CREATE TABLE child_followups_0024 (message_id TEXT PRIMARY KEY, child_id TEXT NOT NULL, project_id TEXT NOT NULL, request TEXT NOT NULL, request_hash TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'accepted_read_only', created_at TEXT NOT NULL, FOREIGN KEY (child_id) REFERENCES child_links_0024(child_id))",
+      'INSERT INTO child_links_0024 (child_id, project_id, parent_id, label, summary, kind, mode, state, role, created_at, updated_at, ended_at) SELECT child_id, project_id, parent_id, label, summary, kind, mode, state, role, created_at, updated_at, ended_at FROM child_links',
+      'INSERT INTO child_history_0024 (child_id, seq, event_id, event_type, payload, occurred_at) SELECT child_id, seq, event_id, event_type, payload, occurred_at FROM child_history',
+      'INSERT INTO child_followups_0024 (message_id, child_id, project_id, request, request_hash, status, created_at) SELECT message_id, child_id, project_id, request, request_hash, status, created_at FROM child_followups',
+      'DROP TABLE child_followups',
+      'DROP TABLE child_history',
+      'DROP TABLE child_links',
+      'ALTER TABLE child_links_0024 RENAME TO child_links',
+      'ALTER TABLE child_history_0024 RENAME TO child_history',
+      'ALTER TABLE child_followups_0024 RENAME TO child_followups',
+      'CREATE INDEX IF NOT EXISTS idx_child_links_project_parent ON child_links(project_id, parent_id)',
+      'CREATE INDEX IF NOT EXISTS idx_child_links_parent ON child_links(parent_id)',
+      'CREATE INDEX IF NOT EXISTS idx_child_history_seq ON child_history(child_id, seq)',
+      'CREATE INDEX IF NOT EXISTS idx_child_followups_child ON child_followups(child_id, created_at)',
+    ].join(';\n'))
+  }
+  const violations = db.prepare('PRAGMA foreign_key_check').all()
+  if (violations.length > 0) throw new Error('0024 topology rebuild violated foreign keys')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.child_links = Number((db.prepare('SELECT COUNT(*) AS n FROM child_links').get() as { n: number }).n)
+  report.rows.child_history = Number((db.prepare('SELECT COUNT(*) AS n FROM child_history').get() as { n: number }).n)
+  report.rows.child_followups = Number((db.prepare('SELECT COUNT(*) AS n FROM child_followups').get() as { n: number }).n)
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -1325,6 +1360,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'EXEC-ENV-02: configurable local-process/local-docker/remote-ssh runner targets with SecretRef-only connection metadata and revision CAS',
     body: `${runnerTargetRegistry.toString()}\n\n${RUNNER_TARGET_DDL}\n${seedBuiltinRunnerTargets.toString()}`,
     up: runnerTargetRegistry,
+  },
+  {
+    id: '0024_topology_cancelled_state',
+    description: 'SUBAGENT-STAGE-02: cancelled child topology state + rebuilt CHECK constraint',
+    body: topologyCancelledState.toString(),
+    up: topologyCancelledState,
   },
 ]
 

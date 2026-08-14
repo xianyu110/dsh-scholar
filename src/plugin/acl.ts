@@ -111,12 +111,42 @@ export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
 /** v2 §3.1: unknown/unregistered agents default to `none` (deny), NOT director. */
 export const DEFAULT_ROLE: ResearchRole = 'none'
 
+/** Fail-closed project fence for stage-subagent tool calls. The child may
+ * name its bound project explicitly, but may never use an arbitrary project
+ * or job id to escape that scope. */
+export async function stageProjectScopeDenial(
+  projectScope: string,
+  args: unknown,
+  projectForJob: (jobId: string) => Promise<string>,
+): Promise<string | undefined> {
+  const record = args !== null && typeof args === 'object' && !Array.isArray(args)
+    ? args as Record<string, unknown>
+    : {}
+  if (typeof record.project_id === 'string' && record.project_id !== '' && record.project_id !== projectScope) {
+    return 'stage subagent project scope does not match project_id'
+  }
+  if (typeof record.job_id === 'string' && record.job_id !== '') {
+    try {
+      if (await projectForJob(record.job_id) !== projectScope) {
+        return 'stage subagent project scope does not match job_id'
+      }
+    } catch {
+      return 'stage subagent job scope could not be verified'
+    }
+  }
+  return undefined
+}
+
 /** In-memory session → role registry (roles are set per session). */
 export class RoleRegistry {
   private readonly roles = new Map<string, ResearchRole>()
 
   set(sessionId: string, role: ResearchRole): void {
     this.roles.set(sessionId, role)
+  }
+
+  delete(sessionId: string): void {
+    this.roles.delete(sessionId)
   }
 
   get(sessionId: string | undefined): ResearchRole {

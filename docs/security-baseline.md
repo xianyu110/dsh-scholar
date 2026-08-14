@@ -115,6 +115,8 @@ Remote Runner 使用 mTLS service identity、target allowlist、签名 Execution
 - imported logs/results 仅为 Artifact + ImportedRunObservation/legacy Evidence；没有本 Kernel 接受的签名 Manifest 时要求 clean rerun/reanalysis；
 - Research Trajectory 只投影 Outbox；Session Trajectory 默认只返回 allowlisted summary。raw prompt、tool args/results、provider payload、cwd/env/secret 不得透明暴露；
 - subagent list/history/followup 服务端校验 exact parent/child/mode 和 project membership；history/cold read 不激活 Agent；one-shot、diagnostic、parent offline 或无 capability 必须只读；
+- 阶段 subagent 默认关闭；启用后每个 child 绑定创建时 project scope，允许工具拒绝跨项目显式 project/job 引用。internal topology bridge 同时要求 service token、`dsh-plugin` service principal、session→project 与 exact-parent fence，非规范 path 不得绕过 token；
+- 自报 `user_confirmed=true` 不是可信 Human receipt；独立、一次性、session/action/revision 绑定的确认凭据与原子预算预留未落地前，不得将阶段 fan-out 作为生产安全能力。task/completion/perspective 在进入 provider 前必须先脱敏；
 - Session detail 使用 redaction、bounded preview/CAS spill 和 TTL；purge 产生 redacted/gap 审计，不能删除对应 Kernel Outbox。
 
 ## 9.2 Standalone BFF 与本地监听

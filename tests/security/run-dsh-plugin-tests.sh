@@ -415,7 +415,10 @@ const { Context } = require('@deepseek-ai/cordis')
 const { ToolRuntime } = await import(`${repo}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`)
 const { CommandRuntime } = await import(`${repo}/node_modules/@deepseek-ai/dsh-commands/lib/index.js`)
 const { SkillRegistry } = await import(`${repo}/node_modules/@deepseek-ai/dsh-skill/lib/index.js`)
-const { default: SettingsLocal } = await import(`${repo}/node_modules/@deepseek-ai/dsh-settings-local/lib/index.js`)
+// Keep this fixture on the current Harness canonical provider. The former
+// dsh-settings-local workspace was removed/renamed; loading the real
+// dsh-settings-file provider ensures the required settings service is active.
+const { default: SettingsFile } = await import(`${repo}/node_modules/@deepseek-ai/dsh-settings-file/lib/index.js`)
 const pluginMod = await import(`${repo}/lib/plugin/index.js`)
 const { readFileSync, mkdtempSync, rmSync, existsSync } = await import('node:fs')
 const { tmpdir } = await import('node:os')
@@ -435,7 +438,7 @@ async function makeHost(dataDir) {
   await root.plugin(ToolRuntime, { mode: 'native' })
   await root.plugin(CommandRuntime)
   await root.plugin(SkillRegistry)
-  await root.plugin(SettingsLocal, { path: join(dataDir, 'settings.yaml'), watch: false })
+  await root.plugin(SettingsFile, { path: join(dataDir, 'settings.yaml'), watch: false })
   root.provide('subagents', { start: async () => { throw new Error('fixture has no subagent backend') } })
   return root
 }

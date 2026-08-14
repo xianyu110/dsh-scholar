@@ -33,6 +33,14 @@ kernel:
   startSidecar: true
 defaultMode: gate-only
 unattended: false
+subagents:
+  enabled: false
+  provider: spawn
+  maxConcurrency: 4
+  maxFanoutPerAction: 6
+  maxDepth: 1
+  timeoutMs: 300000
+  maxOutputBytes: 131072
 skills:
   includeCore: true
   includeDomains: [machine-learning, data-science]
@@ -84,7 +92,7 @@ DSH 本体 Chat 的自然语言入口与 iframe 的无工具 LLM bridge 是两�
 
 命令只是 ResearchClient adapter，不重复业务逻辑。它使用 invocation.agent.id 解析 session link。错误输出 research: 加稳定错误摘要，不能泄漏内部路径、Token 或上游响应。帮助文本与 i18n 资源生成；宿主命令描述若在注册时固化语言，locale change 时重新注册或保持语言无关。
 
-本地开发可运行 `scripts/link-dsh-deps.sh` 解析当前 DSH checkout；脚本必须链接 `@deepseek-ai/*`（包括当前 DSH 的 `@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery`）与 vendored `@cordisjs/*`/`cosmokit`，并且只替换因 DSH 包目录重组产生的 dangling symlink，不覆盖仍有效的链接或真实安装包。该链接只用于本地 typecheck，不能作为 DSH 兼容性 PASS；发布兼容性仍必须由 `tests/integration/run-dsh-private-registry-tests.sh` 在全新目录和全新 DSH_HOME 中安装固定私有 `@deepseek-ai/*` 包验证。
+本地开发可运行 `scripts/link-dsh-deps.sh` 解析当前 DSH checkout；脚本必须链接 `@deepseek-ai/*`（包括当前 DSH 的 `@deepseek-ai/cordis`、`@deepseek-ai/schemastery` 与设置 provider）与 vendored `@cordisjs/*`/`cosmokit`，并且只替换因 DSH 包目录重组产生的 dangling symlink，不覆盖仍有效的链接或真实安装包。当前 Harness checkout 的文件设置 provider canonical 包名是 `@deepseek-ai/dsh-settings-file`；宿主生命周期夹具必须跟随 checkout 的 canonical provider，不得继续依赖已经移除的 `@deepseek-ai/dsh-settings-local`。该链接只用于本地 typecheck 与 checkout 夹具反馈，不能作为 DSH 发布兼容性 PASS；发布兼容性仍必须由 `tests/integration/run-dsh-private-registry-tests.sh` 在全新目录和全新 DSH_HOME 中安装固定私有 `@deepseek-ai/*` 包验证。
 
 每个发布 Skill 的 YAML frontmatter 必须能被当前私有 `dsh-skill-filesystem` 严格解析；含 `: ` 等 YAML 指示符的 description 必须引用。兼容测试必须从 `ctx.skills.list()` 公共接口核对四个 Skill，而不能读取内部 provider collection。
 
@@ -104,11 +112,15 @@ ctx.subagents 用于短周期文献、Idea 和 Reviewer Panel。长实验、等�
 
 research_panel 必须：
 
+- 默认关闭；启用后每次调用先经过 DSH Host `ask`，模型不能用输入布尔值冒充用户确认；
 - 使用有界 perspectives 数量和 completion；
 - Promise.allSettled 保留部分成功和失败；
 - 将 API/模型用量写预算；
 - 外部文本保持 untrusted；
 - 返回结构化面板结果而不是让子代理直接写权威状态。
+- child session 绑定固定 project scope，显式 foreign project/job id 在 `tools/pre-execute` fail closed；timeout/cancel 优先于延迟 completed，terminal update 与 dispose 并行有界；stale fan-in 丢弃 structured members。
+
+当前预算只在已启动 child 完成后记录 `api_requests`；DSH 公共 SubagentResult 未提供可信四桶 token/cost，Kernel 也尚无 panel 原子 reserve/reconcile，所以这一轮不能宣称预算闭环或崩溃恢复。进程内同 action 只允许一个 panel、同 idempotency key 稳定 replay 只是 fail-closed 临时边界，不替代 durable ledger。
 
 每次 `ctx.subagents.start` 保存 exact parent session、child session、role/kind、one-shot/continuable、created_at 与 safe refs。standalone Topology 只通过 BFF adapter 列 direct children、分页读取 cold history，读取不得激活 Agent；进入 child 使用 parent+child+mode address 和 breadcrumb。continuable follow-up 必须由服务端重新验证 exact live parent、项目 membership 和 capability；首版浏览器不提供 spawn/stop/cancel。
 
