@@ -52,7 +52,7 @@ export const ProviderCapability = z.enum(['chat', 'vision', 'ocr', 'embedding'])
 export type ProviderCapability = z.infer<typeof ProviderCapability>
 
 /** Provider kind（展示/分类用途；执行层由 capabilities 决定）。 */
-export const ProviderKind = z.enum(['openai-compatible', 'anthropic', 'google', 'local', 'custom'])
+export const ProviderKind = z.enum(['openai-compatible', 'anthropic', 'google', 'local', 'mineru', 'custom'])
 export type ProviderKind = z.infer<typeof ProviderKind>
 
 /**
@@ -78,7 +78,8 @@ export const ProviderDescriptor = z.object({
   capabilities: z.array(ProviderCapability).min(1).default(['chat']),
   models: z.array(ProviderModel).default([]),
   revision: z.number().int().positive().default(1),
-  credential: SecretRef,
+  /** Optional for providers/modes that do not authenticate (for example MinerU Flash). */
+  credential: SecretRef.optional(),
   /** 创建者（instance 级管理面；响应不包含 secret 值）。 */
   created_by: z.string().default(''),
   created_at: z.string(),
@@ -99,7 +100,8 @@ export const ProviderCreateInput = z.object({
     display_name: z.string().max(256).optional(),
     capabilities: z.array(ProviderCapability).min(1).default(['chat']),
   }).strict()).default([]),
-  credential: SecretRef,
+  /** Optional for no-auth providers; precision modes can attach a server-side SecretRef. */
+  credential: SecretRef.optional(),
 }).strict()
 export type ProviderCreateInput = z.infer<typeof ProviderCreateInput>
 
@@ -116,7 +118,8 @@ export const ProviderUpdateInput = z.object({
     display_name: z.string().max(256).optional(),
     capabilities: z.array(ProviderCapability).min(1).default(['chat']),
   }).strict()).optional(),
-  credential: SecretRef.optional(),
+  /** null explicitly removes the current SecretRef; omission preserves it. */
+  credential: SecretRef.nullable().optional(),
 }).strict()
 export type ProviderUpdateInput = z.infer<typeof ProviderUpdateInput>
 
@@ -150,6 +153,8 @@ export const ProjectModelBindingInput = z.object({
   purpose: BindingPurpose,
   provider_id: z.string().min(1),
   model_id: z.string().min(1),
+  /** Pins the exact provider revision selected by the configuration writer. */
+  expected_provider_revision: z.number().int().positive().optional(),
   /** 绑定 CAS：缺省时允许覆盖（首个绑定 revision=0）。 */
   expected_revision: z.number().int().nonnegative().optional(),
 }).strict()
@@ -161,6 +166,9 @@ export const PROVIDER_ERROR_CODES = [
   'provider_exists',
   'provider_revision_conflict',
   'provider_disabled',
+  'provider_contract_invalid',
+  'provider_credential_required',
+  'provider_credential_corrupt',
   'model_unknown',
   'provider_capability_missing',
   'provider_url_scheme_invalid',

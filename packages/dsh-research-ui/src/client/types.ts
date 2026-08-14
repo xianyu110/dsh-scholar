@@ -152,6 +152,38 @@ export interface ProjectRow { project_id?: string; name?: string; status?: strin
 
 export type RunnerTargetKindLite = 'local-process' | 'local-docker' | 'remote-ssh'
 export interface SecretRefViewLite { scheme: 'keyring' | 'file' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
+export type ProviderKindLite = 'openai-compatible' | 'anthropic' | 'google' | 'local' | 'mineru' | 'custom'
+export interface ProviderModelLite {
+  model_id: string
+  display_name?: string
+  capabilities: Array<'chat' | 'vision' | 'ocr' | 'embedding'>
+  revision: number
+}
+export interface ProviderSafeViewLite {
+  provider_id: string
+  display_name: string
+  kind: ProviderKindLite
+  base_url: string
+  enabled: boolean
+  capabilities: Array<'chat' | 'vision' | 'ocr' | 'embedding'>
+  models: ProviderModelLite[]
+  revision: number
+  credential?: SecretRefViewLite
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+export interface ProjectModelBindingLite {
+  project_id: string
+  purpose: 'chat' | 'ocr' | 'vision'
+  provider_id: string
+  model_id: string
+  provider_revision: number
+  provider_config_hash: string
+  revision: number
+  updated_by: string
+  updated_at: string
+}
 export interface RunnerTargetSafeViewLite {
   target_id: string
   display_name: string

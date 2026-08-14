@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -85,7 +85,9 @@ describe('private @deepseek-ai registry compatibility harness', () => {
   })
 
   it('keeps repository .npmrc free of registry credentials', () => {
-    const npmrc = readFileSync(join(repo, '.npmrc'), 'utf8')
+    const path = join(repo, '.npmrc')
+    if (!existsSync(path)) return
+    const npmrc = readFileSync(path, 'utf8')
     expect(npmrc).not.toContain('_authToken')
     expect(npmrc).not.toMatch(/^@deepseek-ai:registry=/m)
   })

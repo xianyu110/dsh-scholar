@@ -664,7 +664,7 @@ workspace 的每次 mutation 是**两种介质上的两个提交**：磁盘字�
 
 ## 11. Init、Intake upload、Provider 与 OCR 增量
 
-后续 migration 只追加、不改已发布 checksum，并至少包含：projects.brief_status（collecting/confirmed）；intake_artifact_stages（stage/intake/project/owner/file/expected size+hash/committed offset/state/temp uri/expiry/finalized artifact）；model_providers（global descriptor、SecretRef metadata、revision）；project_model_bindings（purpose/provider/model/revision）；ocr_requests（source/provider/model/config pin/status/result/safe error/idempotency）。
+已发布 migration 0021 包含 `model_providers`、模型目录与 projects 上的 model binding 列；`credential_json` 使用 JSON `null` 表达 no-auth，SecretRef metadata 表达有凭据，坏 JSON/坏 schema 必须 fail closed。MinerU 不另建旁路配置表：固定 descriptor 与当前项目 binding 均复用这些表。后续 migration 只追加、不改已发布 checksum，并至少补齐独立的 `ocr_requests`（source/provider/model/config pin/status/result/safe error/idempotency）；Provider 配置完成不得伪造 OCR request/result 行。
 
 stage 创建按 expected_size 事务预留 Intake 配额；finalize 与 intake_artifacts 写入原子，失败不泄漏权威 Artifact。Provider/OCR 记录不得保存 secret value。备份/恢复与 integrity scan 必须覆盖开放 stage offset/temp 文件、binding foreign key、OCR config pin 和终态 result ref；GC 只删除 expired/aborted 临时文件，不触碰已采用或共享 Blob。
 

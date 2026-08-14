@@ -155,9 +155,11 @@ sources 客户端镜像一起由 tests/unit/settings-model.test.ts 对真实注�
 
 ## 7. Model Provider 与 OCR 配置增量
 
-global scope 必须提供 `models.providers.*` 与 `onboarding.ocr.*` descriptor：Provider enable/base-url policy/catalog refresh/timeout、OCR provider/model/language/page/concurrency/retry，以及 `onboarding.upload.chunk_bytes`、`onboarding.upload.intake_total_bytes`。默认 chunk=8 MiB、最大=32 MiB；默认 Intake total=2 GiB、最大=10 GiB。安全字段只能由 instance/global 收紧，项目不能覆盖 endpoint 或 credential。
+Model Provider 是独立的 Provider Registry 权威资源，不写入通用 `CONFIG_REGISTRY`。当前已实现的首个内置 descriptor 只支持 MinerU：固定 `provider_id=mineru`、`kind=mineru`、官方 Open API origin、`flash/pipeline/vlm` 模型目录、启用状态、可选 SecretRef 与 revision；Settings 的「模型与 OCR」分组从 `/v1/providers*` 和当前项目 `/v1/projects/{id}/model-binding` 读写。Provider global 写与项目 binding 写均使用 revision CAS，并由 BFF 和 Kernel 两层限制为 PI/Operator。
 
-Provider credential 使用严格 SecretRef 存储层；项目仅保存 provider/model ID binding。Settings 的 Models & OCR 分组由 schema/provider API 生成，所有写入使用 revision CAS。运行中 OCR 固定 provider/model/config revision/hash，不因后续编辑漂移。精确 schema 与 fail-closed 规则见 `init-grill-upload-models.md`。
+项目仅保存 `purpose=ocr`、provider/model ID、Provider revision/config hash 快照，不保存 endpoint 或 credential。Flash 允许显式无凭据；Pipeline/VLM 必须提供严格 SecretRef，凭据 JSON 损坏必须 fail closed，不能被解释成“未配置”。Provider 与项目 binding 是两次非原子写，第二步失败时客户端必须明确显示部分成功并要求刷新重试。非幂等写不得由客户端自动重放。
+
+`onboarding.ocr.*` 的 language/page/concurrency/retry、OCR request/worker/status/provenance 仍是目标配置与执行面，当前未注册；不得因为 MinerU Provider/binding 保存成功就显示文件“已 OCR”。`onboarding.upload.chunk_bytes`、`onboarding.upload.intake_total_bytes` 的目标默认值仍分别为 8 MiB 和 2 GiB，最大值为 32 MiB 和 10 GiB。精确 schema 与 fail-closed 规则见 `init-grill-upload-models.md`。
 
 ## 8. Experiment Environment 与 Remote SSH Runner
 

@@ -61,6 +61,8 @@ Model Provider 是 instance/global 资源；项目和 Intake 只能引用 opaque
 
 Provider descriptor 至少包含 provider_id、display_name、kind、base_url、enabled、capabilities（chat/vision/ocr/embedding）、可选 models 目录、revision 和 credential `SecretRef`。自定义 base URL 由服务端执行 URL 解析、scheme/host/redirect/DNS/代理 allowlist 与 SSRF 校验。浏览器响应只显示 SecretRef metadata 与 available 布尔值，不返回 secret value。
 
+OCR-CONFIG-01 的首个内置 descriptor 是 MinerU：固定 `provider_id=mineru`、`kind=mineru`、官方 Open API 默认值 `https://mineru.net/api/v4` 和 `flash/pipeline/vlm` 模型目录。MinerU Flash 可省略 credential；Pipeline/VLM 绑定前必须存在 SecretRef。该固定契约由 Kernel 与 UI 双重校验，API 不能通过伪造 kind/id/catalog 绕过。当前 Settings 写面只完成 Provider 与项目 `purpose=ocr` binding；OCR request、worker、状态恢复与 provenance 仍未实现。
+
 ~~~typescript
 interface SecretRef {
   scheme: 'keyring' | 'file' | 'vault'
@@ -69,6 +71,8 @@ interface SecretRef {
   scope?: string
 }
 ~~~
+
+`credential` 本身可省略以表达明确的 no-auth provider/mode；一旦存在仍必须完全符合 SecretRef，更新时 `null` 表示移除引用。缺省 credential 与损坏/不可解析的 credential metadata 不是同一状态，后者必须 fail closed。
 
 SecretRef 是严格 schema，出现 `value`、token、password 或额外 credential 字段必须拒绝。Provider 修改使用 revision CAS，运行中的 OCR/Job/PTY/Build 固定创建时 provider/model/config revision/hash。
 

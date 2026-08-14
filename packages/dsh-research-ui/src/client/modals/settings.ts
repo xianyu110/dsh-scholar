@@ -1,4 +1,4 @@
-import type { ProjectExecutionSettingsLite, Projection, RunnerTargetKindLite, RunnerTargetSafeViewLite, SecretRefViewLite } from '../types'
+import type { ProjectExecutionSettingsLite, ProjectModelBindingLite, Projection, ProviderSafeViewLite, RunnerTargetKindLite, RunnerTargetSafeViewLite, SecretRefViewLite } from '../types'
 import { api, apiResult, base } from '../api'
 import { getLocale, registerOverlayRebuild, setLocale, t } from '../i18n/index'
 import { openShortcutsModal } from '../modals/commands'
@@ -17,6 +17,18 @@ import {
   type RunnerTargetSecretRefPayload,
   type RunnerTargetSecretRefScheme,
 } from '../runner-target-settings-model'
+import {
+  MINERU_MODEL_IDS,
+  mineruBindingWrite,
+  mineruProvider,
+  mineruProviderCreate,
+  mineruProviderUpdate,
+  mineruSettingsErrorKey,
+  mineruSettingsDraft,
+  type MineruModelId,
+  type MineruSecretRefScheme,
+  type MineruSettingsDraft,
+} from '../mineru-settings-model'
 /* ─────────────────────────── settings modal ─────────────────────────── */
 
 /**
@@ -69,15 +81,25 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
 
   // One kernel health probe serves the connection section; the CONFIG-01
   // surface (schema + effective) drives the dynamic config sections.
-  const [health, schema, effective, runnerTargets, activeProject] = await Promise.all([
+  const activeProjectId = state.projectId
+  const [health, schema, effective, runnerTargets, providerRead, activeProjectRead, modelBindingRead] = await Promise.all([
     api<{ ok?: boolean; instance?: string; config_pin?: string }>('/v1/health'),
     api<SettingsSchemaWire>('/v1/config/schema'),
     api<SettingsEffectiveWire>('/v1/config/effective'),
     api<RunnerTargetSafeViewLite[]>('/v1/runner-targets'),
-    state.projectId === undefined
+    apiResult<ProviderSafeViewLite[]>('/v1/providers'),
+    activeProjectId === undefined
       ? Promise.resolve(null)
-      : api<ProjectExecutionSettingsLite>(`/v2/projects/${encodeURIComponent(state.projectId)}`),
+      : apiResult<ProjectExecutionSettingsLite>(`/v2/projects/${encodeURIComponent(activeProjectId)}`),
+    activeProjectId === undefined
+      ? Promise.resolve(null)
+      : apiResult<ProjectModelBindingLite | null>(`/v1/projects/${encodeURIComponent(activeProjectId)}/model-binding`),
   ])
+  const providers = providerRead.ok ? providerRead.data : null
+  const activeProject = activeProjectRead === null ? null : activeProjectRead.ok ? activeProjectRead.data : null
+  const activeProjectLoadFailed = activeProjectRead !== null && !activeProjectRead.ok
+  const modelBinding = modelBindingRead === null ? null : modelBindingRead.ok ? modelBindingRead.data : null
+  const modelBindingLoadFailed = modelBindingRead !== null && !modelBindingRead.ok
   const hasConfig = schema !== null && effective !== null &&
     typeof effective.config === 'object' && effective.config !== null
   const dynamicSections = hasConfig && schema !== null && effective !== null
@@ -136,6 +158,220 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       }
       rowEl.appendChild(slot)
       body.appendChild(rowEl)
+    }
+    modal.appendChild(acc)
+  }
+
+  // OCR-CONFIG-01: one compact built-in Provider editor. The browser sends
+  // only descriptor metadata and optional SecretRef metadata; no token value
+  // is accepted by this form or returned by the Provider Registry.
+  {
+    const currentProvider = mineruProvider(providers)
+    const initial = mineruSettingsDraft(currentProvider, modelBinding)
+    const { acc, body } = makeAccordion(
+      'models-ocr',
+      t('shell', 'shell.settings.ocr.title'),
+      t('shell', 'shell.settings.ocr.summary'),
+      true,
+    )
+    const error = el('div', 'settings-readonly-note')
+    error.setAttribute('role', 'alert')
+    error.setAttribute('aria-live', 'assertive')
+    error.style.cssText = 'display:none;color:var(--tone-red)'
+    const setError = (message: string): void => {
+      error.textContent = message
+      error.style.display = message === '' ? 'none' : 'block'
+    }
+    body.appendChild(error)
+    if (providers === null) {
+      setError(t('shell', 'shell.settings.ocr.loadFailed'))
+    } else {
+      const form = el('div', 'settings-row settings-row-stack')
+      form.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);gap:8px'
+      const status = el('div', 'row')
+      status.style.cssText = 'justify-content:space-between;width:100%'
+      const providerIdentity = el('div')
+      providerIdentity.append(
+        el('div', 'settings-row-label', t('shell', 'shell.settings.ocr.provider')),
+        el('div', 'muted', t('shell', 'shell.settings.ocr.providerHint')),
+      )
+      status.append(
+        providerIdentity,
+        el('span', 'settings-chip', currentProvider === undefined
+          ? t('shell', 'shell.settings.ocr.unconfigured')
+          : t('shell', 'shell.settings.ocr.configured', { revision: String(currentProvider.revision) })),
+      )
+
+      const providerName = document.createElement('input')
+      providerName.className = 'field-input mono'
+      providerName.value = 'MinerU'
+      providerName.disabled = true
+      providerName.setAttribute('aria-label', t('shell', 'shell.settings.ocr.provider'))
+
+      const enabled = document.createElement('input')
+      enabled.type = 'checkbox'
+      enabled.checked = initial.enabled
+      const enabledWrap = el('label', 'row')
+      enabledWrap.style.cssText = 'gap:8px'
+      enabledWrap.append(enabled, document.createTextNode(t('shell', 'shell.settings.ocr.enabled')))
+
+      const field = (labelKey: string, control: HTMLElement, hintKey?: string): HTMLElement => {
+        const wrapper = el('label')
+        wrapper.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0'
+        wrapper.append(el('span', 'settings-row-label', t('shell', labelKey)), control)
+        if (hintKey !== undefined) wrapper.appendChild(el('span', 'muted', t('shell', hintKey)))
+        return wrapper
+      }
+      const textInput = (value: string, placeholder = ''): HTMLInputElement => {
+        const input = document.createElement('input')
+        input.className = 'field-input mono'
+        input.value = value
+        input.placeholder = placeholder
+        input.style.cssText = 'width:100%;box-sizing:border-box'
+        return input
+      }
+      const baseUrl = textInput(initial.baseUrl)
+      baseUrl.type = 'url'
+
+      const model = document.createElement('select')
+      model.className = 'field-input'
+      model.disabled = activeProject === null || activeProjectLoadFailed || modelBindingLoadFailed
+      for (const modelId of MINERU_MODEL_IDS) {
+        const option = document.createElement('option')
+        option.value = modelId
+        option.textContent = t('shell', `shell.settings.ocr.model.${modelId}`)
+        option.selected = modelId === initial.modelId
+        model.appendChild(option)
+      }
+
+      const useCredential = document.createElement('input')
+      useCredential.type = 'checkbox'
+      useCredential.checked = initial.useCredential
+      const credentialToggle = el('label', 'row')
+      credentialToggle.style.cssText = 'gap:8px'
+      credentialToggle.append(useCredential, document.createTextNode(t('shell', 'shell.settings.ocr.credentialToggle')))
+
+      const credentialFields = el('div')
+      credentialFields.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:8px;border:1px solid var(--border);border-radius:var(--radius-sm)'
+      const scheme = document.createElement('select')
+      scheme.className = 'field-input mono'
+      for (const value of ['file', 'keyring', 'vault'] as const) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = value
+        option.selected = value === initial.credential.scheme
+        scheme.appendChild(option)
+      }
+      const credentialName = textInput(initial.credential.name, t('shell', 'shell.settings.targets.ref.namePlaceholder'))
+      const credentialVersion = textInput(initial.credential.version, t('shell', 'shell.settings.targets.ref.optionalPlaceholder'))
+      const credentialScope = textInput(initial.credential.scope, t('shell', 'shell.settings.targets.ref.optionalPlaceholder'))
+      credentialFields.append(
+        field('shell.settings.targets.ref.scheme', scheme),
+        field('shell.settings.targets.ref.name', credentialName),
+        field('shell.settings.targets.ref.version', credentialVersion),
+        field('shell.settings.targets.ref.scope', credentialScope),
+      )
+      const refreshCredential = (): void => { credentialFields.style.display = useCredential.checked ? 'grid' : 'none' }
+      useCredential.onchange = refreshCredential
+      model.onchange = () => {
+        if (model.value !== 'flash') useCredential.checked = true
+        refreshCredential()
+      }
+      refreshCredential()
+
+      const credentialState = currentProvider?.credential === undefined
+        ? null
+        : el('span', 'settings-chip', t('shell', currentProvider.credential.available
+          ? 'shell.settings.ocr.credentialAvailable'
+          : 'shell.settings.ocr.credentialUnavailable'))
+
+      const save = el('button', 'hbtn', t('shell', 'shell.settings.ocr.save')) as HTMLButtonElement
+      if (activeProjectLoadFailed || modelBindingLoadFailed) {
+        save.disabled = true
+        setError(t('shell', 'shell.settings.ocr.bindingLoadFailed'))
+      }
+      save.onclick = async () => {
+        setError('')
+        const draft: MineruSettingsDraft = {
+          enabled: enabled.checked,
+          baseUrl: baseUrl.value,
+          modelId: model.value as MineruModelId,
+          useCredential: useCredential.checked,
+          credential: {
+            scheme: scheme.value as MineruSecretRefScheme,
+            name: credentialName.value,
+            version: credentialVersion.value,
+            scope: credentialScope.value,
+          },
+        }
+        save.disabled = true
+        try {
+          if (activeProjectLoadFailed || modelBindingLoadFailed) {
+            setError(t('shell', 'shell.settings.ocr.bindingLoadFailed'))
+            return
+          }
+          const providerPayload = currentProvider === undefined
+            ? mineruProviderCreate(draft)
+            : mineruProviderUpdate(draft, currentProvider.revision)
+          // Validate the binding before the Provider mutation. The revision is
+          // replaced with the actual Provider write response below.
+          const bindingPayload = activeProject !== null && draft.enabled
+            ? mineruBindingWrite(draft, modelBinding, currentProvider?.revision ?? 1)
+            : null
+          const providerResult = currentProvider === undefined
+            ? await apiResult<ProviderSafeViewLite>('/v1/providers', {
+              method: 'POST', body: JSON.stringify(providerPayload),
+            })
+            : await apiResult<ProviderSafeViewLite>('/v1/providers/mineru', {
+              method: 'PATCH', body: JSON.stringify(providerPayload),
+            })
+          if (!providerResult.ok) {
+            setError(t('shell', mineruSettingsErrorKey(providerResult.error.code)))
+            return
+          }
+          if (activeProject !== null && bindingPayload !== null) {
+            const bindingResult = await apiResult<ProjectModelBindingLite>(
+              `/v1/projects/${encodeURIComponent(activeProject.project_id)}/model-binding`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                  ...bindingPayload,
+                  expected_provider_revision: providerResult.data.revision,
+                }),
+              },
+            )
+            if (!bindingResult.ok) {
+              setError(t('shell', 'shell.settings.ocr.providerSavedBindingFailed', {
+                reason: t('shell', mineruSettingsErrorKey(bindingResult.error.code)),
+              }))
+              return
+            }
+          }
+          overlay.remove()
+          void openSettingsModal(root)
+        } catch {
+          setError(t('shell', 'shell.settings.ocr.saveFailed'))
+        } finally {
+          save.disabled = false
+        }
+      }
+      form.append(
+        status,
+        providerName,
+        enabledWrap,
+        field('shell.settings.ocr.baseUrl', baseUrl, 'shell.settings.ocr.baseUrlHint'),
+        field('shell.settings.ocr.model', model, 'shell.settings.ocr.modelHint'),
+      )
+      if (activeProject === null && !activeProjectLoadFailed) {
+        form.appendChild(el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.noProject')))
+      }
+      form.append(credentialToggle, credentialFields)
+      if (credentialState !== null) form.appendChild(credentialState)
+      form.append(
+        el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.credentialHint')),
+        el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.executionPending')),
+        save,
+      )
+      body.appendChild(form)
     }
     modal.appendChild(acc)
   }

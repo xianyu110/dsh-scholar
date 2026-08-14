@@ -80,7 +80,10 @@ export type ApiResult<T> =
 export async function apiResult<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   const method = (init?.method ?? 'GET').toUpperCase()
   const isWrite = method !== 'GET' && method !== 'HEAD'
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Reads may be retried once. Writes are not automatically replayed because
+  // many kernel mutations use CAS rather than an Idempotency-Key.
+  const attempts = isWrite ? 1 : 2
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const response = await fetch(`${base()}${path}`, {
         ...init,
@@ -124,7 +127,9 @@ export async function apiResult<T>(path: string, init?: RequestInit): Promise<Ap
  */
 export async function apiMultipart<T>(path: string, form: FormData): Promise<ApiResult<T>> {
   const method = 'POST'
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Multipart uploads are state-changing POSTs. A transport error does not
+  // prove the server did not commit, so automatic replay is unsafe.
+  for (let attempt = 0; attempt < 1; attempt++) {
     try {
       const response = await fetch(`${base()}${path}`, {
         method,
@@ -150,10 +155,7 @@ export async function apiMultipart<T>(path: string, form: FormData): Promise<Api
         return { ok: false, error, status: response.status }
       }
       return { ok: true, data: (await response.json()) as T, status: response.status }
-    } catch {
-      // retry once on transport failures
-    }
+    } catch { /* caller may retry explicitly after reconciling server state */ }
   }
   return { ok: false, error: { code: 'network_error', message: 'request failed' }, status: 0 }
 }
-

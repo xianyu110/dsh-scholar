@@ -240,7 +240,7 @@ export function providerConfigHash(descriptor: {
   enabled: boolean
   capabilities: string[]
   models: Array<{ model_id: string; display_name?: string; capabilities: string[]; revision?: number }>
-  credential: SecretRef
+  credential?: SecretRef
 }): string {
   const canonical = JSON.stringify({
     provider_id: descriptor.provider_id,
@@ -252,7 +252,9 @@ export function providerConfigHash(descriptor: {
     models: [...descriptor.models]
       .map(m => ({ model_id: m.model_id, display_name: m.display_name ?? '', capabilities: [...m.capabilities].sort(), revision: m.revision ?? 1 }))
       .sort((a, b) => (a.model_id < b.model_id ? -1 : a.model_id > b.model_id ? 1 : 0)),
-    credential: { scheme: descriptor.credential.scheme, name: descriptor.credential.name, version: descriptor.credential.version ?? null, scope: descriptor.credential.scope ?? null },
+    credential: descriptor.credential === undefined
+      ? null
+      : { scheme: descriptor.credential.scheme, name: descriptor.credential.name, version: descriptor.credential.version ?? null, scope: descriptor.credential.scope ?? null },
   })
   return createHash('sha256').update(canonical).digest('hex')
 }
@@ -272,6 +274,46 @@ export function parseProviderModels(models: ProviderCreateInput['models'] | Prov
   return out
 }
 
+const MINERU_MODEL_CONTRACT = new Map<string, readonly string[]>([
+  ['flash', ['ocr']],
+  ['pipeline', ['ocr']],
+  ['vlm', ['ocr', 'vision']],
+])
+
+/** Enforce the first built-in OCR provider at the server boundary, not only in UI. */
+export function validateBuiltInProviderContract(descriptor: Pick<ProviderDescriptor,
+  'provider_id' | 'kind' | 'base_url' | 'capabilities' | 'models'>): void {
+  const isMineru = descriptor.provider_id === 'mineru' || descriptor.kind === 'mineru'
+  if (!isMineru) return
+  if (descriptor.provider_id !== 'mineru' || descriptor.kind !== 'mineru') {
+    throw new KernelError(422, 'provider_contract_invalid', 'the built-in MinerU provider must use provider_id and kind "mineru"')
+  }
+  if (descriptor.base_url.includes('?') || descriptor.base_url.includes('#')) {
+    throw new KernelError(422, 'provider_contract_invalid', 'the built-in MinerU provider URL must not contain query or fragment delimiters')
+  }
+  let parsed: URL
+  try { parsed = new URL(descriptor.base_url) } catch {
+    throw new KernelError(422, 'provider_contract_invalid', 'the built-in MinerU provider requires the official MinerU API URL')
+  }
+  const officialPath = parsed.pathname === '/api/v4' || parsed.pathname === '/api/v4/'
+  if (parsed.origin !== 'https://mineru.net' || !officialPath || parsed.search !== '' || parsed.hash !== '') {
+    throw new KernelError(422, 'provider_contract_invalid', 'the built-in MinerU provider requires the official https://mineru.net/api/v4 URL without query or fragment')
+  }
+  if (!descriptor.capabilities.includes('ocr') || !descriptor.capabilities.includes('vision')) {
+    throw new KernelError(422, 'provider_contract_invalid', 'the built-in MinerU provider must declare ocr and vision capabilities')
+  }
+  if (descriptor.models.length !== MINERU_MODEL_CONTRACT.size) {
+    throw new KernelError(422, 'provider_contract_invalid', 'the built-in MinerU provider model catalog must be flash, pipeline and vlm')
+  }
+  for (const model of descriptor.models) {
+    const expected = MINERU_MODEL_CONTRACT.get(model.model_id)
+    const actual = [...model.capabilities].sort()
+    if (expected === undefined || actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
+      throw new KernelError(422, 'provider_contract_invalid', `invalid MinerU model contract for ${model.model_id}`)
+    }
+  }
+}
+
 /**
  * 浏览器响应形态：credential → {scheme,name,version?,scope?,available}。
  * `name` 属配置数据保持原文（init-grill-upload-models.md §4）；value 无处
@@ -282,14 +324,19 @@ export function providerRedacted(
   descriptor: ProviderDescriptor,
   secretRoot: string | null,
 ): Omit<ProviderDescriptor, 'credential'> & {
-  credential: SecretRef & { available: boolean }
+  credential?: SecretRef & { available: boolean }
 } {
+  const { credential, ...safe } = descriptor
   return {
-    ...descriptor,
-    credential: {
-      ...descriptor.credential,
-      available: secretRefAvailable(descriptor.credential, secretRoot),
-    },
+    ...safe,
+    ...(credential === undefined
+      ? {}
+      : {
+          credential: {
+            ...credential,
+            available: secretRefAvailable(credential, secretRoot),
+          },
+        }),
   }
 }
 

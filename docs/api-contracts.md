@@ -344,7 +344,7 @@ zh/en 字典随 dsh-research-ui client bundle 发布，不由 Kernel 动态返�
 
 `accept` 只存在于 BFF Human 面；Agent tool schema 不生成该方法。scan/parser/LLM 永远不能直接 mutation Project。单文件 Artifact 上传与 research package intake 是两个明确入口，UI 不得把 internal Runner stage 暴露给用户。状态、映射、错误和幂等见 research-onboarding.md。
 
-兼容基线仍包括 v1 项目域 begin/list/resume、≤32 MiB multipart、scan/questions/answers/propose/adopt/reject。v2 name-only Grill、批量分块 stage、OCR 与 Provider 接口按 `init-grill-upload-models.md` 实现；自动测试通过但真实浏览器/大文件/模型服务未执行时必须标记“已实现未验收”，不能继续沿用“UI 不做分块”的旧状态说明。
+兼容基线仍包括 v1 项目域 begin/list/resume、≤32 MiB multipart、scan/questions/answers/propose/adopt/reject。v2 name-only Grill 与批量分块 stage 已实现；Provider Registry、MinerU 配置与项目 binding 使用当前 v1 adapter。上表 OCR request 是目标契约，当前未注册 route/worker/provenance，状态必须是“未实现”，不能仅记为真实服务 `NOT_RUN_MANUAL_PENDING`。
 
 ## 17. 通用 Workspace 与 Upload
 
@@ -404,6 +404,8 @@ Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY �
 | GET/POST | `/bff/research/model-providers` | global Provider 列表/创建；PI/Operator；SecretRef metadata only |
 | PATCH | `/bff/research/model-providers/{id}` | revision CAS；编辑、启停、能力/模型目录；不接受 secret value |
 | GET/PATCH | `/bff/research/projects/{id}/model-bindings` | 项目只选择 purpose/provider_id/model_id；revision CAS |
+
+当前兼容面使用 `/v1/providers*` 与 `/v1/projects/{id}/model-binding`。OCR-CONFIG-01 的首个内置 descriptor 为 `provider_id=mineru`、`kind=mineru`、默认 `base_url=https://mineru.net/api/v4`，模型目录固定为 `flash/pipeline/vlm`；credential 可省略（MinerU Flash）或为严格 SecretRef（精准模式），任何明文 token/value/password 继续拒绝。此处只定义 Provider/Binding 配置面；`/v2/intakes/{id}/ocr-requests` 在 worker 与 provenance 未落地前仍是目标路由，不得从配置成功推断 OCR 已执行。
 
 Remote Agent internal 面提供 enroll/heartbeat/capability/claim/CAS fetch/stage/complete；全部使用 mTLS service identity 与 ExecutionPlan signature。任何 target/profile/config 修改只影响新动作，不能改变运行中 Job/PTY/Build 的 pinned hash。
 

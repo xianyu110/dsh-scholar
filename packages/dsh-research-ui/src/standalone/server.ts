@@ -1547,6 +1547,35 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             proxyHeaders['x-principal-role'] = role
           }
         }
+        // OCR-CONFIG-01: Provider Registry writes are instance/global
+        // administration, matching runner-target configuration. The browser
+        // never supplies its own role; derive it from fresh memberships and
+        // forward only the server-owned principal metadata.
+        if (options.principal !== null && url.pathname.startsWith('/v1/providers')) {
+          proxyHeaders['x-principal-id'] = options.principal
+          if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            const role = await globalConfigRole()
+            if (role === null) {
+              sendJson(res, 403, bffError('role_forbidden', 'model provider configuration requires PI or operator role'))
+              return
+            }
+            proxyHeaders['x-principal-role'] = role
+          }
+        }
+        // Project OCR model binding is a PI/operator configuration write.
+        // Forward the durable browser principal so the Kernel can re-resolve
+        // current membership and record updated_by; never trust client headers.
+        if (options.principal !== null && /^\/v1\/projects\/[^/]+\/model-binding\/?$/.test(url.pathname)) {
+          proxyHeaders['x-principal-id'] = options.principal
+          if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            const role = memberProjectId === null ? null : await projectRole(memberProjectId)
+            if (role !== 'pi' && role !== 'operator') {
+              sendJson(res, 403, bffError('role_forbidden', 'model binding configuration requires PI or operator role'))
+              return
+            }
+            proxyHeaders['x-principal-role'] = role
+          }
+        }
         // PTY-01 (execution-runtime.md §6.1, hardening §5 P0-2): the kernel
         // demands the authenticated principal on EVERY pty operation — open,
         // session read, control and frames (fail-closed: 422

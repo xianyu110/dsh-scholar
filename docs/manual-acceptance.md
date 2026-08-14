@@ -103,6 +103,7 @@
 3. `MANUAL-EXECUTION-ENVIRONMENTS`：在 Settings 分别创建本机进程、本机 Docker、远程 SSH Target/Profile；验证 revision CAS、zh/en、secret 零回显和 safe health。trusted smoke 可选本机进程，formal 对本机进程必须拒绝；本机 Docker 验证 digest/non-root/read-only/network/resource；远程主机验证 host-key/SecretRef、容器同构、CAS/日志/Artifact、断网恢复。停机、错误 host key、撤权、能力不匹配时任务 blocked/retryable 且本机零执行；显式新 attempt 更换 target 后记录新 pin。保留脱敏 target revision/hash、RunManifest、日志和截图，不保存 credential。
 3. `MANUAL-PROVIDER-SECRET`：接私有测试 Provider，创建/编辑/禁用与 restart；确认 SecretRef 明文不出浏览器、argv、日志、Trajectory/Bundle；验证非法 URL/redirect/DNS/proxy；项目选择只提交 ID，运行固定 revision/hash。
 4. `MANUAL-OCR-PROVENANCE`：多页 PDF、扫描图片、中英混合、低置信度与 Provider 失败；无显式模型时不发请求、不回退；结果逐项显示 source/page/confidence，Grill 确认前不进入 Brief/Gate/Evidence。
+5. `MANUAL-MINERU-CONFIG`：在 zh/en 下打开 Settings「Models & OCR」，以无 Token 的 Flash 和 SecretRef 精准模式分别创建/编辑/禁用 MinerU，确认默认官方 API、`flash/pipeline/vlm` 目录、revision CAS、SecretRef available 状态和错误文案；在活动项目切换 OCR model，抓包确认只发送 provider/model ID。配置完成后页面不得把任何文件标成“已 OCR”，真实 OCR 执行仍归 `MANUAL-OCR-PROVENANCE`。
 
 每次 FAIL 先把 error code、重现条件和关闭验收补回 `init-grill-upload-models.md`、`acceptance-tests.md` 与 hardening，再修代码。
 

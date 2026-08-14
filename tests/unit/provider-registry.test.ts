@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
+import { ResearchKernel, KernelError, startKernelServer } from '@dsh-scholar/research-kernel'
 import type { ProviderCreateInput, ProviderUpdateInput, SecretRef } from '@dsh-scholar/research-schemas'
 
 function freshKernel(secretRoot: string | null = null, allowlist: { hosts?: string[]; allowLoopback?: boolean } = {}): ResearchKernel {
@@ -85,6 +85,133 @@ function nameOnlyProject(kernel: ResearchKernel): string {
 }
 
 describe('MODEL-01 provider CRUD + revision CAS', () => {
+  it('requires a durable PI/operator for HTTP Provider and project binding writes', async () => {
+    const kernel = freshKernel(null, { hosts: ['mineru.net'] })
+    const projectId = nameOnlyProject(kernel)
+    const { server, url } = await startKernelServer({ kernel, port: 0 })
+    const body = {
+      provider_id: 'mineru', display_name: 'MinerU', kind: 'mineru', base_url: 'https://mineru.net/api/v4',
+      enabled: true, capabilities: ['ocr', 'vision'],
+      models: [
+        { model_id: 'flash', capabilities: ['ocr'] },
+        { model_id: 'pipeline', capabilities: ['ocr'] },
+        { model_id: 'vlm', capabilities: ['ocr', 'vision'] },
+      ],
+    }
+    try {
+      const secretValue = await fetch(`${url}/v1/providers`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-principal-id': 'pi-1' },
+        body: JSON.stringify({ ...body, credential: { scheme: 'file', name: 'mineru-token', token: 'INLINE-SECRET' } }),
+      })
+      expect(secretValue.status).toBe(422)
+      expect(await secretValue.json()).toMatchObject({ error: { code: 'secret_value_forbidden' } })
+      const anonymous = await fetch(`${url}/v1/providers`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      })
+      expect(anonymous.status).toBe(403)
+      const created = await fetch(`${url}/v1/providers`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-principal-id': 'pi-1' }, body: JSON.stringify(body),
+      })
+      expect(created.status).toBe(201)
+      expect(await created.json()).not.toHaveProperty('credential')
+
+      const bindingBody = { purpose: 'ocr', provider_id: 'mineru', model_id: 'flash', expected_provider_revision: 1 }
+      const bindingAnonymous = await fetch(`${url}/v1/projects/${projectId}/model-binding`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bindingBody),
+      })
+      expect(bindingAnonymous.status).toBe(422)
+      const binding = await fetch(`${url}/v1/projects/${projectId}/model-binding`, {
+        method: 'PUT', headers: { 'content-type': 'application/json', 'x-principal-id': 'pi-1' }, body: JSON.stringify(bindingBody),
+      })
+      expect(binding.status).toBe(200)
+      expect(await binding.json()).toMatchObject({ provider_id: 'mineru', model_id: 'flash', updated_by: 'pi-1' })
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+    }
+  })
+
+  it('supports the built-in MinerU kind and no-auth Flash configuration', () => {
+    const kernel = freshKernel(null, { hosts: ['mineru.net'] })
+    const created = kernel.registerProvider(providerInput({
+      provider_id: 'mineru', display_name: 'MinerU', kind: 'mineru',
+      base_url: 'https://mineru.net/api/v4', capabilities: ['ocr', 'vision'],
+      models: [
+        { model_id: 'flash', capabilities: ['ocr'] },
+        { model_id: 'pipeline', capabilities: ['ocr'] },
+        { model_id: 'vlm', capabilities: ['ocr', 'vision'] },
+      ],
+      credential: undefined,
+    }))
+    expect(created.kind).toBe('mineru')
+    expect(created.credential).toBeUndefined()
+    expect(kernel.providerView(created)).not.toHaveProperty('credential')
+    const row = kernel.db.prepare('SELECT credential_json FROM model_providers WHERE provider_id = ?').get('mineru') as { credential_json: string }
+    expect(JSON.parse(row.credential_json)).toBeNull()
+  })
+
+  it('enforces the MinerU descriptor and precision credential server-side', () => {
+    const kernel = freshKernel(null, { hosts: ['mineru.net'] })
+    expectKernelError(() => kernel.registerProvider(providerInput({
+      provider_id: 'mineru', kind: 'mineru', base_url: 'https://mineru.net/api/v4',
+      capabilities: ['ocr', 'vision'], models: [{ model_id: 'pipeline', capabilities: ['ocr'] }], credential: undefined,
+    })), 422, 'provider_contract_invalid')
+    for (const base_url of [
+      'https://mineru.net/not-api',
+      'https://mineru.net/api/v4?token=inline',
+      'https://mineru.net/api/v4?',
+      'https://mineru.net/api/v4#secret',
+      'https://mineru.net/api/v4#',
+      'https://mineru.net:444/api/v4',
+    ]) {
+      expectKernelError(() => kernel.registerProvider(providerInput({
+        provider_id: 'mineru', kind: 'mineru', base_url, capabilities: ['ocr', 'vision'],
+        models: [
+          { model_id: 'flash', capabilities: ['ocr'] },
+          { model_id: 'pipeline', capabilities: ['ocr'] },
+          { model_id: 'vlm', capabilities: ['ocr', 'vision'] },
+        ], credential: undefined,
+      })), 422, 'provider_contract_invalid')
+    }
+    kernel.registerProvider(providerInput({
+      provider_id: 'mineru', display_name: 'MinerU', kind: 'mineru', base_url: 'https://mineru.net/api/v4',
+      capabilities: ['ocr', 'vision'],
+      models: [
+        { model_id: 'flash', capabilities: ['ocr'] },
+        { model_id: 'pipeline', capabilities: ['ocr'] },
+        { model_id: 'vlm', capabilities: ['ocr', 'vision'] },
+      ],
+      credential: undefined,
+    }))
+    const projectId = nameOnlyProject(kernel)
+    expectKernelError(() => kernel.setProjectModelBinding(projectId, {
+      purpose: 'ocr', provider_id: 'mineru', model_id: 'pipeline', expected_provider_revision: 1,
+    }), 422, 'provider_credential_required')
+    expectKernelError(() => kernel.setProjectModelBinding(projectId, {
+      purpose: 'ocr', provider_id: 'mineru', model_id: 'flash', expected_provider_revision: 2,
+    }), 409, 'provider_revision_conflict')
+    const bound = kernel.setProjectModelBinding(projectId, {
+      purpose: 'ocr', provider_id: 'mineru', model_id: 'flash', expected_provider_revision: 1,
+    })
+    expect(bound.provider_revision).toBe(1)
+    const credentialed = kernel.updateProvider('mineru', {
+      expected_revision: 1, credential: { scheme: 'file', name: 'mineru-token' },
+    })
+    expectKernelError(() => kernel.setProjectModelBinding(projectId, {
+      purpose: 'vision', provider_id: 'mineru', model_id: 'flash',
+      expected_provider_revision: credentialed.revision, expected_revision: bound.revision,
+    }), 422, 'provider_capability_missing')
+    expectKernelError(() => kernel.setProjectModelBinding(projectId, {
+      purpose: 'vision', provider_id: 'mineru', model_id: 'pipeline',
+      expected_provider_revision: credentialed.revision, expected_revision: bound.revision,
+    }), 422, 'provider_capability_missing')
+    const vision = kernel.setProjectModelBinding(projectId, {
+      purpose: 'vision', provider_id: 'mineru', model_id: 'vlm',
+      expected_provider_revision: credentialed.revision, expected_revision: bound.revision,
+    })
+    expect(vision).toMatchObject({ purpose: 'vision', model_id: 'vlm', provider_revision: 2, revision: 2 })
+  })
+
   it('registers a provider with its model catalog and bumps revision on update (CAS)', () => {
     const kernel = freshKernel(null, { hosts: ['models.example.com'] })
     const created = kernel.registerProvider(providerInput())
@@ -111,6 +238,16 @@ describe('MODEL-01 provider CRUD + revision CAS', () => {
     expectKernelError(() => kernel.deleteProvider('prov_ocr', 2), 409, 'provider_revision_conflict')
     kernel.deleteProvider('prov_ocr', 3)
     expectKernelError(() => kernel.getProvider('prov_ocr'), 404, 'provider_unknown')
+  })
+
+  it('distinguishes explicit no-auth from corrupt credential metadata', () => {
+    const kernel = freshKernel(null, { hosts: ['models.example.com'] })
+    kernel.registerProvider(providerInput())
+    const cleared = kernel.updateProvider('prov_ocr', { expected_revision: 1, credential: null })
+    expect(cleared.credential).toBeUndefined()
+    expect(kernel.providerView(cleared)).not.toHaveProperty('credential')
+    kernel.db.prepare('UPDATE model_providers SET credential_json = ? WHERE provider_id = ?').run('{bad-json', 'prov_ocr')
+    expectKernelError(() => kernel.getProvider('prov_ocr'), 500, 'provider_credential_corrupt')
   })
 
   it('rejects model capabilities the provider does not declare (422 provider_capability_missing)', () => {

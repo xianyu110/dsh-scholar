@@ -23,6 +23,7 @@ import {
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus, type ImportMapping,
   type ProjectDeletionReceipt,
+  SecretRef as SecretRefSchema,
   type ProviderDescriptor, type ProviderCreateInput, type ProviderUpdateInput, type SecretRef,
   type RunnerTargetCreateInput, type RunnerTargetDescriptor, type RunnerTargetUpdateInput,
   type ProjectModelBinding, type ProjectModelBindingInput, type BindingPurpose,
@@ -64,7 +65,7 @@ import { TrajectoryStore } from './trajectory.js'
 import { MetricsStore } from './metrics.js'
 import {
   validateSecretRefInput, validateProviderBaseUrl, providerConfigHash, providerRedacted,
-  secretRefAvailable, parseProviderModels, type ProviderUrlAllowlist,
+  secretRefAvailable, parseProviderModels, validateBuiltInProviderContract, type ProviderUrlAllowlist,
 } from './provider.js'
 import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
 import { RunnerTargetRegistry } from './runner-target-registry.js'
@@ -3842,6 +3843,18 @@ export class ResearchKernel {
 
   private providerFromRow(row: ModelProviderRow): ProviderDescriptor {
     const models = this.providerModels(row.provider_id)
+    let rawCredential: unknown
+    try { rawCredential = JSON.parse(row.credential_json) } catch {
+      throw new KernelError(500, 'provider_credential_corrupt', `model provider ${row.provider_id} has invalid credential metadata`)
+    }
+    let credential: SecretRef | undefined
+    if (rawCredential !== null) {
+      const parsed = SecretRefSchema.safeParse(rawCredential)
+      if (!parsed.success) {
+        throw new KernelError(500, 'provider_credential_corrupt', `model provider ${row.provider_id} has invalid credential metadata`)
+      }
+      credential = parsed.data
+    }
     return {
       provider_id: row.provider_id,
       display_name: row.display_name,
@@ -3856,7 +3869,7 @@ export class ResearchKernel {
         revision: m.model_revision,
       })),
       revision: row.revision,
-      credential: jsonParse(row.credential_json, { scheme: 'file', name: '' }) as SecretRef,
+      ...(credential === undefined ? {} : { credential }),
       created_by: row.created_by,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -3901,7 +3914,7 @@ export class ResearchKernel {
    * （非法 scheme/userinfo/私有网段/未 allowlist 主机 fail closed）。
    */
   registerProvider(input: ProviderCreateInput & { created_by?: string }): ProviderDescriptor {
-    validateSecretRefInput(input.credential)
+    if (input.credential !== undefined) validateSecretRefInput(input.credential)
     validateProviderBaseUrl(input.base_url, this.providerUrlAllowlist)
     const existing = this.db.prepare('SELECT provider_id FROM model_providers WHERE provider_id = ?').get(input.provider_id)
     if (existing !== undefined) {
@@ -3931,13 +3944,14 @@ export class ResearchKernel {
       created_at: now,
       updated_at: now,
     }
+    validateBuiltInProviderContract(descriptor)
     return withTransaction(this.db, () => {
       this.db.prepare(
         `INSERT INTO model_providers (provider_id, display_name, kind, base_url, enabled, capabilities, credential_json, revision, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         descriptor.provider_id, descriptor.display_name, descriptor.kind, descriptor.base_url,
-        descriptor.enabled ? 1 : 0, JSON.stringify(descriptor.capabilities), JSON.stringify(descriptor.credential),
+        descriptor.enabled ? 1 : 0, JSON.stringify(descriptor.capabilities), JSON.stringify(descriptor.credential ?? null),
         descriptor.revision, descriptor.created_by, descriptor.created_at, descriptor.updated_at,
       )
       for (const model of descriptor.models) {
@@ -3967,9 +3981,11 @@ export class ResearchKernel {
       enabled: input.enabled ?? current.enabled,
       capabilities: input.capabilities ?? current.capabilities,
       models: input.models !== undefined ? parseProviderModels(input.models) : current.models,
-      credential: input.credential ?? current.credential,
+      ...(input.credential === null
+        ? { credential: undefined }
+        : { credential: input.credential ?? current.credential }),
     }
-    validateSecretRefInput(next.credential)
+    if (next.credential !== undefined) validateSecretRefInput(next.credential)
     validateProviderBaseUrl(next.base_url, this.providerUrlAllowlist)
     for (const model of next.models) {
       for (const capability of model.capabilities) {
@@ -3979,6 +3995,7 @@ export class ResearchKernel {
         }
       }
     }
+    validateBuiltInProviderContract(next)
     next.revision = current.revision + 1
     next.updated_at = nowIso()
     return withTransaction(this.db, () => {
@@ -3986,7 +4003,7 @@ export class ResearchKernel {
         `UPDATE model_providers SET display_name = ?, kind = ?, base_url = ?, enabled = ?, capabilities = ?, credential_json = ?, revision = ?, updated_at = ? WHERE provider_id = ?`,
       ).run(
         next.display_name, next.kind, next.base_url, next.enabled ? 1 : 0, JSON.stringify(next.capabilities),
-        JSON.stringify(next.credential), next.revision, next.updated_at, providerId,
+        JSON.stringify(next.credential ?? null), next.revision, next.updated_at, providerId,
       )
       this.db.prepare('DELETE FROM model_provider_models WHERE provider_id = ?').run(providerId)
       for (const model of next.models) {
@@ -4067,15 +4084,23 @@ export class ResearchKernel {
     if (model === undefined) {
       throw new KernelError(422, 'model_unknown', `model ${input.model_id} is not in provider ${input.provider_id} catalog`)
     }
+    if (input.expected_provider_revision !== undefined && input.expected_provider_revision !== provider.revision) {
+      throw new KernelError(409, 'provider_revision_conflict',
+        `provider ${provider.provider_id} revision ${provider.revision} does not match expected ${input.expected_provider_revision}`)
+    }
+    if (provider.kind === 'mineru' && model.model_id !== 'flash' && provider.credential === undefined) {
+      throw new KernelError(422, 'provider_credential_required',
+        `MinerU ${model.model_id} requires a configured SecretRef`)
+    }
     const capability = input.purpose
-    if (!provider.capabilities.includes(capability) && !model.capabilities.includes(capability)) {
+    if (!model.capabilities.includes(capability)) {
       throw new KernelError(422, 'provider_capability_missing',
-        `provider ${input.provider_id} / model ${input.model_id} do not declare capability '${capability}'`)
+        `model ${input.model_id} in provider ${input.provider_id} does not declare capability '${capability}'`)
     }
     const existing = this.getProjectModelBinding(projectId)
-    if (input.expected_revision !== undefined && existing !== null && input.expected_revision !== existing.revision) {
+    if (input.expected_revision !== undefined && input.expected_revision !== (existing?.revision ?? 0)) {
       throw new KernelError(409, 'binding_revision_conflict',
-        `project ${projectId} model binding revision ${existing.revision} does not match expected ${input.expected_revision}`)
+        `project ${projectId} model binding revision ${existing?.revision ?? 0} does not match expected ${input.expected_revision}`)
     }
     const now = nowIso()
     const binding: ProjectModelBinding = {

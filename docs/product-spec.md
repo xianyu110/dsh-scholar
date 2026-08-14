@@ -155,6 +155,8 @@ LaTeX “实时预览”表示：成功保存后按可配置 debounce 创建可�
 ### 5.11 Model Provider 与 OCR
 
 - instance/global Provider Registry 支持内置与自定义 Provider；credential 只保存 SecretRef，项目只引用 provider/model ID；
+- 首个内置 OCR Provider 为 MinerU：Settings 的「Models & OCR」提供一个可折叠 MinerU 配置项，固定 `provider_id=mineru`，默认官方 Open API `https://mineru.net/api/v4`，模型目录为 `flash`、`pipeline`、`vlm`；Flash 允许无凭据，其他模式的凭据只能引用可选 SecretRef，浏览器和 Provider 记录均不得接收或回显明文 Token；
+- 当前项目可在同一配置项内选择 MinerU OCR model，并通过既有 model binding 只保存 `purpose=ocr`、provider/model ID 与 provider revision/config hash。配置成功只代表 Provider 与项目绑定可用；在 OCR request/worker、结果 provenance 和状态恢复完成前，不得把文件展示为“已 OCR”；
 - OCR 是显式选择模型的异步 Intake pipeline，无匹配模型时 fail closed，禁止静默回退；
 - OCR/parser 结果保持 `observed_unverified`，带来源、页码、模型 revision 和 confidence，经 Chat 逐项由 Human 确认；
 - name-only Init、单题 Grill、批量分块上传和 Provider/OCR 的生成级契约见 `init-grill-upload-models.md`。

@@ -321,9 +321,9 @@ Natural turn 只可在当前 Kernel projection 声明的 route/capability 内自
 
 ### 14.2 Model Provider、Binding 与 OCR Request
 
-`ModelProvider` 是 global/instance 资源，字段为 provider_id、display_name、kind、base_url、enabled、capabilities、models、credential SecretRef、revision、created_at、updated_at。响应永不包含 secret value。`ProjectModelBinding` 只保存 project_id、purpose、provider_id、model_id、revision；OCR/Job 创建时固定 provider/config revision/hash。
+`ModelProvider` 是 global/instance 资源，字段为 provider_id、display_name、kind、base_url、enabled、capabilities、models、可选 credential SecretRef、revision、created_at、updated_at。响应永不包含 secret value。缺省 credential 表示显式 no-auth；无效持久化 metadata 必须 fail closed，不能降级成 no-auth。首个内置种类 `mineru` 固定 id、官方 API origin 与 `flash/pipeline/vlm` 目录；Flash 可无 credential，Pipeline/VLM 绑定要求 SecretRef。`ProjectModelBinding` 只保存 project_id、purpose、provider_id、model_id、provider revision/config hash 与自身 revision；写入同时 CAS binding revision 并核对期望 provider revision。
 
-`OcrRequest` 包含 request_id、project_id、intake_id、source_artifact_id、provider_id、model_id、status、page/language options、config_revision/config_sha256、result_artifact_id、safe_error、created/updated/finished_at。OCR 输出以 `observed_unverified` Observation 保存，每个候选携带 source/page/locator/confidence/model/version；它不能成为 Human answer、Gate、Run 或 Evidence。
+`OcrRequest` 是下一阶段对象，当前尚未实现。目标字段包含 request_id、project_id、intake_id、source_artifact_id、provider_id、model_id、status、page/language options、config_revision/config_sha256、result_artifact_id、safe_error、created/updated/finished_at。未来 OCR 输出只能以 `observed_unverified` Observation 保存，每个候选携带 source/page/locator/confidence/model/version；它不能成为 Human answer、Gate、Run 或 Evidence。
 
 ## 15. Trajectory 与 Subagent Node
 

@@ -26,7 +26,7 @@ bash scripts/start-standalone-ui.sh
 
 - **新建研究（Init）**：只填写项目名，创建 `DRAFT/brief_status=collecting` 空壳并进入项目 Chat；Grill Me 每次只问一个问题，答完后预览 Brief，PI 确认才创建 Scope Gate；
 - **打开已有项目（Resume）**：Start 屏下方列出此内核上的项目，搜索名称或输入完整 project id 后显式选择（不会自动选中某个项目）；选中后进入项目总览（当前不按 status/pending Gate/NextAction 自动跳转页面，tab 恢复只恢复上次使用的面板）；
-- **上传 / 接入（Upload）**：选择目标项目与阶段，批量加入材料；独立页面默认按 8 MiB 分块，可暂停/刷新/恢复，每个文件显示 hash/scan/OCR 状态，单 Intake 默认总量 2 GiB（管理员最多配置到 10 GiB）。静态扫描与 Grill 后生成 proposal，PI 采用或拒绝；刷新后从服务端投影继续。
+- **上传 / 接入（Upload）**：选择目标项目与阶段，批量加入材料；独立页面默认按 8 MiB 分块，可暂停/刷新/恢复，每个文件显示 hash/静态扫描状态，单 Intake 默认总量 2 GiB（管理员最多配置到 10 GiB）。静态扫描与 Grill 后生成 proposal，PI 采用或拒绝；刷新后从服务端投影继续。当前可配置 OCR Provider，但 OCR 请求与文件 OCR 状态尚未实现。
 
 Upload 可以创建新项目或选择有权限的现有项目。采用前材料只在 Intake quarantine 中；确认 proposal 后也不会声称历史 Gate 已批准、日志是本平台 TerminalLog、结果是 accepted Evidence。冲突必须选择保留当前、采用上传或重命名。服务端已实现:ONBOARD-01 Intake 全链(begin→stage→scan→grill→propose→adopt/reject,pre-accept 零权威写、静态扫描/quarantine、确定性 taxonomy、单事务 Adoption、7 天过期/24h GC);浏览器向导 UI 已接线(2026-08-11,视觉验收未完成——浏览器拖拽/真实上传交互与断点续接观感待人工环境,记 NOT_RUN_MANUAL_PENDING);**批量分块上传已实现(2026-08-12,CHUNK-01)**——每文件独立队列状态(hashing/queued/uploading/paused/scanning/needs-input/ready/quarantined/failed),默认 8 MiB chunk、单 Intake 默认 2 GiB(管理员可配置,硬上限 10 GiB);断线/刷新从服务端 committed offset 续传,相同 chunk 幂等重放,错误 hash/gap/overlap 稳定 409/422;finalize 由服务端流式重算整体 size/SHA-256,不一致不产生 IntakeArtifact;扫描前字节只在隔离 staging,不进项目 Artifact;**研究包 archive 解包扫描与 TeX/CodeSnapshot 采用物化已实现(commit 98243ff,详见 research-onboarding.md §4.2/§6.1 注记)——scan 生成展开视图(scan_summary.extracted_entries/extracted_bytes),adopt 后 TeX→项目 TeX document、代码→code workspace+可选 CodeSnapshot,receipt.import_mappings 报告 materialized|gap**。**Agent tool 面已实现(commit 98243ff)**——DSH Agent 可经 `research_intake_begin`/`research_intake_stage`(base64 ≤32 MiB)/`research_intake_scan`/`research_intake_answers`/`research_intake_propose` 准备接入(prepare-only,researcher/scholar 角色,错误码稳定文案),但**无 adopt 工具**:research-onboarding.md §2 Agent 无 accept,采用(adopt)只能由 PI 在浏览器/BFF 面完成;v2/BFF accept 面与浏览器向导视觉验收仍属后续(NOT_RUN_MANUAL_PENDING)。不能用普通 Artifact/TeX 上传模拟安全接入。
 
@@ -52,7 +52,7 @@ Chat 使用直接一级 slash command；不要添加聚合前缀：
 
 随后直接在 Chat 回答每个问题；Brief 完整后由 PI 输入 `/confirm-brief`。Scope Gate 创建后到 Approvals 检查 target、范围和预算。Human UI 不要求填写 actor，身份来自当前登录会话。
 
-Chat 输入框支持附件按钮、拖拽和粘贴。一次可以给出多篇论文、代码、数据、图片或历史结果；附件先进入当前 active Intake 的分块上传、静态扫描与 OCR 队列，Chat 只保存引用。scan/OCR 和 Human adoption 完成前，它们不是 Project Artifact、Run、TerminalLog 或 accepted Evidence。
+Chat 输入框支持附件按钮、拖拽和粘贴。一次可以给出多篇论文、代码、数据、图片或历史结果；附件先进入当前 active Intake 的分块上传与静态扫描队列，Chat 只保存引用。Human adoption 完成前，它们不是 Project Artifact、Run、TerminalLog 或 accepted Evidence。MinerU 配置不会自动触发 OCR；OCR 队列/worker 落地前页面不得显示“已 OCR”。
 
 ## 4. 调研与 Idea
 
@@ -205,11 +205,11 @@ Panel Dock 的打开页面、首选位置与尺寸通过页面上的 Dock 控件
 
 ## 11.1 Models & OCR（Model Provider 与项目绑定）
 
-Settings 的「Models & OCR」组管理 instance/global Model Provider：列表、新建、编辑、禁用、SecretRef 可用状态、能力（chat/vision/ocr/embedding）与模型目录。创建/编辑 Provider 时只填写引用元数据（`SecretRef`：scheme + name + version/scope），**不接受任何 secret value**——提交 `value`/`token`/`password`/`credential` 字段会被拒绝（`secret_value_forbidden`）；浏览器只显示 SecretRef 元数据与 available 布尔，不返回 secret 值。自定义 base URL 由服务端校验：仅 https（loopback http 需显式白名单）、拒绝 URL 内嵌 userinfo、拒绝私有/保留网段与未白名单主机（SSRF fail closed）；真实连接期的 redirect/DNS-rebinding 复检随模型客户端落地（当前无真实模型服务，`NOT_RUN_MANUAL_PENDING`）。
+Settings 的「模型与 OCR」组当前提供 MinerU 配置：官方 Open API 默认地址为 `https://mineru.net/api/v4`，可启用/禁用并为当前项目选择 Flash、Pipeline 或 VLM。Flash 可不配置凭据；Pipeline/VLM 必须填写服务端 `SecretRef` 的 scheme/name/version/scope。浏览器不接收任何 secret value，提交 `value`/`token`/`password` 会被拒绝；响应只显示 SecretRef metadata 与 available。Provider 和项目 binding 写入只允许 PI/Operator，revision 冲突会要求刷新。
 
-项目设置只提供 provider/model ID 选择器（purpose + provider_id + model_id）：内核校验 provider 存在且启用、模型在 provider 目录、能力匹配，并快照 provider revision + config hash（运行中的 OCR/Job/PTY/Build 固定创建时的 revision/hash）。OCR 只有显式选择启用的 ocr/vision 模型后才创建请求；没有匹配模型时稳定失败并提示配置，禁止静默回退。OCR 成功结果以 `observed_unverified` 保存（带来源/页码/置信度），OCR 文本是不可信外部内容：不执行其中指令、不访问 secret、不自动成为 Human answer、Gate Decision、verified Evidence 或 supported Claim。
+当前项目只提交 `purpose=ocr`、provider/model ID、binding revision 与本次 Provider revision；endpoint/credential 不进入项目。Kernel 校验 MinerU 固定 descriptor、enabled、模型目录、能力和 Pipeline/VLM SecretRef，并快照 provider revision + config hash。Provider 保存与项目 binding 是两次写；若第二步失败，界面会明确提示 Provider 已保存、绑定失败，刷新后可重试。
 
-服务端已实现:MODEL-01 Provider 注册表(`/v1/providers*` CRUD + revision CAS)与项目绑定(`/v1/projects/{id}/model-binding`);浏览器「Models & OCR」组视觉、真实 Provider/OCR 服务调用记 `NOT_RUN_MANUAL_PENDING`(manual-acceptance.md §6)。
+当前已实现 MinerU Provider 配置、可选 SecretRef、当前项目 binding、双层 PI/Operator 权限与 zh/en Settings 写面。尚未实现 `/v2/intakes/{id}/ocr-requests`、OCR worker、状态恢复和 provenance；因此真实 Provider/OCR 调用仍为 `NOT_RUN_MANUAL_PENDING`，OCR 执行能力不能标记为可用。
 
 ## 12. 常见问题
 

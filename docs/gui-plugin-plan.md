@@ -252,6 +252,8 @@ Compile 先保存所有脏文件，再冻结 workspace manifest 并提交 latex-
 
 Settings section 首次全部折叠：Essentials、Models & OCR、Execution advanced、Workspace、Terminal、LaTeX、Agent & Trajectory、Security & Secrets、Diagnostics/Config provenance。每项由 Config Schema 生成，显示 effective value、source scope/revision/hash、default/modified、hot/restart、允许范围和 Reset；secret 只显示 SecretRef 与是否可用。Provider 在 global 组管理 endpoint/capabilities/catalog/SecretRef，项目只选 provider/model ID。
 
+OCR-CONFIG-01 首期把 Models & OCR 收敛成一个 MinerU 卡：可编辑 enabled、官方 API URL、可选 SecretRef，并为当前项目选择 Flash/Pipeline/VLM。Provider 读取、项目读取或 binding 读取失败必须禁用保存，不能把错误折叠成“未配置”；写入先校验，再保存 Provider，随后用返回的 provider revision + binding revision 写项目 binding。两次写不是原子事务，第二步失败必须明确提示“Provider 已保存、项目绑定失败”，不直接回显 Kernel 英文 message，也不自动重放非幂等写。无活动项目时只保存 global Provider 并明确提示未绑定。
+
 Execution advanced 内含可编辑 Runner Target/Profile Registry：目标类型明确显示“本机进程（仅 trusted dev/smoke）”“本机 Docker”“远程 SSH”，配置 label、capabilities、resource/network policy、enabled/draining 与 revision/hash；remote-ssh 表单只提交服务端连接配置和 SecretRef 元数据，私钥/token 不回显。项目和实验只用 opaque target/profile picker，显示健康/能力与 pin；offline、host-key mismatch 或 capability mismatch 给出可操作阻断信息，不提供隐式本机回退按钮。所有 label、validation、secret availability、health、aria 具备 zh/en parity。
 
 Start 的 New Project modal 只含 project name；创建成功立即进入 Chat Grill。Upload 是多文件队列，支持 8 MiB 分块、暂停/恢复/取消、offset/hash 冲突、扫描和 OCR 状态。配置项收缩在 Settings 折叠组，不在创建流程铺开。切换语言不得清空项目名、当前 Grill answer 或队列。

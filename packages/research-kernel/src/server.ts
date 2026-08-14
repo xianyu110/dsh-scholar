@@ -17,6 +17,7 @@ import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
 } from './uploads.js'
+import { validateSecretRefInput } from './provider.js'
 
 export interface KernelServerOptions {
   kernel: ResearchKernel
@@ -1177,6 +1178,13 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             return
           }
           if (method === 'POST' && id === undefined) {
+            if (!requireGlobalConfigRole(kernel, req, res, 'model provider creation')) return
+            const rawCredential = body !== null && typeof body === 'object' && !Array.isArray(body)
+              ? (body as Record<string, unknown>).credential
+              : undefined
+            if (rawCredential !== undefined && rawCredential !== null && typeof rawCredential === 'object' && !Array.isArray(rawCredential)) {
+              validateSecretRefInput(rawCredential as never)
+            }
             const input = ProviderCreateInput.parse(body)
             send(res, 201, kernel.providerView(kernel.registerProvider({ ...input, created_by: headerPrincipal ?? '' })))
             return
@@ -1187,11 +1195,19 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               return
             }
             if (method === 'PATCH') {
+              if (!requireGlobalConfigRole(kernel, req, res, 'model provider update')) return
+              const rawCredential = body !== null && typeof body === 'object' && !Array.isArray(body)
+                ? (body as Record<string, unknown>).credential
+                : undefined
+              if (rawCredential !== undefined && rawCredential !== null && typeof rawCredential === 'object' && !Array.isArray(rawCredential)) {
+                validateSecretRefInput(rawCredential as never)
+              }
               const input = ProviderUpdateInput.parse(body)
               ok(res, kernel.providerView(kernel.updateProvider(id, { ...input, updated_by: headerPrincipal ?? '' })))
               return
             }
             if (method === 'DELETE') {
+              if (!requireGlobalConfigRole(kernel, req, res, 'model provider deletion')) return
               const input = providerDeleteSchema.parse(body)
               kernel.deleteProvider(id, input.expected_revision)
               ok(res, { ok: true })
@@ -1419,6 +1435,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
                 return
               }
               if (method === 'PUT' || method === 'POST') {
+                if (!requirePiOnly(kernel, req, res, id, body, 'model binding update')) return
                 const input = ProjectModelBindingInput.parse(body)
                 ok(res, kernel.setProjectModelBinding(id, { ...input, updated_by: headerPrincipal ?? '' }))
                 return

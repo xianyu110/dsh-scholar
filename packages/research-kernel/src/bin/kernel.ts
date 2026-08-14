@@ -103,7 +103,15 @@ if (backupOnStart) {
   }
 }
 
-const kernel = new ResearchKernel({ dbPath, casRoot, serviceToken })
+const kernel = new ResearchKernel({
+  dbPath,
+  casRoot,
+  serviceToken,
+  // OCR-CONFIG-01: the first built-in provider is MinerU's official Open API.
+  // Other DNS providers remain fail-closed unless a future instance policy
+  // explicitly allowlists them; loopback remains disabled here.
+  providerUrlAllowlist: { hosts: ['mineru.net'] },
+})
 
 // PTY-01 (execution-runtime.md §6.1): the production kernel serves REAL
 // pseudo-terminals through the LocalPtyAdapter (python3 pty bridge). The
