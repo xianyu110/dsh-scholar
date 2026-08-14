@@ -17,6 +17,13 @@ import {
   type StandaloneShortcut,
 } from '../shared/standalone.js'
 import type { ResearchSettings } from '../shared/settings-rpc.js'
+import {
+  SCHOLAR_STAGE_IDS,
+  normalizeDshSessionId,
+  type ScholarSessionProjection,
+  type ScholarStageId,
+  type ScholarStageState,
+} from '../shared/research-stage.js'
 import { ScholarSettingsScope } from './scholar-settings.js'
 
 const LOCALE_NAMESPACE = 'settings.dshScholar'
@@ -28,6 +35,11 @@ type ResearchConfigKey =
   | 'standaloneUrl' | 'standaloneUrlHint' | 'shortcut' | 'shortcutHint' | 'shortcutDisabled'
   | 'openStandalone' | 'copyToken' | 'copyingToken' | 'tokenCopied' | 'tokenCopyFailed'
   | 'viewDescription' | 'viewFrameTitle' | 'viewUnavailable'
+  | 'sessionTimeline' | 'sessionLoading' | 'sessionUnavailable' | 'sessionUnlinked' | 'refreshStages'
+  | 'projectRevision' | 'nextAction' | 'nextReason' | 'pendingGates' | 'jobsSummary'
+  | 'stageInit' | 'stageSurvey' | 'stageIdea' | 'stageReproduce' | 'stageContract'
+  | 'stageExperiment' | 'stageEvidence' | 'stageWriting' | 'stageReview' | 'stageRelease'
+  | 'stageDone' | 'stageCurrent' | 'stageUpcoming' | 'stageBlocked'
   | 'save' | 'saving' | 'saveFailed'
 
 const en: Record<ResearchConfigKey, string> = {
@@ -55,6 +67,30 @@ const en: Record<ResearchConfigKey, string> = {
   viewDescription: 'The standalone Scholar workbench is displayed here.',
   viewFrameTitle: 'dsh Scholar standalone workbench',
   viewUnavailable: 'The standalone workbench URL is unavailable. Check Plugin config.',
+  sessionTimeline: 'Research stages for this DSH session',
+  sessionLoading: 'Loading the session research stages…',
+  sessionUnavailable: 'The session research stages are temporarily unavailable.',
+  sessionUnlinked: 'This DSH session has no linked research project. Start in Chat with a project name or /new <project name>.',
+  refreshStages: 'Refresh stages',
+  projectRevision: 'Revision',
+  nextAction: 'Next action',
+  nextReason: 'Reason',
+  pendingGates: 'Pending gates',
+  jobsSummary: 'Jobs',
+  stageInit: 'Init',
+  stageSurvey: 'Survey',
+  stageIdea: 'Idea',
+  stageReproduce: 'Reproduce',
+  stageContract: 'Contract',
+  stageExperiment: 'Experiment',
+  stageEvidence: 'Evidence',
+  stageWriting: 'Writing',
+  stageReview: 'Review',
+  stageRelease: 'Release',
+  stageDone: 'done',
+  stageCurrent: 'current',
+  stageUpcoming: 'upcoming',
+  stageBlocked: 'blocked',
   overridden: 'Overridden',
   reset: 'Reset to deployment default',
   save: 'Save',
@@ -87,6 +123,30 @@ const zh: Record<ResearchConfigKey, string> = {
   viewDescription: '这里显示独立运行的 Scholar 工作台。',
   viewFrameTitle: 'dsh Scholar 独立工作台',
   viewUnavailable: 'Standalone 工作台地址不可用，请检查 Plugin config。',
+  sessionTimeline: '当前 DSH 会话的研究阶段',
+  sessionLoading: '正在加载会话研究阶段…',
+  sessionUnavailable: '暂时无法读取当前会话的研究阶段。',
+  sessionUnlinked: '当前 DSH 会话尚未关联研究项目。请在 Chat 中输入项目名，或使用 /new <项目名>。',
+  refreshStages: '刷新阶段',
+  projectRevision: '版本',
+  nextAction: '下一步',
+  nextReason: '原因',
+  pendingGates: '待审批',
+  jobsSummary: '任务',
+  stageInit: '初始化',
+  stageSurvey: '调研',
+  stageIdea: '想法',
+  stageReproduce: '复现',
+  stageContract: '合同',
+  stageExperiment: '实验',
+  stageEvidence: '证据',
+  stageWriting: '写作',
+  stageReview: '评审',
+  stageRelease: '发布',
+  stageDone: '已完成',
+  stageCurrent: '当前',
+  stageUpcoming: '未开始',
+  stageBlocked: '受阻',
   overridden: '已覆盖',
   reset: '恢复部署默认值',
   save: '保存',
@@ -120,6 +180,7 @@ interface ScholarViewFace {
   hooks: { researchSettings: SettingsScope<ResearchSettings> }
   openStandalone: (url: string) => void
   callHostChatTurn: (payload: unknown, signal?: AbortSignal) => Promise<unknown>
+  readSessionProjection: (sessionId: string, signal?: AbortSignal) => Promise<ScholarSessionProjection>
 }
 
 type ScholarViewProps = ConvViewProps
@@ -174,6 +235,19 @@ const style = {
     borderBottom: '1px solid var(--dsw-alias-border-l2)',
   },
   viewText: { flex: 1, minWidth: 0, margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' },
+  sessionPanel: { padding: '12px 16px', borderBottom: '1px solid var(--dsw-alias-border-l2)', display: 'flex', flexDirection: 'column', gap: 10 },
+  sessionHeading: { display: 'flex', alignItems: 'center', gap: 10 },
+  sessionTitle: { flex: 1, margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
+  projectMeta: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+  stages: { display: 'grid', gridTemplateColumns: 'repeat(10, minmax(64px, 1fr))', gap: 6, overflowX: 'auto' },
+  stage: { minWidth: 64, borderRadius: 8, padding: '7px 6px', textAlign: 'center', fontSize: 11, border: '1px solid var(--dsw-alias-border-l2)', display: 'flex', flexDirection: 'column', gap: 2 },
+  stageName: { fontWeight: 600 },
+  stageState: { fontSize: 10, opacity: 0.82 },
+  stageDone: { background: 'color-mix(in srgb, var(--dsw-alias-label-success) 12%, transparent)', color: 'var(--dsw-alias-label-success)' },
+  stageCurrent: { background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)', color: 'var(--dsw-alias-label-primary)', fontWeight: 600 },
+  stageUpcoming: { background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-tertiary)' },
+  stageBlocked: { background: 'color-mix(in srgb, var(--dsw-alias-label-error) 10%, transparent)', color: 'var(--dsw-alias-label-error)', fontWeight: 600 },
+  nextLine: { margin: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
   frame: { flex: 1, width: '100%', minHeight: 0, border: 0, background: '#fff' },
   unavailable: { margin: 24, color: 'var(--dsw-alias-label-error)' },
 } satisfies Record<string, CSSProperties>
@@ -187,6 +261,11 @@ const CHAT_BRIDGE_RESPONSE = 'dsh-scholar/chat-turn-response'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const allowedSet = new Set(allowed)
+  return Object.keys(value).every(key => allowedSet.has(key))
 }
 
 export interface ScholarChatBridgeRequest {
@@ -223,6 +302,69 @@ export async function callScholarChatTurn(
     throw new Error('Scholar Chat model is unavailable')
   }
   return response.value
+}
+
+function isScholarProjection(value: unknown, expectedSessionId: string): value is ScholarSessionProjection {
+  if (!isRecord(value) || typeof value.linked !== 'boolean' || value.session_id !== expectedSessionId) return false
+  if (!hasOnlyKeys(value, ['linked', 'session_id', 'project', 'stages', 'next_action', 'summary'])) return false
+  if (!Array.isArray(value.stages) || value.stages.length !== SCHOLAR_STAGE_IDS.length || !isRecord(value.summary)) return false
+  const nonnegativeInteger = (candidate: unknown): candidate is number => Number.isInteger(candidate) && (candidate as number) >= 0
+  if (!hasOnlyKeys(value.summary, ['pending_gates', 'jobs', 'counts'])) return false
+  if (!nonnegativeInteger(value.summary.pending_gates) || !isRecord(value.summary.jobs) || !isRecord(value.summary.counts)) return false
+  if (!hasOnlyKeys(value.summary.jobs, ['total', 'queued', 'running', 'succeeded', 'failed'])) return false
+  for (const key of ['total', 'queued', 'running', 'succeeded', 'failed']) {
+    if (!nonnegativeInteger(value.summary.jobs[key])) return false
+  }
+  if (!Object.values(value.summary.counts).every(nonnegativeInteger)) return false
+  if (value.linked && (!isRecord(value.project) || !hasOnlyKeys(value.project, ['project_id', 'name', 'status', 'revision', 'brief_status'])
+    || typeof value.project.project_id !== 'string'
+    || typeof value.project.name !== 'string' || typeof value.project.status !== 'string'
+    || !nonnegativeInteger(value.project.revision)
+    || (value.project.brief_status !== undefined && typeof value.project.brief_status !== 'string'))) return false
+  if (!value.linked && (value.project !== undefined || value.next_action !== undefined)) return false
+  if (value.next_action !== undefined) {
+    if (!isRecord(value.next_action)
+      || !hasOnlyKeys(value.next_action, ['code', 'label', 'reason', 'route', 'state', 'blocking', 'required_by', 'required', 'revision'])
+      || typeof value.next_action.code !== 'string'
+      || typeof value.next_action.label !== 'string' || typeof value.next_action.reason !== 'string'
+      || typeof value.next_action.route !== 'string'
+      || (value.next_action.state !== 'ready' && value.next_action.state !== 'blocked' && value.next_action.state !== 'done')
+      || typeof value.next_action.blocking !== 'boolean'
+      || (value.next_action.required_by !== 'human' && value.next_action.required_by !== 'agent' && value.next_action.required_by !== 'runner')
+      || (value.next_action.required !== true && (!Array.isArray(value.next_action.required)
+        || !value.next_action.required.every(item => typeof item === 'string')))
+      || (value.next_action.revision !== null && !nonnegativeInteger(value.next_action.revision))) return false
+  }
+  return value.stages.every((stage, index) => isRecord(stage)
+    && hasOnlyKeys(stage, ['id', 'state'])
+    && stage.id === SCHOLAR_STAGE_IDS[index]
+    && (stage.state === 'done' || stage.state === 'current' || stage.state === 'upcoming' || stage.state === 'blocked'))
+}
+
+/** Loopback-only, session-bound phase projection from the plugin Kernel. */
+export async function callScholarSessionProjection(
+  rpc: RpcCaller,
+  isLoopback: boolean,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ScholarSessionProjection> {
+  const normalized = normalizeDshSessionId(sessionId)
+  if (!isLoopback || normalized === undefined) throw new Error('Scholar session projection is unavailable')
+  const response = signal === undefined
+    ? await rpc.call('/dsh-scholar', 'session-projection', { session_id: normalized })
+    : await rpc.call('/dsh-scholar', 'session-projection', { session_id: normalized }, signal)
+  if (!isRecord(response) || response.ok !== true || !isScholarProjection(response.value, normalized)) {
+    throw new Error('Scholar session projection is unavailable')
+  }
+  return response.value
+}
+
+const STAGE_KEYS: Record<ScholarStageId, ResearchConfigKey> = {
+  init: 'stageInit', survey: 'stageSurvey', idea: 'stageIdea', reproduce: 'stageReproduce', contract: 'stageContract',
+  experiment: 'stageExperiment', evidence: 'stageEvidence', writing: 'stageWriting', review: 'stageReview', release: 'stageRelease',
+}
+const STAGE_STATE_KEYS: Record<ScholarStageState, ResearchConfigKey> = {
+  done: 'stageDone', current: 'stageCurrent', upcoming: 'stageUpcoming', blocked: 'stageBlocked',
 }
 
 function isEditableTarget(target: unknown): boolean {
@@ -293,6 +435,60 @@ function ScholarView(props: ScholarViewProps) {
   const snapshot = props.useResearchSettings(value => value)
   const url = resolvedStandaloneUrl(snapshot.status === 'ready' ? snapshot.value : undefined)
   const frameRef = useRef<HTMLIFrameElement>(null)
+  const sessionId = typeof props.sessionId === 'string' ? props.sessionId.trim() : ''
+  const [sessionProjection, setSessionProjection] = useState<ScholarSessionProjection | null>(null)
+  const [sessionState, setSessionState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const [refreshGeneration, setRefreshGeneration] = useState(0)
+  useEffect(() => {
+    const controller = new AbortController()
+    let timer: number | undefined
+    let active = true
+    let inFlight = false
+    const schedule = (): void => {
+      if (!active || controller.signal.aborted) return
+      if (timer !== undefined) window.clearTimeout(timer)
+      timer = window.setTimeout(() => { void read() }, 4_000)
+    }
+    const read = async (): Promise<void> => {
+      if (!active || sessionId === '') {
+        if (active) { setSessionProjection(null); setSessionState('failed') }
+        return
+      }
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        schedule()
+        return
+      }
+      if (inFlight) return
+      inFlight = true
+      try {
+        const value = await props.readSessionProjection(sessionId, controller.signal)
+        if (!active || controller.signal.aborted) return
+        setSessionProjection(value)
+        setSessionState('ready')
+      } catch {
+        if (!active || controller.signal.aborted) return
+        setSessionState('failed')
+      } finally {
+        inFlight = false
+      }
+      schedule()
+    }
+    const onVisibility = (): void => {
+      if (document.visibilityState !== 'visible' || inFlight) return
+      if (timer !== undefined) window.clearTimeout(timer)
+      void read()
+    }
+    setSessionProjection(null)
+    setSessionState('loading')
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
+    void read()
+    return () => {
+      active = false
+      controller.abort()
+      if (timer !== undefined) window.clearTimeout(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [props.readSessionProjection, refreshGeneration, sessionId])
   useEffect(() => {
     if (url === null) return
     const source = frameRef.current?.contentWindow
@@ -363,6 +559,51 @@ function ScholarView(props: ScholarViewProps) {
           {props.t('openStandalone')}
         </button>
       </header>
+      <section style={style.sessionPanel} aria-label={props.t('sessionTimeline')}>
+        <div style={style.sessionHeading}>
+          <h2 style={style.sessionTitle}>{props.t('sessionTimeline')}</h2>
+          <button type="button" style={style.secondary} onClick={() => { setRefreshGeneration(value => value + 1) }}>
+            {props.t('refreshStages')}
+          </button>
+        </div>
+        {sessionState === 'loading' ? <p role="status" style={style.projectMeta}>{props.t('sessionLoading')}</p> : null}
+        {sessionState === 'failed' ? <p role="alert" style={style.error}>{props.t('sessionUnavailable')}</p> : null}
+        {sessionState === 'ready' && sessionProjection?.linked === false
+          ? <p role="status" style={style.projectMeta}>{props.t('sessionUnlinked')}</p>
+          : null}
+        {sessionState === 'ready' && sessionProjection?.linked === true && sessionProjection.project !== undefined
+          ? (
+            <>
+              <p style={style.projectMeta}>
+                {sessionProjection.project.name} · {sessionProjection.project.status} · {props.t('projectRevision')} {sessionProjection.project.revision}
+              </p>
+              <div style={style.stages} role="list">
+                {sessionProjection.stages.map(stage => (
+                  <span
+                    key={stage.id}
+                    role="listitem"
+                    style={{ ...style.stage, ...style[`stage${stage.state[0]!.toUpperCase()}${stage.state.slice(1)}` as 'stageDone' | 'stageCurrent' | 'stageUpcoming' | 'stageBlocked'] }}
+                    aria-label={`${props.t(STAGE_KEYS[stage.id])}: ${props.t(STAGE_STATE_KEYS[stage.state])}`}
+                    aria-current={stage.state === 'current' || stage.state === 'blocked' ? 'step' : undefined}
+                    title={props.t(STAGE_STATE_KEYS[stage.state])}
+                  >
+                    <span style={style.stageName}>{props.t(STAGE_KEYS[stage.id])}</span>
+                    <span style={style.stageState}>{props.t(STAGE_STATE_KEYS[stage.state])}</span>
+                  </span>
+                ))}
+              </div>
+              <p style={style.nextLine}>
+                {props.t('nextAction')}: {sessionProjection.next_action?.label ?? '—'}
+                {sessionProjection.next_action === undefined ? '' : ` (${sessionProjection.next_action.code})`}
+                {' · '}{props.t('pendingGates')}: {sessionProjection.summary.pending_gates} · {props.t('jobsSummary')}: {sessionProjection.summary.jobs.total}
+              </p>
+              {sessionProjection.next_action === undefined ? null : (
+                <p style={style.nextLine}>{props.t('nextReason')}: {sessionProjection.next_action.reason}</p>
+              )}
+            </>
+          )
+          : null}
+      </section>
       {url === null
         ? <p role="alert" style={style.unavailable}>{props.t('viewUnavailable')}</p>
         : (
@@ -579,6 +820,12 @@ export function apply(ctx: ClientContext): void {
     payload,
     signal,
   )
+  const readSessionProjection = (sessionId: string, signal?: AbortSignal): Promise<ScholarSessionProjection> => callScholarSessionProjection(
+    connection.rpc,
+    connection.isLoopback,
+    sessionId,
+    signal,
+  )
   ctx.effect(() => ctx.locale.register(LOCALE_NAMESPACE, { zh, en }), 'dsh-scholar: configuration dictionaries')
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
@@ -606,6 +853,7 @@ export function apply(ctx: ClientContext): void {
       hooks: { researchSettings: scope },
       openStandalone,
       callHostChatTurn,
+      readSessionProjection,
     }),
   }, ScholarView))
 

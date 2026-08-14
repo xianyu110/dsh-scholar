@@ -54,8 +54,17 @@ export class ResearchClient {
     this.timeoutMs = options.timeoutMs ?? 15000
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+    signal?: AbortSignal,
+  ): Promise<T> {
     const controller = new AbortController()
+    const abortFromCaller = (): void => { controller.abort() }
+    if (signal?.aborted === true) controller.abort()
+    else signal?.addEventListener('abort', abortFromCaller, { once: true })
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     let response: Response
     try {
@@ -74,6 +83,7 @@ export class ResearchClient {
       throw new KernelUnavailableError(this.endpoint, error)
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abortFromCaller)
     }
     if (!response.ok) {
       // api-contracts.md §1: the server envelope carries the STABLE machine
@@ -263,7 +273,7 @@ export class ResearchClient {
     })
   }
 
-  projectProjection(projectId: string): Promise<{
+  projectProjection(projectId: string, signal?: AbortSignal): Promise<{
     project: ResearchProject
     pending_gates: Gate[]
     jobs: Array<{ job_id: string; kind: string; status: string }>
@@ -286,7 +296,7 @@ export class ResearchClient {
       required_by: 'human' | 'agent' | 'runner'
     }>
   }> {
-    return this.request('GET', `/v1/projects/${projectId}/projection`)
+    return this.request('GET', `/v1/projects/${encodeURIComponent(projectId)}/projection`, undefined, {}, signal)
   }
 
   transition(projectId: string, to: string, expectedRevision: number, reason?: string): Promise<ResearchProject> {
@@ -297,8 +307,8 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${projectId}/session`, { session_id: sessionId })
   }
 
-  getProjectBySession(sessionId: string): Promise<ResearchProject | null> {
-    return this.request('GET', `/v1/session-links/${sessionId}`)
+  getProjectBySession(sessionId: string, signal?: AbortSignal): Promise<ResearchProject | null> {
+    return this.request('GET', `/v1/session-links/${encodeURIComponent(sessionId)}`, undefined, {}, signal)
   }
 
   // ── gates ────────────────────────────────────────────────────────────────

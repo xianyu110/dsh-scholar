@@ -4642,6 +4642,8 @@ export class ResearchKernel {
 
   snapshotCorpus(input: {
     project_id: string
+    expected_revision?: number
+    expected_session_id?: string
     queries: CorpusSnapshot['queries']
     papers: Paper[]
     passages?: Passage[]
@@ -4691,6 +4693,15 @@ export class ResearchKernel {
     CorpusSnapshot.parse(snapshot)
     return withTransaction(this.db, () => {
       const project = this.getProject(input.project_id)
+      if (input.expected_session_id !== undefined
+        && this.getProjectBySession(input.expected_session_id)?.project_id !== project.project_id) {
+        throw new KernelError(409, 'session_link_conflict',
+          `session ${input.expected_session_id} is no longer linked to project ${project.project_id}`)
+      }
+      if (input.expected_revision !== undefined && project.revision !== input.expected_revision) {
+        throw new KernelError(409, 'revision_conflict',
+          `expected revision ${input.expected_revision}, got ${project.revision}`)
+      }
       this.db.prepare('INSERT INTO corpus_snapshots (snapshot_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
         .run(snapshot.snapshot_id, snapshot.project_id, JSON.stringify(snapshot), snapshot.created_at)
       this.emit(input.project_id, 'corpus.snapshotted', { snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length })

@@ -61,7 +61,8 @@ port=0 必须通过 sidecar handshake 回填，不能把 0 当作客户端 endpo
 
 | 角色 | 工具 |
 |---|---|
-| director | research_project、research_phase、research_gate_request、research_budget、research_status、research_onboarding |
+| DSH 会话公共受控入口 | dsh_scholar |
+| director | research_project、research_phase、research_gate_request、research_budget、research_status；`research_onboarding` 是五个实际 `research_intake_*` prepare-only tools 的概念组，不是可调用工具名 |
 | scholar/curator | literature_search、paper_resolve、corpus_snapshot、passage_lookup |
 | panel | research_panel、idea_create、idea_compare、novelty_audit |
 | engineer | workspace_snapshot、patch_apply、baseline_prepare、test_run、baseline_verify |
@@ -69,7 +70,7 @@ port=0 必须通过 sidecar handshake 回填，不能把 0 当作客户端 endpo
 | statistician | evidence_note_create、claim_create、claim_verify_request、analysis_request |
 | writer/reviewer | manuscript_build、manuscript_review、release_bundle_request |
 
-Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 deny；允许时必须调用 next()。Human Gate Decision、accepted Evidence 写入和任意宿主 shell 不注册为 Agent Tool。
+Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 deny；允许时必须调用 next()。唯一公共例外 `dsh_scholar` 只接受有界 `text`、可选 `project_id` 与 `locale`，默认从 `exec.agent.id` 解析当前 DSH session link；session id 只允许安全 opaque-id 字符并在 ResearchClient 中编码成一个 URL segment。它返回精确、封闭的脱敏阶段投影和受控动作结果，不授予任何低层 Research role capability。DSH 当前 Tool schema DSL 不表达 string min/max，故 `text` 的 1–4000 长度由运行时再次强制；其余 input/output 字段、enum、对象开放性必须在 schema 中精确声明。Human Gate Decision、accepted Evidence 写入和任意宿主 shell 不注册为 Agent Tool。
 
 ## 5. 命令
 
@@ -78,6 +79,8 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 `/new` 是 name-only Init 引导入口；Grill 回答与 PI `/confirm-brief` 目前属于 authenticated standalone Human Chat/BFF 面，不冒充 Agent command。Agent Intake tool 只操作 observation/question/proposal，不提供 accept/adopt/merge-confirm 或任何 Gate Decision，最终 Adoption 与 Brief confirm 只能由 Human PI 完成。
 
 自然语言 Chat 是 project-scoped turn adapter，不新增 `/research` 聚合 descriptor，也不改变上述 direct command Registry。DSH 浏览器插件只为与 Host 不同 origin 的 loopback standalone iframe 暴露 request-id/source/origin 受控的 `postMessage` seam，再通过 loopback-only `/dsh-scholar` RPC 动态使用可选 `ctx.llm`。LLM 调用不携带 tools，模型路由只从 Host registry/插件配置解析；浏览器不能指定 provider/model/credential。同一 iframe 最多一个 in-flight turn，RPC `AbortSignal` 贯通到 provider。模型不可用、顶层 standalone 或远程 HTTPS iframe 返回确定性阶段引导。模型不能直接调用 Gate Decision、Brief confirm、adopt 或 release decision，不能把 DSH session 状态当作 Kernel NextAction，也不能建议 Human-only direct command。
+
+DSH 本体 Chat 的自然语言入口与 iframe 的无工具 LLM bridge 是两条不同链路。Harness Agent 识别项目研究意图后调用 `dsh_scholar({ text: 用户原文 })`；工具从调用方 session 精确解析项目并读取 Kernel `projectProjection`，返回 `intent`、`execution`、`project`、`stages`、`next_action` 和本地化 `assistant_text`。状态/下一步/Gate/Job/Idea 查询只读；只有锚定正向动作词的“开始/继续/执行调研”可触发自动写，否定、主题讨论和歧义输入零写。执行前再次核对 `survey_run/ready/agent` 和 revision，并以 expected revision 调用与 `/survey` 相同的 canonical Kernel Corpus Snapshot primitive；native 入口额外施加 ready/CAS 策略。其他写动作返回一级 slash command 建议，“生成想法”应生成 `/ideas` 而不是误判为只读列表。未关联项目返回 `needs_project` 与 `/new <项目名>`，blocked/Human-only 返回对应原因和页面路由。显式 `project_id` 必须与当前 session link 一致，否则 fail closed；不得借此跨项目操作。
 
 命令只是 ResearchClient adapter，不重复业务逻辑。它使用 invocation.agent.id 解析 session link。错误输出 research: 加稳定错误摘要，不能泄漏内部路径、Token 或上游响应。帮助文本与 i18n 资源生成；宿主命令描述若在注册时固化语言，locale change 时重新注册或保持语言无关。
 
@@ -90,6 +93,8 @@ Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 
 DSH SessionEventMap 可通过 TypeScript declaration merge 扩展。插件可以追加展示事件并调用 session flush，但科研业务审计仍以 Kernel Outbox 为权威。
 
 推荐 Session 事件只保存关联：project_id、kernel_event_id、gate_id/job_id/build_id 和安全摘要。原始 TerminalLog、Artifact 字节和 TeX 文件不复制进 Session 日志。Tool call/result 使用 DSH presentation metadata 生成可回放终端卡和 Artifact link。
+
+DSH browser half 通过 loopback-only `/dsh-scholar` Connection RPC 的 `session-projection` 方法读取当前页签 `session_id` 对应的脱敏阶段投影。响应只含项目 id/name/status/revision/brief status、阶段 id/state、主要 NextAction 的安全字段以及 Gate/Job/内容计数；不得含 token、SecretRef、原始日志、prompt 或跨项目 transcript。Host 在 projection 前后读取 session link，稳定一致才返回，否则重试一次后 fail closed。客户端首屏读取并在可见时至多每 4 秒串行刷新，session 改变或页签卸载必须把 AbortSignal 贯通到 ResearchClient fetch 并 abort 旧传输；wire validator 对 root/project/stage/NextAction/summary/jobs 使用精确字段 allowlist，要求十阶段固定顺序、完整 NextAction/jobs 形状和动态 counts 中的非负有限整数，畸形/额外字段响应 fail closed。阶段块显示本地化 label + 可见 state，current/blocked 项使用 `aria-current=step`，NextAction 显示 label/reason。该 RPC 面向同一 loopback 桌面用户的 UI 视图选择，不替代 Agent/Kernel 的跨项目授权；该 header 来自 DSH 插件 Kernel，下方 standalone iframe 仍按自身 dataDir/BFF 工作，二者不得混写业务状态。
 
 独立 UI 的 Session Trajectory 由 `SafeSessionTrajectoryAdapter` 提供：输出稳定 session/node/parent/mode/status/timing/四桶 token/安全 tool summary 与业务 refs，默认删除 prompt、raw tool args/result、provider payload、cwd/env/secret。Kernel Outbox 另行生成 Research Trajectory；两者不能互相覆盖。
 

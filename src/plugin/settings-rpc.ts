@@ -4,6 +4,7 @@ import {
   DEFAULT_STANDALONE_SHORTCUT,
   normalizeStandaloneUrl,
 } from '../shared/standalone.js'
+import { normalizeDshSessionId } from '../shared/research-stage.js'
 import {
   SCHOLAR_SETTINGS_NAMESPACE,
   type ResearchSettings,
@@ -77,12 +78,19 @@ function mutation(payload: unknown): ScholarSettingsMutation | undefined {
 const internal = (message: string) => ({ ok: false as const, error: { code: 'internal' as const, message, details: {} } })
 
 export type ScholarChatTurnHandler = (payload: unknown, signal: AbortSignal) => Promise<unknown>
+export type ScholarSessionProjectionHandler = (sessionId: string, signal: AbortSignal) => Promise<unknown>
+
+function sessionId(payload: unknown): string | undefined {
+  if (!isRecord(payload) || typeof payload.session_id !== 'string') return undefined
+  return normalizeDshSessionId(payload.session_id)
+}
 
 /** Public DSH Connection extension handler owned entirely by the Scholar plugin. */
 export function createScholarRpcHandler(
   settings: SettingsProvider,
   readStandaloneToken: () => string,
   runChatTurn?: ScholarChatTurnHandler,
+  readSessionProjection?: ScholarSessionProjectionHandler,
 ): ConnectionRpcHandler {
   return async (endpoint, payload, signal) => {
     if (endpoint === 'standalone-token') {
@@ -111,6 +119,13 @@ export function createScholarRpcHandler(
       if (runChatTurn === undefined) return internal('Scholar Chat model is unavailable')
       try { return { ok: true, value: await runChatTurn(payload, signal) } }
       catch { return internal('Scholar Chat model is unavailable') }
+    }
+    if (endpoint === 'session-projection') {
+      const parsed = sessionId(payload)
+      if (parsed === undefined) return internal('invalid Scholar session projection request')
+      if (readSessionProjection === undefined) return internal('Scholar session projection is unavailable')
+      try { return { ok: true, value: await readSessionProjection(parsed, signal) } }
+      catch { return internal('Scholar session projection is unavailable') }
     }
     return internal('unsupported Scholar endpoint')
   }

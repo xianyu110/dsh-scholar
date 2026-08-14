@@ -8,6 +8,24 @@ description: DSH Research OS core methodology — evidence-first scientific rese
 This skill encodes the operating rules of DSH Research OS (design document §1–§5).
 It applies to every agent role in a Research Project and every direct slash command.
 
+## DSH native conversation entry
+
+When the user is talking in the native DSH Chat and expresses a research intent in ordinary
+language, call `dsh_scholar` with the user's text verbatim. Do not require the user to discover
+or type a slash command first. The façade binds the call to this DSH session, reads the
+authoritative Kernel projection and returns the current stage, execution result and next action.
+
+- If no project is linked, explain the returned `/new <project name>` suggestion.
+- If the façade performs the one safe ready action (`survey_run`), report that it ran and use the
+  returned post-action projection; do not claim success from the pre-action state.
+- Treat only an explicit positive start/continue/run instruction as permission to execute a survey.
+  Discussion, ambiguity, and negative wording such as “不要调研” or “do not research” are never consent.
+- For other Agent/Runner actions, help the user edit and confirm the returned direct slash command.
+- Never turn a suggestion into a Gate decision, Brief confirmation, Intake adoption, Evidence
+  acceptance or Release decision. Those remain authenticated Human actions in dsh Scholar.
+- Point the user to the `dsh Scholar` conversation tab when a visual phase timeline, Gate, Run,
+  Evidence, Workspace or Manuscript view would be clearer.
+
 ## Non-negotiables
 
 1. **Evidence-first**: no number, table cell, abstract figure or conclusion enters a manuscript

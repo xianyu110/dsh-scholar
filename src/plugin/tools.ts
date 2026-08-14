@@ -11,6 +11,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { KernelApiError, type ResearchClient } from '@dsh-scholar/research-client'
 import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { selectSkillPacks, selectedSkillNames } from './skills.js'
+import { runNativeScholarTurn } from './native-chat.js'
 
 /** Render a canonical tool value as text blocks. */
 export function renderText(value: unknown): ContentBlock[] {
@@ -129,6 +130,77 @@ const okSchema = {
   properties: { ok: { type: 'boolean' } },
 } as const satisfies ObjectValueSchemaSpec
 
+/** Closed wire contract for the one public native-Chat façade. The current
+ * DSH schema DSL has no string min/max keywords, so text/session bounds stay
+ * duplicated in the runtime validator; every representable field remains
+ * closed and typed here for Harness schema consumers. */
+const scholarNativeReplySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    linked: { type: 'boolean', required: true },
+    session_id: { type: 'string', required: true },
+    assistant_text: { type: 'string', required: true },
+    intent: {
+      type: 'object', additionalProperties: false, required: true,
+      properties: {
+        kind: { type: 'string', enum: ['status', 'next', 'gates', 'jobs', 'ideas', 'survey', 'conversation'], required: true },
+        confidence: { type: 'string', const: 'deterministic', required: true },
+      },
+    },
+    execution: {
+      type: 'object', additionalProperties: false, required: true,
+      properties: {
+        status: { type: 'string', enum: ['read_only', 'executed', 'suggested', 'blocked', 'needs_human', 'needs_project'], required: true },
+        operation: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+        suggested_command: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+      },
+    },
+    project: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        project_id: { type: 'string', required: true }, name: { type: 'string', required: true },
+        status: { type: 'string', required: true }, revision: { type: 'integer', required: true },
+        brief_status: { type: 'string' },
+      },
+    },
+    stages: {
+      type: 'array', required: true,
+      items: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          id: { type: 'string', enum: ['init', 'survey', 'idea', 'reproduce', 'contract', 'experiment', 'evidence', 'writing', 'review', 'release'], required: true },
+          state: { type: 'string', enum: ['done', 'current', 'upcoming', 'blocked'], required: true },
+        },
+      },
+    },
+    next_action: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        code: { type: 'string', required: true }, label: { type: 'string', required: true }, reason: { type: 'string', required: true },
+        route: { type: 'string', required: true }, state: { type: 'string', enum: ['ready', 'blocked', 'done'], required: true },
+        blocking: { type: 'boolean', required: true }, required_by: { type: 'string', enum: ['human', 'agent', 'runner'], required: true },
+        required: { oneOf: [{ type: 'boolean', const: true }, { type: 'array', items: { type: 'string' } }], required: true },
+        revision: { oneOf: [{ type: 'integer' }, { type: 'null' }], required: true },
+      },
+    },
+    summary: {
+      type: 'object', additionalProperties: false, required: true,
+      properties: {
+        pending_gates: { type: 'integer', required: true },
+        jobs: {
+          type: 'object', additionalProperties: false, required: true,
+          properties: {
+            total: { type: 'integer', required: true }, queued: { type: 'integer', required: true },
+            running: { type: 'integer', required: true }, succeeded: { type: 'integer', required: true }, failed: { type: 'integer', required: true },
+          },
+        },
+        counts: { type: 'object', additionalProperties: true, required: true },
+      },
+    },
+  },
+} as const satisfies ObjectValueSchemaSpec
+
 /**
  * Stable copy per intake error code (research-onboarding.md §9; mirrors the
  * browser wizard's `INTAKE_ERROR_KEYS` semantics so the agent and the UI
@@ -191,6 +263,37 @@ async function callIntake<T>(fn: () => Promise<T>): Promise<T> {
 
 export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<typeof defineTool>): void } }, toolCtx: ResearchToolContext): void {
   const { client } = toolCtx
+
+  // Native DSH Chat entry. This is intentionally the only tool available to
+  // an unregistered/root Agent role: it binds to the caller session and
+  // exposes a deterministic, capability-bounded research conversation.
+  ctx.tools.register(researchTool({
+    name: 'dsh_scholar',
+    description: 'Primary entry for research requests made in native DSH Chat. Call this when the user asks in ordinary language to start, continue, inspect or discuss research; pass the user text verbatim. It binds to the calling DSH session, returns the authoritative dsh Scholar phase/next action, may execute only an explicitly requested ready literature survey, and otherwise suggests a direct slash command. It never decides Gates, confirms a Brief, adopts an Intake, accepts Evidence or releases a project.',
+    parameters: {
+      text: { type: 'string', required: true, description: 'User text verbatim; runtime-enforced trimmed length 1–4000 characters.' },
+      project_id: OPT_STRING,
+      locale: { type: 'string', enum: ['zh', 'en'] },
+    },
+    output: scholarNativeReplySchema,
+    execute: async (args, ctx_, sessionId, exec) => {
+      try {
+        return { ...await runNativeScholarTurn({
+          text: String(args.text),
+          projectId: typeof args.project_id === 'string' ? args.project_id : undefined,
+          locale: args.locale,
+          sessionId,
+          client: ctx_.client,
+          cache: ctx_.cache,
+          signal: exec.signal,
+        }) }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        if (message === 'aborted' || message.startsWith('dsh_scholar ') || message.startsWith('project_id is not linked')) throw error
+        throw new Error('dsh_scholar is temporarily unavailable')
+      }
+    },
+  }, toolCtx))
 
   // ── project orchestration (Research Director) ────────────────────────────
 

@@ -40,6 +40,9 @@ export type ResearchToolAlias = keyof typeof TOOL_ALIASES
 
 /** Research tool names (the plugin's own surface): canonical + aliases. */
 export const RESEARCH_TOOLS = [
+  // Bounded native-DSH conversation façade. Public to every DSH role, but it
+  // only resolves the calling session and never grants a low-level capability.
+  'dsh_scholar',
   'research_project',
   'research_phase',
   'research_gate_request',
@@ -86,7 +89,7 @@ export const RESEARCH_TOOLS = [
  * resolve through {@link TOOL_ALIASES} in `RoleRegistry.allows`.
  */
 export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
-  none: [],
+  none: ['dsh_scholar'],
   director: ['research_project', 'research_phase', 'research_gate_request', 'research_budget', 'research_status', 'research_panel', 'release_bundle_request'],
   // ONBOARD-01 (research-onboarding.md §2): the researcher (scholar) role
   // prepares intakes — begin/stage/scan/answers/propose. There is NO adopt
@@ -123,7 +126,7 @@ export class RoleRegistry {
 
   /** Whether the role may call the tool (deprecation aliases resolve to their canonical name). */
   allows(role: ResearchRole, toolName: string): boolean {
-    const canonical = TOOL_ALIASES[toolName as ResearchToolAlias] ?? toolName
-    return ROLE_TOOLS[role].includes(canonical)
+    const canonical: string = TOOL_ALIASES[toolName as ResearchToolAlias] ?? toolName
+    return canonical === 'dsh_scholar' || ROLE_TOOLS[role].includes(canonical)
   }
 }

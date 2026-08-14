@@ -188,6 +188,11 @@ const artifactSchema = z.object({
 
 const corpusSchema = z.object({
   project_id: z.string().min(1).optional(),
+  /** Optional CAS fence used by state-guided native turns. Explicit slash
+   *  snapshots remain valid without it, but an automatic turn must pin the
+   *  projection revision it revalidated immediately before committing. */
+  expected_revision: z.number().int().nonnegative().optional(),
+  expected_session_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/).optional(),
   queries: z.array(z.object({ source: z.enum(['openalex', 'crossref', 'arxiv', 'semantic-scholar']), query: z.string(), run_at: z.string() })).default([]),
   papers: z.array(z.unknown()),
   passages: z.array(z.unknown()).optional(),

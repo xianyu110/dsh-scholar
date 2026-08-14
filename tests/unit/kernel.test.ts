@@ -901,6 +901,40 @@ describe('CONFIG-01 canonical Config Registry integration', () => {
 })
 
 describe('corpus + ideas + manuscript', () => {
+  it('CAS-fences an automatic corpus snapshot by project revision', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'cas-survey', workspace: '/w', brief: makeBrief(), session_id: 'session_a' })
+    const other = kernel.createProject({ name: 'other', workspace: '/other', brief: makeBrief() })
+    const corpus = fixtureCorpus(project.project_id)
+    expect(() => kernel.snapshotCorpus({
+      project_id: project.project_id,
+      expected_revision: project.revision + 1,
+      queries: corpus.queries,
+      papers: corpus.papers,
+    })).toThrow(/expected revision/)
+    expect(kernel.listCorpusSnapshots(project.project_id)).toHaveLength(0)
+    kernel.linkSession('session_a', other.project_id)
+    expect(() => kernel.snapshotCorpus({
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      expected_session_id: 'session_a',
+      queries: corpus.queries,
+      papers: corpus.papers,
+    })).toThrow(/no longer linked/)
+    expect(kernel.listCorpusSnapshots(project.project_id)).toHaveLength(0)
+    kernel.linkSession('session_a', project.project_id)
+    const snapshot = kernel.snapshotCorpus({
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      expected_session_id: 'session_a',
+      queries: corpus.queries,
+      papers: corpus.papers,
+    })
+    expect(snapshot.project_id).toBe(project.project_id)
+    expect(kernel.listCorpusSnapshots(project.project_id)).toHaveLength(1)
+    kernel.close()
+  })
+
   it('snapshots corpus and builds deterministic manuscripts from the ledger', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })

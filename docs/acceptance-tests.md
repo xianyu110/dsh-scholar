@@ -321,7 +321,15 @@ UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 
 ## 9. DSH 集成与 Skills
 
-### 9.0 私有宿主包安装兼容性
+### 9.0 DSH 原生对话研究与同会话阶段投影
+
+- `dsh-native-scholar-natural-turn`：未知/root Agent role 只能额外调用 `dsh_scholar`，既有 `research_project`、Gate、Evidence、Runner 等低层工具仍拒绝；工具 description 明确要求 Harness 在 DSH Chat 收到普通研究话术时原样传递 `text`，不得强迫用户先输入 slash。无 session link 返回本地化 `needs_project` 与 `/new <项目名>`，显式 `project_id` 与 session link 不一致 fail closed；session A 永远不能读取或推进 session B 的项目。
+- `dsh-native-scholar-session-id-fence`：native/RPC 拒绝 `/`、`\`、`?`、`#`、`%`、首尾/内部空白、控制字符和超长 session id；ResearchClient 把合法 opaque id 编码为一个 URL segment，`x/../../projects/rsp_other` 不得改写路由或产生任何 project read/write。
+- `dsh-native-scholar-intent-policy`：zh/en 的状态、下一步、Gate、Job、Idea 查询返回同一权威 projection 且零写；只有主 NextAction=`survey_run/state=ready/required_by=agent` 且用户本次话术以锚定正向动作词明确要求调研或继续时执行 canonical Kernel Corpus Snapshot primitive，并回显 `intent`、`execution=executed` 与执行后的最新阶段。`research`、`tell me about research methods`、`不要调研`、`please do not research` 全部零写；`run a survey` 必须命中 survey 而不是 jobs；“生成想法 / generate ideas”返回 `/ideas` 建议。其他 Agent/Runner write 只返回 canonical 一级 slash 建议；blocked、unknown、歧义、Brief confirm、Intake adoption、Gate/Release decision 全部零副作用，并返回 required_by、blocking 与页面路由。
+- `dsh-native-scholar-survey-cas`：检索后若 revision、status、主 NextAction 或 session link 已变化，不写 Corpus；Kernel 在 Corpus transaction 内同时以 `expected_revision` 和 `expected_session_id→project_id` CAS，竞争/relink 写返回稳定 conflict。取消发生在 commit 前零写；mutation 已开始后视为不可回滚提交，不得返回“已取消且零写”的误导结果。Kernel/网络错误不得泄露 endpoint/path。
+- `dsh-native-scholar-session-stage-view`：DSH `conversation.view` 用 props.sessionId 调用 loopback `/dsh-scholar` 的 `session-projection`；响应只含脱敏项目/阶段/NextAction/Gate/Job/计数，不含 token、SecretRef、prompt、日志或 transcript。Host 在 projection 前后核对 link，不稳定时重试一次后 fail closed。session A→B 切换及卸载会把 abort 贯通到底层 fetch，迟到 A 不覆盖 B；可见时最多 4 秒一次串行刷新。客户端对每层使用字段 allowlist，拒绝任意额外字段、乱序/重复阶段、畸形 NextAction、负数/NaN summary；未关联、加载、失败、刷新和十个阶段的 label + 可见 state 均 zh/en parity，current/blocked 阶段有 `aria-current=step`。`BLOCKED_GATE` 按 pending Gate type 映射对应阶段，下一步显示 label/reason 而不只显示 machine code。顶部投影来自 DSH 插件 Kernel，下方 standalone iframe 仍为独立完整工作台，测试不得把 iframe 项目选择当成 DSH session link。
+
+### 9.1 私有宿主包安装兼容性
 
 - `dsh-private-registry-install`：在空临时目录与全新 `DSH_HOME` 中，用权限 0600 的临时 npm userconfig 从 `DSH_PRIVATE_REGISTRY_URL` 安装固定 `DSH_PRIVATE_DSH_SPEC` 及真实 `@deepseek-ai/*` host 包；以固定 `DSH_SCHOLAR_PLUGIN_SPEC` 安装 Scholar 发布产物后，经公开 DSH CLI/Profile 完成插件 add、dump-config、boot、apply/dispose；所有安装包 realpath 位于临时目录，版本与锁定 spec 一致，日志/报告不含 token。仓库根 `.npmrc` 应不存在；兼容旧 checkout 时若存在，也必须不含 scope registry 或 `_authToken`。源码 checkout、symlink、fake/minimal host、浮动版本、`file:` overrides 或只验证 tarball consumer 一律不能 PASS。
 - 开发机未配置 registry/credential 时脚本输出 `NOT_RUN_MANUAL_PENDING` 并进入 `manual-acceptance.md`，不得伪装为 PASS；带 `CI=true` 或实际提供任一私有环境输入后必须 fail-closed。
@@ -331,6 +339,7 @@ UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 - `defaultMode` 不是展示字段：`research_project create` 与 `/new` 省略 mode 时继承插件 row，显式 mode 优先；full-auto 仍必须绑定 registered FixtureProfile；
 - 根包无 legacy `dshClient` 字段；`./client` 导出 DSH Plugin config 卡片和 `conversation.view` 页签的 browser bundle，manifest 声明 `dsh.client` 及 connection/conversation 依赖，打包产物包含 `lib/client.js`；
 - Host 插件在 settings provider 就绪后注册私有 `research-plugin` namespace；配置客户端只通过 Scholar 自有 loopback-only RPC 访问三个 UI 字段的脱敏投影，DSH 中央 settings allowlist 无需修改；
+- DSH lifecycle 阻断 fixture 必须加载真实 `@deepseek-ai/dsh-settings-local` provider 后再加载 Scholar；缺失必需的 `settings` service 时不得把未激活 fiber 当成 port=0、reload 或 dispose 通过。
 - DSH Settings → Plugin config 显示 `dsh Scholar` 卡片，且无需修改 DSH 源码或中央 settings allowlist；卡片经 Scholar 自有 loopback-only RPC 读取脱敏投影并以 revision-fenced path mutation 写回。展开后可编辑 `defaultMode`、`unattended`、`standalone.url` 与 `standalone.shortcut`，并明确提示重启生效；URL 拒绝 userinfo/query/hash、unsafe scheme 和非 loopback HTTP；
 - 会话顶部按 `Chat`、`Trajectory`、`dsh Scholar` 顺序显示页签；Scholar 页签以最小权限 iframe 展示同一 standalone 页面，显式按钮和默认 `Alt+Shift+S` 都以 `noopener,noreferrer` 打开同一规范化 URL；editable/IME/repeat 时快捷键不触发，dispose 后 listener 被移除；
 - Plugin config 初始 DOM、aria、Settings snapshot、URL、storage 和日志均无 Token。仅在显式 click/Enter/Space 后调用 loopback-only RPC，Host 固定读取 standalone `0600` 普通非 symlink Token 文件，客户端直接写 `navigator.clipboard.writeText` 并只显示成功/失败状态；缺文件、空值、过大、权限错误、symlink、非 loopback 或 Clipboard 拒绝均 fail closed 且不使用 DOM fallback；

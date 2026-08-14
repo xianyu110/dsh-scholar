@@ -4,7 +4,7 @@
 # handlers, headless tools and skill provider resolution.
 #
 #   1. Tool catalog == reconstruction-contracts.md §17 canonical registry
-#      (34 canonical names incl. the ONBOARD-01 intake prepare surface),
+#      (35 canonical names incl. dsh_scholar and the ONBOARD-01 prepare surface),
 #      legacy claim_verify/analysis_build/release_bundle registered as
 #      one-version deprecation aliases (never unknown tool).
 #   2. No Human Decision / gate-decision tool exists; no intake adopt/accept
@@ -59,6 +59,7 @@ const { registerResearchTools } = await import(`${repo}/lib/plugin/tools.js`)
 const { RoleRegistry, RESEARCH_TOOLS, ROLE_TOOLS, TOOL_ALIASES, DEFAULT_ROLE } = await import(`${repo}/lib/plugin/acl.js`)
 
 const CANONICAL = [
+  'dsh_scholar',
   'research_project', 'research_phase', 'research_gate_request', 'research_budget',
   'research_status', 'literature_search', 'paper_resolve', 'corpus_snapshot',
   'passage_lookup', 'research_panel', 'idea_create', 'idea_compare', 'novelty_audit',
@@ -71,7 +72,7 @@ const CANONICAL = [
   'research_intake_begin', 'research_intake_stage', 'research_intake_scan',
   'research_intake_answers', 'research_intake_propose',
 ]
-if (CANONICAL.length !== 34) throw new Error(`§17 registry has ${CANONICAL.length} entries, expected 34`)
+if (CANONICAL.length !== 35) throw new Error(`§17 registry has ${CANONICAL.length} entries, expected 35`)
 
 const registered = []
 // Tool defs capture `client` at registration time; one registration serves
@@ -143,8 +144,11 @@ for (const n of intakeNames) {
 for (const role of Object.keys(ROLE_TOOLS)) {
   if (ROLE_TOOLS[role].includes('research_intake_adopt')) problems.push(`ROLE_TOOLS[${role}] must not contain an adopt tool`)
 }
-// 5. unknown/unregistered agent -> DEFAULT_ROLE none -> every tool denied
-for (const n of names) if (roles.allows(DEFAULT_ROLE, n)) problems.push(`unknown agent may call ${n}`)
+// 5. unknown/unregistered agent gets only the bounded native-chat façade.
+for (const n of names) {
+  const allowed = roles.allows(DEFAULT_ROLE, n)
+  if (n === 'dsh_scholar' ? !allowed : allowed) problems.push(`unknown agent ACL mismatch on ${n}`)
+}
 if (roles.get('some-unknown-session') !== 'none') problems.push('unknown session role must be none')
 if (roles.allows('writer', 'claim_verify_request')) problems.push('writer must not verify claims')
 if (roles.allows('writer', 'claim_verify')) problems.push('writer must not call claim_verify alias')
@@ -183,7 +187,7 @@ PROBLEMS=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c
 ALIASN=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).aliasCount))")
 
 if [ -z "$PROBLEMS" ]; then
-  ok "all 34 §17 canonical tools registered, aliases + ACL consistent"
+  ok "all 35 §17 canonical tools registered, aliases + ACL consistent"
 else
   bad "catalog/ACL problems: $PROBLEMS"
 fi
@@ -213,8 +217,8 @@ if probe "$CATALOG" "j.names.filter(n=>n.startsWith('research_intake')).length =
 else
   bad "intake prepare tool count wrong"
 fi
-if probe "$CATALOG" "!j.problems.some(p=>/unknown agent/.test(p))"; then
-  ok "unknown/unregistered agent denied on every research tool"
+if probe "$CATALOG" "!j.problems.some(p=>/unknown agent ACL mismatch/.test(p))"; then
+  ok "unknown/unregistered agent limited to dsh_scholar"
 else
   bad "unknown agent ACL leak"
 fi
@@ -247,14 +251,15 @@ const { apply, KernelSidecar } = await import(`${repo}/lib/plugin/index.js`)
 
 const problems = []
 
-// 1. DEFAULT_ROLE = none; unknown sessions resolve to none; none has an
-//    EMPTY tool surface -> every research tool is denied for unknown agents.
+// 1. DEFAULT_ROLE = none; unknown sessions resolve to none; none has only the
+//    bounded dsh_scholar façade and no low-level research capability.
 if (DEFAULT_ROLE !== 'none') problems.push('DEFAULT_ROLE must be none')
 const roles = new RoleRegistry()
 if (roles.get('some-unknown-agent-42') !== 'none') problems.push('unknown session role must resolve to none')
-if (ROLE_TOOLS.none.length !== 0) problems.push('none role surface must be empty')
+if (ROLE_TOOLS.none.length !== 1 || ROLE_TOOLS.none[0] !== 'dsh_scholar') problems.push('none role surface must contain only dsh_scholar')
 for (const tool of RESEARCH_TOOLS) {
-  if (roles.allows(DEFAULT_ROLE, tool)) problems.push(`unknown agent may call ${tool}`)
+  const allowed = roles.allows(DEFAULT_ROLE, tool)
+  if (tool === 'dsh_scholar' ? !allowed : allowed) problems.push(`unknown agent ACL mismatch on ${tool}`)
 }
 
 // 2. pre-execute waterfall replicated 1:1 from src/plugin/index.ts (the
@@ -281,9 +286,10 @@ const run = async (agentId, tool) => {
   return result?.kind === 'deny' ? 'deny' : calledNext ? 'allow' : 'other'
 }
 
-// unknown agent: EVERY research tool (canonical + deprecation alias) denied
+// unknown agent: only dsh_scholar allowed; every low-level tool denied.
 for (const tool of RESEARCH_TOOLS) {
-  if (await run('unknown-agent-abc', tool) !== 'deny') problems.push(`unknown agent NOT denied on ${tool}`)
+  const outcome = await run('unknown-agent-abc', tool)
+  if (tool === 'dsh_scholar' ? outcome !== 'allow' : outcome !== 'deny') problems.push(`unknown agent ACL mismatch on ${tool}`)
 }
 // known role (director = the PI surface, docs/dsh-integration.md §4):
 // every tool in its surface is allowed; the alias is canonical-only.
@@ -347,12 +353,12 @@ if [ -z "$DSH01" ]; then
   bad "DSH-01 probe script produced no output"
 else
   if probe "$DSH01" "j.problems.length === 0"; then
-    ok "unknown agent denied on every research tool; known roles keep their surface"
+    ok "unknown agent limited to dsh_scholar; known roles keep their surface"
   else
     bad "DSH-01 ACL: $(printf '%s' "$DSH01" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.join('|')))")"
   fi
-  if probe "$DSH01" "!j.problems.some(p=>/unknown agent NOT denied/.test(p))"; then
-    ok "unknown agent denied on every research write tool (DSH-01)"
+  if probe "$DSH01" "!j.problems.some(p=>/unknown agent ACL mismatch/.test(p))"; then
+    ok "unknown agent denied on every low-level research tool (DSH-01)"
   else
     bad "unknown-agent ACL leak"
   fi
@@ -390,7 +396,7 @@ fi
 #     client (no module-level tool-context ref), roles and ACL listeners are
 #     per-instance (granting a role in B never leaks into A);
 #   - reload: cordis update() unloads (kills the old kernel, unregisters
-#     tools) then re-applies — no duplicate registration (still exactly 37
+#     tools) then re-applies — no duplicate registration (still exactly 38
 #     tools / 1 skill provider), data persists in the same dataDir;
 #   - dispose: sidecar kernel dead, endpoint.json removed, port released,
 #     tools/commands/skills/pre-execute listeners all gone, the other
@@ -409,6 +415,7 @@ const { Context } = require('@deepseek-ai/cordis')
 const { ToolRuntime } = await import(`${repo}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`)
 const { CommandRuntime } = await import(`${repo}/node_modules/@deepseek-ai/dsh-commands/lib/index.js`)
 const { SkillRegistry } = await import(`${repo}/node_modules/@deepseek-ai/dsh-skill/lib/index.js`)
+const { default: SettingsLocal } = await import(`${repo}/node_modules/@deepseek-ai/dsh-settings-local/lib/index.js`)
 const pluginMod = await import(`${repo}/lib/plugin/index.js`)
 const { readFileSync, mkdtempSync, rmSync, existsSync } = await import('node:fs')
 const { tmpdir } = await import('node:os')
@@ -422,12 +429,13 @@ const readEp = (dataDir) => JSON.parse(readFileSync(join(dataDir, 'runtime', 'en
 const projectBrief = { problem: 'test problem', scope: 'test scope', questions: [], primary_metrics: [], resources: '', risks: [], target_outputs: ['conference-paper'], target_venue: null, baseline_repo: null, domain: 'machine-learning' }
 
 /** Minimal host: real cordis root + the real DSH registries the plugin uses. */
-async function makeHost() {
+async function makeHost(dataDir) {
   const root = new Context()
   root.provide('systemPrompt', { tools() {}, section() {} })
   await root.plugin(ToolRuntime, { mode: 'native' })
   await root.plugin(CommandRuntime)
   await root.plugin(SkillRegistry)
+  await root.plugin(SettingsLocal, { path: join(dataDir, 'settings.yaml'), watch: false })
   root.provide('subagents', { start: async () => { throw new Error('fixture has no subagent backend') } })
   return root
 }
@@ -446,8 +454,8 @@ try {
   tempDirs.push(dirA, dirB)
   const cfgA = { kernel: { host: '127.0.0.1', port: 0, dataDir: dirA }, unattended: true }
   const cfgB = { kernel: { host: '127.0.0.1', port: 0, dataDir: dirB }, unattended: true }
-  const rootA = await makeHost()
-  const rootB = await makeHost()
+  const rootA = await makeHost(dirA)
+  const rootB = await makeHost(dirB)
 
   // ── apply A and B (async apply is awaited by cordis) ─────────────────────
   const handleA = await rootA.plugin(pluginMod, cfgA)
@@ -469,7 +477,7 @@ try {
 
   // ── tools / commands / skills registered exactly once ────────────────────
   const toolsA = rootA.tools.schemas().map(s => s.name)
-  if (toolsA.length !== 37) problems.push(`instance A tool count ${toolsA.length} != 37`)
+  if (toolsA.length !== 38) problems.push(`instance A tool count ${toolsA.length} != 38`)
   if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
   const expectedCommands = ['help','new','list','status','gates','jobs','claims','survey','ideas','reproduce','contract','run','evidence','write','review','release-bundle','release']
   const registeredCommands = rootA.commands.list({}).map(c => c.name).sort()
@@ -500,7 +508,7 @@ try {
   trackedPids.push(epFileA2.pid)
   if (alive(oldPid)) problems.push('reload must stop the old kernel (sidecar disposer)')
   if (epFileA2.pid === oldPid) problems.push('reload must spawn/reuse a fresh kernel instance')
-  if (rootA.tools.schemas().length !== 37) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 37, duplicate risk)`)
+  if (rootA.tools.schemas().length !== 38) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 38, duplicate risk)`)
   if ((await rootA.skills.list()).length !== 4) problems.push('reload leaked or lost research skills')
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('reload must keep kernel data (same dataDir)')
   if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 1) problems.push('reload must not duplicate the pre-execute listener')
@@ -518,14 +526,14 @@ try {
   const healthAfter = await fetch(`${lastEndpoint}/v1/health`).then(r => r.ok).catch(() => false)
   if (healthAfter) problems.push('dispose must release the kernel port (health still answering)')
   // the sibling instance is untouched
-  if (rootB.tools.schemas().length !== 37) problems.push('disposing A must not affect B tools')
+  if (rootB.tools.schemas().length !== 38) problems.push('disposing A must not affect B tools')
   if (rootB.research === undefined) problems.push('disposing A must not affect B research service')
 
   // ── re-apply on the same root: usable again, still exactly once ──────────
   const handleA2 = await rootA.plugin(pluginMod, cfgA)
   const epFileA3 = readEp(dirA)
   trackedPids.push(epFileA3.pid)
-  if (rootA.tools.schemas().length !== 37) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 37`)
+  if (rootA.tools.schemas().length !== 38) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 38`)
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('re-apply must restore the client against the same dataDir')
   await handleA2.dispose()
 } catch (error) {

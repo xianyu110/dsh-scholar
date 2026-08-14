@@ -4,13 +4,14 @@
 
 ## 1. 运行形态
 
-完整科研浏览器 UI 的实现、HTTP host 与 BFF 只有 standalone 一份：本地 HTTP host、同源 BFF、全屏 UI、独立 Token 解锁，并内置 locale/theme adapter。DSH Agent 插件继续提供 tools、commands、Skills 和 Settings → Plugin config 配置卡，同时在会话 `Chat`、`Trajectory` 之后注册 `dsh Scholar` 页签。该页签只以受控 iframe 展示已配置的 standalone URL，并提供“在新页面打开”；它不是第二套 UI/BFF，不发布 legacy `dshClient`、不恢复 `/research-api` 或 `/research-ui-api` 桥，也不复制科研状态模型。
+完整科研浏览器 UI 的实现、HTTP host 与 BFF 只有 standalone 一份：本地 HTTP host、同源 BFF、全屏 UI、独立 Token 解锁，并内置 locale/theme adapter。DSH Agent 插件继续提供 tools、commands、Skills 和 Settings → Plugin config 配置卡，同时在会话 `Chat`、`Trajectory` 之后注册 `dsh Scholar` 页签。该页签在 iframe 外渲染一个只读、同 session 的 Kernel 阶段投影，并以受控 iframe 展示已配置的 standalone URL、提供“在新页面打开”；它不是第二套业务 UI/BFF，不发布 legacy `dshClient`、不恢复 `/research-api` 或 `/research-ui-api` 桥，也不复制可变科研状态模型。
 
 所有页面、状态模型、翻译 key、ResearchClient 和 UI 实现都只有一份。Shadow DOM 可以用于隔离独立 bootstrap 与工作区样式，不得再引入 DSH Web 宿主适配分支。
 
 ### 1.1 DSH 会话入口与 Plugin config
 
 - 会话页签固定 `id=dsh-scholar`、顺序在 `Chat` 与 `Trajectory` 之后，标签、iframe title、按钮、状态和错误均支持简体中文/英文；页签卸载时清理 listener，不得抢占 Chat composer、Terminal、编辑器或任意 `input/textarea/select/contenteditable` 的焦点；
+- 页签 header 用当前 DSH `sessionId` 调用 loopback `session-projection`，展示项目名/status/revision、完整阶段条、主要 NextAction label/reason、待决 Gate 与 Job 计数；阶段同时显示本地化名称与可见状态文字，不能只用颜色区分，current/blocked 阶段带 `aria-current=step`，blocked 依据 pending Gate 类型落在对应流程阶段。未关联项目时本地化提示先在 Chat 输入项目名或 `/new <项目名>`。每 4 秒至多一个请求，session 切换、卸载或手动刷新会把 AbortSignal 贯通到底层 fetch，迟到响应不得覆盖新会话；
 - standalone URL 是可配置项，默认 `http://127.0.0.1:18610`。只接受无 userinfo、无 query/hash 的 HTTPS URL，或 loopback HTTP URL；拒绝 `javascript:`、`data:`、非 loopback HTTP 和携带凭据/Token 的 URL；
 - `Alt+Shift+S` 为默认全局快捷键，也可在 Plugin config 禁用。仅在非编辑状态、非 IME composition、非按键重复时触发；使用 `noopener,noreferrer` 打开新页面，且与页签内显式按钮指向同一规范化 URL；
 - standalone 响应只允许 `standalone.frame_ancestors` 配置的精确 loopback DSH origin 嵌入（默认 `127.0.0.1/localhost/[::1]:3080`）；非白名单 ancestor 由无通配符 CSP 拒绝。页面内联 bootstrap script/style 使用每响应 nonce，业务脚本只允许 self；iframe 使用最小 sandbox/referrer policy，不把 Token 放入 URL、postMessage、DOM attribute 或 boot manifest；
@@ -92,6 +93,8 @@ Tab 可收藏，Alt+1…9 切换。上表全部当前业务页面都必须提供
 支持会话新建、切换、重命名、固定、复制、归档、搜索、导出 JSON/Markdown 和最多 200 条本地 transcript。Chat session 必须携带 `project_id`，session 列表、active id、transcript、草稿、引用回复、附件引用和搜索状态按项目分区持久化；项目切换是显式 context switch，不得继续复用固定全局 storage key。异步命令和附件上传必须同时捕获 origin project + origin session，完成时只回写原项目；附件 `project_id` 与当前项目不一致时 fail closed。Chat 同时是 name-only Init 的 Grill Me 主界面：active Init Intake 时，自由文本每次回答当前唯一问题，服务端返回 next question、Brief preview 和下一步。模型文本和服务器 raw error 原样显示；问题 label、CTA、状态、已知错误、aria 等 UI chrome 翻译。
 
 Composer 的输入分派顺序固定为：显式 `/...` → direct command；active Grill/current question → 单题 Human answer；其余 project-scoped prose → natural turn。Natural turn 先读取权威 `next_actions_v2`，再把文本解析为 canonical operation intent；status/ideas/gates/jobs/claims 等只读意图可直接执行，明确的 Agent 动作可在本次发送构成确认后执行，Human-only、blocked、unknown、歧义或参数不完整动作只返回候选命令/参数和可达页面，禁止浏览器或模型猜状态、Gate、revision 或 capability。没有可用模型调用 adapter 时也必须接受普通文本并返回确定性阶段引导，不能退回 `Unknown command`；模型可用时其回答仍不能改变 Kernel 投影或绕过 canonical operation。
+
+同样的自然语言体验必须覆盖 DSH 本体 Chat，而不是只存在于 standalone composer。`research-core` Skill 指示 Harness Agent 在用户表达研究意图时调用单一 `dsh_scholar` façade，并原样传递文本；工具按当前 DSH session 绑定项目、执行受控 intent、返回本地化回答与最新阶段。Agent 不应要求用户先手写 slash；当动作不能安全自动执行时，回答要帮助生成可编辑的一级 slash command，并解释所需 Human/Agent/Runner 与阻断项。
 
 DSH 页签中的 standalone iframe 通过 request-id 关联的 `postMessage` 请求 Host browser client，再由 loopback-only Scholar RPC 使用 Harness `ctx.llm` 完成无工具的一次对话调用。模型桥仅对与 Host 不同 origin 的 loopback standalone 开放；配置的远程 HTTPS 工作台可展示，但只能使用 deterministic fallback。standalone HTML 用 `frame-ancestors` 只允许 loopback embedder，iframe 使用 origin-only referrer，子页在发送任何 project/history 前必须从浏览器 `document.referrer` 确认父 origin 为不同 origin 的 loopback。父页面必须同时校验 iframe `contentWindow` 与配置的 standalone origin，已完成 request-id 在有界 128 项窗口内仍拒绝重放，且每个 iframe 最多一个 in-flight turn；iframe 只接受来自 `window.parent` 且 request-id 匹配的响应。父子两端 20 秒超时，iframe 卸载、URL 切换或 RPC 取消必须通过 `AbortSignal` 终止 Host LLM；不可用时立即回退确定性回答。请求最多携带最近 12 条、每条有界且在首次 await 前冻结的当前 project/session 文本以及裁剪后的 `project.status/brief_status/next_actions_v2`，禁止跨项目 transcript、附件字节和任何 secret。模型返回的候选 slash 必须由 direct descriptor allowlist 校验并排除 Human-only command，只渲染为“使用命令”按钮；点击仅把命令写入 composer 并把光标置于末尾，不自动发送。
 

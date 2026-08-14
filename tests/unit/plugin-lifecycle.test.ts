@@ -82,7 +82,14 @@ describe('DSH research plugin lifecycle', () => {
       mutate,
     }
     const chatTurn = vi.fn().mockResolvedValue({ assistant_text: '可以继续讨论。', suggested_command: '/status' })
-    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token', chatTurn)
+    const sessionProjection = vi.fn().mockResolvedValue({
+      linked: true,
+      session_id: 'session_1',
+      project: { project_id: 'rsp_1', name: 'Research', status: 'SCOPED', revision: 2 },
+      stages: [{ id: 'survey', state: 'current' }],
+      summary: { pending_gates: 0, jobs: { total: 0 }, counts: {} },
+    })
+    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token', chatTurn, sessionProjection)
 
     const snapshot = await handler('settings-snapshot', {}, new AbortController().signal)
     expect(snapshot).toMatchObject({ ok: true, value: { available: true, snapshot: {
@@ -109,10 +116,25 @@ describe('DSH research plugin lifecycle', () => {
     expect(chat).toEqual({ ok: true, value: { assistant_text: '可以继续讨论。', suggested_command: '/status' } })
     expect(chatTurn).toHaveBeenCalledWith({ text: '下一步是什么？' }, controller.signal)
 
+    const phases = await handler('session-projection', { session_id: 'session_1' }, controller.signal)
+    expect(phases).toMatchObject({ ok: true, value: { linked: true, session_id: 'session_1' } })
+    expect(sessionProjection).toHaveBeenCalledWith('session_1', controller.signal)
+    const invalidProjection = await handler('session-projection', { session_id: '' }, controller.signal)
+    expect(invalidProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
+    const unsafeProjection = await handler('session-projection', { session_id: 'x/../../projects/rsp_other' }, controller.signal)
+    expect(unsafeProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
+    const whitespaceProjection = await handler('session-projection', { session_id: ' session_1' }, controller.signal)
+    expect(whitespaceProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
+    expect(sessionProjection).toHaveBeenCalledTimes(1)
+
     const unavailable = createScholarRpcHandler(settings as never, () => 'clipboard-token')
     await expect(unavailable('chat-turn', {}, controller.signal)).resolves.toMatchObject({
       ok: false,
       error: { code: 'internal', message: 'Scholar Chat model is unavailable' },
+    })
+    await expect(unavailable('session-projection', { session_id: 'session_1' }, controller.signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: 'Scholar session projection is unavailable' },
     })
   })
 

@@ -513,3 +513,34 @@ data: {"time":"…"}
 ### BFF 透传
 
 standalone BFF 对三个 stream 路由与 Terminal SSE 同等处理：bearer 401、CSRF GET 豁免、project/global-id 路由在**首字节前**完成 membership（非成员/未知 → 404 JSON，零 SSE 字节）、`x-service-token` 注入同现有、`x-principal-id` 注入（pty 流走 `/v1/pty/sessions` 既有规则；watch/trajectory 流由 BFF 对 `…/watch/stream` 与 `…/trajectory/stream` 注入 server-derived 身份）；`proxy_buffering off` 由 nginx 层处理（响应头含 `x-accel-buffering: no`）。
+
+## 23. DSH 原生 Scholar 对话与阶段投影
+
+### Agent Tool `dsh_scholar`
+
+输入为 `{text: string, project_id?: string, locale?: "zh"|"en"}`，`text` 去首尾空白后 1–4000 字符。调用上下文必须提供 DSH agent/session id；该 id 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$`，ResearchClient 将其 `encodeURIComponent` 后作为一个 path segment 发送。未提供 `project_id` 时只按该 session link 解析项目，提供时必须与 link 精确一致。输出为：
+
+~~~json
+{
+  "linked": true,
+  "session_id": "session_abc123",
+  "assistant_text": "…",
+  "intent": {"kind": "status", "confidence": "deterministic"},
+  "execution": {"status": "read_only", "operation": "research_status", "suggested_command": null},
+  "project": {"project_id": "rsp_…", "name": "…", "status": "SCOPED", "revision": 2, "brief_status": "confirmed"},
+  "stages": [
+    {"id":"init","state":"done"},{"id":"survey","state":"current"},{"id":"idea","state":"upcoming"},
+    {"id":"reproduce","state":"upcoming"},{"id":"contract","state":"upcoming"},{"id":"experiment","state":"upcoming"},
+    {"id":"evidence","state":"upcoming"},{"id":"writing","state":"upcoming"},{"id":"review","state":"upcoming"},
+    {"id":"release","state":"upcoming"}
+  ],
+  "next_action": {"code":"survey_run","label":"Run survey","reason":"corpus required","route":"chat","state":"ready","blocking":false,"required_by":"agent","required":true,"revision":2},
+  "summary": {"pending_gates":0,"jobs":{"total":0,"queued":0,"running":0,"succeeded":0,"failed":0},"counts":{}}
+}
+~~~
+
+`assistant_text` 按 `locale` 或 CJK 输入检测选择 zh/en；wire enum/id、Kernel 提供的 NextAction label/reason 不翻译，浏览器阶段 label/state 由 UI 字典本地化。未关联项目返回同形状的 `execution.status="needs_project"` 与 `suggested_command="/new <项目名>"`。工具是 unknown role 可调用的唯一公共 façade，不改变其他 ACL。只读意图零副作用；自动执行集合固定为权威 ready `survey_run`，且要求本次文本含锚定的正向开始/继续/执行动作；否定、主题讨论和歧义输入零写。检索后重新读取并核验相同 project、revision、session link 与 `survey_run/ready/agent`，Corpus Snapshot 请求携带 `expected_revision` 和 `expected_session_id`，Kernel 在同一事务内核对 revision 与 session→project 绑定；调用 mutation 前检查取消，mutation 开始后进入不可回滚 commit boundary。非输入类 Kernel/网络错误统一为稳定 `dsh_scholar is temporarily unavailable`，不得暴露 endpoint/path/upstream message。其他 mutation 返回 `suggested`/`blocked`/`needs_human`，Human-only 永远不执行。
+
+### Connection RPC `/dsh-scholar`: `session-projection`
+
+请求 `{session_id: string}`，仅接受 loopback authority，session id 不做宽松 trim，必须原样匹配上述安全 opaque-id 语法。未关联返回 `{linked:false, session_id, stages:[…]}`；已关联返回 `{linked:true, session_id, project, stages, next_action, summary}`，字段集合与上述工具的安全投影一致。该 RPC 只读且不接受 project id；它是同一桌面用户的 UI 视图传输，不是跨租户授权边界，真正的 mutation 仍只接受 Host 绑定的 Agent session。Host 在读取 projection 后再次核对 session link；不一致重试一次后返回 unavailable。handler 不暴露 Kernel/provider/standalone token、SecretRef、原始日志、prompt、tool args/result 或 transcript；内部错误返回稳定 `Scholar session projection is unavailable`，不透传路径或上游响应。客户端必须以精确 allowlist 校验 root/project/stage/NextAction/summary/jobs，不允许额外字段；响应 session 精确相等、十阶段固定顺序、完整 NextAction/jobs 结构，`counts` 是可为空的动态字典但每个值都必须为非负有限整数；session 切换的 AbortSignal 必须传到底层 fetch。

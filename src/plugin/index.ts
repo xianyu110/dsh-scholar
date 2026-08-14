@@ -56,6 +56,7 @@ import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type Sk
 import { readStandaloneAccessToken } from './standalone-token.js'
 import { createScholarRpcHandler } from './settings-rpc.js'
 import { createHarnessChatTurn, type HarnessChatTurnReply } from './chat-turn.js'
+import { buildScholarSessionProjection, type ScholarSessionProjection } from '../shared/research-stage.js'
 import {
   DEFAULT_STANDALONE_SHORTCUT,
   DEFAULT_STANDALONE_URL,
@@ -279,6 +280,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   // The callback is owned by this plugin fiber and cleared when the injected
   // llm child is unloaded or replaced.
   let hostChatTurn: ((payload: unknown, signal?: AbortSignal) => Promise<HarnessChatTurnReply>) | undefined
+  let readSessionProjection: ((sessionId: string, signal: AbortSignal) => Promise<ScholarSessionProjection>) | undefined
   if (typeof ctx.inject === 'function') {
     ctx.inject(['llm'], llmCtx => {
       const handler = createHarnessChatTurn(
@@ -305,6 +307,10 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
         (payload, signal) => {
           if (hostChatTurn === undefined) throw new Error('Scholar Chat model is unavailable')
           return hostChatTurn(payload, signal)
+        },
+        (sessionId, signal) => {
+          if (readSessionProjection === undefined) throw new Error('Scholar session projection is unavailable')
+          return readSessionProjection(sessionId, signal)
         },
       ),
       { authority: 'loopback' },
@@ -361,6 +367,25 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   const cacheDir = effectiveConfig.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
   const cache = new DiskCache(cacheDir)
   const roles = new RoleRegistry()
+
+  const projectionReader = async (sessionId: string, signal: AbortSignal): Promise<ScholarSessionProjection> => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (signal.aborted) throw new Error('aborted')
+      const project = await client.getProjectBySession(sessionId, signal)
+      if (signal.aborted) throw new Error('aborted')
+      if (project === null) return buildScholarSessionProjection(sessionId)
+      const projection = await client.projectProjection(project.project_id, signal)
+      if (signal.aborted) throw new Error('aborted')
+      const confirmed = await client.getProjectBySession(sessionId, signal)
+      if (signal.aborted) throw new Error('aborted')
+      if (confirmed?.project_id === project.project_id) return buildScholarSessionProjection(sessionId, projection)
+    }
+    throw new Error('Scholar session link changed during projection')
+  }
+  readSessionProjection = projectionReader
+  ctx.effect(() => () => {
+    if (readSessionProjection === projectionReader) readSessionProjection = undefined
+  }, 'research-plugin.session-projection')
 
   // Project resolution service for other plugins / commands.
   ctx.provide('research', {

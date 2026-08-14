@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
   callScholarChatTurn,
+  callScholarSessionProjection,
   copyStandaloneAccessToken,
   inject,
   parseScholarChatBridgeRequest,
@@ -142,6 +143,44 @@ describe('DSH research plugin browser configuration', () => {
     expect(call).toHaveBeenCalledWith('/dsh-scholar', 'chat-turn', { text: '问题' })
     call.mockClear()
     await expect(callScholarChatTurn({ call }, false, {})).rejects.toThrow('Scholar Chat model is unavailable')
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  it('reads only an exact loopback DSH session projection and rejects malformed responses', async () => {
+    const value = {
+      linked: true,
+      session_id: 'session_1',
+      project: { project_id: 'rsp_1', name: 'Research', status: 'SCOPED', revision: 2 },
+      stages: ['init', 'survey', 'idea', 'reproduce', 'contract', 'experiment', 'evidence', 'writing', 'review', 'release']
+        .map(id => ({ id, state: id === 'survey' ? 'current' : id === 'init' ? 'done' : 'upcoming' })),
+      next_action: {
+        code: 'survey_run', label: 'Run survey', reason: 'corpus required', route: 'chat', state: 'ready',
+        blocking: false, required_by: 'agent', required: true, revision: 2,
+      },
+      summary: { pending_gates: 0, jobs: { total: 0, queued: 0, running: 0, succeeded: 0, failed: 0 }, counts: {} },
+    }
+    const call = vi.fn().mockResolvedValue({ ok: true, value })
+    const controller = new AbortController()
+    await expect(callScholarSessionProjection({ call }, true, 'session_1', controller.signal)).resolves.toEqual(value)
+    expect(call).toHaveBeenCalledWith('/dsh-scholar', 'session-projection', { session_id: 'session_1' }, controller.signal)
+
+    call.mockResolvedValueOnce({ ok: true, value: { ...value, session_id: 'session_2' } })
+    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    call.mockResolvedValueOnce({ ok: true, value: { ...value, stages: [...value.stages].reverse() } })
+    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    call.mockResolvedValueOnce({ ok: true, value: { ...value, next_action: { code: 'survey_run' } } })
+    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    call.mockResolvedValueOnce({ ok: true, value: { ...value, summary: { ...value.summary, pending_gates: -1 } } })
+    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    call.mockResolvedValueOnce({ ok: true, value: { ...value, token: 'must-not-enter-state' } })
+    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    call.mockResolvedValueOnce({ ok: true, value: { ...value, project: { ...value.project, secret_ref: 'ssh-key' } } })
+    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    call.mockClear()
+    await expect(callScholarSessionProjection({ call }, true, 'session/other')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, true, ' session_1')).rejects.toThrow('unavailable')
+    expect(call).not.toHaveBeenCalled()
+    await expect(callScholarSessionProjection({ call }, false, 'session_1')).rejects.toThrow('unavailable')
     expect(call).not.toHaveBeenCalled()
   })
 })

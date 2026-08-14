@@ -106,6 +106,7 @@ describe('v2 §3.1 default-deny ACL', () => {
     const { RoleRegistry } = await import('@dsh-scholar/research-plugin')
     const roles = new RoleRegistry()
     expect(roles.get('some-unknown-session')).toBe('none')
+    expect(roles.allows('none', 'dsh_scholar')).toBe(true)
     expect(roles.allows('none', 'research_project')).toBe(false)
     expect(roles.allows('none', 'research_status')).toBe(false)
     expect(roles.allows('none', 'literature_search')).toBe(false)
