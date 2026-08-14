@@ -60,6 +60,12 @@ Token 四桶互斥，reasoning 已属于 output；父节点汇总不得与子节
 
 进入 child 后默认显示安全摘要、消息时间线、工具名/状态/耗时和安全输出 preview。原始工具参数、结果、prompt、环境变量和 provider detail 默认不返回；有 `trajectory_detail_read` 时也先经过结构化 allowlist、redaction 与大小限制。
 
+### 3.1 阶段执行与拓扑接线
+
+阶段并行只复用本规范的 observational topology，不新增一套研究状态机。DSH 插件的 StageAwareSubagentPlanner 在权威 NextAction 通过准入后启动 one-shot child；启动即 registerChildLink(state=running)，完成、取消或失败后 updateChildState，每条成功启动路径都在 finally 调用 run.dispose()。retry 必须创建新 node，终态 node 不复活。
+
+Topology node 可增加 stage/action、perspective、attempt 和安全输入/输出 hash，但 Research phase、NextAction、Gate、Evidence 与 Release 只能来自 Kernel Research Outbox。页面中的 running/succeeded/failed/cancelled 计数是观察性投影，不能反向推进 Project。阶段矩阵、准入、预算、tool filter、provenance 与实施顺序见 subagent-stage-execution.md。
+
 ## 4. 事件、历史与实时恢复
 
 统一事件 envelope：

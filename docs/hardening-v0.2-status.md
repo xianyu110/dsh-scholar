@@ -310,3 +310,11 @@ SELFMOD-01 的当前边界保持不变：Cordis self-referential 工具已经以
 | P0 | WORKSPACE-FACADE-READ-01：部分 | 本地 `demo1` 已稳定复现 manuscript tree 200、generic `nodes?path=paper.tex|main.bib` 404，而 TeX file route 200；原因是 generic store 对未知 `ws_doc_*` 返回 null，Kernel 未触发 TeX facade fallback。关闭条件：backend-first read/readVersion/blob、HTTP 200 原字节、缺失文件仍 404，节点非法 size 降级 `0 B`；Kernel/UI/BFF 回归和本地页面通过。 |
 
 任何 Chat context 新需求或修复建议必须先同步 product-spec.md §5.2、gui-plugin-plan.md §4、acceptance-tests.md `ui-chat-project-isolation`、manual-acceptance.md、USAGE_GUIDE.md 与本行，再修改代码。
+
+## 15. 2026-08-15 阶段感知 Subagent 加速需求
+
+| 优先级 | ID / 当前状态 | 当前事实与关闭条件 |
+|---|---|---|
+| P0 | SUBAGENT-STAGE-02：部分 | 当前根插件 research_panel 已可用 DSH ctx.subagents.start('spawn', ...) 并行启动多个 perspective，并以 Promise.allSettled 收集；Kernel/Client 已有 child register/state API、history、Trajectory session lane 与 Topology 投影。但插件尚未在所有路径 run.dispose()，未调用 registerChildLink/updateChildState，也没有 phase/NextAction/pending Gate/revision/session fencing、原子预算预留与对账、幂等、最小 tool filter、provenance 和 draft-only 聚合闭环，因此不得宣称自动阶段并行已完成。关闭条件：按 subagent-stage-execution.md 落地 StageAwareSubagentPlanner；优先 Survey/Idea/Writing/Review，Experiment 计算只走 Runner；完成 acceptance-tests.md §8.3 全部自动场景，再以真实 DSH host/model 对取消、预算、拓扑、i18n/a11y 和 secret redaction 做人工验收。 |
+
+本需求的任何新增实现、缺陷或修复建议必须先同步 product-spec.md §5.10.1、trajectory-subagents.md §3.1、subagent-stage-execution.md、acceptance-tests.md §8.3 与本行，再修改代码。

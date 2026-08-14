@@ -167,6 +167,14 @@ Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 g
 - history/cold read 不得激活 Agent，默认只返回脱敏安全摘要；
 - 精确模型、流协议和 DSH 移植边界见 trajectory-subagents.md。
 
+#### 5.10.1 阶段感知 Subagent 加速
+
+- Survey、Idea、Writing、Review 优先使用确定性 fan-out/fan-in 面板；Init、Reproduce、Contract、Evidence、Release 可在领域 provenance 完整后并行读取、审阅与草稿任务；Experiment 的真实计算并行必须使用 Runner Job，subagent 只辅助规划、监控和诊断；
+- child 只产出 observation、proposal、draft、review finding 或 diagnostic，不能批准 Gate、提交正式 Runner、接受 Evidence、支撑 Claim、合并 canonical manuscript 或发布；
+- 每次 fan-out 必须钉定 project/session/revision/NextAction/snapshot/config/model，校验 exact live parent、membership、pending Gate、幂等、预算、并发和 allowlist；fan-in 后再次校验，过期结果不得回写权威对象；
+- DSH child 使用公开 ctx.subagents 一次性 spawn、maxDepth=1 和最小 tool filter；所有路径必须 dispose，并把 running/terminal state 回写既有 observational topology；
+- 当前 research_panel 只有基础并行启动，未完成上述生命周期、阶段准入与预算闭环；完整生成级契约见 subagent-stage-execution.md。
+
 ### 5.11 Model Provider 与 OCR
 
 - instance/global Provider Registry 支持内置与自定义 Provider；credential 只保存 SecretRef，项目只引用 provider/model ID；

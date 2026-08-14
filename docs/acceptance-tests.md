@@ -319,6 +319,23 @@ UI 目标场景（浏览器/DSH 集成验收，保持契约原文）：
 - topology-usage：四桶 token、active duration 与 cost unknown/estimated 正确，父子不双计；
 - topology-scale-a11y：10k nodes/records DOM 有界，>100 virtualize、prepend anchor 稳定，tree/treeitem keyboard/ARIA 和 zh/en 通过。
 
+### 8.3 阶段感知 Subagent 执行
+
+以下场景关闭前，阶段并行只能标记“部分”或“已实现未验收”：
+
+- subagent-stage-matrix：Init/Survey/Idea/Reproduce/Contract/Experiment/Evidence/Writing/Review/Release 的 allowlist 与 subagent-stage-execution.md §2 一致；未知 phase/action fail closed，Experiment 的真实计算只能产生 Runner Job，不在 child 宿主执行；
+- subagent-stage-admission：只有 exact live parent、project membership、ready NextAction、无 pending Human Gate/BLOCKED_GATE、revision/session link 稳定、配置开启且预算/并发充足时可 fan-out；每个负向场景均零 child、零扣费、零 Research mutation；
+- subagent-explicit-authority：自然语言可由父 Agent 提出阶段加速建议，但未获本次用户明确请求或已确认动作时不静默启动；浏览器 topology/history 面无 spawn/stop/cancel 写能力；
+- subagent-lifecycle-topology：每个成功 start 都 register running child，completed/aborted/error/max-tokens/refusal/unknown 映射正确；成功、失败、取消、schema 拒绝与 update 失败路径均调用幂等 run.dispose()，终态只单向写入且 retry 创建新 node；
+- subagent-fanout-partial：N 个 perspective 使用 Promise.allSettled；部分失败如实返回分片状态，不把缺失输出当完整结果，不因单 child 失败遗漏其他 child 的 dispose/state update；
+- subagent-stage-revision-fence：fan-in 后重新检查 project revision、NextAction、pending Gate 与 session link；任一变化时结果只保留为过期 diagnostic，零权威写；同 idempotency key+input hash 不重复 spawn/扣费，异 hash 冲突；
+- subagent-budget-reconcile：启动前原子预留项目/全局预算和并发槽，结束后按四桶 token/cost 对账并退款；取消、start 失败、unknown usage、parent+children 汇总和 hard limit 均不双计、不超卖；
+- subagent-draft-only：Idea 结果保持 proposed，Writing 结果保持 draft/patch，Evidence 结果保持 draft analysis；child 调用 Gate、Runner 正式提交、Evidence accept、Claim support、canonical merge、Intake adopt、delete 或 Release 工具一律被 tool filter/role policy 拒绝；
+- subagent-provenance-redaction：node 固定 project/session/attempt、project/NextAction revision、snapshot/config/model/provider pins 与安全输入/输出 hash；prompt/history/SSE/Bundle 零 service token、SecretRef value、SSH key、endpoint、cookie、Authorization、DSH_HOME、cwd、绝对宿主路径和完整 tool args/results；
+- subagent-cancel-recovery：父 AbortSignal 贯穿所有 child；取消后停止新 spawn、等待 terminal update/dispose、释放未消费预留；进程重启以 topology/idempotency 恢复，unknown child 不自动重放付费任务；
+- subagent-stage-ui：阶段视图与 Topology 显示 running/succeeded/failed/cancelled、role/perspective/attempt/duration/usage，进入 child 与 breadcrumb 可用且 zh/en/ARIA 完整；这些观察计数不能改变 Research phase 或 NextAction；
+- subagent-official-runtime：只通过 DSH 公开 ctx.subagents/SubagentRun 接口，默认 one-shot spawn、maxDepth=1、最小 tool filter 与结构化 output schema；不引用 package-private continuation/lifecycle 内部类。
+
 ## 9. DSH 集成与 Skills
 
 ### 9.0 DSH 原生对话研究与同会话阶段投影

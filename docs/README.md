@@ -13,7 +13,7 @@ UI 品牌硬规则：正式产品名为 `DSH Scholar`，组合字标为 `dsh Sch
 
 1. 本文件中的全局规则；
 2. product-spec.md、design-notes.md 和 domain-model.md 中的产品、架构与不变量；
-3. research-onboarding.md、init-grill-upload-models.md、reproduction-contracts.md、trajectory-subagents.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
+3. research-onboarding.md、init-grill-upload-models.md、reproduction-contracts.md、trajectory-subagents.md、subagent-stage-execution.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
 4. repository-blueprint.md 与 acceptance-tests.md 中的工程结构和验收规则；
 5. test-instance-plan.md 与 USAGE_GUIDE.md 中的运行说明；
 6. hardening-v0.2-status.md 中的当前实现差距，仅用于迁移，不能覆盖目标规范；
@@ -38,18 +38,19 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 | 5 | init-grill-upload-models.md | name-only Init、Chat 单题 Grill、批量分块上传和 Provider/OCR 如何实现 |
 | 6 | reproduction-contracts.md | 论文复现、实验环境、Chat 附件与 session Terminal 如何形成可追溯闭环 |
 | 7 | trajectory-subagents.md | 如何移植 Trajectory、展示 subagent 拓扑并进入子会话 |
-| 8 | storage-migrations.md | 如何持久化、迁移和恢复 |
-| 9 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
-| 10 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
-| 11 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
-| 12 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
-| 13 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
-| 14 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
-| 15 | acceptance-tests.md | 如何证明生成结果符合规范 |
-| 16 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
-| 17 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
-| 18 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
-| 19 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
+| 8 | subagent-stage-execution.md | 哪些研究阶段可并行，以及如何安全地 fan-out/fan-in |
+| 9 | storage-migrations.md | 如何持久化、迁移和恢复 |
+| 10 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
+| 11 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
+| 12 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
+| 13 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
+| 14 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
+| 15 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
+| 16 | acceptance-tests.md | 如何证明生成结果符合规范 |
+| 17 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
+| 18 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
+| 19 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
+| 20 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
 
 ## 4. 生成约束
 
@@ -80,6 +81,7 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 - 论文复现必须持久化 Spec/Attempt/Report，固定 paper/code/data/environment/Contract/RunManifest，并区分 execution 成功与科学比较 pass；
 - 使用过程中必须由 Kernel 权威投影提供结构化 NextAction，页面给出一项主要下一步与原因/阻断/目标路由，未知动作只读展示，不能由 LLM 或浏览器猜测推进；
 - Trajectory 必须区分 Kernel Research Outbox 与展示性的 DSH Session；subagent 以父子拓扑展示并可进入授权 child 查看，one-shot 只读，continuable follow-up 必须 exact-parent 授权且默认脱敏；
+- 阶段 subagent 必须按 subagent-stage-execution.md 的确定性矩阵与准入执行：Survey/Idea/Writing/Review 优先 fan-out，child 只产出草稿/观察/审阅，所有路径 dispose 并回写 observational topology；Human Gate、Runner 正式计算、accepted Evidence、canonical manuscript 和 Release 不得委派；
 - 主页面只保留 Start、Overview、Workspace、Runs 和 Manuscript 等高频任务；Approvals、Artifacts、Evidence、Budget、Trajectory/Topology 保持深链可达，所有可调项统一进入默认折叠的 Settings；
 - 所有列表、流式日志和 Artifact 读取都执行 Project AuthZ；
 - 项目删除只接受已归档项目，由 PI 经精确名称确认创建可审计 tombstone；普通读取立即隐藏，但共享 CAS、Outbox、Decision 和 retention 证据不得被同步物理删除；
