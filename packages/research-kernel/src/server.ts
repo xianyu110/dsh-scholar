@@ -5,7 +5,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { z } from 'zod'
 import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from './kernel.js'
@@ -122,6 +122,10 @@ const createProjectForGrillSchema = z.object({
   creator_principal_id: z.string().optional(),
   creator_tenant_id: z.string().optional(),
 })
+
+const createDshSessionProjectSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+}).strict()
 
 const deleteProjectSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
@@ -1092,6 +1096,57 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           request_hash: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
         })
         send(res, 201, report)
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  if (version === 'internal' && resource === 'dsh-sessions' && id !== undefined && sub === 'projects' && method === 'POST') {
+    void readJson(req).then((body) => {
+      try {
+        if (kernel.serviceToken === undefined) {
+          send(res, 403, { error: errorEnvelope('service_token_required', 'DSH project creation requires a configured service token') })
+          return
+        }
+        const configuredDshPluginToken = kernel.dshPluginToken
+        const dshPluginToken = req.headers['x-dsh-plugin-token']
+        if (configuredDshPluginToken === undefined || configuredDshPluginToken.trim() === '' || typeof dshPluginToken !== 'string' || dshPluginToken.trim() === '' || !serviceTokenEquals(dshPluginToken, configuredDshPluginToken)) {
+          send(res, 403, { error: errorEnvelope('dsh_plugin_token_required', 'DSH project creation requires the DSH plugin credential') })
+          return
+        }
+        if (req.headers['x-service-principal'] !== 'dsh-plugin') {
+          send(res, 403, { error: errorEnvelope('service_identity_required', 'DSH project creation requires x-service-principal: dsh-plugin') })
+          return
+        }
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(id)) {
+          send(res, 422, { error: errorEnvelope('invalid_session_id', 'DSH session id is not a safe opaque id') })
+          return
+        }
+        const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' && req.headers['idempotency-key'] !== ''
+          ? req.headers['idempotency-key']
+          : undefined
+        if (idempotencyKey === undefined) {
+          send(res, 422, { error: errorEnvelope('idempotency_key_required', 'DSH project creation requires an Idempotency-Key header') })
+          return
+        }
+        const input = createDshSessionProjectSchema.parse(body)
+        const replayHeader = req.headers['x-idempotency-replay-only']
+        if (replayHeader !== undefined && replayHeader !== '1') {
+          send(res, 422, { error: errorEnvelope('validation_error', 'x-idempotency-replay-only must be 1 when provided') })
+          return
+        }
+        const requestHash = createHmac('sha256', configuredDshPluginToken)
+          .update(JSON.stringify({ route: 'dsh-create-link-v1', session_id: id, name: input.name }))
+          .digest('hex')
+        const out = kernel.createProjectForDshSession({
+          name: input.name,
+          session_id: id,
+          idempotency_key: idempotencyKey,
+          request_hash: requestHash,
+          replay_only: replayHeader === '1',
+        })
+        send(res, 201, out)
       } catch (error) {
         fail(res, error)
       }

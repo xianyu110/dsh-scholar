@@ -11,11 +11,13 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel } from '@dsh-scholar/research-kernel'
+import { ResearchClient } from '@dsh-scholar/research-client'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
+import { runNativeScholarTurn } from '../../src/plugin/native-chat.js'
 
-function freshKernel(): ResearchKernel {
+function freshKernel(options: { serviceToken?: string; dshPluginToken?: string } = {}): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-v2-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), ...options })
 }
 
 function makeBody(overrides: Record<string, unknown> = {}) {
@@ -43,6 +45,269 @@ async function withServer(kernel: ResearchKernel, fn: (base: string) => Promise<
 }
 
 describe('v2 project adapter', () => {
+  it('service-creates a name-only project and atomically links the exact DSH session', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const url = `${base}/internal/dsh-sessions/session_native/projects`
+      const request = (headers: Record<string, string>, body: Record<string, unknown> = { name: 'Native OCR' }) => fetch(url, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body),
+      })
+
+      const service = { 'x-service-token': 'service-secret' }
+      const plugin = { ...service, 'x-dsh-plugin-token': 'dsh-secret' }
+      expect((await request({ 'x-service-principal': 'dsh-plugin', 'idempotency-key': 'native-create-1' })).status).toBe(403)
+      expect((await request({ 'x-service-token': 'wrong', 'x-dsh-plugin-token': 'dsh-secret', 'x-service-principal': 'dsh-plugin', 'idempotency-key': 'native-create-1' })).status).toBe(403)
+      expect((await request({ ...service, 'x-service-principal': 'dsh-plugin', 'idempotency-key': 'native-create-1' })).status).toBe(403)
+      expect((await request({ ...service, 'x-dsh-plugin-token': 'wrong', 'x-service-principal': 'dsh-plugin', 'idempotency-key': 'native-create-1' })).status).toBe(403)
+      expect((await request({ ...plugin, 'x-service-principal': 'browser', 'idempotency-key': 'native-create-1' })).status).toBe(403)
+      expect((await request({ ...plugin, 'x-service-principal': 'dsh-plugin' })).status).toBe(422)
+      expect((await request({
+        ...plugin, 'x-service-principal': 'dsh-plugin', 'idempotency-key': 'native-extra-field',
+      }, { name: 'Native OCR', session_id: 'forged' })).status).toBe(422)
+      const unsafeSession = await fetch(`${base}/internal/dsh-sessions/bad%2Fsession/projects`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json', ...plugin,
+          'x-service-principal': 'dsh-plugin', 'idempotency-key': 'native-unsafe-session',
+        },
+        body: JSON.stringify({ name: 'Unsafe session' }),
+      })
+      expect(unsafeSession.status).toBe(422)
+
+      const createdResponse = await request({
+        ...plugin,
+        'x-service-principal': 'dsh-plugin',
+        'idempotency-key': 'native-create-1',
+      })
+      expect(createdResponse.status).toBe(201)
+      const created = await createdResponse.json() as {
+        project: { project_id: string; name: string; brief_status: string; status: string }
+        intake: { project_id: string; status: string }
+        membership: Array<{ principal_id: string; role: string }>
+        link: { session_id: string; project_id: string }
+      }
+      expect(created.project).toMatchObject({ name: 'Native OCR', brief_status: 'collecting', status: 'DRAFT' })
+      expect(created.intake).toMatchObject({ project_id: created.project.project_id, status: 'draft' })
+      expect(created.link).toEqual(expect.objectContaining({ session_id: 'session_native', project_id: created.project.project_id }))
+      expect(created.membership).toContainEqual(expect.objectContaining({ principal_id: expect.stringMatching(/^dsh:[a-f0-9]{32}$/), role: 'pi' }))
+      expect(kernel.getProjectBySession('session_native')?.project_id).toBe(created.project.project_id)
+      expect(kernel.listGates(created.project.project_id)).toEqual([])
+
+      const replay = await request({
+        ...plugin,
+        'x-service-principal': 'dsh-plugin',
+        'idempotency-key': 'native-create-1',
+      })
+      expect(replay.status).toBe(201)
+      expect(((await replay.json()) as { project: { project_id: string } }).project.project_id).toBe(created.project.project_id)
+
+      const conflictingName = await request({
+        ...plugin,
+        'x-service-principal': 'dsh-plugin',
+        'idempotency-key': 'native-create-1',
+      }, { name: 'Different name' })
+      expect(conflictingName.status).toBe(409)
+      const secondCreate = await request({
+        ...plugin,
+        'x-service-principal': 'dsh-plugin',
+        'idempotency-key': 'native-create-2',
+      }, { name: 'Second project' })
+      expect(secondCreate.status).toBe(409)
+      expect(kernel.listProjects()).toHaveLength(1)
+    })
+    kernel.close()
+  })
+
+  it('ResearchClient sends both service credentials and create/link never overwrites fenced rows', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      const first = await client.createProjectForDshSession({
+        session_id: 'session_client', name: 'Client Project', idempotency_key: 'client-create-1',
+      })
+      expect(first.link).toMatchObject({ session_id: 'session_client', project_id: first.project.project_id })
+
+      const archived = kernel.archiveProject(first.project.project_id)
+      kernel.deleteProject({
+        project_id: first.project.project_id, expected_revision: archived.revision,
+        confirm_name: first.project.name, reason: 'test tombstone fence', deleted_by: 'pi_test', request_id: 'delete-client-project',
+      })
+      await expect(client.createProjectForDshSession({
+        session_id: 'session_client', name: 'Replacement', idempotency_key: 'client-create-2',
+      })).rejects.toMatchObject({ status: 409, code: 'session_link_conflict' })
+      expect((kernel.db.prepare('SELECT project_id FROM session_links WHERE session_id = ?').get('session_client') as { project_id: string }).project_id)
+        .toBe(first.project.project_id)
+
+      kernel.db.prepare('INSERT INTO session_links (session_id, project_id, linked_at) VALUES (?, ?, ?)')
+        .run('session_dangling', 'rsp_missing', new Date().toISOString())
+      await expect(client.createProjectForDshSession({
+        session_id: 'session_dangling', name: 'Dangling Replacement', idempotency_key: 'client-create-3',
+      })).rejects.toMatchObject({ status: 409, code: 'session_link_conflict' })
+      expect((kernel.db.prepare('SELECT project_id FROM session_links WHERE session_id = ?').get('session_dangling') as { project_id: string }).project_id)
+        .toBe('rsp_missing')
+      expect(kernel.db.prepare('SELECT COUNT(*) AS n FROM projects').get()).toMatchObject({ n: 1 })
+
+      const noPlugin = new ResearchClient({ endpoint: base, serviceToken: 'service-secret' })
+      await expect(noPlugin.createProjectForDshSession({
+        session_id: 'session_no_plugin', name: 'Denied', idempotency_key: 'client-denied',
+      })).rejects.toMatchObject({ status: 403, code: 'dsh_plugin_token_required' })
+    })
+    kernel.close()
+  })
+
+  it('requires the Kernel bearer before either internal credential is considered', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    const { server, port } = await startKernelServer({ kernel, host: '127.0.0.1', port: 0, token: 'kernel-secret' })
+    try {
+      const url = `http://127.0.0.1:${port}/internal/dsh-sessions/session_bearer/projects`
+      const request = (authorization?: string) => fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(authorization === undefined ? {} : { authorization }),
+          'x-service-token': 'service-secret', 'x-dsh-plugin-token': 'dsh-secret',
+          'x-service-principal': 'dsh-plugin', 'idempotency-key': 'bearer-create',
+        },
+        body: JSON.stringify({ name: 'Bearer Project' }),
+      })
+      expect((await request()).status).toBe(401)
+      expect((await request('Bearer wrong')).status).toBe(401)
+      expect((await request('Bearer kernel-secret')).status).toBe(201)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+    }
+  })
+
+  it('treats an empty or blank DSH plugin credential as missing', async () => {
+    for (const dshPluginToken of ['', '   ']) {
+      const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken })
+      await withServer(kernel, async (base) => {
+        const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken })
+        await expect(client.createProjectForDshSession({
+          session_id: 'session_blank_plugin', name: 'Denied', idempotency_key: `blank-plugin-${dshPluginToken.length}`,
+        })).rejects.toMatchObject({ status: 403, code: 'dsh_plugin_token_required' })
+        expect(kernel.listProjects()).toHaveLength(0)
+      })
+      kernel.close()
+    }
+  })
+
+  it('keeps public v2 idempotency rows isolated from DSH create/link', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const forgedBody = await fetch(`${base}/v2/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-principal-id': 'attacker', 'idempotency-key': 'collision-forged' },
+        body: JSON.stringify({ route: 'dsh-create-link-v1', session_id: 'sid_collision', name: 'Collision' }),
+      })
+      // Legacy extra fields remain ignored for compatibility. The internal
+      // receipt hash is credential-bound, so exact public bytes cannot forge it.
+      expect(forgedBody.status).toBe(201)
+
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      await expect(client.createProjectForDshSession({
+        session_id: 'sid_collision', name: 'Collision', idempotency_key: 'collision-forged',
+      })).rejects.toMatchObject({ status: 409, code: 'idempotency_conflict' })
+      expect(kernel.getProjectBySession('sid_collision')).toBeNull()
+
+      const publicCreate = await fetch(`${base}/v2/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-principal-id': 'attacker', 'idempotency-key': 'collision-key' },
+        body: JSON.stringify({ name: 'Collision' }),
+      })
+      expect(publicCreate.status).toBe(201)
+      await expect(client.createProjectForDshSession({
+        session_id: 'sid_collision', name: 'Collision', idempotency_key: 'collision-key',
+      })).rejects.toMatchObject({ status: 409, code: 'idempotency_conflict' })
+      expect(kernel.getProjectBySession('sid_collision')).toBeNull()
+      expect(kernel.listProjectMembers(kernel.listProjects()[0]!.project_id)).toContainEqual(expect.objectContaining({ principal_id: 'attacker' }))
+    })
+    kernel.close()
+  })
+
+  it('does not expose an internal DSH receipt to a later public v2 collision', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      const internal = await client.createProjectForDshSession({
+        session_id: 'sid_internal_first', name: 'Internal First', idempotency_key: 'internal-first-key',
+      })
+      const publicCollision = await fetch(`${base}/v2/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-principal-id': 'attacker', 'idempotency-key': 'internal-first-key' },
+        body: JSON.stringify({ route: 'dsh-create-link-v1', session_id: 'sid_internal_first', name: 'Internal First' }),
+      })
+      expect(publicCollision.status).toBe(409)
+      expect(await publicCollision.json()).toMatchObject({ error: { code: 'idempotency_conflict' } })
+      expect(kernel.getProjectBySession('sid_internal_first')?.project_id).toBe(internal.project.project_id)
+      expect(kernel.listProjectMembers(internal.project.project_id)).not.toContainEqual(expect.objectContaining({ principal_id: 'attacker' }))
+      expect(kernel.listProjects()).toHaveLength(1)
+    })
+    kernel.close()
+  })
+
+  it('replay-only returns only the committed receipt and never creates one when absent', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      await expect(client.createProjectForDshSession({
+        session_id: 'session_replay_missing', name: 'Missing', idempotency_key: 'missing-key', replay_only: true,
+      })).rejects.toMatchObject({ status: 404, code: 'idempotency_receipt_not_found' })
+      expect(kernel.listProjects()).toHaveLength(0)
+
+      const created = await client.createProjectForDshSession({
+        session_id: 'session_replay', name: 'Replay Project', idempotency_key: 'replay-key',
+      })
+      const replay = await client.createProjectForDshSession({
+        session_id: 'session_replay', name: 'Replay Project', idempotency_key: 'replay-key', replay_only: true,
+      })
+      expect(replay.project.project_id).toBe(created.project.project_id)
+      expect(kernel.listProjects()).toHaveLength(1)
+    })
+    kernel.close()
+  })
+
+  it('serializes concurrent create/link attempts so only one project owns the session', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      const results = await Promise.allSettled([
+        client.createProjectForDshSession({ session_id: 'session_race', name: 'Race A', idempotency_key: 'race-a' }),
+        client.createProjectForDshSession({ session_id: 'session_race', name: 'Race B', idempotency_key: 'race-b' }),
+      ])
+      expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+      expect(results.filter(result => result.status === 'rejected')).toHaveLength(1)
+      expect(kernel.listProjects()).toHaveLength(1)
+      expect(kernel.getProjectBySession('session_race')?.project_id).toBe(kernel.listProjects()[0]?.project_id)
+    })
+    kernel.close()
+  })
+
+  it('runs the native façade through ResearchClient and the real Kernel route', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    await withServer(kernel, async (base) => {
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      const reply = await runNativeScholarTurn({
+        text: '创建研究项目 真实链路', projectName: '真实链路', sessionId: 'session_e2e', client,
+        cache: { get: async () => undefined, set: async () => undefined },
+      })
+      expect(reply).toMatchObject({
+        linked: true,
+        project: { name: '真实链路', status: 'DRAFT', brief_status: 'collecting' },
+        next_action: { code: 'intake_resume', required_by: 'human' },
+        execution: { status: 'executed', operation: 'project_create' },
+      })
+      const linked = kernel.getProjectBySession('session_e2e')
+      expect(linked?.project_id).toBe(reply.project?.project_id)
+      expect(kernel.listGates(linked!.project_id)).toEqual([])
+      expect(kernel.listProjectMembers(linked!.project_id)).toContainEqual(expect.objectContaining({
+        principal_id: expect.stringMatching(/^dsh:[a-f0-9]{32}$/), role: 'pi',
+      }))
+    })
+    kernel.close()
+  })
+
   it('creates a name-only collecting project with an active Init Intake and no Gate', async () => {
     const kernel = freshKernel()
     await withServer(kernel, async (base) => {

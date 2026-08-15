@@ -2,7 +2,8 @@
  * Research Kernel entry — sidecar process (design §9.1 Local Desktop Profile).
  * Usage: node lib/bin/kernel.js --db <path> --cas <dir> [--port 7412] [--token <t>]
  *        [--service-token <t>] [--endpoint-file <path>]
- *        (or DSH_SCHOLAR_KERNEL_TOKEN / DSH_SCHOLAR_SERVICE_TOKEN)
+ *        (or DSH_SCHOLAR_KERNEL_TOKEN / DSH_SCHOLAR_SERVICE_TOKEN;
+ *         DSH_SCHOLAR_DSH_PLUGIN_TOKEN is the route-specific create/link secret)
  *
  * CONFIG-01: the CLI surface is parsed by the canonical Config Registry
  * (parseCli) — flags, defaults and validation are the registry's single
@@ -54,6 +55,7 @@ const host = (cli['kernel.host'] as string | undefined) ?? '127.0.0.1'
 // process listings. The CLI flag remains for explicit backwards compatibility.
 const token = (cli['kernel.token'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
 const serviceToken = (cli['kernel.service_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
+const dshPluginToken = process.env.DSH_SCHOLAR_DSH_PLUGIN_TOKEN
 const endpointFile = (cli['kernel.endpoint_file'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_ENDPOINT_FILE
 
 // CONFIG-01: the deployment's effective config is validated through the
@@ -107,6 +109,7 @@ const kernel = new ResearchKernel({
   dbPath,
   casRoot,
   serviceToken,
+  dshPluginToken,
   // OCR-CONFIG-01: the first built-in provider is MinerU's official Open API.
   // Other DNS providers remain fail-closed unless a future instance policy
   // explicitly allowlists them; loopback remains disabled here.

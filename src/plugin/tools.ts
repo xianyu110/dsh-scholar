@@ -148,7 +148,7 @@ const scholarNativeReplySchema = {
     intent: {
       type: 'object', additionalProperties: false, required: true,
       properties: {
-        kind: { type: 'string', enum: ['status', 'next', 'gates', 'jobs', 'ideas', 'survey', 'conversation'], required: true },
+        kind: { type: 'string', enum: ['create', 'status', 'next', 'gates', 'jobs', 'ideas', 'survey', 'conversation'], required: true },
         confidence: { type: 'string', const: 'deterministic', required: true },
       },
     },
@@ -273,9 +273,10 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
   // exposes a deterministic, capability-bounded research conversation.
   ctx.tools.register(researchTool({
     name: 'dsh_scholar',
-    description: 'Primary entry for research requests made in native DSH Chat. Call this when the user asks in ordinary language to start, continue, inspect or discuss research; pass the user text verbatim. It binds to the calling DSH session, returns the authoritative dsh Scholar phase/next action, may execute only an explicitly requested ready literature survey, and otherwise suggests a direct slash command. It never decides Gates, confirms a Brief, adopts an Intake, accepts Evidence or releases a project.',
+    description: 'Primary entry for research requests made in native DSH Chat. Call this when the user asks in ordinary language to create, continue, inspect or discuss research; pass the current user text verbatim. For a complete affirmative create request in an unlinked calling DSH session, pass project_name only when it equals the complete name after the create command in the current user text, never a substring; never invent, rewrite or infer it from history, and never pass it for questions, discussion, ambiguous, negative, cancel or avoid wording. The tool performs name-only Init and links that session, or asks for a missing name without requiring slash commands. It returns the authoritative dsh Scholar phase/next action, may execute only that explicit create or an explicitly requested ready literature survey, and otherwise suggests a direct slash command. It never decides Gates, confirms a Brief, adopts an Intake, accepts Evidence or releases a project.',
     parameters: {
       text: { type: 'string', required: true, description: 'User text verbatim; runtime-enforced trimmed length 1–4000 characters.' },
+      project_name: { type: 'string', description: 'Complete 1–120 character project name parsed after the create command in the current user text; never a substring and only for an affirmative request in an unlinked session.' },
       project_id: OPT_STRING,
       locale: { type: 'string', enum: ['zh', 'en'] },
     },
@@ -284,6 +285,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       try {
         return { ...await runNativeScholarTurn({
           text: String(args.text),
+          projectName: typeof args.project_name === 'string' ? args.project_name : undefined,
           projectId: typeof args.project_id === 'string' ? args.project_id : undefined,
           locale: args.locale,
           sessionId,

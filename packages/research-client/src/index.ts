@@ -33,10 +33,12 @@ export class KernelApiError extends Error {
 export interface KernelClientOptions {
   endpoint: string
   token?: string
-  /** §4 P0 (API-01/EVID-01): internal-route service identity — sent as
-   * `x-service-token` on every request; the kernel only enforces it on its
-   * internal routes (claim/runner-keys/recover/verified/accept/approve). */
+  /** §4 P0 (API-01/EVID-01): shared internal-route service identity. DSH
+   * create/link additionally requires the audience-bound dshPluginToken. */
   serviceToken?: string
+  /** DSH-CREATE-LINK-01: route-specific create/link credential; never sent
+   * to Runner processes or used as a public bearer. */
+  dshPluginToken?: string
   /** Timeout for each request, ms. */
   timeoutMs?: number
 }
@@ -45,12 +47,14 @@ export class ResearchClient {
   readonly endpoint: string
   private readonly token: string | undefined
   private readonly serviceToken: string | undefined
+  private readonly dshPluginToken: string | undefined
   private readonly timeoutMs: number
 
   constructor(options: KernelClientOptions) {
     this.endpoint = options.endpoint.replace(/\/+$/, '')
     this.token = options.token
     this.serviceToken = options.serviceToken
+    this.dshPluginToken = options.dshPluginToken
     this.timeoutMs = options.timeoutMs ?? 15000
   }
 
@@ -66,9 +70,8 @@ export class ResearchClient {
     if (signal?.aborted === true) controller.abort()
     else signal?.addEventListener('abort', abortFromCaller, { once: true })
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
-    let response: Response
     try {
-      response = await fetch(`${this.endpoint}${path}`, {
+      const response = await fetch(`${this.endpoint}${path}`, {
         method,
         headers: {
           'content-type': 'application/json',
@@ -79,29 +82,37 @@ export class ResearchClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       })
+      if (!response.ok) {
+        // api-contracts.md §1: the server envelope carries the STABLE machine
+        // code in error.code and the human message in error.message — expose
+        // both faithfully (error.code = machine code, error.message =
+        // `${code}: ${message}`), so callers can map stable copy per code.
+        let code = ''
+        let message = ''
+        try {
+          const parsed = await response.json() as { error?: { code?: string; message?: string } }
+          code = parsed.error?.code ?? ''
+          message = parsed.error?.message ?? ''
+        } catch { /* keep empty */ }
+        if (code === '') code = `http_${response.status}`
+        if (message === '') message = `request ${method} ${path} failed`
+        throw new KernelApiError(response.status, code, message)
+      }
+      try {
+        return (await response.json()) as T
+      } catch (error) {
+        // A successful status does not prove the commit receipt reached the
+        // caller. Treat truncated/aborted JSON as transport loss so the DSH
+        // create path can perform a replay-only reconciliation.
+        throw new KernelUnavailableError(this.endpoint, error)
+      }
     } catch (error) {
+      if (error instanceof KernelApiError || error instanceof KernelUnavailableError) throw error
       throw new KernelUnavailableError(this.endpoint, error)
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener('abort', abortFromCaller)
     }
-    if (!response.ok) {
-      // api-contracts.md §1: the server envelope carries the STABLE machine
-      // code in error.code and the human message in error.message — expose
-      // both faithfully (error.code = machine code, error.message =
-      // `${code}: ${message}`), so callers can map stable copy per code.
-      let code = ''
-      let message = ''
-      try {
-        const parsed = await response.json() as { error?: { code?: string; message?: string } }
-        code = parsed.error?.code ?? ''
-        message = parsed.error?.message ?? ''
-      } catch { /* keep empty */ }
-      if (code === '') code = `http_${response.status}`
-      if (message === '') message = `request ${method} ${path} failed`
-      throw new KernelApiError(response.status, code, message)
-    }
-    return (await response.json()) as T
   }
 
   /**
@@ -237,6 +248,36 @@ export class ResearchClient {
     session_id?: string | null
   }): Promise<ResearchProject> {
     return this.request('POST', '/v1/projects', input)
+  }
+
+  /** DSH-CREATE-LINK-01: service-only, name-only Init that atomically binds
+   * the calling Host session. The principal is derived by the Kernel; callers
+   * can provide neither a principal nor an arbitrary project id. */
+  createProjectForDshSession(input: {
+    session_id: string
+    name: string
+    idempotency_key: string
+    /** Read an already committed idempotency receipt; never create if absent. */
+    replay_only?: boolean
+  }, signal?: AbortSignal): Promise<{
+    project: ResearchProject
+    intake: IntakeSession
+    budget: Record<string, unknown>
+    membership: Array<Record<string, unknown>>
+    link: SessionLink
+  }> {
+    return this.request(
+      'POST',
+      `/internal/dsh-sessions/${encodeURIComponent(input.session_id)}/projects`,
+      { name: input.name },
+      {
+        'x-service-principal': 'dsh-plugin',
+        ...this.dshPluginToken !== undefined ? { 'x-dsh-plugin-token': this.dshPluginToken } : {},
+        'idempotency-key': input.idempotency_key,
+        ...input.replay_only === true ? { 'x-idempotency-replay-only': '1' } : {},
+      },
+      signal,
+    )
   }
 
   listProjects(): Promise<ResearchProject[]> {

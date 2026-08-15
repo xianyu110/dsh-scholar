@@ -15,7 +15,18 @@ language, call `dsh_scholar` with the user's text verbatim. Do not require the u
 or type a slash command first. The façade binds the call to this DSH session, reads the
 authoritative Kernel projection and returns the current stage, execution result and next action.
 
-- If no project is linked, explain the returned `/new <project name>` suggestion.
+- If no project is linked and the user gives a complete affirmative creation request with a name,
+  pass `project_name` only when it equals the complete name parsed after the create command in the
+  current user text, never a substring of that name. The façade creates
+  and links the name-only Init directly; do not send the user to standalone first.
+- If an affirmative creation request has no name, ask for the project name in natural language.
+  Never invent, rewrite, or infer a name from history. Questions, discussion, ambiguous wording,
+  and negative/cancel/stop/avoid wording must not include `project_name` and must not create a project.
+  Treat a comma/semicolon tail, a later negation/cancellation/stop/avoidance clause, or a connector such as
+  `然后`/`并`/`and`/`then` followed by another clause as ambiguous:
+  do not pass `project_name`, do not create, and ask the user to restate one affirmative instruction.
+- For other unlinked conversation, explain the returned guidance; `/new <project name>` remains an
+  optional direct command, not a prerequisite for ordinary conversation.
 - If the façade performs the one safe ready action (`survey_run`), report that it ran and use the
   returned post-action projection; do not claim success from the pre-action state.
 - Treat only an explicit positive start/continue/run instruction as permission to execute a survey.

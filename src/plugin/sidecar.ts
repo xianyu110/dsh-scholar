@@ -70,6 +70,7 @@ const ENDPOINT_SCHEMA = 'v1'
 const DB_FILE_NAME = 'kernel.db'
 const SERVICE_TOKEN_FILE = 'service-token'
 const KERNEL_TOKEN_FILE = 'kernel-token'
+const DSH_PLUGIN_TOKEN_FILE = 'dsh-plugin-token'
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 function sleep(ms: number): Promise<void> {
@@ -89,6 +90,8 @@ export class KernelSidecar {
   private resolvedPort: number | null = null
   /** Cached value of <dataDir>/service-token (lazy, see ensureServiceToken). */
   private serviceTokenValue: string | undefined
+  /** Cached route-specific DSH create/link token. */
+  private dshPluginTokenValue: string | undefined
   /** Cached value of <dataDir>/kernel-token (lazy, see ensureKernelToken). */
   private kernelTokenValue: string | undefined
   private readonly require = createRequire(import.meta.url)
@@ -206,6 +209,35 @@ export class KernelSidecar {
       throw new Error(`service token file must not be empty: ${file}`)
     }
     this.serviceTokenValue = token
+    return token
+  }
+
+  /** Route-specific credential that is never passed to Runner processes. */
+  get dshPluginToken(): string {
+    if (this.dshPluginTokenValue !== undefined) return this.dshPluginTokenValue
+    const file = join(this.dataDir, DSH_PLUGIN_TOKEN_FILE)
+    let existing = false
+    try {
+      const stat = lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`DSH plugin token path must be a regular file: ${file}`)
+      existing = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let token = existing ? readFileSync(file, 'utf8').trim() : ''
+    if (existing) chmodSync(file, 0o600)
+    if (token === '') {
+      mkdirSync(this.dataDir, { recursive: true })
+      token = randomBytes(16).toString('hex')
+      try {
+        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
+      } catch {
+        token = readFileSync(file, 'utf8').trim()
+      }
+      chmodSync(file, 0o600)
+    }
+    if (token === '') throw new Error(`DSH plugin token file must not be empty: ${file}`)
+    this.dshPluginTokenValue = token
     return token
   }
 
@@ -428,6 +460,8 @@ export class KernelSidecar {
     // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity
     // travels via env only (0600 file, never argv / process listings).
     childEnv.DSH_SCHOLAR_SERVICE_TOKEN = this.serviceToken
+    delete childEnv.DSH_SCHOLAR_DSH_PLUGIN_TOKEN
+    childEnv.DSH_SCHOLAR_DSH_PLUGIN_TOKEN = this.dshPluginToken
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {

@@ -11,7 +11,7 @@
 ### 1.1 DSH 会话入口与 Plugin config
 
 - 会话页签固定 `id=dsh-scholar`、顺序在 `Chat` 与 `Trajectory` 之后，标签、iframe title、按钮、状态和错误均支持简体中文/英文；页签卸载时清理 listener，不得抢占 Chat composer、Terminal、编辑器或任意 `input/textarea/select/contenteditable` 的焦点；
-- 页签 header 用当前 DSH `sessionId` 调用 loopback `session-projection`，展示项目名/status/revision、完整阶段条、主要 NextAction label/reason、待决 Gate 与 Job 计数；阶段同时显示本地化名称与可见状态文字，不能只用颜色区分，current/blocked 阶段带 `aria-current=step`，blocked 依据 pending Gate 类型落在对应流程阶段。未关联项目时本地化提示先在 Chat 输入项目名或 `/new <项目名>`。每 4 秒至多一个请求，session 切换、卸载或手动刷新会把 AbortSignal 贯通到底层 fetch，迟到响应不得覆盖新会话；
+- 页签 header 用当前 DSH `sessionId` 调用 loopback `session-projection`，展示项目名/status/revision、完整阶段条、主要 NextAction label/reason、待决 Gate 与 Job 计数；阶段同时显示本地化名称与可见状态文字，不能只用颜色区分，current/blocked 阶段带 `aria-current=step`，blocked 依据 pending Gate 类型落在对应流程阶段。未关联项目时本地化提示用户直接回到同一 DSH Chat 输入“创建研究项目 <名称>”或 `/new <名称>`；自然语言入口完成 name-only Init 与 session link 后，本页签下一次投影立即显示 Init/Grill 状态，不要求先打开 standalone。完全空白 DSH Session 若被 Host shell 隐藏 view，首条创建消息必须同时解除空白态；插件不得把 iframe 内项目选择当作关联成功。每 4 秒至多一个请求，session 切换、卸载或手动刷新会把 AbortSignal 贯通到底层 fetch，迟到响应不得覆盖新会话；
 - standalone URL 是可配置项，默认 `http://127.0.0.1:18610`。只接受无 userinfo、无 query/hash 的 HTTPS URL，或 loopback HTTP URL；拒绝 `javascript:`、`data:`、非 loopback HTTP 和携带凭据/Token 的 URL；
 - `Alt+Shift+S` 为默认全局快捷键，也可在 Plugin config 禁用。仅在非编辑状态、非 IME composition、非按键重复时触发；使用 `noopener,noreferrer` 打开新页面，且与页签内显式按钮指向同一规范化 URL；
 - standalone 响应只允许 `standalone.frame_ancestors` 配置的精确 loopback DSH origin 嵌入（默认 `127.0.0.1/localhost/[::1]:3080`）；非白名单 ancestor 由无通配符 CSP 拒绝。页面内联 bootstrap script/style 使用每响应 nonce，业务脚本只允许 self；iframe 使用最小 sandbox/referrer policy，不把 Token 放入 URL、postMessage、DOM attribute 或 boot manifest；

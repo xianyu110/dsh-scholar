@@ -346,6 +346,13 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
       expect(lstatSync(file).isSymbolicLink()).toBe(false)
       // the sidecar's getter agrees with the file.
       expect(sidecar.kernelToken).toBe(token)
+      const dshPluginFile = join(dataDir, 'dsh-plugin-token')
+      const dshPluginToken = readFileSync(dshPluginFile, 'utf8').trim()
+      expect(dshPluginToken).toMatch(hex32)
+      expect(statSync(dshPluginFile).mode & 0o777).toBe(0o600)
+      expect(lstatSync(dshPluginFile).isSymbolicLink()).toBe(false)
+      expect(sidecar.dshPluginToken).toBe(dshPluginToken)
+      expect(dshPluginToken).not.toBe(readFileSync(join(dataDir, 'service-token'), 'utf8').trim())
       // direct read without the bearer -> 401 (the local-process hole is closed).
       const noAuth = await request(port, '/v1/projects')
       expect(noAuth.status).toBe(401)
@@ -357,6 +364,21 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
       expect(write.status).toBe(401)
       // the file token authenticates (read + write).
       expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
+      // Direct DSH create/link needs all three credentials; the spawned
+      // kernel received the route-specific token only through env.
+      expect((await request(port, '/internal/dsh-sessions/sidecar_session/projects', 'POST', {
+        authorization: `Bearer ${token}`,
+        'x-service-token': sidecar.serviceToken,
+        'x-service-principal': 'dsh-plugin',
+        'idempotency-key': 'sidecar-create-no-plugin',
+      }, { name: 'Denied' })).status).toBe(403)
+      expect((await request(port, '/internal/dsh-sessions/sidecar_session/projects', 'POST', {
+        authorization: `Bearer ${token}`,
+        'x-service-token': sidecar.serviceToken,
+        'x-dsh-plugin-token': dshPluginToken,
+        'x-service-principal': 'dsh-plugin',
+        'idempotency-key': 'sidecar-create-ok',
+      }, { name: 'Sidecar Direct Create' })).status).toBe(201)
       // health stays exempt (sidecar handshake without a token still works).
       expect((await request(port, '/v1/health')).status).toBe(200)
     } finally {

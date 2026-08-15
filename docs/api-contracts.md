@@ -81,7 +81,9 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
 
-### 4.1 DSH plugin internal topology bridge
+### 4.1 DSH plugin internal create/link 与 topology bridge
+
+- `POST /internal/dsh-sessions/{session_id}/projects`：同时要求普通 Kernel bearer、共享 internal service token、仅注入 DSH plugin/kernel 的独立且非空 `x-dsh-plugin-token`，并固定 `x-service-principal: dsh-plugin`；配置缺失、空白、空 header、自报 principal 或被 Runner 持有的共享 service token 均不能单独满足该 route。请求还要求 `Idempotency-Key` 和严格 body `{name}`；session id 使用同一安全 opaque-id 语法。服务端只从 path session 派生 creator Principal，body/client 不能提供或覆盖 Principal/session。internal request hash 必须是以专用 DSH plugin token 为密钥、覆盖固定 route namespace/session/name 的 `HMAC-SHA256`；public v2 name-only adapter 可继续忽略 legacy 额外字段，但公开请求无法构造相同的凭证绑定 hash，任一方向的同 key 跨 route 碰撞都必须 409。创建事务内先核对 idempotency ledger 与原始 `session_links` 行，再原子创建 name-only `DRAFT/collecting` Project、active Init Intake、Budget、PI membership 和 exact session link，返回 `{project,intake,budget,membership,link}`。同 key+同 session/name 重放仅在 project.session、原始 link 和派生 PI membership 全部一致时返回同一资源；不同 hash 或不完整旧状态 409。`x-idempotency-replay-only: 1` 只允许读取同 key 的已提交回执，key 不存在时 404 且绝不创建，供 transport 在 fetch、响应头或成功响应体读取/解析阶段失败、超时或 abort 后对账；客户端超时和 caller abort 必须覆盖完整响应体消费过程。任何既有 session link（包括已删除 Project 的墓碑 link、悬空 link）、并发创建或 relink 竞争均稳定 409 且零新项目，绝不使用 upsert 改绑；public v2 create 不能接受任意 DSH session id。
 
 - `POST /internal/projects/{project_id}/topology/children`：只接受 service token 与 `x-service-principal: dsh-plugin`；body 的 `session_id` 必须已精确链接 path project，且 `parent_id === session_id`。既有 `child_id` 若属于其他 project/parent 返回 409，终态 re-register 不复活；
 - `PATCH /internal/topology/{child_id}/state`：同样要求 service token/service principal，body `session_id` 必须仍等于 child 的 parent 且链接 child project；terminal state 单调，同状态重放幂等，其他 terminal transition 返回 409；
@@ -526,7 +528,7 @@ standalone BFF 对三个 stream 路由与 Terminal SSE 同等处理：bearer 401
 
 ### Agent Tool `dsh_scholar`
 
-输入为 `{text: string, project_id?: string, locale?: "zh"|"en"}`，`text` 去首尾空白后 1–4000 字符。调用上下文必须提供 DSH agent/session id；该 id 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$`，ResearchClient 将其 `encodeURIComponent` 后作为一个 path segment 发送。未提供 `project_id` 时只按该 session link 解析项目，提供时必须与 link 精确一致。输出为：
+输入为 `{text: string, project_name?: string, project_id?: string, locale?: "zh"|"en"}`，`text` 去首尾空白后 1–4000 字符。调用上下文必须提供 DSH agent/session id；该 id 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$`，ResearchClient 将其 `encodeURIComponent` 后作为一个 path segment 发送。未提供 `project_id` 时只按该 session link 解析项目，提供时必须与 link 精确一致。`project_name` 必须等于确定性创建语法从本次原文命令后缀解析出的完整 1–120 字符名称（可去掉一对包裹引号），不能只是其中子串；它不能由模型补写、改写或从历史消息推断。输出为：
 
 ~~~json
 {
@@ -547,7 +549,7 @@ standalone BFF 对三个 stream 路由与 Terminal SSE 同等处理：bearer 401
 }
 ~~~
 
-`assistant_text` 按 `locale` 或 CJK 输入检测选择 zh/en；wire enum/id、Kernel 提供的 NextAction label/reason 不翻译，浏览器阶段 label/state 由 UI 字典本地化。未关联项目返回同形状的 `execution.status="needs_project"` 与 `suggested_command="/new <项目名>"`。工具是 unknown role 可调用的唯一公共 façade，不改变其他 ACL。只读意图零副作用；自动执行集合固定为权威 ready `survey_run`，且要求本次文本含锚定的正向开始/继续/执行动作；否定、主题讨论和歧义输入零写。检索后重新读取并核验相同 project、revision、session link 与 `survey_run/ready/agent`，Corpus Snapshot 请求携带 `expected_revision` 和 `expected_session_id`，Kernel 在同一事务内核对 revision 与 session→project 绑定；调用 mutation 前检查取消，mutation 开始后进入不可回滚 commit boundary。非输入类 Kernel/网络错误统一为稳定 `dsh_scholar is temporarily unavailable`，不得暴露 endpoint/path/upstream message。其他 mutation 返回 `suggested`/`blocked`/`needs_human`，Human-only 永远不执行。
+`assistant_text` 按 `locale` 或 CJK 输入检测选择 zh/en；wire enum/id、Kernel 提供的 NextAction label/reason 不翻译，浏览器阶段 label/state 由 UI 字典本地化。未关联时，只有整句锚定的肯定创建指令且 `project_name` 等于确定性语法解析出的完整名称才执行 `project_create`；名称子串、疑问句、否定/取消/避免语义、主题讨论、仅模型填入名称或名称不一致全部零写。肯定创建但缺名称时返回 `execution.status="needs_project"` 并用自然语言追问名称，不强制用户先输入 slash；普通未关联对话仍可建议 `/new <项目名>`。工具是 unknown role 可调用的唯一公共 façade，不改变其他 ACL。其余自动执行集合固定为权威 ready `survey_run`，且要求本次文本含锚定的正向开始/继续/执行动作。检索后重新读取并核验相同 project、revision、session link 与 `survey_run/ready/agent`，Corpus Snapshot 请求携带 `expected_revision` 和 `expected_session_id`，Kernel 在同一事务内核对 revision 与 session→project 绑定；调用 mutation 前检查取消，mutation 开始后进入不可回滚 commit boundary。创建 POST 若在提交后断线、超时或收到 AbortSignal，adapter 必须用同一幂等 key、相同 request hash 和无 caller signal 的 replay-only 请求读取已提交回执；不存在回执时保持原错误与零写，只有回执及权威 link/投影全部一致才返回 executed，绝不能把恰好同名的其他 link 当作本次成功，也不能重建第二个项目。非输入类 Kernel/网络错误统一为稳定 `dsh_scholar is temporarily unavailable`，不得暴露 endpoint/path/upstream message。其他 mutation 返回 `suggested`/`blocked`/`needs_human`，Human-only 永远不执行。
 
 ### Connection RPC `/dsh-scholar`: `session-projection`
 

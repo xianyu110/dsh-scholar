@@ -20,7 +20,7 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 
 ## 2. 身份、AuthZ 与 Gate
 
-- BFF 从 standalone 本地身份或 SSO 解析 Human Principal；DSH session 只用于 Agent 命令/工具关联，浏览器 actor 字段无效；
+- BFF 从 standalone 本地身份或 SSO 解析 Human Principal；DSH session 通常只用于 Agent 命令/工具关联，浏览器 actor 字段无效。唯一创建例外是 `dsh_scholar` 的显式 name-only Init：internal route 同时要求 Kernel bearer、共享 service token、仅 DSH plugin/kernel 持有的独立非空专用 token 与固定 audience 标签；专用 token 配置缺失/空白、Runner 持有的共享 token、自报 `x-service-principal:dsh-plugin`、浏览器 bearer 均不能单独授权。服务端只从 Host path session 派生 pseudonymous creator Principal，并在同一事务检查 idempotency 与原始 `session_links` 行、创建 collecting Project/active Intake/PI membership/exact link；模型、浏览器和 route body 均不能提交或覆盖 Principal/session。项目名必须等于确定性命令解析出的完整后缀名称，子串或模型补名不算 consent；疑问、否定、歧义、标点或连接词引出的后续子句、无标点的“不创建/not create/先别创建”尾句或名称不一致零写。public v2 name-only adapter 可兼容并忽略 legacy 额外字段，但不得把 strict body 当作安全边界；internal DSH request hash 必须是由专用 plugin token 签出的 route/session/name `HMAC-SHA256`，公开请求在任一方向都不能伪造或认领该幂等行。transport 在 fetch、响应头或成功响应体读取/解析阶段失败、超时或 abort 时只可 replay-only 读取同 key 已提交回执，不能用同名 link 猜测成功。任何既有活动/墓碑/悬空 link 均禁止替换；
 - Gate Decision 只存在于 Human BFF，Agent Tool 和命令不注册该能力；
 - Project 角色至少为 owner/PI、researcher、operator、auditor、viewer；
 - 读 Terminal 原始日志是独立权限 job_log_read，不能假设查看 status 就可读 secret-bearing log；

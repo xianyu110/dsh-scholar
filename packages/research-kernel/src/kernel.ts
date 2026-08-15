@@ -241,14 +241,17 @@ export interface KernelOptions {
   requireSignedManifest?: boolean
   /**
    * §4 P0 (hardening API-01/EVID-01): service identity token for INTERNAL
-   * routes (jobs-claim, runner-keys, recover/leases, evidence verified/
-   * accept, contracts approve). When configured, the HTTP server demands
+   * routes (including DSH create/link, jobs-claim, runner-keys, recover/
+   * leases, evidence verified/accept and contracts approve). When configured, the HTTP server demands
    * `x-service-token` on those routes (browser bearer credentials and
    * self-reported x-service-principal headers are NOT accepted). Supplied by
    * the sidecars via DSH_SCHOLAR_SERVICE_TOKEN; a bare kernel without it
    * stays open (dev compatibility).
    */
   serviceToken?: string
+  /** DSH-CREATE-LINK-01: route-specific credential shared only by the DSH
+   * plugin client and Kernel. Runners never receive this token. */
+  dshPluginToken?: string
   /**
    * §12.1 (TEX-03): debounce window for live preview builds after a save
    * success (default 800ms). Per-request overrides are accepted by
@@ -837,6 +840,8 @@ export class ResearchKernel {
   requireSignedManifest: boolean
   /** §4 P0 (API-01/EVID-01): service identity for internal HTTP routes. */
   readonly serviceToken: string | undefined
+  /** DSH-CREATE-LINK-01: audience-bound credential for direct create/link. */
+  readonly dshPluginToken: string | undefined
   /**
    * CONFIG-01: sha256 pin of the running kernel's effective config, computed
    * through the canonical Config Registry (research-schemas config-registry
@@ -952,6 +957,9 @@ export class ResearchKernel {
     this.trajectory = new TrajectoryStore(this.db, (projectId, kind, payload) => this.emit(projectId, kind, payload))
     this.instanceId = options.instanceId ?? `kernel-${randomUUID().slice(0, 8)}`
     this.serviceToken = options.serviceToken
+    // A blank credential must be indistinguishable from a missing one. In
+    // particular it must never become an attacker-computable empty HMAC key.
+    this.dshPluginToken = options.dshPluginToken?.trim() === '' ? undefined : options.dshPluginToken
     // OBS-01: the runtime metrics store is process-local; no locking needed.
     this.metrics = new MetricsStore()
     // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
@@ -1359,6 +1367,12 @@ export class ResearchKernel {
     creator_tenant_id?: string
     idempotency_key: string
     request_hash: string
+    /** Internal DSH Host seam only: atomically bind the newly-created shell
+     * to this exact session. Public v2 callers never supply this field. */
+    session_id?: string
+    /** Internal reconciliation mode: an absent idempotency receipt is a
+     * zero-write 404 rather than permission to create. */
+    replay_only?: boolean
   }): { project: ResearchProject; intake: IntakeSession; budget: BudgetRecord; membership: Array<Record<string, unknown>> } {
     const name = input.name.trim()
     if (name === '' || name.length > 120) {
@@ -1367,18 +1381,46 @@ export class ResearchKernel {
     if (input.creator_principal_id.trim() === '') {
       throw new KernelError(422, 'principal_required', 'name-only project creation requires a Human Principal')
     }
-    const existing = this.db.prepare('SELECT project_id, request_hash FROM projects WHERE idempotency_key = ?')
-      .get(input.idempotency_key) as { project_id: string; request_hash: string | null } | undefined
-    if (existing !== undefined) {
-      if (existing.request_hash !== input.request_hash) {
-        throw new KernelError(409, 'idempotency_conflict', `idempotency key ${input.idempotency_key} was used with a different request hash`)
-      }
-      const project = this.getProject(existing.project_id)
-      const intake = this.listIntakes(project.project_id).find(item => item.status !== 'accepted' && item.status !== 'rejected' && item.status !== 'expired' && item.status !== 'failed')
-      if (intake === undefined) throw new KernelError(409, 'intake_state_conflict', 'collecting project has no active Init Intake')
-      return { project, intake, budget: this.getBudget(project.project_id), membership: this.listProjectMembers(project.project_id) }
+    const sessionId = input.session_id
+    if (sessionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(sessionId)) {
+      throw new KernelError(422, 'invalid_session_id', 'DSH session id is not a safe opaque id')
     }
     return withTransaction(this.db, () => {
+      // Keep the idempotency lookup and session-link decision under the same
+      // BEGIN IMMEDIATE lock as creation. This makes two Kernel processes
+      // converge on a replay/conflict instead of both passing a preflight.
+      const existing = this.db.prepare('SELECT project_id, request_hash FROM projects WHERE idempotency_key = ?')
+        .get(input.idempotency_key) as { project_id: string; request_hash: string | null } | undefined
+      if (existing !== undefined) {
+        if (existing.request_hash !== input.request_hash) {
+          throw new KernelError(409, 'idempotency_conflict', `idempotency key ${input.idempotency_key} was used with a different request hash`)
+        }
+        const project = this.getProject(existing.project_id)
+        if (sessionId !== undefined) {
+          const rawLink = this.db.prepare('SELECT session_id, project_id, linked_at FROM session_links WHERE session_id = ?')
+            .get(sessionId) as SessionLink | undefined
+          const membership = this.listProjectMembers(project.project_id)
+          if (rawLink?.project_id !== project.project_id || project.session_id !== sessionId
+            || !membership.some(member => member.principal_id === input.creator_principal_id && member.role === 'pi')) {
+            throw new KernelError(409, 'session_link_conflict', 'idempotent DSH project receipt is not bound to this session and creator')
+          }
+        }
+        const intake = this.listIntakes(project.project_id).find(item => item.status !== 'accepted' && item.status !== 'rejected' && item.status !== 'expired' && item.status !== 'failed')
+        if (intake === undefined) throw new KernelError(409, 'intake_state_conflict', 'collecting project has no active Init Intake')
+        return { project, intake, budget: this.getBudget(project.project_id), membership: this.listProjectMembers(project.project_id) }
+      }
+      if (input.replay_only === true) {
+        throw new KernelError(404, 'idempotency_receipt_not_found', 'no committed DSH project creation matches this idempotency key')
+      }
+      if (sessionId !== undefined) {
+        // Read the raw row, not getProjectBySession(): tombstoned and dangling
+        // links are still authoritative fences and must never be overwritten.
+        const rawLink = this.db.prepare('SELECT project_id FROM session_links WHERE session_id = ?')
+          .get(sessionId) as { project_id: string } | undefined
+        if (rawLink !== undefined) {
+          throw new KernelError(409, 'session_link_conflict', 'DSH session already has an authoritative link')
+        }
+      }
       const slug = name.normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'project'
       const project = this.createProject({
         name,
@@ -1399,6 +1441,11 @@ export class ResearchKernel {
         creator_principal_id: input.creator_principal_id,
         creator_tenant_id: input.creator_tenant_id,
       } as Parameters<ResearchKernel['createProject']>[0] & { creator_principal_id: string; creator_tenant_id?: string })
+      if (sessionId !== undefined) {
+        this.linkSessionExclusive(sessionId, project.project_id)
+        this.db.prepare('UPDATE projects SET session_id = ? WHERE project_id = ?').run(sessionId, project.project_id)
+        project.session_id = sessionId
+      }
       const intake = this.beginIntake({
         project_id: project.project_id,
         source_label: 'project-init',
@@ -1411,6 +1458,25 @@ export class ResearchKernel {
         .run(input.idempotency_key, input.request_hash, project.project_id)
       return { project, intake, budget: this.getBudget(project.project_id), membership: this.listProjectMembers(project.project_id) }
     })
+  }
+
+  /** DSH-CREATE-LINK-01: service-only name-only Init with the session link
+   * committed in the same transaction as the Project and active Intake. */
+  createProjectForDshSession(input: {
+    name: string
+    session_id: string
+    idempotency_key: string
+    request_hash: string
+    replay_only?: boolean
+  }): ReturnType<ResearchKernel['createProjectForGrill']> & { link: SessionLink } {
+    const creatorPrincipal = `dsh:${createHash('sha256').update(input.session_id).digest('hex').slice(0, 32)}`
+    const out = this.createProjectForGrill({ ...input, creator_principal_id: creatorPrincipal })
+    const link = this.db.prepare('SELECT session_id, project_id, linked_at FROM session_links WHERE session_id = ?')
+      .get(input.session_id) as SessionLink | undefined
+    if (link === undefined || link.project_id !== out.project.project_id) {
+      throw new KernelError(409, 'session_link_conflict', 'DSH session link was not committed with the created project')
+    }
+    return { ...out, link }
   }
 
   /** Stable, versioned INIT-GRILL-02 question order. */
@@ -1886,6 +1952,21 @@ export class ResearchKernel {
       })
       return receipt
     })
+  }
+
+  /** Link a DSH session to a project (design RSP-006). */
+  private linkSessionExclusive(sessionId: string, projectId: string): SessionLink {
+    this.getProject(projectId)
+    const existing = this.db.prepare('SELECT project_id FROM session_links WHERE session_id = ?')
+      .get(sessionId) as { project_id: string } | undefined
+    if (existing !== undefined) {
+      throw new KernelError(409, 'session_link_conflict', 'DSH session already has an authoritative link')
+    }
+    const link: SessionLink = { session_id: sessionId, project_id: projectId, linked_at: nowIso() }
+    this.db.prepare('INSERT INTO session_links (session_id, project_id, linked_at) VALUES (?, ?, ?)')
+      .run(link.session_id, link.project_id, link.linked_at)
+    this.emit(projectId, 'session.linked', { session_id: sessionId })
+    return link
   }
 
   /** Link a DSH session to a project (design RSP-006). */

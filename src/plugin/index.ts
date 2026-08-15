@@ -394,6 +394,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     // kernel's INTERNAL routes with the same service identity the sidecar
     // handed the kernel (0600 <dataDir>/service-token).
     serviceToken: sidecar.serviceToken,
+    dshPluginToken: sidecar.dshPluginToken,
   })
   const cacheDir = effectiveConfig.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
   const cache = new DiskCache(cacheDir)
