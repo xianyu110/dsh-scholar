@@ -1,4 +1,5 @@
 /** Browser-half composition seam for the DSH plugin configuration page. */
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
@@ -6,7 +7,11 @@ import {
   callScholarSessionProjection,
   copyStandaloneAccessToken,
   inject,
+  nextScholarFrameState,
   parseScholarChatBridgeRequest,
+  parseScholarFrameReadyMessage,
+  scholarFrameAttemptKey,
+  scholarFrameStateForUrl,
   shouldOpenScholarShortcut,
 } from '../../src/client/index.js'
 import { ScholarSettingsScope } from '../../src/client/scholar-settings.js'
@@ -133,20 +138,59 @@ describe('DSH research plugin browser configuration', () => {
       'http://127.0.0.1:18610',
     )).toBeNull()
     expect(standaloneChatBridgeOrigin('http://127.0.0.1:18610/', 'http://127.0.0.1:3080')).toBe('http://127.0.0.1:18610')
+    expect(standaloneChatBridgeOrigin('https://210.34.241.17:8443/', 'https://210.34.241.17')).toBe('https://210.34.241.17:8443')
+    expect(standaloneChatBridgeOrigin('https://scholar.attacker.invalid/', 'https://210.34.241.17')).toBeNull()
     expect(standaloneChatBridgeOrigin('https://scholar.example/', 'http://127.0.0.1:3080')).toBeNull()
     expect(standaloneChatBridgeOrigin('http://127.0.0.1:3080/', 'http://127.0.0.1:3080')).toBeNull()
   })
 
-  it('uses the loopback Scholar RPC for host chat and rejects remote browsers', async () => {
-    const call = vi.fn().mockResolvedValue({ ok: true, value: { assistant_text: '回答' } })
-    await expect(callScholarChatTurn({ call }, true, { text: '问题' })).resolves.toEqual({ assistant_text: '回答' })
-    expect(call).toHaveBeenCalledWith('/dsh-scholar', 'chat-turn', { text: '问题' })
-    call.mockClear()
-    await expect(callScholarChatTurn({ call }, false, {})).rejects.toThrow('Scholar Chat model is unavailable')
-    expect(call).not.toHaveBeenCalled()
+  it('accepts an exact iframe ready handshake and fails closed after timeout', () => {
+    const source = {}
+    const data = { type: 'dsh-scholar/frame-ready', protocol: 1 }
+    expect(parseScholarFrameReadyMessage(
+      { source, origin: 'https://210.34.241.17:8443', data },
+      source,
+      'https://210.34.241.17:8443',
+    )).toBe(true)
+    expect(parseScholarFrameReadyMessage(
+      { source: {}, origin: 'https://210.34.241.17:8443', data },
+      source,
+      'https://210.34.241.17:8443',
+    )).toBe(false)
+    expect(parseScholarFrameReadyMessage(
+      { source, origin: 'https://attacker.invalid', data },
+      source,
+      'https://210.34.241.17:8443',
+    )).toBe(false)
+    expect(nextScholarFrameState('loading', 'ready')).toBe('ready')
+    expect(nextScholarFrameState('loading', 'timeout')).toBe('failed')
+    expect(nextScholarFrameState('ready', 'timeout')).toBe('ready')
+    expect(nextScholarFrameState('failed', 'retry')).toBe('loading')
+    expect(scholarFrameStateForUrl('https://old.example/', 'https://new.example/', 'failed')).toBe('loading')
+    expect(scholarFrameStateForUrl('https://new.example/', 'https://new.example/', 'ready')).toBe('ready')
+    expect(scholarFrameAttemptKey('https://scholar.example/', 0)).not.toBe(scholarFrameAttemptKey('https://scholar.example/', 1))
   })
 
-  it('reads only an exact loopback DSH session projection and rejects malformed responses', async () => {
+  it('rebinds both iframe listeners for URL changes and same-URL retries', () => {
+    const source = readFileSync(new URL('../../src/client/index.tsx', import.meta.url), 'utf8')
+    expect(source).toContain('scholarFrameStateForUrl(frameStateUrl, url, frameState)')
+    expect(source).toContain('cleanupReady()')
+    expect(source).toContain('}, [frameAttemptKey, url])')
+    expect(source).toContain("if (url === null || frameFailed) return")
+    expect(source).toContain('}, [frameAttemptKey, frameFailed, props.callHostChatTurn, url])')
+    expect(source).toContain('key={frameAttemptKey ?? url}')
+  })
+
+  it('uses the trusted-host Scholar view RPC for host chat', async () => {
+    const call = vi.fn().mockResolvedValue({ ok: true, value: { assistant_text: '回答' } })
+    await expect(callScholarChatTurn({ call }, { text: '问题' })).resolves.toEqual({ assistant_text: '回答' })
+    expect(call).toHaveBeenCalledWith('/dsh-scholar-view', 'chat-turn', { text: '问题' })
+    call.mockClear()
+    call.mockResolvedValueOnce({ ok: false, error: { code: 'internal' } })
+    await expect(callScholarChatTurn({ call }, {})).rejects.toThrow('Scholar Chat model is unavailable')
+  })
+
+  it('reads an exact trusted-host DSH session projection and rejects malformed responses', async () => {
     const value = {
       linked: true,
       session_id: 'session_1',
@@ -161,26 +205,24 @@ describe('DSH research plugin browser configuration', () => {
     }
     const call = vi.fn().mockResolvedValue({ ok: true, value })
     const controller = new AbortController()
-    await expect(callScholarSessionProjection({ call }, true, 'session_1', controller.signal)).resolves.toEqual(value)
-    expect(call).toHaveBeenCalledWith('/dsh-scholar', 'session-projection', { session_id: 'session_1' }, controller.signal)
+    await expect(callScholarSessionProjection({ call }, 'session_1', controller.signal)).resolves.toEqual(value)
+    expect(call).toHaveBeenCalledWith('/dsh-scholar-view', 'session-projection', { session_id: 'session_1' }, controller.signal)
 
     call.mockResolvedValueOnce({ ok: true, value: { ...value, session_id: 'session_2' } })
-    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session_1')).rejects.toThrow('unavailable')
     call.mockResolvedValueOnce({ ok: true, value: { ...value, stages: [...value.stages].reverse() } })
-    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session_1')).rejects.toThrow('unavailable')
     call.mockResolvedValueOnce({ ok: true, value: { ...value, next_action: { code: 'survey_run' } } })
-    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session_1')).rejects.toThrow('unavailable')
     call.mockResolvedValueOnce({ ok: true, value: { ...value, summary: { ...value.summary, pending_gates: -1 } } })
-    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session_1')).rejects.toThrow('unavailable')
     call.mockResolvedValueOnce({ ok: true, value: { ...value, token: 'must-not-enter-state' } })
-    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session_1')).rejects.toThrow('unavailable')
     call.mockResolvedValueOnce({ ok: true, value: { ...value, project: { ...value.project, secret_ref: 'ssh-key' } } })
-    await expect(callScholarSessionProjection({ call }, true, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session_1')).rejects.toThrow('unavailable')
     call.mockClear()
-    await expect(callScholarSessionProjection({ call }, true, 'session/other')).rejects.toThrow('unavailable')
-    await expect(callScholarSessionProjection({ call }, true, ' session_1')).rejects.toThrow('unavailable')
-    expect(call).not.toHaveBeenCalled()
-    await expect(callScholarSessionProjection({ call }, false, 'session_1')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, 'session/other')).rejects.toThrow('unavailable')
+    await expect(callScholarSessionProjection({ call }, ' session_1')).rejects.toThrow('unavailable')
     expect(call).not.toHaveBeenCalled()
   })
 })

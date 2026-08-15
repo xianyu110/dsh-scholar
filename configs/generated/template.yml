@@ -194,7 +194,7 @@ standalone:
   # Operator principal identity (GOV-01 local resolver).
   # sources: cli/file
   principal: ''
-  # Comma-separated exact loopback DSH origins allowed by CSP frame-ancestors; no wildcard, path, query, fragment, or credentials.
+  # Comma-separated exact HTTPS or loopback-HTTP DSH origins allowed by CSP frame-ancestors; no wildcard, path, query, fragment, or credentials.
   # sources: cli/env/file; security-floor
   frame_ancestors: "http://127.0.0.1:3080,http://localhost:3080,http://[::1]:3080"
   # Tokenless mode — loopback bind only (127.0.0.0/8, ::1, localhost).

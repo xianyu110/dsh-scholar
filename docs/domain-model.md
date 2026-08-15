@@ -317,7 +317,7 @@ Project `status` 是研究阶段标记，不是活动任务计数。首个冻结
 
 Natural turn 只可在当前 Kernel projection 声明的 route/capability 内自动路由。只读查询可直接执行；明确的 Agent 动作以本次 Human 发送作为意图确认，但仍执行相同 ACL/idempotency/revision；Human-only、Gate、Brief confirm、adoption、release decision、blocked/unknown/ambiguous intent 永远只返回候选与页面导航。assistant 回答必须带最新 `next_actions_v2` 的阶段引导；LLM 文本只是非权威说明，不得生成或覆盖 Project status、Decision、Run、Evidence。显式 slash 与 natural intent 必须共享 canonical operation，不能出现两个语义不同的 `/new`、`/reproduce` 或 `/status` adapter。
 
-`HostChatTurn` 是 `ChatTurn` 的可选非权威回答 adapter，不是 Project 子对象。它只在 DSH Host 与受控 loopback standalone 之间存活，输入为当前 text、locale、裁剪的 project status/brief_status/NextAction 和最近 12 条有界 session history；不存储附件、secret、provider 配置或 reasoning。输出只有 `assistant_text` 和可选 `suggested_command`，后者只是通过非 Human-only direct descriptor allowlist 的 composer draft。Host 一次只处理一个 request-id，超时或 iframe 卸载将其取消；任何失败不生成新业务对象，由 deterministic natural turn 接管。
+`HostChatTurn` 是 `ChatTurn` 的可选非权威回答 adapter，不是 Project 子对象。它只在 DSH Host 与受控的不同 origin loopback standalone，或同主机、不同端口/origin 的 HTTPS standalone 之间存活；跨主机 HTTPS、远端明文 HTTP 与同 origin iframe 不能建立该 adapter。输入为当前 text、locale、裁剪的 project status/brief_status/NextAction 和最近 12 条有界 session history；不存储附件、secret、provider 配置或 reasoning。输出只有 `assistant_text` 和可选 `suggested_command`，后者只是通过非 Human-only direct descriptor allowlist 的 composer draft。父子两端从可信配置或 origin-only referrer 固定 exact origin，`postMessage` 请求和响应都必须同时校验 exact `WindowProxy`、origin 与 request-id，禁止 `targetOrigin='*'`。Host 一次只处理一个 request-id；超时、iframe error/失败态、URL 变化、重试或 iframe 卸载必须取消旧请求，任何迟到响应不得写回。任何失败不生成新业务对象，由 deterministic natural turn 接管。
 
 ### 14.2 Model Provider、Binding 与 OCR Request
 

@@ -16,11 +16,20 @@ function isLoopbackHostname(hostname: string): boolean {
   return octets.every(octet => octet >= 0 && octet <= 255) && octets[0] === 127
 }
 
-/** Chat data may cross only to the separately served loopback workbench. */
+/**
+ * Chat data may cross to a separately served loopback workbench, or between
+ * exact HTTPS origins on the same host (for example DSH on :443 and Scholar
+ * on :8443). Cross-host HTTPS and remote plaintext remain fail-closed.
+ */
 export function standaloneChatBridgeOrigin(value: string, parentOrigin?: string): string | null {
   let parsed: URL
   try { parsed = new URL(normalizeStandaloneUrl(value)) } catch { return null }
-  if (!isLoopbackHostname(parsed.hostname) || parsed.origin === parentOrigin) return null
+  if (parsed.origin === parentOrigin) return null
+  if (isLoopbackHostname(parsed.hostname)) return parsed.origin
+  if (parsed.protocol !== 'https:' || parentOrigin === undefined) return null
+  let parent: URL
+  try { parent = new URL(parentOrigin) } catch { return null }
+  if (parent.protocol !== 'https:' || parent.hostname !== parsed.hostname) return null
   return parsed.origin
 }
 

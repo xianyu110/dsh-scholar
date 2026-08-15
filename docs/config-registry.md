@@ -28,12 +28,12 @@ Registry 是生成权威：JSON Schema、默认值 template、CLI 帮助文本�
 | `runner-profile` | Runner 网关 CLI 与容器安全面 | `runner.*`（kernel endpoint/mode/poll/heartbeat/timeout/cancel/owner/key-file/token/service-token/network/privileged/docker_socket） |
 | `orchestrator` | Durable Research Orchestrator CLI（design §8） | `orchestrator.*`（kernel/db/poll_ms/once/dry_run） |
 | `kernel` | Research Kernel 守护进程 | `kernel.*`（host/port/token/service-token/db/cas/endpoint-file/require_signed_manifest） |
-| `standalone` | standalone BFF | `standalone.*`（host/port/kernel_port/data_dir/token/principal/no_token） |
+| `standalone` | standalone BFF | `standalone.*`（host/port/kernel_port/data_dir/token/principal/frame_ancestors/no_token） |
 
 env 别名在键上声明（生成 JSON Schema 的 `x-dsh-env` 注解与 template 注释带出）：
 `DSH_SCHOLAR_KERNEL_TOKEN`、`DSH_SCHOLAR_SERVICE_TOKEN`（kernel/runner）、
 `DSH_SCHOLAR_KERNEL_ENDPOINT_FILE`、`DSH_IMAGES_LOCK`、`DSH_HOME`（standalone
-data_dir 缺省基目录）、`DSH_SCHOLAR_STANDALONE_{HOST,PORT,KERNEL_PORT,DATA}`
+data_dir 缺省基目录）、`DSH_SCHOLAR_STANDALONE_{HOST,PORT,KERNEL_PORT,DATA,FRAME_ANCESTORS}`
 （start-standalone-ui.sh 翻译为 CLI flag 的别名）。
 
 ## 3. 校验语义（`validateConfig`）

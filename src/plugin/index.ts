@@ -54,7 +54,7 @@ import { registerResearchCommands } from './commands.js'
 import { RoleRegistry, RESEARCH_TOOLS, stageProjectScopeDenial, type ResearchRole } from './acl.js'
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
-import { createScholarRpcHandler } from './settings-rpc.js'
+import { createScholarRpcHandler, createScholarViewRpcHandler } from './settings-rpc.js'
 import { createHarnessChatTurn, type HarnessChatTurnReply } from './chat-turn.js'
 import { buildScholarSessionProjection, type ScholarSessionProjection } from '../shared/research-stage.js'
 import {
@@ -325,27 +325,35 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     })
   }
 
-  // Optional browser Host seam. The registration is lifecycle-owned and only
-  // becomes reachable through DSH Connection's loopback authority fence.
-  // It accepts no path or token input: the Host resolves the fixed standalone
-  // token file and returns it only for an explicit clipboard action.
+  // Optional browser Host seam. Privileged settings/token operations remain
+  // loopback-only; the trusted-host view channel owns only tool-free Chat and
+  // a redacted, session-bound projection for an HTTPS DSH deployment.
   if (typeof ctx.inject === 'function') {
-    ctx.inject(['connection'], connectionCtx => connectionCtx.connection.rpc.handle(
-      '/dsh-scholar',
-      createScholarRpcHandler(
-        settings as SettingsProvider,
-        readStandaloneAccessToken,
-        (payload, signal) => {
-          if (hostChatTurn === undefined) throw new Error('Scholar Chat model is unavailable')
-          return hostChatTurn(payload, signal)
-        },
-        (sessionId, signal) => {
-          if (readSessionProjection === undefined) throw new Error('Scholar session projection is unavailable')
-          return readSessionProjection(sessionId, signal)
-        },
-      ),
-      { authority: 'loopback' },
-    ))
+    ctx.inject(['connection'], connectionCtx => {
+      const disposePrivate = connectionCtx.connection.rpc.handle(
+        '/dsh-scholar',
+        createScholarRpcHandler(settings as SettingsProvider, readStandaloneAccessToken),
+        { authority: 'loopback' },
+      )
+      const disposeView = connectionCtx.connection.rpc.handle(
+        '/dsh-scholar-view',
+        createScholarViewRpcHandler(
+          (payload, signal) => {
+            if (hostChatTurn === undefined) throw new Error('Scholar Chat model is unavailable')
+            return hostChatTurn(payload, signal)
+          },
+          (sessionId, signal) => {
+            if (readSessionProjection === undefined) throw new Error('Scholar session projection is unavailable')
+            return readSessionProjection(sessionId, signal)
+          },
+        ),
+        { authority: 'trusted-host' },
+      )
+      return async () => {
+        await disposeView()
+        await disposePrivate()
+      }
+    })
   }
   // True once this fiber's disposer ran (dispose/reload mid-startup).
   let disposed = false

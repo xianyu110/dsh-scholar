@@ -486,6 +486,11 @@ describe('standalone unlock page i18n (UI-03)', () => {
       for (const key of ['standalone.invalidToken', 'standalone.serverUnreachable', 'standalone.bundleFailed', 'standalone.theme.dark', 'standalone.theme.light']) {
         expect(html.includes(`'${key}'`), `unlock script resolves ${key} via the dictionary`).toBe(true)
       }
+      expect(html).toContain('parseStandaloneUnlockError')
+      expect(html).toContain("type: 'dsh-scholar/frame-ready'")
+      expect(html).toContain("'dsh-scholar/frame-ready-query'")
+      expect(html).toContain('<form id="token-form"')
+      expect(html).not.toContain('(j.error ||')
       // html lang follows the same persisted-locale logic as the client
       // adapter (acceptance §8: persisted dsh.locale → navigator.languages → zh).
       expect(html.includes(`document.documentElement.lang = window.__BOOT_LOCALE__`), 'lang switches with the boot locale').toBe(true)

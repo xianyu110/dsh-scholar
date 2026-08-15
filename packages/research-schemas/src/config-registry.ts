@@ -654,7 +654,7 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     env: 'DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS',
     securityFloor: true,
     sources: ['cli', 'env', 'file'],
-    description: 'Comma-separated exact loopback DSH origins allowed by CSP frame-ancestors; no wildcard, path, query, fragment, or credentials.',
+    description: 'Comma-separated exact HTTPS or loopback-HTTP DSH origins allowed by CSP frame-ancestors; no wildcard, path, query, fragment, or credentials.',
   },
   {
     key: 'standalone.no_token',

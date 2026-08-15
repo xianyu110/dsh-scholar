@@ -34,7 +34,8 @@ type ResearchConfigKey =
   | 'unattended' | 'unattendedHint' | 'overridden' | 'reset'
   | 'standaloneUrl' | 'standaloneUrlHint' | 'shortcut' | 'shortcutHint' | 'shortcutDisabled'
   | 'openStandalone' | 'copyToken' | 'copyingToken' | 'tokenCopied' | 'tokenCopyFailed'
-  | 'viewDescription' | 'viewFrameTitle' | 'viewUnavailable'
+  | 'viewDescription' | 'viewFrameTitle' | 'viewUnavailable' | 'frameLoading' | 'frameLoadFailed'
+  | 'retryFrame' | 'resetStandalone'
   | 'sessionTimeline' | 'sessionLoading' | 'sessionUnavailable' | 'sessionUnlinked' | 'refreshStages'
   | 'projectRevision' | 'nextAction' | 'nextReason' | 'pendingGates' | 'jobsSummary'
   | 'stageInit' | 'stageSurvey' | 'stageIdea' | 'stageReproduce' | 'stageContract'
@@ -67,6 +68,10 @@ const en: Record<ResearchConfigKey, string> = {
   viewDescription: 'The standalone Scholar workbench is displayed here.',
   viewFrameTitle: 'dsh Scholar standalone workbench',
   viewUnavailable: 'The standalone workbench URL is unavailable. Check Plugin config.',
+  frameLoading: 'Connecting to the standalone Scholar workbench…',
+  frameLoadFailed: 'Scholar could not be loaded safely. Open it in a new page to inspect the certificate, or check the URL and allowed frame origins.',
+  retryFrame: 'Retry',
+  resetStandalone: 'Use local default',
   sessionTimeline: 'Research stages for this DSH session',
   sessionLoading: 'Loading the session research stages…',
   sessionUnavailable: 'The session research stages are temporarily unavailable.',
@@ -123,6 +128,10 @@ const zh: Record<ResearchConfigKey, string> = {
   viewDescription: '这里显示独立运行的 Scholar 工作台。',
   viewFrameTitle: 'dsh Scholar 独立工作台',
   viewUnavailable: 'Standalone 工作台地址不可用，请检查 Plugin config。',
+  frameLoading: '正在连接独立运行的 Scholar 工作台…',
+  frameLoadFailed: '无法安全加载 Scholar。请在新页面检查证书，或检查地址与允许嵌入的来源。',
+  retryFrame: '重试',
+  resetStandalone: '恢复本机默认地址',
   sessionTimeline: '当前 DSH 会话的研究阶段',
   sessionLoading: '正在加载会话研究阶段…',
   sessionUnavailable: '暂时无法读取当前会话的研究阶段。',
@@ -179,6 +188,7 @@ type ResearchCardProps =
 interface ScholarViewFace {
   hooks: { researchSettings: SettingsScope<ResearchSettings> }
   openStandalone: (url: string) => void
+  resetStandalone: () => Promise<void>
   callHostChatTurn: (payload: unknown, signal?: AbortSignal) => Promise<unknown>
   readSessionProjection: (sessionId: string, signal?: AbortSignal) => Promise<ScholarSessionProjection>
 }
@@ -248,8 +258,12 @@ const style = {
   stageUpcoming: { background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-tertiary)' },
   stageBlocked: { background: 'color-mix(in srgb, var(--dsw-alias-label-error) 10%, transparent)', color: 'var(--dsw-alias-label-error)', fontWeight: 600 },
   nextLine: { margin: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
-  frame: { flex: 1, width: '100%', minHeight: 0, border: 0, background: '#fff' },
-  unavailable: { margin: 24, color: 'var(--dsw-alias-label-error)' },
+  frameRegion: { flex: 1, minHeight: 240, position: 'relative', overflow: 'hidden', background: 'var(--dsw-alias-bg-layer-1)' },
+  frame: { position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0, background: '#fff' },
+  frameStatus: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  frameFailure: { maxWidth: 600, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, textAlign: 'center' },
+  frameActions: { display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 8 },
+  unavailable: { margin: 0, color: 'var(--dsw-alias-label-error)', lineHeight: 1.5 },
 } satisfies Record<string, CSSProperties>
 
 type RpcCaller = {
@@ -258,6 +272,32 @@ type RpcCaller = {
 
 const CHAT_BRIDGE_REQUEST = 'dsh-scholar/chat-turn-request'
 const CHAT_BRIDGE_RESPONSE = 'dsh-scholar/chat-turn-response'
+const FRAME_READY = 'dsh-scholar/frame-ready'
+const FRAME_READY_QUERY = 'dsh-scholar/frame-ready-query'
+
+export type ScholarFrameState = 'loading' | 'ready' | 'failed'
+export type ScholarFrameEvent = 'ready' | 'timeout' | 'error' | 'retry'
+
+/** Small deterministic state machine used by the iframe timeout UI. */
+export function nextScholarFrameState(state: ScholarFrameState, event: ScholarFrameEvent): ScholarFrameState {
+  if (event === 'retry') return 'loading'
+  if (state !== 'loading') return state
+  return event === 'ready' ? 'ready' : 'failed'
+}
+
+/** URL changes must render a fresh iframe before the effect can bind its ref. */
+export function scholarFrameStateForUrl(
+  stateUrl: string | null,
+  currentUrl: string | null,
+  state: ScholarFrameState,
+): ScholarFrameState {
+  return stateUrl === currentUrl ? state : 'loading'
+}
+
+/** A same-URL retry is a distinct iframe/source and must rebind every bridge. */
+export function scholarFrameAttemptKey(url: string | null, generation: number): string | null {
+  return url === null ? null : `${url}\u0000${generation}`
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -287,17 +327,26 @@ export function parseScholarChatBridgeRequest(
   return { requestId, payload: envelope.payload }
 }
 
-/** Loopback-only browser seam for the Host-owned, tool-free chat model RPC. */
+/** Accept readiness only from the exact configured iframe window and origin. */
+export function parseScholarFrameReadyMessage(
+  event: { source?: unknown; origin?: unknown; data?: unknown },
+  expectedSource: unknown,
+  expectedOrigin: string,
+): boolean {
+  if (event.source !== expectedSource || event.origin !== expectedOrigin) return false
+  const envelope = isRecord(event.data) ? event.data : null
+  return envelope?.type === FRAME_READY && envelope.protocol === 1 && hasOnlyKeys(envelope, ['type', 'protocol'])
+}
+
+/** Trusted-host browser seam for the Host-owned, tool-free chat model RPC. */
 export async function callScholarChatTurn(
   rpc: RpcCaller,
-  isLoopback: boolean,
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  if (!isLoopback) throw new Error('Scholar Chat model is unavailable')
   const response = signal === undefined
-    ? await rpc.call('/dsh-scholar', 'chat-turn', payload)
-    : await rpc.call('/dsh-scholar', 'chat-turn', payload, signal)
+    ? await rpc.call('/dsh-scholar-view', 'chat-turn', payload)
+    : await rpc.call('/dsh-scholar-view', 'chat-turn', payload, signal)
   if (!isRecord(response) || response.ok !== true || !('value' in response)) {
     throw new Error('Scholar Chat model is unavailable')
   }
@@ -341,18 +390,17 @@ function isScholarProjection(value: unknown, expectedSessionId: string): value i
     && (stage.state === 'done' || stage.state === 'current' || stage.state === 'upcoming' || stage.state === 'blocked'))
 }
 
-/** Loopback-only, session-bound phase projection from the plugin Kernel. */
+/** Trusted-host, session-bound phase projection from the plugin Kernel. */
 export async function callScholarSessionProjection(
   rpc: RpcCaller,
-  isLoopback: boolean,
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<ScholarSessionProjection> {
   const normalized = normalizeDshSessionId(sessionId)
-  if (!isLoopback || normalized === undefined) throw new Error('Scholar session projection is unavailable')
+  if (normalized === undefined) throw new Error('Scholar session projection is unavailable')
   const response = signal === undefined
-    ? await rpc.call('/dsh-scholar', 'session-projection', { session_id: normalized })
-    : await rpc.call('/dsh-scholar', 'session-projection', { session_id: normalized }, signal)
+    ? await rpc.call('/dsh-scholar-view', 'session-projection', { session_id: normalized })
+    : await rpc.call('/dsh-scholar-view', 'session-projection', { session_id: normalized }, signal)
   if (!isRecord(response) || response.ok !== true || !isScholarProjection(response.value, normalized)) {
     throw new Error('Scholar session projection is unavailable')
   }
@@ -439,6 +487,12 @@ function ScholarView(props: ScholarViewProps) {
   const [sessionProjection, setSessionProjection] = useState<ScholarSessionProjection | null>(null)
   const [sessionState, setSessionState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [refreshGeneration, setRefreshGeneration] = useState(0)
+  const [frameGeneration, setFrameGeneration] = useState(0)
+  const [frameState, setFrameState] = useState<ScholarFrameState>('loading')
+  const [frameStateUrl, setFrameStateUrl] = useState<string | null>(url)
+  const visibleFrameState = scholarFrameStateForUrl(frameStateUrl, url, frameState)
+  const frameAttemptKey = scholarFrameAttemptKey(url, frameGeneration)
+  const frameFailed = visibleFrameState === 'failed'
   useEffect(() => {
     const controller = new AbortController()
     let timer: number | undefined
@@ -490,7 +544,39 @@ function ScholarView(props: ScholarViewProps) {
     }
   }, [props.readSessionProjection, refreshGeneration, sessionId])
   useEffect(() => {
+    setFrameStateUrl(url)
+    setFrameState('loading')
     if (url === null) return
+    const source = frameRef.current?.contentWindow
+    if (source === null || source === undefined) return
+    let origin: string
+    try { origin = new URL(url).origin } catch { return }
+    let active = true
+    let timer: number | undefined
+    const cleanupReady = (): void => {
+      if (!active) return
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      window.removeEventListener('message', onMessage)
+    }
+    const onMessage = (event: MessageEvent): void => {
+      if (!parseScholarFrameReadyMessage(event, source, origin)) return
+      cleanupReady()
+      setFrameState(state => nextScholarFrameState(state, 'ready'))
+    }
+    timer = window.setTimeout(() => {
+      cleanupReady()
+      setFrameState(state => nextScholarFrameState(state, 'timeout'))
+    }, 8_000)
+    window.addEventListener('message', onMessage)
+    try { source.postMessage({ type: FRAME_READY_QUERY, protocol: 1 }, origin) } catch {
+      cleanupReady()
+      setFrameState(state => nextScholarFrameState(state, 'error'))
+    }
+    return cleanupReady
+  }, [frameAttemptKey, url])
+  useEffect(() => {
+    if (url === null || frameFailed) return
     const source = frameRef.current?.contentWindow
     if (source === null || source === undefined) return
     const origin = standaloneChatBridgeOrigin(url, window.location.origin)
@@ -545,7 +631,7 @@ function ScholarView(props: ScholarViewProps) {
       for (const controller of pending.values()) controller.abort()
       pending.clear()
     }
-  }, [props.callHostChatTurn, url])
+  }, [frameAttemptKey, frameFailed, props.callHostChatTurn, url])
   return (
     <section style={style.view} aria-label={props.t('title')}>
       <header style={style.viewHeader}>
@@ -605,16 +691,58 @@ function ScholarView(props: ScholarViewProps) {
           : null}
       </section>
       {url === null
-        ? <p role="alert" style={style.unavailable}>{props.t('viewUnavailable')}</p>
+        ? <div style={style.frameStatus}><p role="alert" style={style.unavailable}>{props.t('viewUnavailable')}</p></div>
         : (
-          <iframe
-            ref={frameRef}
-            src={url}
-            title={props.t('viewFrameTitle')}
-            style={style.frame}
-            referrerPolicy="origin"
-            sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-modals allow-popups"
-          />
+          <div style={style.frameRegion}>
+            {visibleFrameState === 'loading'
+              ? <div style={style.frameStatus}><p role="status" style={style.projectMeta}>{props.t('frameLoading')}</p></div>
+              : null}
+            {visibleFrameState === 'failed'
+              ? (
+                <div style={style.frameStatus}>
+                  <div style={style.frameFailure} role="alert">
+                    <p style={style.unavailable}>{props.t('frameLoadFailed')}</p>
+                    <div style={style.frameActions}>
+                      <button
+                        type="button"
+                        style={style.secondary}
+                        onClick={() => {
+                          setFrameState(state => nextScholarFrameState(state, 'retry'))
+                          setFrameGeneration(value => value + 1)
+                        }}
+                      >
+                        {props.t('retryFrame')}
+                      </button>
+                      <button type="button" style={style.secondary} onClick={() => { props.openStandalone(url) }}>
+                        {props.t('openStandalone')}
+                      </button>
+                      {url === DEFAULT_STANDALONE_URL ? null : (
+                        <button type="button" style={style.secondary} onClick={() => { void props.resetStandalone() }}>
+                          {props.t('resetStandalone')}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+              : (
+                <iframe
+                  key={frameAttemptKey ?? url}
+                  ref={frameRef}
+                  src={url}
+                  title={props.t('viewFrameTitle')}
+                  style={{ ...style.frame, visibility: visibleFrameState === 'ready' ? 'visible' : 'hidden' }}
+                  referrerPolicy="origin"
+                  sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-modals allow-popups"
+                  onLoad={() => {
+                    const source = frameRef.current?.contentWindow
+                    if (source === null || source === undefined) return
+                    try { source.postMessage({ type: FRAME_READY_QUERY, protocol: 1 }, new URL(url).origin) } catch { /* invalid URL already handled */ }
+                  }}
+                  onError={() => { setFrameState(state => nextScholarFrameState(state, 'error')) }}
+                />
+              )}
+          </div>
         )}
     </section>
   )
@@ -816,13 +944,11 @@ export function apply(ctx: ClientContext): void {
   )
   const callHostChatTurn = (payload: unknown, signal?: AbortSignal): Promise<unknown> => callScholarChatTurn(
     connection.rpc,
-    connection.isLoopback,
     payload,
     signal,
   )
   const readSessionProjection = (sessionId: string, signal?: AbortSignal): Promise<ScholarSessionProjection> => callScholarSessionProjection(
     connection.rpc,
-    connection.isLoopback,
     sessionId,
     signal,
   )
@@ -852,6 +978,7 @@ export function apply(ctx: ClientContext): void {
     inject: (): ScholarViewFace => ({
       hooks: { researchSettings: scope },
       openStandalone,
+      resetStandalone: () => scope.unset('standalone'),
       callHostChatTurn,
       readSessionProjection,
     }),

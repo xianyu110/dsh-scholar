@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   loadOptions, bffError, isProjectTrajectoryTopologyForward, standaloneContentSecurityPolicy,
-  standaloneFrameAncestorSources, surveySnapshotBody, surveyWriteRoleAllowed,
+  parseStandaloneUnlockError, standaloneFrameAncestorSources, surveySnapshotBody, surveyWriteRoleAllowed,
 } from '../../packages/dsh-research-ui/lib/standalone/server.js'
 // @ts-expect-error re-export surface
 
@@ -115,6 +115,14 @@ describe('standalone web application', () => {
     expect(csp).not.toContain('*')
   })
 
+  it('allows explicit HTTPS embedders while rejecting remote plaintext origins', () => {
+    expect(standaloneFrameAncestorSources('https://210.34.241.17,https://dsh.example.test/')).toEqual([
+      'https://210.34.241.17',
+      'https://dsh.example.test',
+    ])
+    expect(() => standaloneFrameAncestorSources('http://210.34.241.17')).toThrow(/HTTPS or loopback HTTP/)
+  })
+
   it.each([
     '', 'http://127.0.0.1:*', 'http://example.test:3080',
     'http://user@127.0.0.1:3080', 'http://127.0.0.1:3080/path',
@@ -137,6 +145,14 @@ describe('standalone web application', () => {
     expect(bffError('kernel_unreachable', 'research kernel unavailable')).toEqual({ ok: false, error: { code: 'kernel_unreachable', message: 'research kernel unavailable' } })
     expect(bffError('connector_unavailable', 'survey connector unavailable')).toEqual({ ok: false, error: { code: 'connector_unavailable', message: 'survey connector unavailable' } })
     expect(bffError('invalid_json', 'bad request')).toEqual({ ok: false, error: { code: 'invalid_json', message: 'bad request' } })
+  })
+
+  it('normalizes structured and legacy unlock errors without stringifying objects', () => {
+    expect(parseStandaloneUnlockError({ code: 'unauthorized', message: 'invalid token' })).toEqual({
+      code: 'unauthorized', message: 'invalid token',
+    })
+    expect(parseStandaloneUnlockError('invalid token')).toEqual({ code: 'unauthorized', message: 'invalid token' })
+    expect(parseStandaloneUnlockError({ code: 42, message: {} })).toEqual({ code: null, message: null })
   })
 
   it('survey snapshot preserves citation edges and never marks partial connector failure complete', () => {

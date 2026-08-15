@@ -89,8 +89,6 @@ function sessionId(payload: unknown): string | undefined {
 export function createScholarRpcHandler(
   settings: SettingsProvider,
   readStandaloneToken: () => string,
-  runChatTurn?: ScholarChatTurnHandler,
-  readSessionProjection?: ScholarSessionProjectionHandler,
 ): ConnectionRpcHandler {
   return async (endpoint, payload, signal) => {
     if (endpoint === 'standalone-token') {
@@ -115,6 +113,16 @@ export function createScholarRpcHandler(
         return { ok: true, value: snapshot(settings) }
       } catch { return internal('Scholar settings update failed') }
     }
+    return internal('unsupported Scholar endpoint')
+  }
+}
+
+/** Trusted-host view RPC: deliberately excludes settings and token endpoints. */
+export function createScholarViewRpcHandler(
+  runChatTurn?: ScholarChatTurnHandler,
+  readSessionProjection?: ScholarSessionProjectionHandler,
+): ConnectionRpcHandler {
+  return async (endpoint, payload, signal) => {
     if (endpoint === 'chat-turn') {
       if (runChatTurn === undefined) return internal('Scholar Chat model is unavailable')
       try { return { ok: true, value: await runChatTurn(payload, signal) } }
@@ -127,6 +135,6 @@ export function createScholarRpcHandler(
       try { return { ok: true, value: await readSessionProjection(parsed, signal) } }
       catch { return internal('Scholar session projection is unavailable') }
     }
-    return internal('unsupported Scholar endpoint')
+    return internal('unsupported Scholar view endpoint')
   }
 }

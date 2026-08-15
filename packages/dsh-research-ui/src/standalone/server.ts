@@ -279,7 +279,7 @@ interface StandaloneOptions {
   /** API-01: loopback operator identity. When set, the BFF enforces project
    * membership on project-scoped /v1 routes (non-member -> 404). */
   principal: string | null
-  /** Exact loopback DSH origins allowed to embed the standalone page. */
+  /** Exact HTTPS or loopback-HTTP DSH origins allowed to embed the page. */
   frameAncestors: string
 }
 
@@ -289,8 +289,8 @@ export function standaloneFrameAncestorSources(value: string): string[] {
     if (raw.includes('*')) throw new Error('frame ancestors must not contain wildcards')
     let parsed: URL
     try { parsed = new URL(raw) } catch { throw new Error(`invalid frame ancestor origin: ${raw}`) }
-    if (!['http:', 'https:'].includes(parsed.protocol) || !isLoopbackHost(parsed.hostname)) {
-      throw new Error(`frame ancestor must be an http(s) loopback origin: ${raw}`)
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname))) {
+      throw new Error(`frame ancestor must use HTTPS or loopback HTTP: ${raw}`)
     }
     if (parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
       throw new Error(`frame ancestor must be an exact origin without credentials/path/query/fragment: ${raw}`)
@@ -483,6 +483,21 @@ export function bffError(code: string, message: string): { ok: false; error: { c
   return { ok: false, error: { code, message } }
 }
 
+/** Normalize both the current error envelope and the pre-envelope string. */
+export function parseStandaloneUnlockError(error: unknown): { code: string | null; message: string | null } {
+  if (typeof error === 'string') {
+    return { code: error === 'invalid token' ? 'unauthorized' : null, message: error }
+  }
+  if (typeof error !== 'object' || error === null || Array.isArray(error)) return { code: null, message: null }
+  const value = error as Record<string, unknown>
+  return {
+    code: typeof value.code === 'string' ? value.code : null,
+    message: typeof value.message === 'string' ? value.message : null,
+  }
+}
+
+const PARSE_STANDALONE_UNLOCK_ERROR_SOURCE = parseStandaloneUnlockError.toString()
+
 const BOOTSTRAP_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -606,10 +621,12 @@ const BOOTSTRAP_HTML = `<!doctype html>
     <div class="eyebrow" data-i18n="standalone.operatorAccess">Operator access</div>
     <h1 data-i18n="standalone.welcomeBack">Welcome back.</h1>
     <p data-i18n="standalone.intro">Open your evidence workspace. Human gate decisions are recorded with your operator identity.</p>
-    <label class="field-label" for="token-input" data-i18n="standalone.accessToken">Access token</label>
-    <input id="token-input" type="password" placeholder="Access token" autocomplete="off">
-    <button id="token-submit" data-i18n="standalone.openWorkspace">Open workspace</button>
-    <div class="err" id="token-err"></div>
+    <form id="token-form">
+      <label class="field-label" for="token-input" data-i18n="standalone.accessToken">Access token</label>
+      <input id="token-input" type="password" placeholder="Access token" autocomplete="off">
+      <button id="token-submit" type="submit" data-i18n="standalone.openWorkspace">Open workspace</button>
+      <div class="err" id="token-err"></div>
+    </form>
     <div class="hint"><span class="hint-dot"></span><span data-i18n="standalone.tokenHint">Your token is generated when the local server starts and remains on this machine.</span></div>
   </div>
 </div>
@@ -626,6 +643,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <script src="/client.js"></script>
 <script>
   (function () {
+    ${PARSE_STANDALONE_UNLOCK_ERROR_SOURCE}
     var THEME_KEY = 'dsh-scholar-ui-theme';
     var TOKEN_KEY = 'dsh-scholar-ui-token';
     var root = document.documentElement;
@@ -645,7 +663,19 @@ const BOOTSTRAP_HTML = `<!doctype html>
     var boot = document.getElementById('boot-screen');
     var input = document.getElementById('token-input');
     var err = document.getElementById('token-err');
-    var submit = document.getElementById('token-submit');
+    var form = document.getElementById('token-form');
+    var frameParentOrigin = null;
+    try { frameParentOrigin = document.referrer ? new URL(document.referrer).origin : null; } catch (e) {}
+    function notifyFrameReady() {
+      if (window.parent === window || frameParentOrigin === null) return;
+      window.parent.postMessage({ type: 'dsh-scholar/frame-ready', protocol: 1 }, frameParentOrigin);
+    }
+    window.addEventListener('message', function (e) {
+      if (e.source !== window.parent || e.origin !== frameParentOrigin) return;
+      if (!e.data || e.data.type !== 'dsh-scholar/frame-ready-query' || e.data.protocol !== 1) return;
+      notifyFrameReady();
+    });
+    notifyFrameReady();
     var saved = null;
     try { saved = localStorage.getItem(TOKEN_KEY); } catch (e) {}
     function unlock(token) {
@@ -659,8 +689,11 @@ const BOOTSTRAP_HTML = `<!doctype html>
           } else {
             // Known server error codes map to the localized dictionary;
             // unknown wire text is shown verbatim (acceptance §8 raw text).
-            var errKey = j.error === 'invalid token' ? 'standalone.invalidToken' : null;
-            err.textContent = errKey !== null ? window.__BOOT_MSG__(errKey) : (j.error || window.__BOOT_MSG__('standalone.invalidToken'));
+            var parsedError = parseStandaloneUnlockError(j.error);
+            var errKey = parsedError.code === 'unauthorized' ? 'standalone.invalidToken' : null;
+            err.textContent = errKey !== null
+              ? window.__BOOT_MSG__(errKey)
+              : (parsedError.message || window.__BOOT_MSG__('standalone.invalidToken'));
           }
         })
         .catch(function () { err.textContent = window.__BOOT_MSG__('standalone.serverUnreachable'); });
@@ -679,8 +712,8 @@ const BOOTSTRAP_HTML = `<!doctype html>
     }
     if (saved) { unlock(saved); }
     else { boot.style.display = 'flex'; }
-    submit.addEventListener('click', function () { unlock(input.value.trim()); });
-    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') unlock(input.value.trim()); });
+    form.addEventListener('submit', function (e) { e.preventDefault(); unlock(input.value.trim()); });
+    window.addEventListener('load', notifyFrameReady, { once: true });
     input.focus();
   })();
 </script>
@@ -1054,7 +1087,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         }
         let presented: string | undefined
         try {
-          presented = (JSON.parse(body) as { token?: unknown }).token as string | undefined
+          const candidate = (JSON.parse(body) as { token?: unknown }).token
+          presented = typeof candidate === 'string' ? candidate : undefined
         } catch {
           presented = undefined
         }

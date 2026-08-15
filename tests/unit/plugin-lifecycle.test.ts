@@ -1,14 +1,22 @@
 /** DSH/Cordis lifecycle seam for the research plugin. */
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, inject, KernelSidecar } from '../../src/plugin/index.js'
-import { createScholarRpcHandler } from '../../src/plugin/settings-rpc.js'
+import { createScholarRpcHandler, createScholarViewRpcHandler } from '../../src/plugin/settings-rpc.js'
 
 describe('DSH research plugin lifecycle', () => {
   it('waits for the settings provider before applying the host plugin', () => {
     expect(inject).toContain('settings')
+  })
+
+  it('keeps privileged RPC loopback-only and exposes only the view channel to trusted hosts', () => {
+    const source = readFileSync(new URL('../../src/plugin/index.ts', import.meta.url), 'utf8')
+    expect(source).toContain("'/dsh-scholar',\n        createScholarRpcHandler")
+    expect(source).toContain("{ authority: 'loopback' }")
+    expect(source).toContain("'/dsh-scholar-view',\n        createScholarViewRpcHandler")
+    expect(source).toContain("{ authority: 'trusted-host' }")
   })
 
   it('registers a private restart settings namespace before starting the kernel', async () => {
@@ -64,7 +72,7 @@ describe('DSH research plugin lifecycle', () => {
     }
   })
 
-  it('serves only the redacted Scholar UI projection through its loopback RPC', async () => {
+  it('separates privileged settings from the redacted Scholar view RPC', async () => {
     const mutate = vi.fn().mockResolvedValue(undefined)
     const settings = {
       writable: true,
@@ -89,7 +97,8 @@ describe('DSH research plugin lifecycle', () => {
       stages: [{ id: 'survey', state: 'current' }],
       summary: { pending_gates: 0, jobs: { total: 0 }, counts: {} },
     })
-    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token', chatTurn, sessionProjection)
+    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token')
+    const viewHandler = createScholarViewRpcHandler(chatTurn, sessionProjection)
 
     const snapshot = await handler('settings-snapshot', {}, new AbortController().signal)
     expect(snapshot).toMatchObject({ ok: true, value: { available: true, snapshot: {
@@ -112,22 +121,31 @@ describe('DSH research plugin lifecycle', () => {
     expect(mutate).toHaveBeenCalledTimes(1)
 
     const controller = new AbortController()
-    const chat = await handler('chat-turn', { text: '下一步是什么？' }, controller.signal)
+    const chat = await viewHandler('chat-turn', { text: '下一步是什么？' }, controller.signal)
     expect(chat).toEqual({ ok: true, value: { assistant_text: '可以继续讨论。', suggested_command: '/status' } })
     expect(chatTurn).toHaveBeenCalledWith({ text: '下一步是什么？' }, controller.signal)
 
-    const phases = await handler('session-projection', { session_id: 'session_1' }, controller.signal)
+    const phases = await viewHandler('session-projection', { session_id: 'session_1' }, controller.signal)
     expect(phases).toMatchObject({ ok: true, value: { linked: true, session_id: 'session_1' } })
     expect(sessionProjection).toHaveBeenCalledWith('session_1', controller.signal)
-    const invalidProjection = await handler('session-projection', { session_id: '' }, controller.signal)
+    const invalidProjection = await viewHandler('session-projection', { session_id: '' }, controller.signal)
     expect(invalidProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
-    const unsafeProjection = await handler('session-projection', { session_id: 'x/../../projects/rsp_other' }, controller.signal)
+    const unsafeProjection = await viewHandler('session-projection', { session_id: 'x/../../projects/rsp_other' }, controller.signal)
     expect(unsafeProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
-    const whitespaceProjection = await handler('session-projection', { session_id: ' session_1' }, controller.signal)
+    const whitespaceProjection = await viewHandler('session-projection', { session_id: ' session_1' }, controller.signal)
     expect(whitespaceProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
     expect(sessionProjection).toHaveBeenCalledTimes(1)
 
-    const unavailable = createScholarRpcHandler(settings as never, () => 'clipboard-token')
+    await expect(viewHandler('standalone-token', {}, controller.signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: 'unsupported Scholar view endpoint' },
+    })
+    await expect(handler('chat-turn', {}, controller.signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'internal', message: 'unsupported Scholar endpoint' },
+    })
+
+    const unavailable = createScholarViewRpcHandler()
     await expect(unavailable('chat-turn', {}, controller.signal)).resolves.toMatchObject({
       ok: false,
       error: { code: 'internal', message: 'Scholar Chat model is unavailable' },

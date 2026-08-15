@@ -52,7 +52,7 @@ The default page is <http://127.0.0.1:18610>, and the Research Kernel listens on
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
 ```
 
-If DSH Web does not use the default local port `3080`, set `DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS` before startup to the exact allowed loopback origins (comma-separated; wildcards are rejected).
+If DSH Web does not use the default local port `3080`, set `DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS` before startup to the exact allowed origins (comma-separated). Remote origins must use HTTPS; local origins may use loopback HTTP. Wildcards, credentials, paths, queries, and fragments are rejected.
 
 Use `--no-token` only in an isolated, supervised, loopback-only development environment.
 

@@ -47,11 +47,12 @@ export function safeSuggestedChatCommand(value: unknown): string | undefined {
 
 /** Structural response parser kept DOM-free for regression tests. */
 export function parseHostChatTurnResponse(
-  event: { source?: unknown; data?: unknown },
+  event: { source?: unknown; origin?: unknown; data?: unknown },
   expectedParent: unknown,
+  expectedOrigin: string,
   expectedRequestId: string,
 ): HostChatTurnReply | null {
-  if (event.source !== expectedParent) return null
+  if (event.source !== expectedParent || event.origin !== expectedOrigin) return null
   const envelope = record(event.data)
   if (envelope?.type !== RESPONSE_TYPE || envelope.request_id !== expectedRequestId) return null
   const value = record(envelope.value)
@@ -62,8 +63,13 @@ export function parseHostChatTurnResponse(
   return suggestedCommand === undefined ? { assistantText } : { assistantText, suggestedCommand }
 }
 
-function isMatchingResponse(event: { source?: unknown; data?: unknown }, parent: unknown, id: string): boolean {
-  if (event.source !== parent) return false
+function isMatchingResponse(
+  event: { source?: unknown; origin?: unknown; data?: unknown },
+  parent: unknown,
+  origin: string,
+  id: string,
+): boolean {
+  if (event.source !== parent || event.origin !== origin) return false
   const envelope = record(event.data)
   return envelope?.type === RESPONSE_TYPE && envelope.request_id === id
 }
@@ -78,17 +84,22 @@ function isLoopbackHost(hostname: string): boolean {
   return match !== null && match.slice(1).every(part => Number(part) <= 255)
 }
 
-/** The embedder origin comes from the browser-owned iframe referrer. */
-export function isTrustedHostChatParent(referrer: string, selfOrigin: string): boolean {
+/** Resolve the exact embedder origin from the browser-owned iframe referrer. */
+export function trustedHostChatParentOrigin(referrer: string, selfOrigin: string): string | null {
   try {
     const parent = new URL(referrer)
-    return parent.origin !== selfOrigin && isLoopbackHost(parent.hostname)
-  } catch { return false }
+    const self = new URL(selfOrigin)
+    if (parent.origin === self.origin) return null
+    if (isLoopbackHost(parent.hostname) && isLoopbackHost(self.hostname)) return parent.origin
+    return parent.protocol === 'https:' && self.protocol === 'https:' && parent.hostname === self.hostname
+      ? parent.origin
+      : null
+  } catch { return null }
 }
 
-function canUseHostBridge(): boolean {
-  if (!isLoopbackHost(window.location.hostname)) return false
-  return isTrustedHostChatParent(document.referrer, window.location.origin)
+/** The embedder must be a different-origin loopback or same-host HTTPS parent. */
+export function isTrustedHostChatParent(referrer: string, selfOrigin: string): boolean {
+  return trustedHostChatParentOrigin(referrer, selfOrigin) !== null
 }
 
 /**
@@ -100,7 +111,9 @@ export function requestHostChatTurn(
   payload: HostChatTurnRequest,
   timeoutMs = 20_000,
 ): Promise<HostChatTurnReply | null> {
-  if (typeof window === 'undefined' || window.parent === window || !canUseHostBridge()) return Promise.resolve(null)
+  if (typeof window === 'undefined' || window.parent === window) return Promise.resolve(null)
+  const parentOrigin = trustedHostChatParentOrigin(document.referrer, window.location.origin)
+  if (parentOrigin === null) return Promise.resolve(null)
   const parent = window.parent
   const id = requestId()
   return new Promise(resolve => {
@@ -113,17 +126,18 @@ export function requestHostChatTurn(
       resolve(value)
     }
     const onMessage = (event: MessageEvent): void => {
-      if (!isMatchingResponse(event, parent, id)) return
-      const parsed = parseHostChatTurnResponse(event, parent, id)
+      if (!isMatchingResponse(event, parent, parentOrigin, id)) return
+      const parsed = parseHostChatTurnResponse(event, parent, parentOrigin, id)
       // A matching error or malformed reply fails closed immediately instead
       // of holding the composer disabled until the timeout expires.
       finish(parsed)
     }
     const timer = window.setTimeout(() => finish(null), Math.max(1, timeoutMs))
     window.addEventListener('message', onMessage)
-    // The Host independently checks the configured loopback origin, exact
-    // iframe source and request id; no token, secret or attachment byte is sent.
-    parent.postMessage({ type: REQUEST_TYPE, request_id: id, payload }, '*')
+    // Both directions are pinned to the origin derived from document.referrer;
+    // the Host also checks the configured origin, exact iframe source and id.
+    try { parent.postMessage({ type: REQUEST_TYPE, request_id: id, payload }, parentOrigin) }
+    catch { finish(null) }
   })
 }
 
