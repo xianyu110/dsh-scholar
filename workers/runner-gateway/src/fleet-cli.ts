@@ -34,6 +34,7 @@ import {
   type RemoteRunnerAgent,
   type RemoteRunnerAgentImpl,
 } from './remote-agent.js'
+import { probeNvidiaCapabilities } from './docker-preflight.js'
 import {
   attachRemoteFleetRoutes,
   createFleetKernelClient,
@@ -91,6 +92,7 @@ export function buildAgentRegistration(options: {
   targetId: string
   runnerVersion: string
   labels?: Record<string, string>
+  nvidia?: { toolkit_available: true; devices: string[] } | null
 }): RemoteAgentRegistration {
   return {
     schema_version: 1,
@@ -101,6 +103,7 @@ export function buildAgentRegistration(options: {
       arch: process.arch === 'arm64' ? 'arm64' : 'x64',
       runner_ver: options.runnerVersion,
       images: [],
+      nvidia: options.nvidia ?? null,
     },
     labels: { role: 'remote-agent', ...options.labels },
     health: { status: 'online', last_seen: new Date().toISOString() },
@@ -199,6 +202,7 @@ export async function runFleetAgentMain(options: FleetAgentMainOptions): Promise
     targetId: options.targetId,
     runnerVersion: options.runnerVersion,
     labels: options.labels,
+    nvidia: await probeNvidiaCapabilities(),
   })
   const agent = createRemoteRunnerAgent(registration, transport, {
     publicKeyPem: options.publicKeyPem,

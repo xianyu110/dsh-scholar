@@ -33,6 +33,8 @@ export interface RunManifestInput {
   started_at: string
   finished_at: string
   exit_code: number
+  /** Required so every adapter must attest the compute mode it executed. */
+  compute: { mode: 'cpu' } | { mode: 'nvidia'; devices: 'all' | string[] }
 }
 
 /** 构造 canonical RunManifest 基座（local 与 remote 唯一实现）。 */
@@ -51,7 +53,18 @@ export function buildRunManifest(input: RunManifestInput): Record<string, unknow
     data_hash: input.data_hash,
     seed: input.seed,
     command: input.command,
-    resources: { gpu: 0, cpu: 1, memory_gb: 1 },
+    resources: input.compute.mode === 'nvidia'
+      ? {
+          gpu: input.compute.devices === 'all' ? 1 : input.compute.devices.length,
+          gpu_mode: 'nvidia',
+          gpu_devices: input.compute.devices,
+          cpu: 1,
+          memory_gb: 1,
+        }
+      // Preserve the legacy CPU manifest shape.  Besides keeping existing
+      // signatures stable, omitting redundant compute metadata prevents old
+      // bounded remote spools from rejecting otherwise identical manifests.
+      : { gpu: 0, cpu: 1, memory_gb: 1 },
     started_at: input.started_at,
     finished_at: input.finished_at,
     exit_code: input.exit_code,

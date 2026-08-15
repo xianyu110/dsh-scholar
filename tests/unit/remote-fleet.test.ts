@@ -184,6 +184,17 @@ describe('capability 匹配', () => {
     expect(matchesTargetCapability({ ...plan, requires: { runner_version: '0.2.0' } }, reg())).toBe(false)
     expect(matchesTargetCapability({ ...plan, requires: { runner_version: '0.1.0' } }, reg())).toBe(true)
   })
+
+  it('NVIDIA 请求要求 toolkit 与可用设备，all 不得匹配空设备 agent', () => {
+    const gpuAll = { ...plan, compute: { mode: 'nvidia' as const, devices: 'all' as const } }
+    const selected = { ...plan, compute: { mode: 'nvidia' as const, devices: ['0', '2'] } }
+    const capabilities = { os: 'linux', arch: 'x64', runner_ver: '0.1.0', images: [] }
+    expect(matchesTargetCapability(gpuAll, reg({ capabilities }))).toBe(false)
+    expect(matchesTargetCapability(gpuAll, reg({ capabilities: { ...capabilities, nvidia: { toolkit_available: true, devices: [] } } }))).toBe(false)
+    expect(matchesTargetCapability(gpuAll, reg({ capabilities: { ...capabilities, nvidia: { toolkit_available: true, devices: ['0'] } } }))).toBe(true)
+    expect(matchesTargetCapability(selected, reg({ capabilities: { ...capabilities, nvidia: { toolkit_available: true, devices: ['0', '1'] } } }))).toBe(false)
+    expect(matchesTargetCapability(selected, reg({ capabilities: { ...capabilities, nvidia: { toolkit_available: true, devices: ['0', '1', '2'] } } }))).toBe(true)
+  })
 })
 
 describe('scheduledTarget（调度决策纯函数）', () => {

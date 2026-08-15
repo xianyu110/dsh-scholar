@@ -38,6 +38,33 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
     expect(RunnerTargetCreateInput.parse(remoteInput).kind).toBe('remote-ssh')
   })
 
+  it('models digest-pinned CPU/NVIDIA Docker runtime without arbitrary flags', () => {
+    const digest = 'registry.example/research@sha256:' + 'a'.repeat(64)
+    expect(RunnerTargetCreateInput.parse({
+      target_id: 'docker-cpu', display_name: 'Docker CPU', kind: 'local-docker',
+      runtime: { image_digest: digest, compute: { mode: 'cpu' } },
+    }).runtime).toEqual({ image_digest: digest, compute: { mode: 'cpu' } })
+    expect(RunnerTargetCreateInput.parse({
+      ...remoteInput,
+      runtime: { image_digest: digest, compute: { mode: 'nvidia', devices: ['2', '0'] } },
+    }).runtime?.compute).toEqual({ mode: 'nvidia', devices: ['0', '2'] })
+    for (const runtime of [
+      { image_digest: 'registry.example/research:latest', compute: { mode: 'cpu' } },
+      { image_digest: digest, compute: { mode: 'nvidia', devices: [] } },
+      { image_digest: digest, compute: { mode: 'nvidia', devices: ['0', '0'] } },
+      { image_digest: digest, compute: { mode: 'nvidia', devices: ['--device=/dev/nvidia0'] } },
+      { image_digest: digest, compute: { mode: 'cpu' }, flags: ['--privileged'] },
+    ]) {
+      expect(() => RunnerTargetCreateInput.parse({
+        target_id: 'bad-docker', display_name: 'Bad Docker', kind: 'local-docker', runtime,
+      })).toThrow()
+    }
+    expect(() => RunnerTargetCreateInput.parse({
+      target_id: 'bad-local', display_name: 'Bad local', kind: 'local-process',
+      runtime: { image_digest: digest, compute: { mode: 'cpu' } },
+    })).toThrow()
+  })
+
   it('rejects inline SSH endpoints, credentials and arbitrary bootstrap commands', () => {
     for (const forbidden of [
       { ...remoteInput, hostname: '10.0.0.5' },
@@ -77,6 +104,10 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
       const created = kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
         ...remoteInput,
         target_id: 'lab-a',
+        runtime: {
+          image_digest: 'registry.example/research@sha256:' + 'b'.repeat(64),
+          compute: { mode: 'nvidia', devices: 'all' },
+        },
         connection: {
           endpoint: { scheme: 'file', name: 'runner/endpoint.json' },
           credential: { scheme: 'file', name: 'runner/key' },
@@ -84,6 +115,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
         },
       }), 'operator-1')
       expect(kernel.runnerTargetView(created).connection?.known_hosts.available).toBe(true)
+      expect(kernel.runnerTargetView(created).runtime?.compute).toEqual({ mode: 'nvidia', devices: 'all' })
       expect(() => kernel.updateRunnerTarget('lab-a', { expected_revision: 2, draining: true })).toThrowError(KernelError)
       const project = kernel.createProject({
         name: 'remote', workspace: '/w',
@@ -95,6 +127,8 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
         runner_target_id: 'lab-a',
         runner_target_kind: 'remote-ssh',
         runner_target_revision: 1,
+        image_digest: 'registry.example/research@sha256:' + 'b'.repeat(64),
+        runner_compute: { mode: 'nvidia', devices: 'all' },
       })
       expect(job.payload.runner_target_hash).toMatch(/^sha256:[0-9a-f]{64}$/)
     } finally {

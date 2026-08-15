@@ -7,6 +7,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  runnerTargetRuntimeDraft,
+  runnerTargetRuntimePayload,
   runnerTargetSecretRefDraft,
   runnerTargetSecretRefPayload,
 } from '../../packages/dsh-research-ui/src/client/runner-target-settings-model'
@@ -46,5 +48,28 @@ describe('runner target Settings SecretRef model', () => {
       version: 'v1',
       scope: 'runner',
     })).toBeNull()
+  })
+
+  it('builds progressive local/Docker/NVIDIA/SSH runtime drafts', () => {
+    const digest = 'registry.example/research@sha256:' + 'c'.repeat(64)
+    expect(runnerTargetRuntimeDraft(undefined)).toEqual({ imageDigest: '', computeMode: 'cpu', devices: 'all' })
+    expect(runnerTargetRuntimePayload('local-process', { imageDigest: digest, computeMode: 'nvidia', devices: '0' }))
+      .toEqual({ ok: true, runtime: undefined })
+    expect(runnerTargetRuntimePayload('local-docker', { imageDigest: digest, computeMode: 'cpu', devices: '' }))
+      .toEqual({ ok: true, runtime: { image_digest: digest, compute: { mode: 'cpu' } } })
+    expect(runnerTargetRuntimePayload('remote-ssh', { imageDigest: digest, computeMode: 'nvidia', devices: '0, 2' }))
+      .toEqual({ ok: true, runtime: { image_digest: digest, compute: { mode: 'nvidia', devices: ['0', '2'] } } })
+  })
+
+  it('rejects mutable images and unsafe NVIDIA device selectors', () => {
+    const digest = 'registry.example/research@sha256:' + 'd'.repeat(64)
+    expect(runnerTargetRuntimePayload('local-docker', { imageDigest: 'research:latest', computeMode: 'cpu', devices: '' }))
+      .toEqual({ ok: false, error: 'image' })
+    expect(runnerTargetRuntimePayload('local-docker', { imageDigest: digest, computeMode: 'nvidia', devices: '0,0' }))
+      .toEqual({ ok: false, error: 'devices' })
+    expect(runnerTargetRuntimePayload('local-docker', { imageDigest: digest, computeMode: 'nvidia', devices: '0,,2' }))
+      .toEqual({ ok: false, error: 'devices' })
+    expect(runnerTargetRuntimePayload('local-docker', { imageDigest: digest, computeMode: 'nvidia', devices: '--privileged' }))
+      .toEqual({ ok: false, error: 'devices' })
   })
 })

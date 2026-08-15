@@ -31,6 +31,7 @@ import { z } from 'zod'
 import type { JobRecord } from './kernel.js'
 import type { RunnerProfile } from './runner-profile.js'
 import { RunnerTargetKind } from './runner-target.js'
+import { DockerCompute } from './runner-environment.js'
 
 /** 本地 Docker target 的稳定 opaque id（Kernel/gateway/注册表共用）。 */
 export const LOCAL_DOCKER_TARGET_ID = 'local-docker'
@@ -145,6 +146,8 @@ export const ExecutionPlan = z.object({
   /** effective config 的 sha256 pin（CONFIG-01；未知/未接入时 null）。 */
   config_pin: z.string().nullable().default(null),
   image: ExecutionImage,
+  /** Typed accelerator request; arbitrary Docker flags/devices are not part of the plan. */
+  compute: DockerCompute.default({ mode: 'cpu' }),
   snapshot: ExecutionSnapshot,
   artifact_refs: z.object({
     data_artifact_ids: z.array(z.string()).default([]),
@@ -188,6 +191,19 @@ export function canonicalPlanJson(value: unknown): string {
   return JSON.stringify(value)
 }
 
+/**
+ * schema_version=1 plans shipped before typed compute existed.  Zod supplies
+ * the CPU default while parsing those plans, so signing must treat that
+ * default as an omitted wire field.  NVIDIA remains explicit and signed.
+ * Keeping an explicit-CPU variant in verification also accepts plans emitted
+ * during a rolling upgrade where the additive field was already present.
+ */
+function planSigningShape<T extends Record<string, unknown>>(plan: T): T {
+  if ((plan.compute as { mode?: unknown } | undefined)?.mode !== 'cpu') return plan
+  const { compute: _defaultCompute, ...legacyCompatible } = plan
+  return legacyCompatible as T
+}
+
 /** plan 的确定性 fingerprint（sha256 over canonical JSON）——adapter 用它断言 plan 不可变。 */
 export function executionPlanFingerprint(plan: ExecutionPlan): string {
   return createHash('sha256').update(canonicalPlanJson(plan)).digest('hex')
@@ -208,9 +224,9 @@ export interface PlanSigningKey {
  */
 export function signExecutionPlan(plan: ExecutionPlan, key: PlanSigningKey): ExecutionPlan {
   const unsigned = { ...plan, payload_sha256: null, signature: null, signed_by: null }
-  const payloadSha256 = createHash('sha256').update(canonicalPlanJson(unsigned)).digest('hex')
+  const payloadSha256 = createHash('sha256').update(canonicalPlanJson(planSigningShape(unsigned))).digest('hex')
   const signed = { ...unsigned, payload_sha256: payloadSha256, signed_by: key.keyId }
-  const signature = sign(null, Buffer.from(canonicalPlanJson(signed), 'utf8'), key.privateKey).toString('base64')
+  const signature = sign(null, Buffer.from(canonicalPlanJson(planSigningShape(signed)), 'utf8'), key.privateKey).toString('base64')
   return { ...signed, signature }
 }
 
@@ -227,15 +243,20 @@ export function verifyExecutionPlanSignature(plan: ExecutionPlan, publicKeyPem: 
   if (plan.signature === null || plan.payload_sha256 === null) {
     return { valid: false, reason: 'plan is not signed (signature/payload_sha256 missing)' }
   }
-  const recomputed = createHash('sha256')
-    .update(canonicalPlanJson({ ...plan, payload_sha256: null, signature: null, signed_by: null }))
-    .digest('hex')
-  if (recomputed !== plan.payload_sha256) {
+  const unsigned = { ...plan, payload_sha256: null, signature: null, signed_by: null }
+  const signingVariants = [planSigningShape(unsigned), unsigned]
+  const matchedVariant = signingVariants.find(variant => createHash('sha256')
+    .update(canonicalPlanJson(variant))
+    .digest('hex') === plan.payload_sha256)
+  if (matchedVariant === undefined) {
     return { valid: false, reason: 'payload_sha256 mismatch (plan content changed after signing)' }
   }
   try {
     const publicKey = createPublicKey(publicKeyPem)
-    const ok = verify(null, Buffer.from(canonicalPlanJson({ ...plan, signature: null }), 'utf8'), publicKey, Buffer.from(plan.signature, 'base64'))
+    const signedVariant = matchedVariant === unsigned
+      ? { ...plan, signature: null }
+      : planSigningShape({ ...plan, signature: null })
+    const ok = verify(null, Buffer.from(canonicalPlanJson(signedVariant), 'utf8'), publicKey, Buffer.from(plan.signature, 'base64'))
     if (!ok) return { valid: false, reason: 'Ed25519 signature verification failed' }
   } catch (error) {
     return { valid: false, reason: `signature verification error: ${(error as Error).message}` }
@@ -253,6 +274,7 @@ export interface BuildExecutionPlanOptions {
   config_pin?: string | null
   target_id?: string
   profile_id?: string
+  compute?: z.infer<typeof DockerCompute>
   /**
    * 已解析的 RunnerProfile 记录（domain-model.md §9.1）：提供时 plan 的
    * limits/network/profile_id/profile_config_hash 取自 profile（docker
@@ -280,6 +302,9 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
     ? (payload.contract_metrics as unknown[]).filter((x): x is string => typeof x === 'string')
     : []
   const seed = typeof payload?.seed === 'number' && Number.isFinite(payload.seed) ? payload.seed : null
+  const payloadCompute = payload?.runner_compute === undefined
+    ? { mode: 'cpu' as const }
+    : DockerCompute.parse(payload.runner_compute)
   const plan: ExecutionPlan = {
     schema_version: 1,
     plan_id: `plan_${job.job_id}`,
@@ -309,6 +334,9 @@ export function buildExecutionPlan(job: JobRecord, options: BuildExecutionPlanOp
     },
     config_pin: options.config_pin ?? null,
     image: { digest: options.image_digest },
+    // Missing is the only backwards-compatible CPU default. Malformed data
+    // must never silently downgrade an intended NVIDIA run to CPU.
+    compute: options.compute ?? payloadCompute,
     snapshot: {
       code_snapshot_id: (job as JobRecord & { code_snapshot_id?: string | null }).code_snapshot_id ?? null,
       tex_snapshot: job.kind === 'latex-compile' ? (payload?.tex_snapshot as Record<string, unknown> | undefined) ?? null : null,
@@ -354,6 +382,11 @@ export const AgentCapabilities = z.object({
   runner_ver: z.string().min(1),
   /** 支持的镜像 digest 列表；空数组 = 接受任何 Kernel 锁内 digest。 */
   images: z.array(z.string()).default([]),
+  /** Observed NVIDIA support; null means the agent cannot accept NVIDIA plans. */
+  nvidia: z.object({
+    toolkit_available: z.boolean(),
+    devices: z.array(z.string().regex(/^(0|[1-9][0-9]*)$/)).default([]),
+  }).strict().nullable().optional(),
 })
 export type AgentCapabilities = z.infer<typeof AgentCapabilities>
 
@@ -469,6 +502,11 @@ export function matchesTargetCapability(plan: ExecutionPlan, registration: Remot
   if (plan.platform.os !== null && caps.os !== plan.platform.os) return false
   if (plan.platform.arch !== null && caps.arch !== plan.platform.arch) return false
   if (plan.requires.runner_version !== null && !runnerVersionSatisfies(caps.runner_ver, plan.requires.runner_version)) return false
+  if (plan.compute.mode === 'nvidia') {
+    if (caps.nvidia == null || !caps.nvidia.toolkit_available) return false
+    if (plan.compute.devices === 'all' && caps.nvidia.devices.length === 0) return false
+    if (plan.compute.devices !== 'all' && plan.compute.devices.some(device => !caps.nvidia?.devices.includes(device))) return false
+  }
   return true
 }
 

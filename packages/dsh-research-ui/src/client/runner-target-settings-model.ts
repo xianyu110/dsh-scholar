@@ -1,4 +1,44 @@
-import type { SecretRefViewLite } from './types'
+import type { RunnerTargetKindLite, RunnerTargetRuntimeLite, SecretRefViewLite } from './types'
+
+export const DEFAULT_DOCKER_IMAGE_DIGEST = 'node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32'
+const IMAGE_DIGEST_RE = /^[^\s@]+@sha256:[0-9a-f]{64}$/
+
+export interface RunnerTargetRuntimeDraft {
+  imageDigest: string
+  computeMode: 'cpu' | 'nvidia'
+  devices: string
+}
+
+export function runnerTargetRuntimeDraft(runtime?: RunnerTargetRuntimeLite): RunnerTargetRuntimeDraft {
+  return {
+    imageDigest: runtime?.image_digest ?? '',
+    computeMode: runtime?.compute.mode ?? 'cpu',
+    devices: runtime?.compute.mode === 'nvidia'
+      ? (runtime.compute.devices === 'all' ? 'all' : runtime.compute.devices.join(', '))
+      : 'all',
+  }
+}
+
+export function runnerTargetRuntimePayload(
+  kind: RunnerTargetKindLite,
+  draft: RunnerTargetRuntimeDraft,
+): { ok: true; runtime: RunnerTargetRuntimeLite | undefined } | { ok: false; error: 'image' | 'devices' } {
+  if (kind === 'local-process') return { ok: true, runtime: undefined }
+  const imageDigest = draft.imageDigest.trim()
+  if (!IMAGE_DIGEST_RE.test(imageDigest)) return { ok: false, error: 'image' }
+  if (draft.computeMode === 'cpu') {
+    return { ok: true, runtime: { image_digest: imageDigest, compute: { mode: 'cpu' } } }
+  }
+  const raw = draft.devices.trim()
+  if (raw === 'all') {
+    return { ok: true, runtime: { image_digest: imageDigest, compute: { mode: 'nvidia', devices: 'all' } } }
+  }
+  const devices = raw.split(',').map(value => value.trim())
+  if (devices.length === 0 || devices.some(value => !/^(0|[1-9][0-9]*)$/.test(value)) || new Set(devices).size !== devices.length) {
+    return { ok: false, error: 'devices' }
+  }
+  return { ok: true, runtime: { image_digest: imageDigest, compute: { mode: 'nvidia', devices } } }
+}
 
 export type RunnerTargetSecretRefScheme = SecretRefViewLite['scheme']
 

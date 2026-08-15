@@ -1,6 +1,6 @@
 # DSH Scholar 历史最终差距审计报告（已过期）
 
-> **状态警告（2026-08-11）**：本文是 `0ea536e` 附近工作树的历史快照，不是当前实现的完成证明。`main@fda346b` 的复审已确认普通 Kernel Bearer 缺失、global-id/PTY AuthZ 绕过、任意 host 路径快照、Manuscript rerender 覆写、远端宿主 subprocess、前端关键工作台缺失以及当前测试失败。因此本文 §7“无未覆盖缺口”和 §9“代码侧无可实现差距”的结论已经失效。当前状态与强制关闭条件以 [hardening-v0.2-status.md §5](./hardening-v0.2-status.md#5-2026-08-11-当前代码审阅阻断项) 为准。
+> **状态警告（2026-08-15 更新）**：本文是 `0ea536e` 附近工作树的历史快照，不是当前实现的完成证明。正文中的 TeX、metrics、GPU、execution-target 与测试计数均可能过时；尤其“无 GPU 路径”不再成立，当前 RunnerTarget 已有 typed NVIDIA 路径但真实 GPU 尚未验收。当前状态与强制关闭条件只以 [hardening-v0.2-status.md §5](./hardening-v0.2-status.md#5-2026-08-11-当前代码审阅阻断项) 及最新增量表为准。
 
 - 审计日期:2026-08
 - 审计基线:工作树 HEAD `0ea536e` + 本轮改动(未提交,由主代理统一提交)
@@ -161,7 +161,7 @@
 | 4 | Docker 全链(Golden Path、latex-compile、clean-room、release-bundle、docker-eval) | 脚本/测试齐备,聚合器接入 | 本机 Docker 可用但未在本轮全量重跑;CI 绑定待做 | Docker + 固定 TeX Live 镜像 + CI job |
 | 5 | 宿主编译(pdflatex)/真实 TeX 验收 | run-latex-tests.sh(CI latex job 预装 TeX) | 本机无 pdflatex 时 SKIP(设计) | CI ubuntu-latest texlive 安装 |
 | 6 | AV 深度扫描/archive 解包炸弹检测 | 静态扫描 + av_available=false 如实记录;解包检查由采用时 code-snapshot walk 承担 | 无 AV 引擎 | AV 引擎 + 恶意 archive 红队集 |
-| 7 | GPU 合同(image digest 固定) | 无 GPU 路径实现(纯计算 fixture 用 CPU 镜像) | 无 GPU 环境 | GPU 主机 + 显式 GPU 合同验收 |
+| 7 | GPU 合同(image digest 固定) | **历史快照**：当时无 GPU 路径；当前 RunnerTarget 已实现 typed NVIDIA、受控 `--gpus`、spawn preflight 与签名 manifest | 无真实 GPU 环境 | GPU 主机 + 显式 GPU 合同验收 |
 | 8 | 多实例 orchestrator 真实并发 | 选主单元测试 41/41 | 单进程验证 | 双进程 + 共享 ActionStore 并发验收 |
 | 9 | token/cost 四桶、session trajectory 实时流 | 服务端 schema/投影就绪 | 需 DSH session adapter | 真实 DSH host |
 | 10 | 真实远端 Runner 部署(register/heartbeat/claims 生产形态) | fleet 服务/代理端(内存注册表 + HTTP loopback) | 无远端主机 | 第二主机 + mTLS |

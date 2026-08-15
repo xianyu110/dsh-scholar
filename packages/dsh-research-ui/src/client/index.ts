@@ -64,10 +64,15 @@ let lastKernelCheck = 0
 /** First-paint skeleton (dsh-web loading feel). */
 let booting = true
 
+export interface ApplyOptions {
+  /** Per-response CSP nonce supplied by the standalone bootstrap. */
+  styleNonce?: string
+}
+
 /** Central a11y decorator for modal overlays (see apply). */
 let modalObserver: MutationObserver | null = null
 
-export function apply(): void {
+export function apply(options: ApplyOptions = {}): void {
   closeArtifactPreview()
   msCleanup(true)
   // dsh-web i18n: locale resolves before the first render (§13.4); the
@@ -120,6 +125,9 @@ export function apply(): void {
   modalObserver.observe(root, { childList: true, subtree: true })
 
   const style = el('style')
+  if (typeof options.styleNonce === 'string' && options.styleNonce !== '') {
+    style.nonce = options.styleNonce
+  }
   style.textContent = `${xtermCss}
 
 :host { all: initial; }

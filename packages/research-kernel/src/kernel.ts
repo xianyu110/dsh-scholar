@@ -5350,6 +5350,23 @@ export class ResearchKernel {
       }
       digestInput = fixtureProfile.image
     }
+    let boundImageDigest: string
+    if (SECURE_KINDS.includes(input.kind)) {
+      const configuredRuntime = runnerTarget.runtime
+      if (configuredRuntime !== undefined && fixtureProfile === null && input.kind !== 'latex-compile') {
+        if (digestInput !== undefined && digestInput !== configuredRuntime.image_digest) {
+          throw new KernelError(422, 'runner_target_image_mismatch',
+            `job image ${digestInput} does not match runner target ${runnerTarget.target_id} image ${configuredRuntime.image_digest}`)
+        }
+        // Registering/updating a target is the PI/Operator allowlist action;
+        // RunnerTargetRuntime has already required an immutable digest.
+        boundImageDigest = configuredRuntime.image_digest
+      } else {
+        boundImageDigest = validateImageDigest(input.kind as SecureJobKind, digestInput)
+      }
+    } else {
+      boundImageDigest = input.image_digest ?? runnerTarget.runtime?.image_digest ?? ''
+    }
     const payload = {
       ...(input.payload ?? {}),
       // §12.5 (P0): the Runner validates the metrics FILE against the bound
@@ -5367,9 +5384,8 @@ export class ResearchKernel {
       runner_target_kind: runnerTarget.kind,
       runner_target_revision: runnerTarget.revision,
       runner_target_hash: runnerTargetConfigHash(runnerTarget),
-      image_digest: SECURE_KINDS.includes(input.kind)
-        ? validateImageDigest(input.kind as SecureJobKind, digestInput)
-        : (input.image_digest ?? ''),
+      image_digest: boundImageDigest,
+      runner_compute: runnerTarget.runtime?.compute ?? { mode: 'cpu' as const },
       ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
       ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
     }

@@ -33,6 +33,7 @@ import {
 } from './metrics-file.js'
 import { canonicalJson, signManifest, type RunnerSigningKey } from './manifest-signing.js'
 import { buildRunManifest } from './run-manifest.js'
+import { probeDockerExecutionEnvironment } from './docker-preflight.js'
 import { materializeCodeSnapshot, unpackCodeSnapshot } from './snapshot-materialize.js'
 
 const execFileAsync = promisify(execFile)
@@ -189,6 +190,13 @@ export {
 } from './remote-fleet-server.js'
 export { AgentOutboundSpool, type AgentSpoolEntry, type AgentSpoolOverflowGap } from './agent-spool.js'
 export { buildRunManifest, type RunManifestInput } from './run-manifest.js'
+export {
+  probeDockerExecutionEnvironment,
+  probeNvidiaCapabilities,
+  type DockerPreflightCode,
+  type DockerPreflightExec,
+  type DockerPreflightReport,
+} from './docker-preflight.js'
 export { InMemoryFleetTransport, FailingFleetTransport } from './in-memory-transport.js'
 
 /**
@@ -592,6 +600,18 @@ async function runSubprocess(
 async function runDocker(plan: ExecutionPlan, exec: DockerExecContext): Promise<RunOutcome> {
   const { command, cwd, jobId, signal, onChunk, runId, runEnv } = exec
   const startedAt = new Date().toISOString()
+  const preflight = await probeDockerExecutionEnvironment(plan)
+  if (!preflight.ok) {
+    return {
+      run_id: runId,
+      exit_code: -1,
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      stdout: '',
+      stderr: '',
+      error: `environment: docker preflight failed (${preflight.code})`,
+    }
+  }
   const container = `dsh-scholar-${randomUUID().slice(0, 8)}`
   // §3.2/§12.3 (RUN-02): full container baseline — read-only rootfs,
   // capability drop, no-new-privileges, pids cap. /tmp is a tmpfs and
@@ -991,6 +1011,8 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
     ...(leaseGeneration !== undefined ? { lease_generation: leaseGeneration } : {}),
     payload_json: JSON.stringify({
       exit_code: run.exit_code,
+      compute: (job.payload as { runner_compute?: { mode: 'cpu' } | { mode: 'nvidia'; devices: 'all' | string[] } }).runner_compute
+        ?? { mode: 'cpu' },
       signal: null,
       timed_out: run.error !== undefined && run.error.includes('timed out'),
       cancelled: cancelledJobs.has(job.job_id),
@@ -1023,6 +1045,8 @@ export async function executeJob(job: JobRecord, options: RunnerOptions): Promis
       started_at: run.started_at,
       finished_at: run.finished_at,
       exit_code: run.exit_code,
+      compute: (job.payload as { runner_compute?: { mode: 'cpu' } | { mode: 'nvidia'; devices: 'all' | string[] } }).runner_compute
+        ?? { mode: 'cpu' },
     })
 
     const logContent = `=== dsh-scholar run ${run.run_id} (job ${job.job_id}, kind ${job.kind}) ===\nstarted: ${run.started_at}\nfinished: ${run.finished_at}\nexit: ${run.exit_code}\n\n--- stdout ---\n${run.stdout}\n\n--- stderr ---\n${run.stderr}\n${run.error !== undefined ? `\n--- error ---\n${run.error}\n` : ''}`

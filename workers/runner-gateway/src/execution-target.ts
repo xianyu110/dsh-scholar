@@ -22,6 +22,7 @@
  */
 
 import {
+  dockerGpuArgument,
   ExecutionPlan,
   executionPlanFingerprint,
   LOCAL_DOCKER_TARGET_ID,
@@ -153,6 +154,8 @@ export function buildLocalDockerArgs(input: LocalDockerArgsInput): string[] {
   const { plan, cwd, containerName, env, command } = input
   const envArgs: string[] = []
   for (const [k, v] of Object.entries(env)) envArgs.push('-e', `${k}=${v}`)
+  const gpu = dockerGpuArgument(plan.compute)
+  const gpuArgs = gpu === null ? [] : ['--gpus', gpu]
   return [
     'run', '--rm', '--name', containerName,
     // §3.2/§12.3 (RUN-02): 完整容器基线。
@@ -164,6 +167,7 @@ export function buildLocalDockerArgs(input: LocalDockerArgsInput): string[] {
     '--pids-limit', String(plan.limits.pids),
     '--memory', `${plan.limits.memory_mb}m`,
     '--cpus', String(plan.limits.cpus),
+    ...gpuArgs,
     '--workdir', '/work',
     ...envArgs,
     // 输入区只读；/outputs 是唯一 rw 挂载（§12.2/§12.5 output contract）。
