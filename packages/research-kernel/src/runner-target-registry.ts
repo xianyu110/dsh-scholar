@@ -39,6 +39,7 @@ interface RunnerTargetRow {
   draining: number
   capabilities_json: string
   connection_json: string | null
+  runtime_json?: string | null
   health: RunnerTarget['health']
   last_seen_at: string | null
   revision: number
@@ -58,6 +59,7 @@ function fromRow(row: RunnerTargetRow): RunnerTarget {
     draining: row.draining === 1,
     capabilities: JSON.parse(row.capabilities_json) as unknown,
     connection: row.connection_json === null ? undefined : JSON.parse(row.connection_json) as unknown,
+    runtime: row.runtime_json === undefined || row.runtime_json === null ? undefined : JSON.parse(row.runtime_json) as unknown,
     health: row.health,
     last_seen_at: row.last_seen_at,
     revision: row.revision,
@@ -119,11 +121,12 @@ export class RunnerTargetRegistry {
     validateRefs(target)
     this.db.prepare(
       `INSERT INTO runner_targets
-        (target_id,display_name,kind,enabled,draining,capabilities_json,connection_json,health,last_seen_at,revision,created_by,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (target_id,display_name,kind,enabled,draining,capabilities_json,connection_json,runtime_json,health,last_seen_at,revision,created_by,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       target.target_id, target.display_name, target.kind, target.enabled ? 1 : 0, target.draining ? 1 : 0,
       JSON.stringify(target.capabilities), target.connection === undefined ? null : JSON.stringify(target.connection),
+      target.runtime === undefined ? null : JSON.stringify(target.runtime),
       target.health, target.last_seen_at, target.revision, target.created_by, target.created_at, target.updated_at,
     )
     return target
@@ -143,6 +146,7 @@ export class RunnerTargetRegistry {
       draining: input.draining ?? current.draining,
       capabilities: input.capabilities ?? current.capabilities,
       connection: input.connection === null ? undefined : (input.connection ?? current.connection),
+      runtime: input.runtime === null ? undefined : (input.runtime ?? current.runtime),
       revision: current.revision + 1,
       updated_at: nowIso(),
       // A configuration change invalidates the previous health observation.
@@ -151,11 +155,12 @@ export class RunnerTargetRegistry {
     })
     validateRefs(target)
     const result = this.db.prepare(
-      `UPDATE runner_targets SET display_name=?,kind=?,enabled=?,draining=?,capabilities_json=?,connection_json=?,
+      `UPDATE runner_targets SET display_name=?,kind=?,enabled=?,draining=?,capabilities_json=?,connection_json=?,runtime_json=?,
        health=?,last_seen_at=?,revision=?,updated_at=? WHERE target_id=? AND revision=?`,
     ).run(
       target.display_name, target.kind, target.enabled ? 1 : 0, target.draining ? 1 : 0,
       JSON.stringify(target.capabilities), target.connection === undefined ? null : JSON.stringify(target.connection),
+      target.runtime === undefined ? null : JSON.stringify(target.runtime),
       target.health, target.last_seen_at, target.revision, target.updated_at, targetId, current.revision,
     )
     if (Number(result.changes) !== 1) {

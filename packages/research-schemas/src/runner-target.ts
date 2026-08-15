@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { SecretRef } from './provider.js'
+import { DockerRuntime, type DockerRuntime as DockerRuntimeType } from './runner-environment.js'
 
 export const RunnerTargetKind = z.enum(['local-process', 'local-docker', 'remote-ssh'])
 export type RunnerTargetKind = z.infer<typeof RunnerTargetKind>
@@ -17,7 +18,7 @@ export const RunnerTargetConnection = z.object({
 export type RunnerTargetConnection = z.infer<typeof RunnerTargetConnection>
 
 function validateKindConnection(
-  value: { kind: RunnerTargetKind; connection?: RunnerTargetConnection | null },
+  value: { kind: RunnerTargetKind; connection?: RunnerTargetConnection | null; runtime?: DockerRuntimeType | null },
   ctx: z.RefinementCtx,
 ): void {
   if (value.kind === 'remote-ssh' && value.connection === undefined) {
@@ -25,6 +26,9 @@ function validateKindConnection(
   }
   if (value.kind !== 'remote-ssh' && value.connection !== undefined && value.connection !== null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['connection'], message: 'local targets cannot carry remote connection metadata' })
+  }
+  if (value.kind === 'local-process' && value.runtime !== undefined && value.runtime !== null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['runtime'], message: 'local-process cannot carry Docker runtime configuration' })
   }
 }
 
@@ -35,6 +39,7 @@ export const RunnerTargetCreateInput = z.object({
   enabled: z.boolean().default(true),
   draining: z.boolean().default(false),
   capabilities: z.array(z.string().min(1).max(120)).max(128).default([]),
+  runtime: DockerRuntime.optional(),
   connection: RunnerTargetConnection.optional(),
 }).strict().superRefine((value, ctx) => {
   validateKindConnection(value, ctx)
@@ -48,6 +53,7 @@ export const RunnerTargetUpdateInput = z.object({
   enabled: z.boolean().optional(),
   draining: z.boolean().optional(),
   capabilities: z.array(z.string().min(1).max(120)).max(128).optional(),
+  runtime: DockerRuntime.nullable().optional(),
   connection: RunnerTargetConnection.nullable().optional(),
 }).strict()
 export type RunnerTargetUpdateInput = z.infer<typeof RunnerTargetUpdateInput>
@@ -59,6 +65,7 @@ export const RunnerTargetDescriptor = z.object({
   enabled: z.boolean(),
   draining: z.boolean(),
   capabilities: z.array(z.string()),
+  runtime: DockerRuntime.optional(),
   connection: RunnerTargetConnection.optional(),
   health: z.enum(['unknown', 'online', 'offline']).default('unknown'),
   last_seen_at: z.string().nullable().default(null),
@@ -89,6 +96,7 @@ export function runnerTargetConfigHash(target: RunnerTargetDescriptor): string {
     draining: target.draining,
     capabilities: target.capabilities,
     connection: target.connection,
+    ...(target.runtime === undefined ? {} : { runtime: target.runtime }),
     revision: target.revision,
   })).digest('hex')}`
 }

@@ -105,6 +105,11 @@ OCR-CONFIG-01 最终安全审阅增量（2026-08-14）：MinerU base URL 必须�
 
 > 2026-08-15 DSH-01 校准：上表 DSH-01 中“聚合子命令 handler”属于历史证据，已被 direct-only 契约取代。当前插件注册 17 个直接一级 descriptor 且不注册聚合别名；standalone parser 同样拒绝旧聚合形式。当前 DSH 已把 Cordis peer 迁至私有 `@deepseek-ai/cordis`，并把文件设置 provider 的 canonical 包名调整为 `@deepseek-ai/dsh-settings-file`；插件 checkout 夹具与本地链接脚本必须跟随当前 workspace 包名，不再引用已移除的 `dsh-settings-local`。更新后的 direct descriptor fixture、固定私有 `@deepseek-ai/*` 包和真实 DSH host 尚未验收，因此 DSH-01 仍为“部分”。current `dsh-skill-local` 公共 `list()` 暴露了旧 fixture 读取内部 provider collection 与未引用 YAML description 的兼容缺口，代码/Skill 已修；本地 checkout/link 只用于开发反馈，不能替代私有包 clean-install 验收。
 
+### 3.1 2026-08-15 CSP 与实验环境增量状态
+
+- `UI-CSP-STYLE-01 — 已实现未验收`：根因不是 CSS 资源 404。standalone client 把主样式动态插入 ShadowRoot；当 `style-src` 同时带 nonce 时浏览器忽略 `unsafe-inline`，旧实现创建的 `<style>` 无 nonce，导致 8443 只剩裸 HTML。bootstrap 现在从当前 script 读取每响应 nonce并显式调用 `apply({styleNonce})`，client 在 append 前设置主 style nonce；CSP 把 style element 与 style attribute 分离为 `style-src 'self' 'nonce-…'` 和 `style-src-attr 'unsafe-inline'`。自动测试 29/29 覆盖 CSP/nonce wiring。本机真实 Chrome 直接访问 8443 已确认 HTML/client.js/API 200、ShadowRoot style 有 nonce、`cssRules=386`、`.panel` computed display 为 flex且无 `style-src` violation；截图视觉恢复。DSH 嵌入、刷新 nonce 轮换、旧浏览器 CSP3 兼容与键盘/a11y 仍按 `MANUAL-STANDALONE-CSP-STYLE` 保留人工队列。
+- `EXEC-ENV-03 — 已实现未验收`：0025/SCHEMA_VERSION 22 为 RunnerTarget 追加 nullable `runtime_json`，旧行不回填且旧 target hash 保持；共享 schema 只接受完整 digest 与 typed CPU/NVIDIA（`all` 或排序去重的数字设备），畸形配置 fail closed。Settings 的本机/Docker/SSH 表单按类型渐进显示，SSH 三个 SecretRef 元数据往返保真，加载失败可重试；Docker CPU 不生成 GPU 参数，NVIDIA 只生成单个受控 `--gpus` 参数。Local/remote spawn-time preflight 检查 daemon、镜像、NVIDIA runtime/driver/device；Agent capability 要求 toolkit 与实际设备；Job/ExecutionPlan/签名 RunManifest 固定同一 compute，schema v1 旧 CPU plan 验签兼容。最终自动证据为 95 files / 1374 tests、全包 build、schemas/kernel/runner/UI typecheck 与 docs 22/22 通过。仍缺 Settings 保存时真实连接测试 API/UI、preflight 详细报告持久化、heartbeat→持久 health bridge、真实 Docker/GPU/第二 SSH 主机与 mTLS 验收，均不得标记 PASS。历史 `profile_local_docker_gpu_v1` 本身仍是 CPU-only pin，但不再代表系统没有 GPU 路径。
+
 ## 4. 2026-08-10 当前代码审阅阻断项
 
 审阅范围：`7adc722...cf6a8a8`（`main` 与 `origin/main` 一致，109 个文件，约 `+18,252/-8,022`）。本节是对 §3 历史实现声明的当前校准；同一 ID 有冲突时，必须采用本节的较低状态，直至源码修复、负向验收和当前提交证据同时关闭。

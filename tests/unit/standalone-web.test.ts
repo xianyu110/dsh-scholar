@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  loadOptions, bffError, isProjectTrajectoryTopologyForward, standaloneContentSecurityPolicy,
+  loadOptions, bffError, bootstrapHtmlWithNonce, isProjectTrajectoryTopologyForward, standaloneContentSecurityPolicy,
   parseStandaloneUnlockError, standaloneFrameAncestorSources, surveySnapshotBody, surveyWriteRoleAllowed,
 } from '../../packages/dsh-research-ui/lib/standalone/server.js'
 // @ts-expect-error re-export surface
@@ -108,11 +108,22 @@ describe('standalone web application', () => {
     expect(sources).toEqual(['http://127.0.0.1:3080', 'http://localhost:3080', 'http://[::1]:3080'])
     const csp = standaloneContentSecurityPolicy('nonce-value', sources)
     expect(csp).toContain("script-src 'self' 'nonce-nonce-value'")
+    expect(csp).toContain("style-src 'self' 'nonce-nonce-value'")
+    expect(csp).toContain("style-src-attr 'unsafe-inline'")
+    expect(csp).not.toContain("style-src 'self' 'nonce-nonce-value' 'unsafe-inline'")
     expect(csp).toContain("object-src 'none'")
     expect(csp).toContain("frame-src 'self' blob:")
     expect(csp).toContain("media-src 'self' blob:")
     expect(csp).toContain("frame-ancestors 'self' http://127.0.0.1:3080")
     expect(csp).not.toContain('*')
+  })
+
+  it('passes the response nonce to runtime Shadow DOM styles', () => {
+    const html = bootstrapHtmlWithNonce('runtime-style-nonce')
+    expect(html).toContain('<style nonce="runtime-style-nonce">')
+    expect(html).toContain('<script nonce="runtime-style-nonce"')
+    expect(html).toContain('var cspNonce = document.currentScript')
+    expect(html).toContain('apply({ styleNonce: cspNonce })')
   })
 
   it('allows explicit HTTPS embedders while rejecting remote plaintext origins', () => {

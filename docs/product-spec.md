@@ -94,10 +94,12 @@ Run Terminal 是正式 Job 的只读、可恢复账本。Interactive Terminal �
 ### 5.3.1 可配置实验环境
 
 - 实验执行环境是版本化 `RunnerTarget + RunnerProfile`，至少支持 `local-process`、`local-docker`、`remote-ssh` 三种显式类型；项目、Contract、Job 和复现 attempt 只引用 opaque ID，并在 submit 时固定 target/profile/environment revision 与 hash；
+- Settings 必须以“本机开发 / 本机 Docker CPU / 本机 Docker NVIDIA / 远程 SSH”四个用户可理解的预设进入同一个创建、测试、保存和设为项目默认流程；切换预设只显示该类型需要的字段，保留未提交草稿，加载失败、CAS 冲突和连接测试失败均显示可重试的结构化诊断，不能让配置区静默消失；
 - `local-process` 仅允许明确标记的 trusted development/smoke 工作负载，不能承载 baseline、pilot、formal、reproduce、latex-compile 等正式隔离任务；`local-docker` 使用固定 digest、非 root、只读根、资源/网络策略；`remote-ssh` 连接受控实验机器并在远端执行同一冻结 ExecutionPlan，不能成为业务权威；
+- Docker 配置必须允许由 PI/Operator 在权威 RunnerTarget Registry 中登记完整 `repository@sha256:<digest>`；该 Registry 写操作本身就是本项目的受控 image allowlist，不能由普通项目输入绕过。禁止把 tag、`latest` 或任意 Docker flags 固定到正式 Job。计算模式是判别联合：`cpu` 不产生 GPU 参数；`nvidia` 必须显式选择 `all` 或数字设备 ID 列表，并在 ExecutionPlan、RunManifest 与 environment hash 中固定。保存时至少完成共享 schema 静态校验；每次 spawn 前必须检查 Docker daemon、镜像、NVIDIA Container Toolkit/driver 与请求设备。独立“测试连接”API/UI 仍是关闭本项所需能力，未实现前不得把保存成功描述为环境已就绪；失败返回稳定诊断且不得自动降级 CPU、本机或其他 target；
 - Settings 的 Execution 折叠组提供 Target/Profile 列表、创建、编辑、禁用、健康状态与能力配置。远端 endpoint、known-host/CA 与 credential 分别以完整 SecretRef 配置，界面必须显式覆盖 `scheme`、`name`、可选 `version` 与可选 `scope`，编辑已有 Target 时不得丢失任何可选元数据；SecretRef 只保存于服务端，浏览器、项目、Job、argv、导出包和日志均不得得到私钥或原始 endpoint 内容；
 - 当前项目必须能在 Settings 中以 CAS 保存默认 RunnerTarget；`/run` 与 `/reproduce` 的 JSON 可用顶层 `runner_target_id` 对单次 Job 显式覆盖。解析优先级固定为“Job 覆盖 > 项目默认”，两条路径都必须在 Job/ExecutionPlan 中固定同一 target revision/hash；页面只显示 opaque id、类型、能力与健康摘要；
-- unknown/offline/draining/capability mismatch/host-key mismatch 必须 fail closed 或保持 retryable，绝不静默切换到本机或 Docker。目标在排队、claim 或 spawn 前任一时刻被禁用、排空、换 kind 或 revision/hash 漂移，旧 pin 均不得执行；更换环境必须由用户创建显式新 attempt，并产生新 pin/审计。
+- 持久化 `health=unknown` 只能显示为未探测的观测摘要，不能伪装成 online；远端执行权威来自认证 Agent Registry 的新鲜 heartbeat。offline/draining/capability mismatch/host-key mismatch 必须 fail closed 或保持 retryable，绝不静默切换到本机或 Docker。目标在排队、claim 或 spawn 前任一时刻被禁用、排空、换 kind 或 revision/hash 漂移，旧 pin 均不得执行；更换环境必须由用户创建显式新 attempt，并产生新 pin/审计。
 - 论文复现的 execution binding 与 environment lock 不能只保存未经解析的字符串：创建/更新 spec 与启动 attempt 都要对照 RunnerTarget Registry 校验 target/profile 兼容性，并固化 target revision/hash；未知、禁用、排空、冲突或过期的环境绑定必须 fail closed。
 
 ### 5.4 Workspace Workbench

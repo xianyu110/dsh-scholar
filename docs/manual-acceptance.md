@@ -118,6 +118,7 @@
 5. `MANUAL-SESSION-MULTI-PTY`：两个 Chat session、一个 Research session、父/子 subagent 各打开两个 PTY；切换/深链/detach/reconnect/resize/signal；确认输入只到对应 terminal。撤权、lease expiry、stale generation、跨 parent/跨项目全部拒绝；远端 PTY 复测同一 fencing。
 6. `MANUAL-REPRO-MANUSCRIPT-CLEANROOM`：新 dataDir/无 checkout 隐式依赖环境重建 TeX/PDF，验证 Bundle preflight/hash、数据自包含、表图/PDF检查、signed RunManifest 与不可变 Report。
 7. `MANUAL-DSH-DIRECT-CREATE-LINK`：在全新空 DSH session 不打开 standalone，直接输入“创建研究项目 OCR 复现”；确认 Harness 调用 `dsh_scholar` 并只传原文中的 exact `project_name`，同一条消息后页签显示 collecting Project、Init 当前阶段和 `intake_resume`，刷新/重放不产生第二个项目。再分别测试不带名称、名称字段与原文不一致、疑问句、中文/英文长否定句、`创建研究项目 Foo，不要创建`、`创建研究项目 Foo，然后取消`、`Create a research project named Foo, do not create`、`创建研究项目 Foo 不创建`、`创建研究项目 Foo 先别创建`、`Create a research project named Foo not create`、`创建研究项目 Foo 然后查看状态`、`Create a research project named Foo then show status`、主题讨论、并发双请求、活动 link、已删除项目墓碑 link 与人工构造的悬空 link，均不得创建或静默 relink；以空/空白专用 plugin token 启动 Kernel 时 internal create 必须拒绝；用 public v2 在 internal 前后以同 key 提交完全相同 route/session/name 原始字段，确认双向均冲突且不认领资源；分别模拟 Kernel 在 fetch、响应头、成功响应体读取/解析阶段丢失，确认 replay-only 对账后只显示一个同名项目。记录 Host 空白 shell 是否在首条消息后正常挂载 `dsh Scholar` view。
+8. `MANUAL-EXECUTION-ENVIRONMENTS`：依次使用“本机开发 / Docker CPU / Docker NVIDIA / 远程 SSH”预设创建环境；Docker 分别选择两个已登记 digest，核对保存摘要、ExecutionPlan 与 RunManifest 完全一致。当前 Settings 尚无独立“测试连接”API/UI，须记录为明确产品缺口，并以提交受控 smoke Job 验证 spawn-time preflight，不能把静态保存成功当作已连接。GPU 主机上分别执行 `all` 与设备 `0,2`，CPU 模式不得获得 GPU；再移除 Docker daemon、NVIDIA Container Toolkit、驱动或指定设备，确认逐项诊断且容器未启动、无 CPU/本机 fallback。无真实 NVIDIA/第二 SSH 主机时记录 `NOT_RUN_MANUAL_PENDING`，不能用 mock 单测冒充通过。
 
 以上均为 `NOT_RUN_MANUAL_PENDING`，需要记录 commit、环境、操作者、期望/实际结果、Report/截图/日志引用。
 
@@ -157,6 +158,7 @@
 4. 分别构造 Token 文件缺失、空值、超过上限、权限非 `0600` 与 symlink，确认 Clipboard 不变且仅显示本地化错误；拒绝 Clipboard 权限时不得创建 textarea/input fallback。确认 `kernel.token`、service token、Provider/SSH secret 无复制入口。
 5. 切换 zh/en、light/dark 和窄屏，核对页签、iframe title、按钮、快捷键说明、复制成功/失败状态即时更新且键盘可达。记录截图和脱敏 Network/Host 日志，状态为 `NOT_RUN_MANUAL_PENDING` 直到真实浏览器完成。
 6. `MANUAL-DSH-SCHOLAR-IFRAME-FAILURE`：先配置不可达 URL、未信任证书或不允许当前 DSH origin 的 CSP，打开页签等待最多 8 秒；必须出现本地化结构化失败态、重试与“在新页面打开”，非默认地址还显示恢复本机默认，页面不得残留占满主区的灰色 iframe。确认失败发生时旧 Host Chat RPC 被 abort，迟到响应不回写。随后安装/信任正确 CA 或修正 `standalone.frame_ancestors`，在不改变 URL 的情况下点击重试，确认创建新 iframe，并重新绑定 exact source/origin ready 与 Chat listener 后才展示工作台；再更改 URL/恢复默认值，确认旧失败状态不粘滞。对 HTTPS DSH→同主机不同端口 Scholar 再发一轮普通 Chat，确认 Host bridge 可用；父页导航后不得继续投递，跨主机 HTTPS、远端 HTTP、错误 protocol/source/origin 与伪造 postMessage 必须拒绝。提交错误 Token 时结构化 `unauthorized` 只显示本地化 `Invalid token`，不得出现 `[object Object]`。
+7. `MANUAL-STANDALONE-CSP-STYLE`：在 8443 解锁工作台，Network 确认 HTML/client.js/API 均 200；DevTools 检查 ShadowRoot 主 `<style>` 带当前响应 nonce、`sheet.cssRules.length > 0`、`.panel` computed display 为 flex，控制台没有 `style-src` violation。刷新两次并确认 nonce 每次变化且布局仍正常；DSH 嵌入与独立新页面各执行一次。
 
 ### 10.1 2026-08-15 本地开发 smoke（不替代人工验收）
 

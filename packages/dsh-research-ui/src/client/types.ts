@@ -151,6 +151,13 @@ export interface GateRow { gate_id?: string; type?: string; title?: string; stat
 export interface ProjectRow { project_id?: string; name?: string; status?: string; revision?: number; updated_at?: string }
 
 export type RunnerTargetKindLite = 'local-process' | 'local-docker' | 'remote-ssh'
+export type RunnerTargetComputeLite =
+  | { mode: 'cpu' }
+  | { mode: 'nvidia'; devices: 'all' | string[] }
+export interface RunnerTargetRuntimeLite {
+  image_digest: string
+  compute: RunnerTargetComputeLite
+}
 export interface SecretRefViewLite { scheme: 'keyring' | 'file' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
 export type ProviderKindLite = 'openai-compatible' | 'anthropic' | 'google' | 'local' | 'mineru' | 'custom'
 export interface ProviderModelLite {
@@ -191,6 +198,7 @@ export interface RunnerTargetSafeViewLite {
   enabled: boolean
   draining: boolean
   capabilities: string[]
+  runtime?: RunnerTargetRuntimeLite
   connection?: { endpoint: SecretRefViewLite; credential: SecretRefViewLite; known_hosts: SecretRefViewLite }
   health: 'unknown' | 'online' | 'offline'
   last_seen_at: string | null

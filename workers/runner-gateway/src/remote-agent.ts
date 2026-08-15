@@ -77,6 +77,7 @@ import {
   type OnChunkFn,
   type RunOutcome,
 } from './execution-target.js'
+import { probeDockerExecutionEnvironment } from './docker-preflight.js'
 import { signManifest, type RunnerSigningKey } from './manifest-signing.js'
 import {
   extractMetrics,
@@ -423,6 +424,12 @@ export async function defaultRemoteExecutor(
       plan,
       `remote agent has no docker runtime; job kind ${plan.kind} requires digest-pinned container execution (plan.image.digest=${plan.image.digest}); refusing host subprocess`,
     )
+  }
+  if (dockerProbe === probeDockerAvailable) {
+    const preflight = await probeDockerExecutionEnvironment(plan)
+    if (!preflight.ok) {
+      return environmentFailureOutcome(plan, `docker preflight failed (${preflight.code})`)
+    }
   }
   const cwd = context.cwd ?? process.cwd()
   const container = `dsh-scholar-remote-${randomUUID().slice(0, 8)}`
@@ -1086,6 +1093,7 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
         lease_generation: fencing.generation,
         payload_json: JSON.stringify({
           exit_code: outcome.exit_code,
+          compute: plan.compute,
           signal: null,
           timed_out: outcome.error !== undefined && outcome.error.includes('timed out'),
           cancelled: outcome.error !== undefined && outcome.error.includes('cancelled'),
@@ -1218,6 +1226,7 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
           started_at: outcome.started_at,
           finished_at: outcome.finished_at,
           exit_code: outcome.exit_code,
+          compute: plan.compute,
         }),
         // 同上：log artifact id 内容寻址，spool 时仍可确定。
         ...{ log_artifact: finalized?.artifact_id ?? `sha256:${logSha256}` },
@@ -1268,8 +1277,12 @@ export class RemoteRunnerAgentImpl implements RemoteRunnerAgent {
       if (this.spoolHasEntriesFor(runId)) {
         const queued = this.spool.push(completeEntry)
         if (!queued.accepted) {
+          const stats = this.spoolStats()
+          const completeBytes = Buffer.byteLength(JSON.stringify(completeEntry.payload), 'utf8')
           throw new RemoteRunnerAgentError(
-            `run ${runId}: outbound spool overflow while queueing complete (${queued.reason}) — run fails locally (fail closed)`,
+            `run ${runId}: outbound spool overflow while queueing complete (${queued.reason}; `
+            + `queued=${stats.entries} entries/${stats.bytes} bytes, complete=${completeBytes} bytes) `
+            + '— run fails locally (fail closed)',
           )
         }
       } else {

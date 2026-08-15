@@ -305,7 +305,8 @@ export function standaloneContentSecurityPolicy(nonce: string, frameAncestors: r
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
-    `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
+    `style-src 'self' 'nonce-${nonce}'`,
+    "style-src-attr 'unsafe-inline'",
     "img-src 'self' blob: data:",
     "media-src 'self' blob:",
     "frame-src 'self' blob:",
@@ -318,7 +319,7 @@ export function standaloneContentSecurityPolicy(nonce: string, frameAncestors: r
   ].join('; ')
 }
 
-function bootstrapHtmlWithNonce(nonce: string): string {
+export function bootstrapHtmlWithNonce(nonce: string): string {
   return BOOTSTRAP_HTML
     .replaceAll('<script', `<script nonce="${nonce}"`)
     .replace('<style>', `<style nonce="${nonce}">`)
@@ -643,6 +644,9 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <script src="/client.js"></script>
 <script>
   (function () {
+    var cspNonce = document.currentScript && document.currentScript.nonce
+      ? document.currentScript.nonce
+      : undefined;
     ${PARSE_STANDALONE_UNLOCK_ERROR_SOURCE}
     var THEME_KEY = 'dsh-scholar-ui-theme';
     var TOKEN_KEY = 'dsh-scholar-ui-token';
@@ -704,7 +708,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
           base: '',
           token: function () { return Promise.resolve(token); },
         });
-        window.__DSH_SCHOLAR_UI__.apply();
+        window.__DSH_SCHOLAR_UI__.apply({ styleNonce: cspNonce });
       } else {
         err.textContent = window.__BOOT_MSG__('standalone.bundleFailed');
         boot.style.display = 'flex';

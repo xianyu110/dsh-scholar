@@ -12,6 +12,9 @@ import {
 } from '../settings-model'
 import type { SettingsConfigField, SettingsEffectiveWire, SettingsSchemaWire } from '../settings-model'
 import {
+  DEFAULT_DOCKER_IMAGE_DIGEST,
+  runnerTargetRuntimeDraft,
+  runnerTargetRuntimePayload,
   runnerTargetSecretRefDraft,
   runnerTargetSecretRefPayload,
   type RunnerTargetSecretRefPayload,
@@ -376,6 +379,23 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
     modal.appendChild(acc)
   }
 
+  // A failed registry read must remain visible and retryable instead of
+  // silently removing the whole experiment-environment section.
+  if (runnerTargets === null) {
+    const { acc, body } = makeAccordion(
+      'runner-targets-unavailable',
+      t('shell', 'shell.settings.targets.title'),
+      t('shell', 'shell.settings.targets.loadFailed'),
+      false,
+    )
+    const failure = el('div', 'settings-readonly-note', t('shell', 'shell.settings.targets.loadFailed'))
+    failure.style.color = 'var(--tone-red)'
+    const retry = el('button', 'hbtn', t('shell', 'shell.settings.targets.retry')) as HTMLButtonElement
+    retry.onclick = () => { overlay.remove(); void openSettingsModal(root) }
+    body.append(failure, retry)
+    modal.appendChild(acc)
+  }
+
   // EXEC-ENV-02: the persisted runner target registry is a writable,
   // dedicated accordion. It deliberately sits outside CONFIG-01: project
   // config selects an opaque target id, while this global operator surface
@@ -413,7 +433,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
           health: t('shell', `shell.settings.targets.health.${target.health}`),
         })
         option.selected = target.target_id === activeProject.execution.runner_target_id
-        option.disabled = !target.enabled || target.draining
+        option.disabled = !target.enabled || target.draining || target.health === 'offline'
         select.appendChild(option)
       }
       const saveDefault = el('button', 'hbtn', t('shell', 'shell.settings.targets.saveProjectDefault')) as HTMLButtonElement
@@ -513,12 +533,40 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       target?: RunnerTargetSafeViewLite,
     ): { form: HTMLElement; save: HTMLButtonElement } => {
       const form = el('div', 'settings-row settings-row-stack')
-      form.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);gap:7px'
+      form.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr);width:100%;padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);gap:7px'
       const id = textInput(target?.target_id ?? '', t('shell', 'shell.settings.targets.idPlaceholder'))
       id.disabled = target !== undefined
       const name = textInput(target?.display_name ?? '', t('shell', 'shell.settings.targets.namePlaceholder'))
       const kind = kindSelect(target?.kind ?? 'local-docker')
       const caps = textInput(target?.capabilities.join(', ') ?? '', t('shell', 'shell.settings.targets.capabilitiesPlaceholder'))
+      const runtimeDraft = runnerTargetRuntimeDraft(target?.runtime)
+      const image = textInput(runtimeDraft.imageDigest || DEFAULT_DOCKER_IMAGE_DIGEST, t('shell', 'shell.settings.targets.image'))
+      const compute = document.createElement('select')
+      compute.className = 'field-input'
+      for (const value of ['cpu', 'nvidia'] as const) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = t('shell', `shell.settings.targets.compute.${value}`)
+        option.selected = value === runtimeDraft.computeMode
+        compute.appendChild(option)
+      }
+      const devices = textInput(runtimeDraft.devices, t('shell', 'shell.settings.targets.devices'))
+      const runtimeFields = el('div')
+      runtimeFields.style.cssText = 'display:grid;grid-template-columns:1fr;gap:7px;padding:8px;border:1px solid var(--border);border-radius:var(--radius-sm)'
+      const labeled = (labelKey: string, control: HTMLElement, hintKey?: string): HTMLElement => {
+        const wrapper = el('label')
+        wrapper.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0'
+        wrapper.append(el('span', 'settings-row-label', t('shell', labelKey)), control)
+        if (hintKey !== undefined) wrapper.appendChild(el('span', 'muted', t('shell', hintKey)))
+        return wrapper
+      }
+      const deviceField = labeled('shell.settings.targets.devices', devices, 'shell.settings.targets.devicesHint')
+      runtimeFields.append(
+        el('div', 'settings-row-label', t('shell', 'shell.settings.targets.runtime')),
+        labeled('shell.settings.targets.image', image, 'shell.settings.targets.imageHint'),
+        labeled('shell.settings.targets.compute', compute),
+        deviceField,
+      )
       const endpoint = secretRefEditor('shell.settings.targets.ref.endpoint', target?.connection?.endpoint)
       const credential = secretRefEditor('shell.settings.targets.ref.credential', target?.connection?.credential)
       const knownHosts = secretRefEditor('shell.settings.targets.ref.knownHosts', target?.connection?.known_hosts)
@@ -530,9 +578,15 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         credential.root,
         knownHosts.root,
       )
-      const refreshRemote = (): void => { remoteFields.style.display = kind.value === 'remote-ssh' ? 'grid' : 'none' }
-      kind.onchange = refreshRemote
-      refreshRemote()
+      const refreshConditionalFields = (): void => {
+        const localProcess = kind.value === 'local-process'
+        runtimeFields.style.display = localProcess ? 'none' : 'grid'
+        remoteFields.style.display = kind.value === 'remote-ssh' ? 'grid' : 'none'
+        deviceField.style.display = !localProcess && compute.value === 'nvidia' ? 'flex' : 'none'
+      }
+      kind.onchange = refreshConditionalFields
+      compute.onchange = refreshConditionalFields
+      refreshConditionalFields()
       const flags = el('label', 'row')
       flags.style.cssText = 'gap:14px;font-size:11px'
       const enabled = document.createElement('input')
@@ -548,6 +602,17 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       save.onclick = async () => {
         setError('')
         const targetKind = kind.value as RunnerTargetKindLite
+        const runtimeResult = runnerTargetRuntimePayload(targetKind, {
+          imageDigest: image.value,
+          computeMode: compute.value as 'cpu' | 'nvidia',
+          devices: devices.value,
+        })
+        if (!runtimeResult.ok) {
+          setError(t('shell', runtimeResult.error === 'image'
+            ? 'shell.settings.targets.runtimeImageInvalid'
+            : 'shell.settings.targets.runtimeDevicesInvalid'))
+          return
+        }
         const connection = targetKind === 'remote-ssh'
           ? { endpoint: endpoint.payload(), credential: credential.payload(), known_hosts: knownHosts.payload() }
           : undefined
@@ -562,6 +627,9 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
           enabled: enabled.checked,
           draining: draining.checked,
           capabilities: caps.value.split(',').map(value => value.trim()).filter(Boolean),
+          ...(runtimeResult.runtime !== undefined
+            ? { runtime: runtimeResult.runtime }
+            : { ...(target?.runtime !== undefined ? { runtime: null } : {}) }),
           ...(connection !== undefined ? { connection } : { ...(target?.connection !== undefined ? { connection: null } : {}) }),
         }
         const result = target === undefined
@@ -579,7 +647,16 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         overlay.remove()
         void openSettingsModal(root)
       }
-      form.append(id, name, kind, caps, remoteFields, flags, save)
+      form.append(
+        id,
+        name,
+        labeled('shell.settings.targets.location', kind),
+        runtimeFields,
+        remoteFields,
+        labeled('shell.settings.targets.capabilities', caps),
+        flags,
+        save,
+      )
       return { form, save }
     }
     for (const target of runnerTargets) {
@@ -606,18 +683,26 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         const available = [target.connection.endpoint, target.connection.credential, target.connection.known_hosts].every(ref => ref.available)
         meta.appendChild(document.createTextNode(` · ${t('shell', available ? 'shell.settings.targets.secretsAvailable' : 'shell.settings.targets.secretsUnavailable')}`))
       }
+      if (target.runtime !== undefined) {
+        const computeLabel = target.runtime.compute.mode === 'cpu'
+          ? t('shell', 'shell.settings.targets.compute.cpu')
+          : `${t('shell', 'shell.settings.targets.compute.nvidia')} · ${target.runtime.compute.devices === 'all' ? 'all' : target.runtime.compute.devices.join(',')}`
+        const imageLabel = `${target.runtime.image_digest.split('@')[0]}@…${target.runtime.image_digest.slice(-10)}`
+        meta.appendChild(document.createTextNode(` · ${t('shell', 'shell.settings.targets.runtimeSummary', { image: imageLabel, compute: computeLabel })}`))
+        meta.title = target.runtime.image_digest
+      }
       const edit = el('button', 'hbtn', t('shell', 'shell.settings.targets.edit')) as HTMLButtonElement
       edit.style.cssText = 'align-self:flex-start;padding:2px 10px'
       const form = targetForm(target).form
       form.style.display = 'none'
-      edit.onclick = () => { form.style.display = form.style.display === 'none' ? 'flex' : 'none' }
+      edit.onclick = () => { form.style.display = form.style.display === 'none' ? 'grid' : 'none' }
       row.append(title, meta, edit, form)
       body.appendChild(row)
     }
     const create = el('button', 'hbtn', t('shell', 'shell.settings.targets.add')) as HTMLButtonElement
     const createForm = targetForm().form
     createForm.style.display = 'none'
-    create.onclick = () => { createForm.style.display = createForm.style.display === 'none' ? 'flex' : 'none' }
+    create.onclick = () => { createForm.style.display = createForm.style.display === 'none' ? 'grid' : 'none' }
     body.append(create, createForm)
     modal.appendChild(acc)
   }

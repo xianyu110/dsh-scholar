@@ -23,7 +23,7 @@ import { RUNNER_TARGET_DDL, seedBuiltinRunnerTargets } from './runner-target-reg
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 21
+export const SCHEMA_VERSION = 22
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1221,6 +1221,15 @@ const topologyCancelledState = (db: DatabaseSync, report: MigrationReport): void
   report.rows.child_followups = Number((db.prepare('SELECT COUNT(*) AS n FROM child_followups').get() as { n: number }).n)
 }
 
+/** 0025 — typed Docker image/CPU/NVIDIA runtime attached to a runner target. */
+const runnerTargetRuntime = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'runner_targets', 'runtime_json', 'TEXT')
+  if (report.rows === undefined) report.rows = {}
+  report.rows.runner_targets_with_runtime = Number((db.prepare(
+    'SELECT COUNT(*) AS n FROM runner_targets WHERE runtime_json IS NOT NULL',
+  ).get() as { n: number }).n)
+}
+
 /**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
@@ -1366,6 +1375,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'SUBAGENT-STAGE-02: cancelled child topology state + rebuilt CHECK constraint',
     body: topologyCancelledState.toString(),
     up: topologyCancelledState,
+  },
+  {
+    id: '0025_runner_target_runtime',
+    description: 'EXEC-ENV-03: digest-pinned Docker CPU/NVIDIA runtime configuration on runner targets',
+    body: runnerTargetRuntime.toString(),
+    up: runnerTargetRuntime,
   },
 ]
 

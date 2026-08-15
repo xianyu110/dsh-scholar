@@ -69,6 +69,10 @@ CodeSnapshot 保存实际文件内容；仅包含文件 hash 的旧 manifest 不
 --mount outputs read-write
 ~~~
 
+镜像由版本化 RunnerProfile 选择，正式执行只接受已登记的 `repository@sha256:<digest>`。计算请求固定为 `{mode:'cpu'}` 或 `{mode:'nvidia',devices:'all'|string[]}`：CPU 不生成 GPU 参数；NVIDIA `all` 只生成 `--gpus all`；指定设备只接受去重后的非负数字 ID，并生成单个 `--gpus device=...` 参数。浏览器、Job 和 profile 均不得携带任意 Docker flags。
+
+LocalDocker 与 RemoteRunnerAgent 在 prepare/spawn 前都必须返回结构化 preflight：Docker daemon、镜像 digest、本机/远端 NVIDIA Container Toolkit、驱动和请求设备逐项 pass/fail。任一必需项失败即 `failure_class=environment`，不得启动容器，也不得回退 CPU、local-process 或其他 target；实际 image、compute mode 与设备集合进入签名 ExecutionPlan/RunManifest/environment pin。当前 preflight 报告只作为 spawn gate，详细 capability/preflight summary 尚未持久化；Settings 也尚无保存时的真实连接测试 API，不能把静态保存成功等同于环境可用。
+
 禁止 Docker socket、privileged、host network/PID/IPC、宿主 Home、DSH_HOME、模型/API credential、可变镜像 tag。Runner 启动前将环境缩减为合同白名单，不能继承 DSH 进程环境。
 
 Docker CLI 自身被终止时，finally 仍执行 docker rm -f 兜底。取消必须结束进程组或容器并等待确认，然后才能写 cancelled。

@@ -14,9 +14,10 @@
  * 不做真实 docker：dockerRun 注入 fake，参数映射走纯函数。
  */
 import { describe, expect, it } from 'vitest'
-import { generateKeyPairSync } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign as nodeSign } from 'node:crypto'
 import {
   buildExecutionPlan,
+  canonicalPlanJson,
   ExecutionPlan,
   executionPlanFingerprint,
   signExecutionPlan,
@@ -27,6 +28,7 @@ import {
 import {
   LocalDockerAdapter,
   buildLocalDockerArgs,
+  buildRunManifest,
   deepFreezePlan,
   ExecutionPlanMutationError,
   runnerTargetPinFailure,
@@ -222,6 +224,31 @@ describe('ExecutionPlan schema（research-schemas）', () => {
     expect(unsigned.valid).toBe(false)
     expect(unsigned.reason).toContain('not signed')
   })
+
+  it('验签兼容 compute 字段发布前签署的 schema_version=1 CPU plan', () => {
+    const key = generateKeyPairSync('ed25519')
+    const publicKeyPem = key.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    const { compute: _newField, ...legacy } = makePlan()
+    const unsigned = { ...legacy, payload_sha256: null, signature: null, signed_by: null }
+    const payloadSha256 = createHash('sha256').update(canonicalPlanJson(unsigned)).digest('hex')
+    const signed = { ...unsigned, payload_sha256: payloadSha256, signed_by: 'legacy-runner-key' }
+    const signature = nodeSign(null, Buffer.from(canonicalPlanJson(signed), 'utf8'), key.privateKey).toString('base64')
+    const parsed = ExecutionPlan.parse({ ...signed, signature })
+
+    expect(parsed.compute).toEqual({ mode: 'cpu' })
+    expect(verifyExecutionPlanSignature(parsed, publicKeyPem)).toEqual({ valid: true, reason: null })
+  })
+
+  it('runner_compute 缺失才默认 CPU，存在但 malformed 时 fail closed', () => {
+    expect(makePlan().compute).toEqual({ mode: 'cpu' })
+    const malformed = makeJob({ payload: { runner_compute: { mode: 'nvidia', devices: '--privileged' } } })
+    expect(() => buildExecutionPlan(malformed, {
+      run_id: 'run_bad_compute',
+      lease: { owner: 'runner-1', generation: 1, token: 'tok', expires_at: null },
+      image_digest: 'node@sha256:' + 'c'.repeat(64),
+      timeout_ms: 1000,
+    })).toThrow()
+  })
 })
 
 describe('deepFreezePlan（plan 不可变断言）', () => {
@@ -355,5 +382,41 @@ describe('LocalDockerAdapter（ExecutionTarget port 本地实现）', () => {
     expect(args).toContain(plan.image.digest)
     // 命令尾随（plan.command，target 不得改写）
     expect(args.slice(args.indexOf(plan.image.digest) + 1)).toEqual(plan.command)
+  })
+
+  it('maps typed NVIDIA requests to one safe --gpus argument and leaves CPU plans untouched', () => {
+    const cpuArgs = buildLocalDockerArgs({
+      plan: makePlan(), cwd: '/tmp/work', containerName: 'cpu', env: {}, command: ['true'],
+    })
+    expect(cpuArgs).not.toContain('--gpus')
+
+    const allPlan = makePlan({ compute: { mode: 'nvidia', devices: 'all' } })
+    const allArgs = buildLocalDockerArgs({
+      plan: allPlan, cwd: '/tmp/work', containerName: 'gpu-all', env: {}, command: ['true'],
+    })
+    expect(allArgs.slice(allArgs.indexOf('--gpus'), allArgs.indexOf('--gpus') + 2)).toEqual(['--gpus', 'all'])
+
+    const selectedPlan = makePlan({ compute: { mode: 'nvidia', devices: ['0', '2'] } })
+    const selectedArgs = buildLocalDockerArgs({
+      plan: selectedPlan, cwd: '/tmp/work', containerName: 'gpu-selected', env: {}, command: ['true'],
+    })
+    expect(selectedArgs.slice(selectedArgs.indexOf('--gpus'), selectedArgs.indexOf('--gpus') + 2))
+      .toEqual(['--gpus', 'device=0,2'])
+  })
+})
+
+describe('signed manifest compute provenance', () => {
+  const base = {
+    run_id: 'run_manifest', project_id: 'prj_manifest', contract_id: null, job_id: 'job_manifest',
+    command: ['true'], code_commit: '', code_snapshot_id: null,
+    container_digest: 'docker:node@sha256:' + 'c'.repeat(64), data_hash: '', seed: null,
+    started_at: '2026-08-15T00:00:00.000Z', finished_at: '2026-08-15T00:00:01.000Z', exit_code: 0,
+  }
+
+  it('preserves the legacy CPU shape and records selected NVIDIA devices', () => {
+    expect(buildRunManifest({ ...base, compute: { mode: 'cpu' } }).resources)
+      .toEqual({ gpu: 0, cpu: 1, memory_gb: 1 })
+    expect(buildRunManifest({ ...base, compute: { mode: 'nvidia', devices: ['0', '2'] } }).resources)
+      .toEqual({ gpu: 2, gpu_mode: 'nvidia', gpu_devices: ['0', '2'], cpu: 1, memory_gb: 1 })
   })
 })
