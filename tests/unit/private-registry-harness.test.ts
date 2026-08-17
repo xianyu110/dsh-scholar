@@ -38,8 +38,8 @@ describe('private @deepseek-ai registry compatibility harness', () => {
       expect(manifest.devDependencies[name], name).toBeDefined()
     }
     for (const name of dshPeers.filter(name => name.startsWith('@deepseek-ai/dsh-'))) {
-      expect(manifest.peerDependencies[name], name).toContain('^0.1.0-rc.2')
-      expect(manifest.devDependencies[name], name).toBe('0.1.0-rc.2')
+      expect(manifest.peerDependencies[name], name).toBe('^0.1.0-rc.7')
+      expect(manifest.devDependencies[name], name).toBe('0.1.0-rc.7')
     }
 
     const scripts = (manifest as typeof manifest & {
