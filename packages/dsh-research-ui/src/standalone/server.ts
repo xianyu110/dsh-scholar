@@ -28,7 +28,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { UiKernelSidecar } from './sidecar.js'
-import { validateConfig, parseCli, generateCliHelp } from '@dsh-scholar/research-schemas'
+import { validateConfig, parseCli, generateCliHelp, type CorpusSnapshot, type ExperimentContract, type NoveltyAudit, type ScholarAgentRequest } from '@dsh-scholar/research-schemas'
+import { requestScholarAgent } from './chat-agent-client.js'
 import {
   MAX_BODY_BYTES,
   SlidingWindowRateLimiter,
@@ -70,6 +71,89 @@ export function surveyWriteRoleAllowed(role: string | null): boolean {
   return role === 'pi' || role === 'operator' || role === 'researcher'
 }
 
+interface IdeaAuditCandidate {
+  title: string
+  hypothesis: string
+  exact_delta: string
+}
+
+interface IdeaAuditSearchResult {
+  hits: Array<{ paper: { paper_id?: unknown } }>
+  source_status: Array<{ status: 'ok' | 'failed' }>
+}
+
+/** Bounded, deterministic counter-search queries derived from the selected candidate. */
+export function ideaAuditQueries(idea: IdeaAuditCandidate): string[] {
+  return [idea.title, idea.hypothesis, idea.exact_delta]
+    .map(query => query.trim().replace(/\s+/g, ' ').slice(0, 512))
+    .filter((query, index, all) => query !== '' && all.indexOf(query) === index)
+    .slice(0, 3)
+}
+
+/** Convert connector evidence into the strict persisted NoveltyAudit shape. */
+export function ideaNoveltyAudit(
+  queries: string[],
+  results: IdeaAuditSearchResult[],
+  auditedAt = new Date().toISOString(),
+): NoveltyAudit {
+  const partial = results.some(result => result.source_status.some(source => source.status === 'failed'))
+  const overlapPapers = [...new Set(results.flatMap(result => result.hits.flatMap(hit => {
+    const paperId = hit.paper.paper_id
+    return typeof paperId === 'string' && paperId !== '' ? [paperId] : []
+  })))].slice(0, 20)
+  return {
+    queries,
+    result: partial ? 'inconclusive' : overlapPapers.length === 0 ? 'no_direct_match_found' : 'overlap_found',
+    overlap_papers: overlapPapers,
+    unresolved_risk: partial ? 'high' : 'medium',
+    audited_at: auditedAt,
+  }
+}
+
+interface ContractIdeaCandidate {
+  exact_delta: string
+  minimum_viable_experiment: {
+    dataset: string
+    baseline: string
+    primary_metric: string
+    estimated_gpu_hours: number
+  }
+}
+
+/** Deterministic first Contract draft; the Human Contract Gate reviews it. */
+export function contractDraftFromIdea(idea: ContractIdeaCandidate): Omit<ExperimentContract,
+  'contract_id' | 'version' | 'project_id' | 'idea_id' | 'status' | 'approval' | 'created_at' | 'updated_at'> {
+  const seeds = [11, 23, 47, 89, 101]
+  return {
+    data: {
+      dataset_id: idea.minimum_viable_experiment.dataset.trim(),
+      version: 'official',
+      split: 'official',
+    },
+    methods: {
+      baseline: idea.minimum_viable_experiment.baseline.trim(),
+      treatment: idea.exact_delta.trim(),
+    },
+    metrics: {
+      primary: idea.minimum_viable_experiment.primary_metric.trim(),
+      secondary: [],
+      direction: 'higher_is_better',
+    },
+    seeds,
+    analysis: {
+      effect_size: 'mean_difference',
+      interval: 'bootstrap_95',
+      multiple_testing: 'holm',
+    },
+    ablations: [],
+    stop_conditions: {
+      max_gpu_hours: Math.max(1, Math.ceil(idea.minimum_viable_experiment.estimated_gpu_hours)),
+      min_completed_seeds: seeds.length,
+      stop_on_data_leakage: true,
+    },
+  }
+}
+
 const DEFAULT_PORT = 18610
 const DEFAULT_KERNEL_PORT = 7412
 
@@ -97,6 +181,8 @@ const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
   /(?:^|\/)unarchive(?:\/|$)/,
   // INIT-GRILL-02 §2: Grill confirm 是 PI-only（与 kernel 表逐字同步）。
   /(?:^|\/)grill\/confirm(?:\/|$)/,
+  /(?:^|\/)idea-gate(?:\/|$)/,
+  /(?:^|\/)contract-gate(?:\/|$)/,
 ]
 
 function isPiOnlyWrite(pathname: string): boolean {
@@ -1320,6 +1406,480 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         return
       }
 
+      // Project-scoped free conversation. The browser sends only its text and
+      // bounded visible history; the BFF reloads the authoritative projection
+      // and the DSH plugin's private loopback bridge performs the tool-free
+      // model call. No model reply can write Kernel state on this route.
+      if (method === 'POST' && url.pathname === '/api/chat/turn') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
+            return
+          }
+        }
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken) || !isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, bffError('csrf_rejected', 'missing, invalid or cross-origin CSRF request'))
+          return
+        }
+        const read = await readBody(req)
+        if (read.tooLarge) {
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
+          return
+        }
+        let raw: Record<string, unknown>
+        try {
+          const parsed = JSON.parse(read.body) as unknown
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid')
+          raw = parsed as Record<string, unknown>
+        } catch {
+          sendJson(res, 400, bffError('invalid_json', 'bad request'))
+          return
+        }
+        const projectId = typeof raw.project_id === 'string' ? raw.project_id.trim() : ''
+        const text = typeof raw.text === 'string' ? raw.text.trim() : ''
+        const locale: 'zh' | 'en' = raw.locale === 'en' ? 'en' : 'zh'
+        const history = Array.isArray(raw.history) ? raw.history.slice(-12).flatMap(item => {
+          if (item === null || typeof item !== 'object' || Array.isArray(item)) return []
+          const row = item as Record<string, unknown>
+          if ((row.role !== 'user' && row.role !== 'assistant') || typeof row.text !== 'string') return []
+          const itemText = row.text.trim().slice(0, 2_000)
+          return itemText === '' ? [] : [{ role: row.role, text: itemText }]
+        }) : []
+        if (projectId === '' || projectId.length > 256 || text === '' || text.length > 16_000) {
+          sendJson(res, 422, bffError('validation_error', 'project_id and text are required'))
+          return
+        }
+        if (options.principal !== null && !(await isProjectMember(projectId))) {
+          sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
+          return
+        }
+        const projectionResponse = await fetch(`${endpoint}/v2/projects/${encodeURIComponent(projectId)}/projection`, {
+          headers: { accept: 'application/json', ...upstreamAuthHeaders },
+        }).catch(() => null)
+        if (projectionResponse === null || !projectionResponse.ok) {
+          sendJson(res, 502, bffError('kernel_unreachable', 'research projection unavailable'))
+          return
+        }
+        const projection = await projectionResponse.json() as {
+          project?: Record<string, unknown>
+          next_actions_v2?: Array<Record<string, unknown>>
+        }
+        try {
+          const reply = await requestScholarAgent(options.dataDir, {
+            operation: 'conversation',
+            text,
+            locale,
+            project: {
+              project_id: projectId,
+              ...(typeof projection.project?.name === 'string' ? { name: projection.project.name } : {}),
+              ...(typeof projection.project?.status === 'string' ? { status: projection.project.status } : {}),
+              ...(typeof projection.project?.brief_status === 'string' ? { brief_status: projection.project.brief_status } : {}),
+              ...(projection.project?.brief !== null && typeof projection.project?.brief === 'object'
+                ? { brief: projection.project.brief as Record<string, unknown> } : {}),
+              next_actions_v2: projection.next_actions_v2 ?? [],
+            },
+            history,
+          } as ScholarAgentRequest)
+          if (reply.operation !== 'conversation') throw new Error('wrong operation')
+          sendJson(res, 200, reply)
+        } catch {
+          sendJson(res, 503, bffError('model_unavailable', 'DSH model runtime is unavailable'))
+        }
+        return
+      }
+
+      // Explicit, ready-only IdeaCard generation. The BFF revalidates the
+      // authoritative NextAction and frozen corpus before asking the model,
+      // then the Kernel atomically attaches project/revision/provenance and
+      // writes all generated drafts. The model cannot choose those fields.
+      if (method === 'POST' && url.pathname === '/api/chat/ideas') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
+            return
+          }
+        }
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken) || !isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, bffError('csrf_rejected', 'missing, invalid or cross-origin CSRF request'))
+          return
+        }
+        const read = await readBody(req)
+        if (read.tooLarge) {
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
+          return
+        }
+        let raw: Record<string, unknown>
+        try {
+          const parsed = JSON.parse(read.body) as unknown
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid')
+          raw = parsed as Record<string, unknown>
+        } catch {
+          sendJson(res, 400, bffError('invalid_json', 'bad request'))
+          return
+        }
+        const projectId = typeof raw.project_id === 'string' ? raw.project_id.trim() : ''
+        const text = typeof raw.text === 'string' ? raw.text.trim() : ''
+        const count = typeof raw.count === 'number' && Number.isInteger(raw.count) ? raw.count : 3
+        const locale: 'zh' | 'en' = raw.locale === 'en' ? 'en' : 'zh'
+        if (projectId === '' || projectId.length > 256 || text === '' || text.length > 16_000 || count < 1 || count > 5) {
+          sendJson(res, 422, bffError('validation_error', 'project_id, text and count (1-5) are required'))
+          return
+        }
+        if (options.principal !== null) {
+          const role = await projectRole(projectId)
+          if (role === null) {
+            sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
+            return
+          }
+          if (!surveyWriteRoleAllowed(role)) {
+            sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
+            return
+          }
+        }
+        const [projectionResponse, corpusResponse] = await Promise.all([
+          fetch(`${endpoint}/v2/projects/${encodeURIComponent(projectId)}/projection`, {
+            headers: { accept: 'application/json', ...upstreamAuthHeaders },
+          }).catch(() => null),
+          fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/corpus-snapshots`, {
+            headers: { accept: 'application/json', ...upstreamAuthHeaders },
+          }).catch(() => null),
+        ])
+        if (projectionResponse === null || corpusResponse === null || !projectionResponse.ok || !corpusResponse.ok) {
+          sendJson(res, 502, bffError('kernel_unreachable', 'research context unavailable'))
+          return
+        }
+        const projection = await projectionResponse.json() as {
+          project?: { revision?: number } & Record<string, unknown>
+          next_actions_v2?: Array<Record<string, unknown>>
+        }
+        const ready = (projection.next_actions_v2 ?? []).some(action => action.code === 'idea_generate'
+          && action.state === 'ready' && action.required === true && action.required_by === 'agent')
+        if (!ready || typeof projection.project?.revision !== 'number') {
+          sendJson(res, 409, bffError('action_not_ready', 'idea generation is not the current ready Agent action'))
+          return
+        }
+        let snapshots: CorpusSnapshot[]
+        try {
+          const rawSnapshots = await corpusResponse.json() as unknown
+          if (!Array.isArray(rawSnapshots)) throw new Error('invalid corpus response')
+          snapshots = rawSnapshots as CorpusSnapshot[]
+        } catch {
+          sendJson(res, 502, bffError('kernel_error', 'invalid research context response'))
+          return
+        }
+        const snapshot = snapshots.filter(item => item.project_id === projectId && item.frozen && item.papers.length > 0)
+          .sort((a, b) => a.created_at.localeCompare(b.created_at)).at(-1)
+        if (snapshot === undefined) {
+          sendJson(res, 409, bffError('corpus_required', 'a non-empty frozen corpus snapshot is required'))
+          return
+        }
+        let reply: Awaited<ReturnType<typeof requestScholarAgent>>
+        try {
+          reply = await requestScholarAgent(options.dataDir, {
+            operation: 'generate_ideas',
+            text,
+            locale,
+            count,
+            project: {
+              project_id: projectId,
+              ...(typeof projection.project.name === 'string' ? { name: projection.project.name } : {}),
+              ...(typeof projection.project.status === 'string' ? { status: projection.project.status } : {}),
+              ...(typeof projection.project.brief_status === 'string' ? { brief_status: projection.project.brief_status } : {}),
+              ...(projection.project.brief !== null && typeof projection.project.brief === 'object'
+                ? { brief: projection.project.brief as Record<string, unknown> } : {}),
+              next_actions_v2: projection.next_actions_v2 ?? [],
+            },
+            corpus: {
+              snapshot_id: snapshot.snapshot_id,
+              papers: snapshot.papers.slice(0, 30).map(paper => ({
+                paper_id: paper.paper_id,
+                title: paper.title,
+                year: paper.year,
+                abstract: paper.abstract.slice(0, 2_000),
+              })),
+            },
+            history: [],
+          } as ScholarAgentRequest)
+          if (reply.operation !== 'generate_ideas') throw new Error('wrong operation')
+        } catch {
+          sendJson(res, 503, bffError('model_unavailable', 'DSH model runtime is unavailable'))
+          return
+        }
+        let createdResponse: Response
+        try {
+          createdResponse = await fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/ideas/batch`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json', ...upstreamAuthHeaders },
+            body: JSON.stringify({
+              expected_project_revision: projection.project.revision,
+              corpus_snapshot_id: snapshot.snapshot_id,
+              ideas: reply.ideas,
+            }),
+          })
+        } catch {
+          sendJson(res, 502, bffError('kernel_unreachable', 'research kernel unavailable'))
+          return
+        }
+        const created = await createdResponse.json().catch(() => null) as { ideas?: unknown[] } | null
+        if (!createdResponse.ok || !Array.isArray(created?.ideas)) {
+          sendJson(res, createdResponse.status >= 400 && createdResponse.status < 500 ? createdResponse.status : 502,
+            bffError('idea_write_failed', 'generated IdeaCards could not be committed'))
+          return
+        }
+        sendJson(res, 200, { ok: true, snapshot_id: snapshot.snapshot_id, ideas: created.ideas })
+        return
+      }
+
+      // Human candidate selection: perform the selected idea's real
+      // counter-search first, then let the Kernel atomically persist the
+      // audit, enter IDEATING and create the payload-bound pending Gate.
+      if (method === 'POST' && url.pathname === '/api/chat/ideas/select') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
+            return
+          }
+        }
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken) || !isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, bffError('csrf_rejected', 'missing, invalid or cross-origin CSRF request'))
+          return
+        }
+        const read = await readBody(req)
+        if (read.tooLarge) {
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
+          return
+        }
+        let projectId = ''
+        let ideaId = ''
+        try {
+          const parsed = JSON.parse(read.body) as { project_id?: unknown; idea_id?: unknown }
+          projectId = typeof parsed.project_id === 'string' ? parsed.project_id.trim() : ''
+          ideaId = typeof parsed.idea_id === 'string' ? parsed.idea_id.trim() : ''
+        } catch {
+          sendJson(res, 400, bffError('invalid_json', 'bad request'))
+          return
+        }
+        if (projectId === '' || ideaId === '' || projectId.length > 256 || ideaId.length > 256) {
+          sendJson(res, 422, bffError('validation_error', 'project_id and idea_id are required'))
+          return
+        }
+        const role = await projectRole(projectId)
+        if (role === null) {
+          sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
+          return
+        }
+        if (role !== 'pi' && role !== 'operator') {
+          sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
+          return
+        }
+        const [projectionResponse, ideaResponse] = await Promise.all([
+          fetch(`${endpoint}/v2/projects/${encodeURIComponent(projectId)}/projection`, {
+            headers: { accept: 'application/json', ...upstreamAuthHeaders },
+          }).catch(() => null),
+          fetch(`${endpoint}/v1/ideas/${encodeURIComponent(ideaId)}`, {
+            headers: { accept: 'application/json', ...upstreamAuthHeaders },
+          }).catch(() => null),
+        ])
+        if (projectionResponse === null || ideaResponse === null || !projectionResponse.ok || !ideaResponse.ok) {
+          sendJson(res, 404, bffError('idea_not_found', 'selected idea or project was not found'))
+          return
+        }
+        const projection = await projectionResponse.json() as {
+          project?: { revision?: unknown; status?: unknown }
+          next_actions_v2?: Array<Record<string, unknown>>
+        }
+        const idea = await ideaResponse.json() as Record<string, unknown>
+        const projectRevision = projection.project?.revision
+        const ideaVersion = idea.version
+        const ready = (projection.next_actions_v2 ?? []).some(action => action.code === 'idea_select'
+          && action.state === 'ready' && action.required === true && action.required_by === 'human')
+        if (!ready || projection.project?.status !== 'SURVEYING'
+          || typeof projectRevision !== 'number' || !Number.isInteger(projectRevision)
+          || idea.project_id !== projectId || idea.status !== 'proposed'
+          || typeof ideaVersion !== 'number' || !Number.isInteger(ideaVersion)
+          || typeof idea.title !== 'string' || typeof idea.hypothesis !== 'string' || typeof idea.exact_delta !== 'string') {
+          sendJson(res, 409, bffError('idea_selection_not_ready', 'the selected idea is not ready for the Idea Gate'))
+          return
+        }
+        const queries = ideaAuditQueries({ title: idea.title, hypothesis: idea.hypothesis, exact_delta: idea.exact_delta })
+        let audit: NoveltyAudit
+        try {
+          const searches = await Promise.all(queries.map(query => multiSourceSearch(query, { limit: 5 })))
+          audit = ideaNoveltyAudit(queries, searches as IdeaAuditSearchResult[])
+        } catch {
+          sendJson(res, 502, bffError('connector_unavailable', 'novelty audit connector unavailable'))
+          return
+        }
+        const opSession = operatorSession(options.dataDir, options.principal ?? '')
+        let preparedResponse: Response
+        try {
+          preparedResponse = await fetch(`${endpoint}/v2/projects/${encodeURIComponent(projectId)}/idea-gate`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json',
+              ...upstreamAuthHeaders,
+              'x-principal-id': opSession.principal_id,
+              'x-principal-role': role,
+              'x-principal-session': opSession.session_id,
+            },
+            body: JSON.stringify({
+              idea_id: ideaId,
+              expected_project_revision: projectRevision,
+              expected_idea_version: ideaVersion,
+              novelty_audit: audit,
+            }),
+          })
+        } catch {
+          sendJson(res, 502, bffError('kernel_unreachable', 'research kernel unavailable'))
+          return
+        }
+        const prepared = await preparedResponse.json().catch(() => null) as Record<string, unknown> | null
+        if (!preparedResponse.ok || prepared === null) {
+          const envelope = prepared?.error !== null && typeof prepared?.error === 'object'
+            ? prepared.error as Record<string, unknown>
+            : {}
+          const candidate = envelope.code
+          const code = typeof candidate === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(candidate)
+            ? candidate
+            : 'idea_selection_failed'
+          sendJson(res, preparedResponse.status >= 400 && preparedResponse.status < 500 ? preparedResponse.status : 502,
+            bffError(code, 'selected IdeaCard could not enter the Idea Gate'))
+          return
+        }
+        sendJson(res, 200, prepared)
+        return
+      }
+
+      // Agent-authored Contract draft from the frozen, Human-approved Idea.
+      // The browser performs one BFF write; the Kernel owns the atomic
+      // Contract + CONTRACT_PENDING + payload-bound Contract Gate handoff.
+      if (method === 'POST' && url.pathname === '/api/chat/contracts/draft') {
+        if (options.token !== null) {
+          const auth = req.headers.authorization
+          const match = typeof auth === 'string' ? /^Bearer\s+(.+)$/i.exec(auth) : null
+          if (!tokenMatches(match?.[1], options.token)) {
+            sendJson(res, 401, bffError('unauthorized', 'unauthorized'))
+            return
+          }
+        }
+        if (!verifyCsrfToken(csrfHeader(req), csrfToken) || !isAllowedOrigin(req.headers.origin, req.headers.host)) {
+          sendJson(res, 403, bffError('csrf_rejected', 'missing, invalid or cross-origin CSRF request'))
+          return
+        }
+        const read = await readBody(req)
+        if (read.tooLarge) {
+          sendJson(res, 413, bffError('payload_too_large', 'payload too large'))
+          return
+        }
+        let projectId = ''
+        try {
+          const parsed = JSON.parse(read.body) as { project_id?: unknown }
+          projectId = typeof parsed.project_id === 'string' ? parsed.project_id.trim() : ''
+        } catch {
+          sendJson(res, 400, bffError('invalid_json', 'bad request'))
+          return
+        }
+        if (projectId === '' || projectId.length > 256) {
+          sendJson(res, 422, bffError('validation_error', 'project_id is required'))
+          return
+        }
+        const role = await projectRole(projectId)
+        if (role === null) {
+          sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
+          return
+        }
+        if (role !== 'pi' && role !== 'operator') {
+          sendJson(res, 403, bffError('role_forbidden', 'role forbidden'))
+          return
+        }
+        const [projectionResponse, ideasResponse] = await Promise.all([
+          fetch(`${endpoint}/v2/projects/${encodeURIComponent(projectId)}/projection`, {
+            headers: { accept: 'application/json', ...upstreamAuthHeaders },
+          }).catch(() => null),
+          fetch(`${endpoint}/v1/projects/${encodeURIComponent(projectId)}/ideas`, {
+            headers: { accept: 'application/json', ...upstreamAuthHeaders },
+          }).catch(() => null),
+        ])
+        if (projectionResponse === null || ideasResponse === null || !projectionResponse.ok || !ideasResponse.ok) {
+          sendJson(res, 404, bffError('project_not_found', 'project not found or access denied'))
+          return
+        }
+        const projection = await projectionResponse.json() as {
+          project?: { revision?: unknown; status?: unknown }
+          next_actions_v2?: Array<Record<string, unknown>>
+        }
+        const ideas = await ideasResponse.json() as unknown
+        const projectRevision = projection.project?.revision
+        const ready = (projection.next_actions_v2 ?? []).some(action => action.code === 'contract_register'
+          && action.state === 'ready' && action.required === true && action.required_by === 'agent')
+        const approved = Array.isArray(ideas)
+          ? ideas.filter((idea): idea is Record<string, unknown> => typeof idea === 'object' && idea !== null && idea.status === 'approved')
+          : []
+        const idea = approved.length === 1 ? approved[0]! : null
+        const mve = idea?.minimum_viable_experiment
+        if (!ready || (projection.project?.status !== 'IDEA_APPROVED' && projection.project?.status !== 'CONTRACT_PENDING')
+          || typeof projectRevision !== 'number' || !Number.isInteger(projectRevision)
+          || idea === null || idea.project_id !== projectId || typeof idea.idea_id !== 'string'
+          || typeof idea.version !== 'number' || !Number.isInteger(idea.version)
+          || typeof idea.exact_delta !== 'string' || idea.exact_delta.trim() === ''
+          || typeof mve !== 'object' || mve === null
+          || typeof (mve as Record<string, unknown>).dataset !== 'string' || String((mve as Record<string, unknown>).dataset).trim() === ''
+          || typeof (mve as Record<string, unknown>).baseline !== 'string' || String((mve as Record<string, unknown>).baseline).trim() === ''
+          || typeof (mve as Record<string, unknown>).primary_metric !== 'string' || String((mve as Record<string, unknown>).primary_metric).trim() === ''
+          || typeof (mve as Record<string, unknown>).estimated_gpu_hours !== 'number'
+          || !Number.isFinite((mve as Record<string, unknown>).estimated_gpu_hours)) {
+          sendJson(res, 409, bffError('contract_draft_not_ready', 'the approved idea is not ready for Contract drafting'))
+          return
+        }
+        const contract = contractDraftFromIdea(idea as unknown as ContractIdeaCandidate)
+        const opSession = operatorSession(options.dataDir, options.principal ?? '')
+        let preparedResponse: Response
+        try {
+          preparedResponse = await fetch(`${endpoint}/v2/projects/${encodeURIComponent(projectId)}/contract-gate`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json',
+              ...upstreamAuthHeaders,
+              'x-principal-id': opSession.principal_id,
+              'x-principal-role': role,
+              'x-principal-session': opSession.session_id,
+            },
+            body: JSON.stringify({
+              idea_id: idea.idea_id,
+              expected_project_revision: projectRevision,
+              expected_idea_version: idea.version,
+              contract,
+            }),
+          })
+        } catch {
+          sendJson(res, 502, bffError('kernel_unreachable', 'research kernel unavailable'))
+          return
+        }
+        const prepared = await preparedResponse.json().catch(() => null) as Record<string, unknown> | null
+        if (!preparedResponse.ok || prepared === null) {
+          const envelope = prepared?.error !== null && typeof prepared?.error === 'object'
+            ? prepared.error as Record<string, unknown>
+            : {}
+          const candidate = envelope.code
+          const code = typeof candidate === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(candidate)
+            ? candidate
+            : 'contract_draft_failed'
+          sendJson(res, preparedResponse.status >= 400 && preparedResponse.status < 500 ? preparedResponse.status : 502,
+            bffError(code, 'Experiment Contract draft could not enter the Contract Gate'))
+          return
+        }
+        sendJson(res, 200, prepared)
+        return
+      }
+
       // Chat /survey: the browser client cannot run the scholar
       // connectors (OpenAlex/Crossref/arXiv fetchers), so the standalone
       // server performs the multi-source search + corpus snapshot on its
@@ -1616,7 +2176,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         // it does for /v2/* — server-derived, never client-supplied; the
         // kernel route falls back to the body override for internal callers
         // and NULL when neither is present.
-        if (options.principal !== null && method === 'POST' && /^\/v1\/projects\/[^/]+\/jobs$/.test(url.pathname)) {
+        if (options.principal !== null && method === 'POST' && /^\/v1\/projects\/[^/]+\/(?:jobs|baseline-runs)$/.test(url.pathname)) {
           proxyHeaders['x-principal-id'] = options.principal
         }
         // Global runner target configuration is a PI/operator administration

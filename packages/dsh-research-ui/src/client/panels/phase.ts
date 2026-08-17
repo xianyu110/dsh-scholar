@@ -1,10 +1,11 @@
 import type { Projection } from '../types'
-import { api } from '../api'
+import { api, apiResult } from '../api'
 import { t } from '../i18n/index'
 import { openContractDetailModal, openIdeaDetailModal } from '../modals/detail'
 import { state, tabSave } from '../state'
 import { phasePipeline, copyText, el, fmtId, openContextMenu } from '../ui'
 import { renderNextActionSection } from './overview'
+import { isTabVisible } from '../nav'
 /* ─────────────────────────── tab renderers ─────────────────────────── */
 
 export async function renderPhase(body: HTMLElement, p: Projection, projectId?: string): Promise<void> {
@@ -74,7 +75,7 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
   jump(t('overview', 'overview.jump.runs'), 'runs')
   jump(t('overview', 'overview.jump.artifacts'), 'artifacts')
   jump(t('overview', 'overview.jump.evidence'), 'evidence')
-  jump(t('overview', 'overview.jump.budget'), 'budget')
+  if (isTabVisible('budget')) jump(t('overview', 'overview.jump.budget'), 'budget')
   body.appendChild(quick)
   // dsh-web data panel: budget usage of this project.
   const budget = p.budget
@@ -99,19 +100,24 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
     }
     addBar(t('overview', 'overview.modelLabel'), budget.model_cost_usd ?? 0, maxUsd, '$')
     addBar(t('overview', 'overview.gpuLabel'), budget.gpu_hours ?? 0, maxGpu, 'h')
-    // dsh-web depth: click the usage card to open the Budget tab.
-    bcard.style.cursor = 'pointer'
-    bcard.title = t('overview', 'overview.budgetBarTitle')
-    bcard.onclick = () => {
-      state.activeTab = 'budget'
-      tabSave()
-      state.rerender()
+    // The summary remains visible for governance, but the diagnostic Budget
+    // page is only interactive when the user explicitly enabled it.
+    if (isTabVisible('budget')) {
+      bcard.style.cursor = 'pointer'
+      bcard.title = t('overview', 'overview.budgetBarTitle')
+      bcard.onclick = () => {
+        state.activeTab = 'budget'
+        tabSave()
+        state.rerender()
+      }
     }
     body.appendChild(bcard)
   }
   // dsh-web data panel: IdeaCards of this project.
   if (projectId !== undefined && (p.counts?.ideas ?? 0) > 0) {
     const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(projectId)}/ideas`)) ?? []
+    const canSelectIdea = status === 'SURVEYING' && (p.next_actions_v2 ?? []).some(action =>
+      action.code === 'idea_select' && action.state === 'ready' && action.required_by === 'human')
     body.appendChild(el('div', 'section-label', t('overview', 'overview.ideaCards', { count: String(ideas.length) })))
     const card = el('div', 'card')
     for (const idea of ideas.slice(0, 5)) {
@@ -142,6 +148,28 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
         if (root != null) openIdeaDetailModal(root, idea)
       }
       row.appendChild(ideaBtn)
+      if (canSelectIdea && idea.status === 'proposed' && typeof idea.idea_id === 'string') {
+        const selectBtn = el('button', 'hbtn', t('overview', 'overview.ideaSelect'))
+        selectBtn.style.cssText = 'padding:0 8px;font-size:9px;flex-shrink:0'
+        selectBtn.onclick = async event => {
+          event.stopPropagation()
+          selectBtn.disabled = true
+          selectBtn.textContent = t('overview', 'overview.ideaSelecting')
+          const result = await apiResult(`/api/chat/ideas/select`, {
+            method: 'POST',
+            body: JSON.stringify({ project_id: projectId, idea_id: idea.idea_id }),
+          })
+          if (!result.ok) {
+            selectBtn.disabled = false
+            selectBtn.textContent = t('overview', 'overview.ideaSelectFailed', { code: result.error.code ?? `http_${result.status}` })
+            return
+          }
+          state.activeTab = 'gates'
+          tabSave()
+          state.rerender()
+        }
+        row.appendChild(selectBtn)
+      }
       // dsh-web context menu: details / copy id.
       row.oncontextmenu = (event) => {
         event.preventDefault()
@@ -176,7 +204,10 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
       bodyEl.style.cssText = 'min-width:0'
       const cRecord = c as Record<string, Record<string, unknown> | unknown>
       const methods = (typeof cRecord.methods === 'object' && cRecord.methods !== null ? cRecord.methods : {}) as Record<string, unknown>
-      const title = el('div', '', `${String(methods.baseline ?? '?')} vs ${String(methods.treatment ?? '?')}${typeof cRecord.version === 'number' ? ` · v${cRecord.version}` : ''}`)
+      const title = el('div', '', `${t('overview', 'overview.contractComparison', {
+        baseline: String(methods.baseline ?? '?'),
+        treatment: String(methods.treatment ?? '?'),
+      })}${typeof cRecord.version === 'number' ? ` · v${cRecord.version}` : ''}`)
       title.style.cssText = 'font-size:11.5px;color:var(--text)'
       const id = el('div', 'muted mono', fmtId(String(c.contract_id ?? '')))
       id.style.cssText = 'font-size:9px'
@@ -245,4 +276,3 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
 
 /** Phase tab audit history: newest-10 by default, toggle reveals all. */
 export let phaseHistoryAll = false
-

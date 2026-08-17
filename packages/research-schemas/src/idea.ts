@@ -34,6 +34,35 @@ export const NoveltyAudit = z.object({
 })
 export type NoveltyAudit = z.infer<typeof NoveltyAudit>
 
+/**
+ * Model-produced IdeaCard body before Kernel identity/provenance fields are
+ * attached. Keeping this schema separate makes the model boundary explicit:
+ * the model may propose scientific content, but it cannot choose project,
+ * corpus, status, version, ids or timestamps.
+ */
+export const IdeaDraft = z.object({
+  title: z.string().min(1).max(300),
+  hypothesis: z.string().min(1).max(4_000),
+  scientific_gap: z.object({
+    claims: z.array(z.string().min(1).max(1_000)).min(1).max(12),
+    statement: z.string().min(1).max(4_000),
+  }).strict(),
+  nearest_prior_works: z.array(NearestPriorWork).min(1).max(12),
+  exact_delta: z.string().min(1).max(4_000),
+  falsification: z.object({
+    observation: z.string().min(1).max(4_000),
+  }).strict(),
+  minimum_viable_experiment: MveDefinition,
+  scores: z.object({
+    feasibility: z.number().int().min(1).max(5),
+    information_gain: z.number().int().min(1).max(5),
+    reproducibility: z.number().int().min(1).max(5),
+    cost: z.number().int().min(1).max(5),
+  }).strict(),
+  risk_notes: z.string().max(4_000).default(''),
+}).strict()
+export type IdeaDraft = z.infer<typeof IdeaDraft>
+
 /** A structured, auditable candidate idea. */
 export const IdeaCard = z.object({
   idea_id: z.string().regex(/^idea_[a-z0-9_]+$/),

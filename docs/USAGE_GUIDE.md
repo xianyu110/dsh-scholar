@@ -10,13 +10,13 @@ bash scripts/start-standalone-ui.sh
 
 访问 http://127.0.0.1:18610，输入启动脚本打印的 Token。完整工作台仍由 standalone 提供；安装根插件后，DSH 会话同时提供 `dsh Scholar` 页签和默认 `Alt+Shift+S` 新页面快捷键。打开页面后可以在 Settings → Language 选择中文或 English。没有手动选择时，系统先读 dsh.locale，再匹配浏览器语言，最后使用中文。切换语言不会翻译项目名、论文、命令输出和 TeX 原始错误。
 
-在 DSH 自带 Chat 里可以直接用自然语言说“创建研究项目 OCR 复现”“继续调研”“现在到哪一步了”或“下一步做什么”，无需先记住 slash command。Harness 会调用 Scholar 的受控会话入口：没有关联项目时，整句肯定创建指令与原文中的完整项目名会直接创建 name-only Init 并绑定当前 session；缺名称会在对话中追问，普通未关联对话才把 `/new <项目名>` 作为可选快捷入口。项目进入 Brief 收集时，每个问题直接复用 DSH 原生提问输入区逐题出现，可自由输入、跳过或选“暂时未知”，紧凑 `dsh Scholar` 页签不会再出现第二个输入框；全部答完仍需打开完整 Scholar 由 PI 核对并确认 Brief。有项目时读取同一 session 的权威状态，明确回显识别到的研究动作、是否已执行、最新下一步与阻断。名称子串、疑问、否定、歧义不会创建；当前只有已就绪且用户以“开始/继续/执行”等正向动作词明确要求的调研快照可由这次对话直接执行。Gate、Brief 确认、外部研究采纳和发布决定仍需在 Scholar 中由人完成，生成想法等其他写动作会生成可编辑的 slash command。
+在 DSH 自带 Chat 里可以直接用自然语言说“创建研究项目 OCR 复现”“继续调研”“现在到哪一步了”或“下一步做什么”，无需先记住 slash command。Harness 会调用 Scholar 的受控会话入口：没有关联项目时，整句肯定创建指令与原文中的完整项目名会直接创建 name-only Init 并绑定当前 session；缺名称会在对话中追问，普通未关联对话才把 `/new <项目名>` 作为可选快捷入口。项目进入 Brief 收集时，每个问题直接复用 DSH 原生提问输入区逐题出现，可自由输入、跳过或选“暂时未知”，紧凑 `dsh Scholar` 页签不会再出现第二个输入框；全部答完仍需打开完整 Scholar 由 PI 核对并确认 Brief。有项目时读取同一 session 的权威状态，明确回显识别到的研究动作、是否已执行、最新下一步与阻断。名称子串、疑问、否定、歧义不会创建；当前只有已就绪且用户以“开始/继续/执行”等正向动作词明确要求的调研快照可由这次对话直接执行。Gate、Brief 确认、外部研究采纳和发布决定仍需在 Scholar 中由人完成；其他写动作只生成可编辑的直接命令，不伪装成已执行。
 
 会话的 `dsh Scholar` 页签是面向当前 DSH session 的紧凑入口，不再把完整 Scholar 工作台压缩进 DSH 主区。未绑定时可直接从同一批有权限项目中选择并绑定，或只填写项目名创建 name-only 项目并绑定；已绑定时只显示阶段条、每阶段可见状态、revision、下一步、待审批和任务统计。完整工作台通过页签按钮或 `Alt+Shift+S` 在新页面打开。两处复用同一个 `~/.dsh/research-kernel` 权威数据目录和稳定本机操作员身份；`~/.dsh-scholar-standalone/research-ui-standalone` 只保存浏览器 Token、会话和显示偏好，不得包含第二个业务数据库。
 
 ### 1.1 把页面停靠在右侧或底部
 
-选择项目后，Chat、Overview、Approvals、Runs、Artifacts、Evidence、Budget、Manuscript、Run Terminal、Trajectory、Topology、Workspace 和 Interactive Terminal 等每个当前页面标题区都有“停靠到右侧”和“停靠到底部”。Dock 顶部的页面选择器可以直接换页，“打开到主区”把当前 Dock 页面恢复为全页，“关闭”只关闭 Dock，不关闭项目。
+选择项目后，Chat、Overview、Approvals、Runs、Artifacts、Evidence、Manuscript、Run Terminal、Trajectory、Topology、Workspace 和 Interactive Terminal 等每个当前页面标题区都有“停靠到右侧”和“停靠到底部”。Budget 是默认隐藏的可选运维页，先在 Settings → Preferences 启用后才进入导航与 Dock 页面选择器。Dock 顶部的页面选择器可以直接换页，“打开到主区”把当前 Dock 页面恢复为全页，“关闭”只关闭 Dock，不关闭项目。
 
 同一页面只会存在一个活实例：把正在主区显示的 Chat/Terminal/Workspace/Manuscript 放入 Dock 时，主区自动切换到其他安全页面；从 Dock 打开到主区时也不会复制第二份实例。右侧和底部之间切换的是同一个已挂载页面，因此草稿、选中文件、滚动位置和实时连接应保持。主区与 Dock 之间移动流式页面时，会从最后消费的序号安全重连。
 
@@ -42,7 +42,7 @@ Upload 可以创建新项目或选择有权限的现有项目。采用前材料�
 
 Chat 对话属于当前项目。切换项目时，会话列表、当前会话、消息、草稿、引用回复和附件也随项目切换；返回原项目才恢复原对话。项目 A 中仍在执行的命令或上传即使晚于切换完成，也只能回写 A，不能出现在项目 B。当前修复状态以 hardening 的 `CHAT-SCOPE-01` 为准。
 
-Chat 同时支持普通自然语言和一级 slash command。直接输入“现在进展怎么样”“看看审批”“有哪些想法”“查看运行任务”会按当前项目投影路由到对应只读操作；明确输入“调研 <主题>”可在 `survey_run` ready 时执行 survey。显式 `/status`、`/gates`、`/ideas`、`/jobs`、`/survey ...` 仍是完全确定性的高级入口。在 composer 内输入 `/` 会原位打开补全并保持光标连续；从页面非编辑区域直接按 `/` 则跳到 composer，并把光标放在预填斜杠之后。Init Grill 尚有当前问题时，普通文本仍回答该问题；Brief confirmed 后普通文本进入阶段感知的自由对话，每次回答附当前阶段、下一步和阻断原因。
+Chat 同时支持普通自然语言和一级 slash command。直接输入“现在进展怎么样”“看看审批”“有哪些想法”“查看运行任务”会按当前项目投影路由到对应只读操作；明确输入“调研 <主题>”可在 `survey_run` ready 时执行 survey。Brief confirmed 后的其他普通文本通过 DSH 当前已配置的模型自由讨论研究问题，模型只返回对话文本，页面始终追加 Kernel 权威阶段、下一步和阻断原因；DSH 模型暂不可用时仍返回确定性阶段引导。显式 `/status`、`/gates`、`/ideas`、`/ideas generate 3`、`/ideas select <idea_id>`、`/jobs`、`/survey ...` 是确定性高级入口。在 composer 内输入 `/` 会原位打开补全并保持光标连续；从页面非编辑区域直接按 `/` 则跳到 composer，并把光标放在预填斜杠之后。Init Grill 尚有当前问题时，普通文本仍回答该问题。
 
 用户明确输入“继续”“推进”或“执行下一步”时，Scholar 只会执行当前权威投影已经 ready 且无需补参数的动作；当前可自动进入 `/write`、`/review` 和 `/release-bundle`。要求实验、复现等仍缺必要参数时，页面给出可编辑 slash 建议而不猜参数。Gate 决策、Brief 确认、Intake adoption 和 Release 决策始终只解释并引导人工处理；blocked、权限不足或歧义输入零副作用。对话和显式 slash 最终调用同一个 canonical operation，因此状态、权限和审计语义一致。
 
@@ -63,11 +63,14 @@ Chat 输入框支持附件按钮、拖拽和粘贴。一次可以给出多篇论
 ~~~text
 /survey "temporal action localization under domain shift"
 /ideas
+/ideas generate 3
 ~~~
 
 Scope 审批后，Overview 的 `survey_run` 主 CTA 会打开当前项目 Chat，并从 Brief problem 预填 `/survey ...`；检查或修改 query 后按 Enter 才开始外部检索。它不是 Runner Job，因此不会把你带到空的 Runs 列表。成功后 Corpus Snapshot 与项目进入 SURVEYING 一起提交，刷新后的主 CTA 变为 `idea_generate`。
 
 SURVEYING 是阶段码，不是“当前有调研任务正在跑”。在快照已冻结且下一步为 `idea_generate` 时，中文页面显示“调研已就绪”；Runs 仍可以是 0，因为这里只记录实验 Job/Run。此时 Runs 空态会说明“调研已完成，尚未创建实验运行”，点击“前往总览”回到权威 NextAction。页面不会为了填充 Runs 而伪造调研任务。
+
+`/ideas` 只查看现有 IdeaCard；它在空列表时不会生成内容。用户直接说“生成几个 idea，用来进行研究”或输入 `/ideas generate 3`，仅当权威 NextAction 精确为 `idea_generate/ready/agent` 且存在非空 frozen Corpus Snapshot 时，Scholar 才调用 DSH 已配置模型生成 1–5 个结构化候选，并以 project revision CAS 和 corpus provenance 一次性写入。数量不符、字段不完整、重复标题、虚构 corpus paper id、模型不可用或 revision 竞争均整批零写。生成后 NextAction 变为 Human `idea_select`；在 Overview 点击某张卡的“选择并审计”，或输入 `/ideas select <idea_id>`，会对该候选执行 connector counter-search，并原子保存 NoveltyAudit、进入 IDEATING、创建绑定该卡的 pending Idea Gate。系统不会自动选择 winner 或批准 Gate；下一步由 PI 在审批页决定。
 
 Overview 展示阶段流水线、Brief（问题与主指标）、NextAction 卡、候选 Idea（点击/双击/右键打开详情弹窗，内含 hypothesis、exact delta、falsification、MVE、novelty audit 与评分）、最近 Contract、预算摘要和审计历史（默认最近 10 条，可展开全部）。Corpus 目前只在项目详情弹窗与 Budget 面板以快照计数展示，最近邻（nearest_prior_works）尚未在 UI 展示。调研来源失败在 connector 层以 `source_status` 记录（api-contracts），不会把部分失败伪装成完整覆盖；当前聊天输出只汇总成功去重后的数量，不逐来源列出失败。选择 Idea 后在 Approvals 决定 Idea Gate。
 
@@ -199,7 +202,7 @@ Review 检查数字、Claim 状态、引用定位、Artifact hash、TeX 编译�
 
 ## 11. Budget、Settings 与下一步
 
-Budget 页面显示模型费用、GPU 小时与 API 请求用量，以及项目内容计数（corpus 快照/Idea/Contract/Claim/Evidence/Artifact）与详情弹窗中的约束和策略（数据集、并发上限、执行 profile、网络与完整性要求；内核记账的存储用量字段当前未在 UI 展示）。超过硬上限时项目进入 BLOCKED_GATE，正在运行的策略按 Job contract 安全停止或完成；只有 Human Budget Gate 可恢复到 payload 允许的状态。
+Budget 页面默认隐藏，可在 Settings → Preferences 的“显示预算页面”启用；该浏览器偏好只控制页面可见性，不关闭预算记账或硬限制。启用后页面显示模型费用、GPU 小时与 API 请求用量，以及项目内容计数（corpus 快照/Idea/Contract/Claim/Evidence/Artifact）与详情弹窗中的约束和策略（数据集、并发上限、执行 profile、网络与完整性要求；内核记账的存储用量字段当前未在 UI 展示）。超过硬上限时项目进入 BLOCKED_GATE，正在运行的策略按 Job contract 安全停止或完成；只有 Human Budget Gate 可恢复到 payload 允许的状态，页面隐藏时仍可从 Overview/Approvals 处理。
 
 Overview 顶部以结构化卡片（GUIDE-01 `next_actions_v2`）展示下一步：每张卡含 code 徽标、三态标记（ready 可执行 / blocked 受阻 / done 已完成——done 灰显、blocked 因缺失前置条件而禁用、ready 高亮）、原因、需要 Human/Agent/Runner 徽标（内核 `required_by` 未声明时不显示）、缺失前置条件列表（点击受阻卡展开）、阻断说明和进入可完成动作界面的按钮（chat/gates/runs/evidence/manuscript/budget 直达，ideas/contracts/release 收敛到总览）。其中 `survey_run` 打开项目 Chat 并预填命令，不自动发送。标签优先按字典翻译，未登记 code 原样显示内核 label；未知状态动作（code='unknown'）只读，不提供猜测的执行按钮。旧内核的 `next_actions: string[]` 仍以列表形式兼容显示。
 

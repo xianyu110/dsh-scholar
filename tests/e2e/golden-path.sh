@@ -4,8 +4,8 @@
 #
 #   /new (DRAFT) → Scope Gate approved (SCOPED) → survey
 #   (CorpusSnapshot) → idea + novelty audit (IDEATING) → Idea Gate approved
-#   (IDEA_APPROVED) → baseline job via runner (BASELINE_REPRO) → contract
-#   (CONTRACT_APPROVED) → formal runs → evidence + claim verify
+#   (IDEA_APPROVED) → Contract Gate (CONTRACT_APPROVED) → baseline job
+#   via runner (BASELINE_REPRO) → formal runs → evidence + claim verify
 #   (EVIDENCE_READY) → manuscript + review (WRITING/REVIEWING) → release
 #   bundle (RELEASE_READY, gate unapproved).
 #
@@ -82,9 +82,19 @@ IGATE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type"
 api -X POST "http://127.0.0.1:$PORT/v1/gates/$IGATE/decisions" -d '{"actor":"human-pi","decision":"approved"}' > /dev/null
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
 [[ "$STATUS" == "IDEA_APPROVED" ]] && ok "Idea Gate approved → IDEA_APPROVED" || bad "expected IDEA_APPROVED got $STATUS"
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"BASELINE_REPRO","expected_revision":4}' > /dev/null
 
-say "5. baseline reproduction via isolated runner → RunManifest with hashes"
+say "5. Experiment Contract → Contract Gate (frozen)"
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
+CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"'$IDEA'","data":{"dataset_id":"thumos14","version":"v2","split":"official"},"methods":{"baseline":"baseline_b","treatment":"method_a"},"metrics":{"primary":"mAP@0.5","secondary":["accuracy"]},"seeds":[11,23,47],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"ablations":["component_x"],"stop_conditions":{"max_gpu_hours":48,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | jqfield contract_id)
+CGATE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"contract","title":"Contract Gate","payload":{"contract_id":"'$CONTRACT'"}}' | jqfield gate_id)
+CDEC=$(api -X POST "http://127.0.0.1:$PORT/v1/gates/$CGATE/decisions" -d '{"actor":"human-pi","decision":"approved","diff":"v1"}' | jqfield decision.decision_id)
+STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
+[[ "$STATUS" == "CONTRACT_APPROVED" ]] && ok "contract $CONTRACT approved (decision $CDEC) → CONTRACT_APPROVED" || bad "expected CONTRACT_APPROVED got $STATUS"
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$REV}" > /dev/null
+
+say "6. baseline reproduction via isolated runner → RunManifest with hashes"
 BJOB=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"baseline-1","kind":"smoke","payload":{"script":"echo \"{\\\"metric\\\":\\\"mAP@0.5\\\",\\\"value\\\":58.4,\\\"seed\\\":0}\"","code_commit":"abc123","data_hash":"sha256:data1"}}' | jqfield job_id)
 for _ in $(seq 1 80); do
   BS=$(api "http://127.0.0.1:$PORT/v1/jobs/$BJOB" | jqfield status)
@@ -93,13 +103,6 @@ for _ in $(seq 1 80); do
 done
 MANIFEST=$(api "http://127.0.0.1:$PORT/v1/jobs/$BJOB" | jqfield "run_manifest.log_artifact")
 [[ "$BS" == "succeeded" && "$MANIFEST" == sha256:* ]] && ok "baseline reproduced; log artifact $MANIFEST" || bad "baseline job $BS manifest=$MANIFEST"
-
-say "6. Experiment Contract → Contract Gate (frozen)"
-CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"'$IDEA'","data":{"dataset_id":"thumos14","version":"v2","split":"official"},"methods":{"baseline":"baseline_b","treatment":"method_a"},"metrics":{"primary":"mAP@0.5","secondary":["accuracy"]},"seeds":[11,23,47],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"ablations":["component_x"],"stop_conditions":{"max_gpu_hours":48,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | jqfield contract_id)
-CGATE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"contract","title":"Contract Gate","payload":{"contract_id":"'$CONTRACT'"}}' | jqfield gate_id)
-CDEC=$(api -X POST "http://127.0.0.1:$PORT/v1/gates/$CGATE/decisions" -d '{"actor":"human-pi","decision":"approved","diff":"v1"}' | jqfield decision.decision_id)
-STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
-[[ "$STATUS" == "CONTRACT_APPROVED" ]] && ok "contract $CONTRACT approved (decision $CDEC) → CONTRACT_APPROVED" || bad "expected CONTRACT_APPROVED got $STATUS"
 REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"EXPERIMENTING\",\"expected_revision\":$REV}" > /dev/null
 
@@ -126,7 +129,8 @@ EVID=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/evidence" -d "{\"so
 CLAIM=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/claims" -d '{"statement":"Method A improves mAP@0.5 over Baseline B on THUMOS14","scope":{"dataset":"thumos14_v2","split":"official_test"}}' | jqfield claim_id)
 CSTATUS=$(api -X POST "http://127.0.0.1:$PORT/v1/claims/verify" -d "{\"claim_id\":\"$CLAIM\",\"evidence_ids\":[\"$EVID\"],\"reason\":\"5-seed bootstrap CI excludes zero\"}" | jqfield status)
 [[ "$CSTATUS" == "supported" ]] && ok "claim $CLAIM verified: $CSTATUS" || bad "claim status $CSTATUS"
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"EVIDENCE_READY","expected_revision":7}' > /dev/null
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"EVIDENCE_READY\",\"expected_revision\":$REV}" > /dev/null
 
 say "8.5 deterministic analysis (E5): multi-seed mean/CI/effect size"
 ANALYSIS=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/analysis" -d "{\"contract_id\":\"$CONTRACT\",\"metric\":\"mAP@0.5\"}" | jqfield artifact_id)
@@ -145,8 +149,10 @@ REVIEW=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscript-review" | jqfi
 BIBTEX=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/manuscripts/build" -d '{"format":"markdown","include_limitations":true}' | jqfield bibtex)
 [[ -n "$DRAFT" && "$REVIEW" == "true" ]] && ok "manuscript $DRAFT built; reviewer checks PASS" || bad "draft=$DRAFT review=$REVIEW"
 [[ "$BIBTEX" == *"@article{"* ]] && ok "BibTeX generated with corpus-resolved citations" || bad "bibtex missing" 
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"WRITING","expected_revision":8}' > /dev/null
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d '{"to":"REVIEWING","expected_revision":9}' > /dev/null
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"WRITING\",\"expected_revision\":$REV}" > /dev/null
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"REVIEWING\",\"expected_revision\":$REV}" > /dev/null
 
 say "10. release bundle stays unapproved; human Release Gate"
 BUNDLE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/release-bundle" | jqfield bundle_id)

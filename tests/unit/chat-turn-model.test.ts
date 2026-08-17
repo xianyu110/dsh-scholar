@@ -27,11 +27,38 @@ describe('project-scoped natural Chat turn planning', () => {
     })).toMatchObject({ kind: 'conversation', suggestedCommand: '/survey temporal localization' })
   })
 
+  it('routes an explicit idea-generation request to the ready idea action instead of the read-only list', () => {
+    const ideating = {
+      project: { status: 'SURVEYING' },
+      next_actions_v2: [{
+        ...projection.next_actions_v2[0]!, code: 'idea_generate', label: 'Generate ideas', route: 'ideas',
+      }],
+    }
+    expect(planNaturalChatTurn('生成几个idea，用来进行研究', ideating)).toMatchObject({
+      kind: 'command', command: '/ideas generate 3', effect: 'agent-write', actionCode: 'idea_generate',
+    })
+    expect(planNaturalChatTurn('我想让你提出五个研究假设', ideating)).toMatchObject({
+      kind: 'command', command: '/ideas generate 5', effect: 'agent-write', actionCode: 'idea_generate',
+    })
+    expect(planNaturalChatTurn('不要生成 idea，只看看已有想法', ideating)).toMatchObject({
+      kind: 'command', command: '/ideas', effect: 'read',
+    })
+    const humanIdea = planNaturalChatTurn('生成几个idea', {
+      ...ideating,
+      next_actions_v2: [{ ...ideating.next_actions_v2[0]!, required_by: 'human' }],
+    })
+    expect(humanIdea).toMatchObject({ kind: 'conversation', suggestedCommand: '/ideas generate 3' })
+    expect(humanIdea).not.toHaveProperty('command')
+  })
+
   it('never auto-executes human-only, ambiguous or parameter-incomplete requests', () => {
     expect(planNaturalChatTurn('帮我批准这个 gate', projection)).toMatchObject({ kind: 'conversation', effect: 'human-only' })
     expect(planNaturalChatTurn('确认这份 Brief', projection)).toMatchObject({ kind: 'conversation', effect: 'human-only' })
     expect(planNaturalChatTurn('采纳导入的研究材料', projection)).toMatchObject({ kind: 'conversation', effect: 'human-only' })
     expect(planNaturalChatTurn('运行实验', projection)).toMatchObject({ kind: 'conversation', suggestedCommand: '/run ' })
+    expect(planNaturalChatTurn('帮我准备并启动基线实验', projection)).toMatchObject({
+      kind: 'conversation', intentCode: 'baseline_reproduce', suggestedCommand: '/reproduce', effect: 'agent-write',
+    })
     expect(planNaturalChatTurn('我想讨论指标选择', projection)).toMatchObject({ kind: 'conversation', effect: 'none' })
   })
 
@@ -50,6 +77,21 @@ describe('project-scoped natural Chat turn planning', () => {
       ...writing,
       next_actions_v2: [{ ...writing.next_actions_v2[0]!, state: 'blocked', required: ['evidence'] }],
     })).toMatchObject({ kind: 'conversation', suggestedCommand: '/write' })
+  })
+
+  it('turns continue/contract requests into the ready contract draft command', () => {
+    const contract = {
+      project: { status: 'IDEA_APPROVED' },
+      next_actions_v2: [{
+        ...projection.next_actions_v2[0]!, code: 'contract_register', label: 'Draft contract', route: 'contracts',
+      }],
+    }
+    expect(planNaturalChatTurn('继续', contract)).toMatchObject({
+      kind: 'command', command: '/contract draft', effect: 'agent-write', actionCode: 'contract_register',
+    })
+    expect(planNaturalChatTurn('生成实验合同', contract)).toMatchObject({
+      kind: 'command', command: '/contract draft', effect: 'agent-write', actionCode: 'contract_register',
+    })
   })
 
   it('derives guidance from structured NextAction rather than status labels', () => {

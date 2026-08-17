@@ -15,7 +15,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
   ArtifactKind, ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision,
-  EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig,
+  EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig, NoveltyAudit,
   JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
   buildProjectId, getFixtureProfile, getRunnerProfile, randomId, resolveRunnerProfileId, runnerTargetConfigHash, validateConfig, RUNNER_PROFILE_IDS, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
@@ -27,6 +27,7 @@ import {
   type ProviderDescriptor, type ProviderCreateInput, type ProviderUpdateInput, type SecretRef,
   type RunnerTargetCreateInput, type RunnerTargetDescriptor, type RunnerTargetUpdateInput,
   type ProjectModelBinding, type ProjectModelBindingInput, type BindingPurpose,
+  type IdeaDraft,
   type UploadSession, type UploadSessionView, type ChunkAppendResult, type UploadSessionBeginInput,
   parseContentRange,
   CHUNKED_UPLOAD_DEFAULT_CHUNK_BYTES, CHUNKED_UPLOAD_MAX_CHUNK_BYTES,
@@ -47,7 +48,7 @@ import { normalizeWorkspacePath, openWorkspaceStore, WorkspaceError, type Worksp
 import { TexWorkspaceFacade, texInfoToWorkspaceInfo } from './tex-facade.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
-import { IMAGES_LOCK } from './images-lock.js'
+import { getLockedDigest, IMAGES_LOCK } from './images-lock.js'
 import { STAGED_UPLOAD_TTL_MS as STAGED_TTL, UPLOAD_MAX_FILE_BYTES as UPLOAD_LIMIT_BYTES } from './upload-limits.js'
 import {
   INTAKE_DEFAULT_TTL_MS, INTAKE_STAGED_TTL_MS, INTAKE_DDL, GRILL_TAXONOMY_VERSION, GRILL_QUESTION_REVISION,
@@ -672,7 +673,7 @@ function eventFromRow(row: OutboxEventRow): KernelEvent {
 const GATE_APPROVAL_TRANSITION: Record<GateType, { from: ProjectStatus; to: ProjectStatus }> = {
   scope: { from: 'DRAFT', to: 'SCOPED' },
   idea: { from: 'IDEATING', to: 'IDEA_APPROVED' },
-  contract: { from: 'BASELINE_REPRO', to: 'CONTRACT_APPROVED' },
+  contract: { from: 'CONTRACT_PENDING', to: 'CONTRACT_APPROVED' },
   budget: { from: 'BLOCKED_GATE', to: 'EXPERIMENTING' }, // resume: caller pins target in payload
   release: { from: 'RELEASE_READY', to: 'RELEASED' },
 }
@@ -2209,6 +2210,7 @@ export class ResearchKernel {
                   `idea ${ideaId} references corpus snapshot ${corpusSnapshotId} of project ${snapshot.project_id}, not gate project ${gate.project_id} (cross-project corpus binding is rejected)`)
               }
             }
+            if (card !== undefined) this.approveIdea(card.idea_id)
           }
           if (project.status === mapping.from) {
             project = this.gateTransition(project.project_id, mapping.to, mapping.from, gate.gate_id, `${gate.type} gate approved`)
@@ -4666,6 +4668,42 @@ export class ResearchKernel {
     return card
   }
 
+  /**
+   * Canonical Scholar Chat idea-generation write. The model only supplies
+   * validated IdeaDraft bodies; this Kernel method pins project revision and
+   * frozen-corpus provenance, then inserts the whole set atomically. It does
+   * not select a winner or advance the Human-governed Idea Gate.
+   */
+  createIdeasBatch(input: {
+    project_id: string
+    expected_project_revision: number
+    corpus_snapshot_id: string
+    ideas: IdeaDraft[]
+  }): IdeaCard[] {
+    const project = this.getProject(input.project_id)
+    if (project.revision !== input.expected_project_revision) {
+      throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_project_revision}, got ${project.revision}`)
+    }
+    if (project.status !== 'SURVEYING') {
+      throw new KernelError(409, 'idea_generation_not_ready', `idea generation requires SURVEYING, got ${project.status}`)
+    }
+    const snapshot = this.getCorpusSnapshot(input.corpus_snapshot_id)
+    if (snapshot.project_id !== input.project_id) {
+      throw new KernelError(422, 'idea_corpus_foreign', `corpus snapshot ${input.corpus_snapshot_id} belongs to another project`)
+    }
+    if (!snapshot.frozen) {
+      throw new KernelError(422, 'idea_corpus_not_frozen', `corpus snapshot ${input.corpus_snapshot_id} is not frozen`)
+    }
+    if (input.ideas.length < 1 || input.ideas.length > 5) {
+      throw new KernelError(422, 'idea_count_invalid', 'idea generation requires 1-5 drafts')
+    }
+    return withTransaction(this.db, () => input.ideas.map(draft => this.createIdea({
+      project_id: input.project_id,
+      corpus_snapshot_id: input.corpus_snapshot_id,
+      ...draft,
+    })))
+  }
+
   listIdeas(projectId: string): IdeaCard[] {
     const rows = this.db.prepare('SELECT * FROM ideas WHERE project_id = ? ORDER BY updated_at').all(projectId) as unknown as Array<{ body: string }>
     return rows.map(row => jsonParse(row.body, null as unknown as IdeaCard)).filter(Boolean)
@@ -4701,7 +4739,118 @@ export class ResearchKernel {
     return this.updateIdea(ideaId, { novelty_audit: audit })
   }
 
+  /**
+   * Human selection boundary between generated candidates and the Idea Gate.
+   * The connector-derived audit, phase transition and payload-bound pending
+   * Gate either all commit or all roll back.
+   */
+  prepareIdeaGate(input: {
+    project_id: string
+    idea_id: string
+    expected_project_revision: number
+    expected_idea_version: number
+    novelty_audit: NonNullable<IdeaCard['novelty_audit']>
+  }): { idea: IdeaCard; project: ResearchProject; gate: Gate } {
+    const audit = NoveltyAudit.parse(input.novelty_audit)
+    return withTransaction(this.db, () => {
+      const project = this.getProject(input.project_id)
+      if (project.revision !== input.expected_project_revision) {
+        throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_project_revision}, got ${project.revision}`)
+      }
+      if (project.status !== 'SURVEYING') {
+        throw new KernelError(409, 'idea_selection_not_ready', `idea selection requires SURVEYING, got ${project.status}`)
+      }
+      const card = this.getIdea(input.idea_id)
+      if (card.project_id !== input.project_id) {
+        throw new KernelError(422, 'idea_foreign', `idea ${input.idea_id} belongs to another project`)
+      }
+      if (card.version !== input.expected_idea_version) {
+        throw new KernelError(409, 'idea_revision_conflict', `expected idea version ${input.expected_idea_version}, got ${card.version}`)
+      }
+      if (card.status !== 'proposed') {
+        throw new KernelError(409, 'idea_not_proposed', `idea ${input.idea_id} is ${card.status}`)
+      }
+      const corpusSnapshotId = card.corpus_snapshot_id
+      if (corpusSnapshotId === null || corpusSnapshotId === '') {
+        throw new KernelError(422, 'idea_corpus_required', `idea ${input.idea_id} is not bound to a frozen corpus`)
+      }
+      const snapshot = this.getCorpusSnapshot(corpusSnapshotId)
+      if (snapshot.project_id !== input.project_id) {
+        throw new KernelError(422, 'idea_corpus_foreign', `idea ${input.idea_id} references another project's corpus`)
+      }
+      if (!snapshot.frozen) {
+        throw new KernelError(422, 'idea_corpus_not_frozen', `corpus snapshot ${corpusSnapshotId} is not frozen`)
+      }
+      if (this.listGates(input.project_id, 'pending').some(gate => gate.type === 'idea')) {
+        throw new KernelError(409, 'idea_gate_exists', 'a pending Idea Gate already exists')
+      }
+      const idea = this.updateIdeaNovelty(input.idea_id, audit)
+      const transitioned = this.transition(input.project_id, 'IDEATING', project.revision, `idea ${input.idea_id} selected after novelty audit`)
+      const gate = this.createGate({
+        project_id: input.project_id,
+        type: 'idea',
+        title: 'Idea Gate',
+        summary: idea.title,
+        payload: { idea_id: idea.idea_id },
+      })
+      return { idea, project: transitioned, gate }
+    })
+  }
+
   // ── contracts ────────────────────────────────────────────────────────────
+
+  /**
+   * Agent-authored, Human-governed handoff from an approved IdeaCard to the
+   * Contract Gate. Contract registration, phase transition and the
+   * payload-bound Gate are one transaction, so the user never lands in a
+   * state with only an unmet approved_contract dependency.
+   */
+  prepareContractGate(input: {
+    project_id: string
+    idea_id: string
+    expected_project_revision: number
+    expected_idea_version: number
+    contract: Omit<ExperimentContract, 'contract_id' | 'version' | 'project_id' | 'idea_id' | 'status' | 'approval' | 'created_at' | 'updated_at'>
+  }): { contract: ExperimentContract; project: ResearchProject; gate: Gate } {
+    return withTransaction(this.db, () => {
+      const project = this.getProject(input.project_id)
+      if (project.revision !== input.expected_project_revision) {
+        throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_project_revision}, got ${project.revision}`)
+      }
+      if (project.status !== 'IDEA_APPROVED' && project.status !== 'CONTRACT_PENDING') {
+        throw new KernelError(409, 'contract_draft_not_ready', `contract drafting requires IDEA_APPROVED or CONTRACT_PENDING, got ${project.status}`)
+      }
+      const idea = this.getIdea(input.idea_id)
+      if (idea.project_id !== input.project_id) {
+        throw new KernelError(422, 'idea_foreign', `idea ${input.idea_id} belongs to another project`)
+      }
+      if (idea.version !== input.expected_idea_version) {
+        throw new KernelError(409, 'idea_revision_conflict', `expected idea version ${input.expected_idea_version}, got ${idea.version}`)
+      }
+      if (idea.status !== 'approved') {
+        throw new KernelError(409, 'idea_not_approved', `idea ${input.idea_id} is ${idea.status}`)
+      }
+      if (this.listGates(input.project_id, 'pending').some(gate => gate.type === 'contract')) {
+        throw new KernelError(409, 'contract_gate_exists', 'a pending Contract Gate already exists')
+      }
+      const contract = this.registerContract({
+        ...input.contract,
+        project_id: input.project_id,
+        idea_id: input.idea_id,
+      })
+      const transitioned = project.status === 'IDEA_APPROVED'
+        ? this.transition(input.project_id, 'CONTRACT_PENDING', project.revision, `contract ${contract.contract_id} drafted from approved idea ${idea.idea_id}`)
+        : project
+      const gate = this.createGate({
+        project_id: input.project_id,
+        type: 'contract',
+        title: 'Contract Gate',
+        summary: `${idea.title} — ${contract.methods.baseline} → ${contract.methods.treatment}`,
+        payload: { contract_id: contract.contract_id },
+      })
+      return { contract, project: transitioned, gate }
+    })
+  }
 
   registerContract(input: Omit<ExperimentContract, 'contract_id' | 'version' | 'status' | 'created_at' | 'updated_at'> & { project_id: string }): ExperimentContract {
     this.getProject(input.project_id)
@@ -5126,6 +5275,14 @@ export class ResearchKernel {
     }
   }
 
+  /** Project-scoped immutable code snapshot summaries for execution setup. */
+  listCodeSnapshots(projectId: string): Array<ReturnType<ResearchKernel['getCodeSnapshot']>> {
+    this.getProject(projectId)
+    const rows = this.db.prepare('SELECT snapshot_id FROM code_snapshots WHERE project_id = ? ORDER BY created_at DESC, snapshot_id DESC')
+      .all(projectId) as unknown as Array<{ snapshot_id: string }>
+    return rows.map(row => this.getCodeSnapshot(row.snapshot_id))
+  }
+
   // ── durable jobs (design §4.2 Job Controller, §9.3) ──────────────────────
 
   /** Idempotent job submission: same idempotency_key returns the existing job. */
@@ -5483,6 +5640,97 @@ export class ResearchKernel {
     )
     this.emit(input.project_id, 'job.submitted', { job_id: job.job_id, kind: job.kind, idempotency_key: input.idempotency_key })
     return job
+  }
+
+  /**
+   * Atomic Contract → baseline execution handoff.
+   *
+   * A Contract Gate freezes scientific intent, not executable code. This is
+   * therefore the only path that may create the first contract-bound
+   * baseline Job and advance CONTRACT_APPROVED → BASELINE_REPRO. Validation,
+   * Job/outbox writes and the phase transition share one SQLite transaction,
+   * so callers can never observe a queued Job with the old phase (or the new
+   * phase without its Job).
+   */
+  startBaselineRun(input: {
+    project_id: string
+    expected_revision: number
+    idempotency_key: string
+    contract_id: string
+    code_snapshot_id: string
+    command: string[]
+    runner_target_id?: string | null
+    image_digest?: string
+    output_contract?: { metrics: string; logs: string }
+    created_by_principal_id?: string | null
+  }): { project: ResearchProject; job: JobSpecBound } {
+    const command = input.command.map(part => part.trim())
+    if (command.length === 0 || command.some(part => part === '')) {
+      throw new KernelError(422, 'baseline_command_required', 'baseline run requires a non-empty argv array')
+    }
+    const requestHash = `sha256:${createHash('sha256').update(JSON.stringify({
+      expected_revision: input.expected_revision,
+      contract_id: input.contract_id,
+      code_snapshot_id: input.code_snapshot_id,
+      command,
+      runner_target_id: input.runner_target_id ?? null,
+      image_digest: input.image_digest ?? null,
+      output_contract: input.output_contract ?? null,
+      created_by_principal_id: input.created_by_principal_id ?? null,
+    })).digest('hex')}`
+
+    return withTransaction(this.db, () => {
+      const current = this.getProject(input.project_id)
+      const existingRow = this.db.prepare('SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?')
+        .get(input.project_id, input.idempotency_key) as JobRow | undefined
+      if (existingRow !== undefined) {
+        const existing = jobFromRow(existingRow, this.db, this.leaseTokens.get(existingRow.job_id) ?? null)
+        if (existing.payload.baseline_start_request_hash !== requestHash) {
+          throw new KernelError(409, 'idempotency_conflict', `idempotency key ${input.idempotency_key} was already used with a different baseline request`)
+        }
+        return { project: current, job: existing }
+      }
+      if (current.revision !== input.expected_revision) {
+        throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_revision}, got ${current.revision}`)
+      }
+      if (current.status !== 'CONTRACT_APPROVED') {
+        throw new KernelError(409, 'baseline_start_not_ready', `baseline start requires CONTRACT_APPROVED, got ${current.status}`)
+      }
+
+      const targetId = input.runner_target_id ?? current.execution.runner_target_id
+      const target = this.listRunnerTargets().find(candidate => candidate.target_id === targetId)
+      if (target === undefined) {
+        throw new KernelError(422, 'runner_target_unknown', `runner target '${targetId}' is not registered`)
+      }
+      const imageDigest = input.image_digest ?? target.runtime?.image_digest ?? getLockedDigest('node_fixture')
+      const outputContract = input.output_contract ?? {
+        metrics: '/outputs/metrics.json',
+        logs: '/outputs/run.log',
+      }
+      const job = this.submitJob({
+        project_id: input.project_id,
+        idempotency_key: input.idempotency_key,
+        kind: 'baseline',
+        command,
+        payload: {
+          message: 'approved contract baseline reproduction',
+          baseline_start_request_hash: requestHash,
+        },
+        contract_id: input.contract_id,
+        code_snapshot_id: input.code_snapshot_id,
+        runner_target_id: targetId,
+        image_digest: imageDigest,
+        output_contract: outputContract,
+        created_by_principal_id: input.created_by_principal_id ?? null,
+      })
+      const project = this.transition(
+        input.project_id,
+        'BASELINE_REPRO',
+        current.revision,
+        `baseline job ${job.job_id} submitted from approved contract ${input.contract_id}`,
+      )
+      return { project, job }
+    })
   }
 
   getJob(jobId: string): JobSpecBound & { run_id: string | null } {
@@ -8392,6 +8640,14 @@ export class ResearchKernel {
       contract_id: j.contract_id,
       created_at: j.created_at,
     }))
+    const codeSnapshots = this.listCodeSnapshots(projectId)
+    const profileId = resolveRunnerProfileId(project.execution.runner_profile_id ?? project.execution.runner_profile)
+    const target = this.listRunnerTargets().find(candidate => candidate.target_id === project.execution.runner_target_id)
+    const runnerEnvironmentReady = profileId !== null
+      && getRunnerProfile(profileId) !== null
+      && target !== undefined
+      && target.enabled
+      && !target.draining
     const nextActionsV2 = nextActionProjection({
       project,
       gates: pendingGates,
@@ -8402,6 +8658,8 @@ export class ResearchKernel {
       evidence: this.listEvidence(projectId),
       claims: this.listClaims(projectId),
       corpus_snapshots: this.listCorpusSnapshots(projectId),
+      code_snapshots: codeSnapshots.map(snapshot => ({ snapshot_id: snapshot.snapshot_id })),
+      runner_environment_ready: runnerEnvironmentReady,
       // ONBOARD-01 intake overlay (GUIDE-01 landing): active intake sessions
       // project intake_resume/scan/answer/propose/adopt guidance.
       intakes: this.listIntakes(projectId).map(session => ({

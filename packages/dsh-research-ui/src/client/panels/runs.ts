@@ -5,6 +5,9 @@ import { state, tabSave } from '../state'
 import { copyText, el, fmtId, openContextMenu, pill, rootHost, showToast } from '../ui'
 import { terminalLoadSeq } from '../terminal'
 import { runsEmptyStateModel, runsFilterDefinitions } from '../runs-model'
+import { nextActionCardModel } from '../next-action-cards'
+import { runChatLine } from '../modals/commands'
+import { openSettingsModal } from '../modals/settings'
 export let runsSelecting = false
 export let runsSelected = new Set<string>()
 /** Runs status filter (dsh-web filter chips). */
@@ -46,11 +49,47 @@ export function renderRuns(body: HTMLElement, p: Projection): void {
     p.project?.status,
     p.counts?.corpus_snapshots ?? 0,
     p.next_actions_v2?.some(action => action.code === 'idea_generate') ?? false,
+    p.next_actions_v2?.some(action => action.code === 'baseline_reproduce') ?? false,
     allJobs.length,
     jobs.length,
   )
   if (emptyState !== null) {
-    if (emptyState.kind === 'survey-ready') {
+    if (emptyState.kind === 'baseline-setup') {
+      const action = p.next_actions_v2?.find(candidate => candidate.code === 'baseline_reproduce')
+      const model = action === undefined ? null : nextActionCardModel(action)
+      const guidance = el('div', 'card')
+      guidance.style.cssText = 'margin-top:10px;padding:18px;display:flex;flex-direction:column;gap:12px;border-color:var(--tone-amber)'
+      const copy = el('div')
+      copy.append(
+        el('div', 'section-label', t('runs', 'runs.baselineSetup.title')),
+        el('div', 'muted', t('runs', 'runs.baselineSetup.body')),
+      )
+      guidance.appendChild(copy)
+      if (model !== null && model.missingList.length > 0) {
+        const gapTitle = el('div', 'muted', t('runs', 'runs.baselineSetup.missing'))
+        gapTitle.style.cssText = 'font-size:10.5px;font-weight:600;color:var(--tone-amber)'
+        const list = el('ul')
+        list.style.cssText = 'margin:0;padding-left:20px;color:var(--text-2);font-size:11px'
+        for (const gap of model.missingList) list.appendChild(el('li', '', gap))
+        guidance.append(gapTitle, list)
+      }
+      const actions = el('div', 'row')
+      actions.style.cssText = 'gap:8px;flex-wrap:wrap'
+      const chat = el('button', 'btn primary', t('runs', 'runs.baselineSetup.chat'))
+      chat.onclick = () => { runChatLine('/reproduce') }
+      const workspace = el('button', 'hbtn', t('runs', 'runs.baselineSetup.workspace'))
+      workspace.onclick = () => {
+        state.activeTab = 'workspace'
+        tabSave()
+        try { history.replaceState(null, '', '#tab=workspace') } catch { /* sandboxed */ }
+        state.rerender()
+      }
+      const settings = el('button', 'hbtn', t('runs', 'runs.baselineSetup.settings'))
+      settings.onclick = () => { void openSettingsModal(rootHost()) }
+      actions.append(chat, workspace, settings)
+      guidance.appendChild(actions)
+      body.appendChild(guidance)
+    } else if (emptyState.kind === 'survey-ready') {
       const guidance = el('div', 'card')
       guidance.style.cssText = 'margin-top:10px;padding:18px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap'
       const copy = el('div')

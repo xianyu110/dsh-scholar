@@ -7,14 +7,15 @@
  * Kept free of DOM so unit tests can assert zh/en re-evaluation purely.
  */
 import { t } from './index'
+import { readNavigationVisibility, type NavigationVisibility } from '../navigation-preferences'
 
 export interface ChromeTab { key: string; label: string; description: string }
 export interface ChromeTabGroup { label: string; tabs: ChromeTab[] }
 export interface ChromeModelChoice { id: string; label: string }
 
 /** Tab groups with labels/descriptions in the CURRENT locale. */
-export function chromeTabGroups(): ChromeTabGroup[] {
-  return [
+export function chromeTabGroups(visibility: NavigationVisibility = readNavigationVisibility()): ChromeTabGroup[] {
+  const groups: ChromeTabGroup[] = [
     {
       label: t('shell', 'shell.tabs.group.research'),
       tabs: [
@@ -47,16 +48,17 @@ export function chromeTabGroups(): ChromeTabGroup[] {
     },
     {
       label: t('shell', 'shell.tabs.group.operations'),
-      tabs: [
+      tabs: visibility.budgetPage ? [
         { key: 'budget', label: t('shell', 'shell.tab.budget'), description: t('shell', 'shell.tab.budget.desc') },
-      ],
+      ] : [],
     },
   ]
+  return groups
 }
 
 /** Flat tab list in the CURRENT locale (order = Alt+1..9 order). */
-export function chromeTabs(): ChromeTab[] {
-  return chromeTabGroups().flatMap(group => group.tabs)
+export function chromeTabs(visibility: NavigationVisibility = readNavigationVisibility()): ChromeTab[] {
+  return chromeTabGroups(visibility).flatMap(group => group.tabs)
 }
 
 /** Research-agent model selector choices in the CURRENT locale. */

@@ -81,6 +81,12 @@ capabilities 至少包含 terminal_stream、interactive_terminal、workspace_fil
 
 Projection 是 UI 摘要，不承载完整日志、Artifact 字节、TeX 内容或大型 Evidence。
 
+Standalone 当前使用两个同源、Bearer + CSRF 保护的本地 BFF route。`POST /api/chat/turn` 接收 `{project_id,text,locale,history}`；BFF 先做 membership 并重读 project projection，再把 allowlist 后的 project context 和最多 12 条有界 history 发给 DSH 插件的 private loopback model bridge。开放对话的模型输出是纯文本流，插件负责封装为 strict `{operation:"conversation",assistant_text}` reply；不得要求模型把自然语言包装成 JSON，也不从模型文本解析或自动执行 mutation/suggested command。该 route 零 Kernel mutation；bridge metadata/credential 必须是共享数据目录中的 `0600` 普通文件，origin 只能是 loopback HTTP，浏览器永远拿不到 endpoint/token。桥接或模型不可用返回稳定 `503 model_unavailable`，客户端退回确定性阶段引导。
+
+`POST /api/chat/ideas` 接收 `{project_id,text,count,locale}`，其中 `count` 为 1–5。BFF 必须重新核对 project membership/写角色、`idea_generate/state=ready/required=true/required_by=agent`、project revision 与最新非空 frozen Corpus Snapshot；随后要求 model bridge 返回数量精确的严格 `IdeaDraft[]`。草稿不得携带 id、project、status、version、timestamp 或 provenance；重复标题、schema 不完整、引用不在该 frozen corpus 的 paper id、模型失败、revision 冲突均不得部分写入。成功后只调用下述 Kernel batch route；它不选择 winner、不批准 Idea Gate。
+
+`POST /api/chat/ideas/select` 接收 `{project_id,idea_id}`，只允许当前项目 PI/operator。BFF 重读 projection 与 IdeaCard 后，用候选 title/hypothesis/exact_delta 派生最多 3 个有界 counter-search query，并调用 Scholar connectors；connector 整体失败时返回 `502 connector_unavailable` 且零写。BFF 将 queries、结果、去重 overlap paper ids、风险和 `audited_at` 发送给 `POST /v2/projects/{project_id}/idea-gate`。Kernel 以 expected project revision + expected idea version 单事务校验 selected proposed idea、同项目 frozen corpus 和唯一 pending Idea Gate，保存 NoveltyAudit、推进 `SURVEYING→IDEATING`、创建 payload `{idea_id}` 的 pending Gate；任一冲突全部回滚。正常流程禁止 payload-less Idea Gate；该 route 不批准 Gate。
+
 ### 4.1 DSH plugin internal create/link 与 topology bridge
 
 - `POST /internal/dsh-sessions/{session_id}/projects`：同时要求普通 Kernel bearer、共享 internal service token、仅注入 DSH plugin/kernel 的独立且非空 `x-dsh-plugin-token`，并固定 `x-service-principal: dsh-plugin`；配置缺失、空白、空 header、自报 principal 或被 Runner 持有的共享 service token 均不能单独满足该 route。请求还要求 `Idempotency-Key` 和严格 body `{name}`；session id 使用同一安全 opaque-id 语法。服务端只从 path session 派生 creator Principal，body/client 不能提供或覆盖 Principal/session。internal request hash 必须是以专用 DSH plugin token 为密钥、覆盖固定 route namespace/session/name 的 `HMAC-SHA256`；public v2 name-only adapter 可继续忽略 legacy 额外字段，但公开请求无法构造相同的凭证绑定 hash，任一方向的同 key 跨 route 碰撞都必须 409。创建事务内先核对 idempotency ledger 与原始 `session_links` 行，再原子创建 name-only `DRAFT/collecting` Project、active Init Intake、Budget、PI membership 和 exact session link，返回 `{project,intake,budget,membership,link}`。同 key+同 session/name 重放仅在 project.session、原始 link 和派生 PI membership 全部一致时返回同一资源；不同 hash 或不完整旧状态 409。`x-idempotency-replay-only: 1` 只允许读取同 key 的已提交回执，key 不存在时 404 且绝不创建，供 transport 在 fetch、响应头或成功响应体读取/解析阶段失败、超时或 abort 后对账；客户端超时和 caller abort 必须覆盖完整响应体消费过程。任何既有 session link（包括已删除 Project 的墓碑 link、悬空 link）、并发创建或 relink 竞争均稳定 409 且零新项目，绝不使用 upsert 改绑；public v2 create 不能接受任意 DSH session id。
@@ -128,6 +134,7 @@ POST /bff/research/gates/{gate_id}/decision
 | GET | /v2/projects/{id}/corpus-snapshots | 分页列表 |
 | GET | /v2/corpus-snapshots/{id} | 完整快照或分页子资源 |
 | POST | /v2/projects/{id}/ideas | Idea Draft |
+| POST | /v1/projects/{id}/ideas/batch | standalone Chat canonical idea write；`{expected_project_revision,corpus_snapshot_id,ideas[1..5]}`，要求 SURVEYING + 同项目 frozen corpus，整批事务提交并由 Kernel 附加 identity/provenance |
 | GET | /v2/projects/{id}/ideas | 列表 |
 | GET | /v2/ideas/{id} | IdeaCard |
 | POST | /v2/ideas/{id}/novelty-audits | 查询集与结果，产生新 Idea version |
@@ -455,6 +462,14 @@ Standalone v1 adapter 兼容面（当前 Scholar UI 使用）包括 `/v1/project
 `GET /v1/projects/{id}/projection`（v2 同路由）返回双字段（GUIDE-01）：`next_actions: string[]`（legacy，由 `next_actions_v2` 中非 done 动作的 label 稳定派生，终态为空数组——旧 UI/API 消费端不受破坏）与 `next_actions_v2: NextAction[]`（权威结构化投影，wire 字段见 reconstruction-contracts.md §24 / domain-model.md §14）。
 
 NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contracts、ideas、evidence、claims 确定性生成（`nextActionProjection` 纯函数，无 DB、无副作用、不抛错）。状态、reason、required 缺口、revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label、解析白名单交互与路由，不能直接执行未声明 mutation。未知/未来状态退化 `code='unknown'` 的只读动作（state=blocked、required=['state_mapping']），UI 不得为 unknown 构造 mutation。`required` 是前置条件，`required_by` 才是执行者。Intake/Grill 阶段动作在 ONBOARD-01 落地后由同一投影扩展。
+
+Contract 批准后的 baseline handoff 使用专用 `POST /v1/projects/{id}/baseline-runs`，不允许浏览器用“先 POST Job、再 POST transition”的两步写法。请求严格为 `{expected_revision,idempotency_key,contract_id,code_snapshot_id,command:string[],runner_target_id?,image_digest?,output_contract?}`；`command` 至少一个非空 argv，CodeSnapshot 必须属于 path project，Contract 必须已由 Human Gate 冻结且属于同项目。Kernel 以项目默认 Runner/Profile/target 为基础解析环境；显式 override 仍走同一 registered target 与 digest pin 校验。成功 `201` 返回 `{project,job}`，Job 为 queued 且 Project 为 `BASELINE_REPRO`；任何失败零半写。相同 project + idempotency key + 相同请求可重放，异请求必须 409。
+
+`GET /v1/projects/{id}/code-snapshots` 只列出该项目的不可变快照摘要，供运行准备任务选择；不得返回宿主绝对路径或跨项目记录。`POST .../code-snapshots` 仍是从批准 Workspace 冻结实际内容的唯一创建路径。
+
+当 projection 为 `CONTRACT_APPROVED`、baseline Jobs 为空时，`next_actions_v2` 必须包含 `baseline_reproduce`，并通过 `required` 精确报告 `baseline_command`、`code_snapshot`、`runner_environment` 缺口。Runs UI 将其显示为 projected preparation task，但 `jobs.length` 与各 Job filter count 保持 0；不得用假 queued Job 填充列表。
+
+合同阶段使用 `POST /api/chat/contracts/draft {project_id}`。BFF 仅在 Kernel projection 声明 `contract_register/ready/required=true` 时读取唯一 approved IdeaCard，从其 MVE 生成严格 ExperimentContract 输入，再调用 PI/operator-only `POST /v2/projects/{project_id}/contract-gate`；Kernel 输入钉定 expected_project_revision、idea_id、expected_idea_version 和 contract body，在单事务校验 Idea Gate 结果、登记 draft Contract、`IDEA_APPROVED→CONTRACT_PENDING`（若已在 CONTRACT_PENDING 则保持）、创建唯一 payload-bound pending Contract Gate。响应返回 contract/project/gate；跨项目、无 approved idea、已有 pending Contract Gate、revision 冲突或 schema 错误均零部分写。浏览器不得自行串联 register/transition/create-gate 三个写请求。
 
 `survey_run` 固定 `route='chat'`、`required_by='agent'`。Overview CTA 打开当前 project-scoped Chat 并预填 `/survey <Brief.problem>`（Brief problem 为空时预填 `/survey `），等待用户确认发送；不得跳转空 Runs、不得自动发起 connector 请求。`POST /api/chat/survey` 成功写入 SCOPED 项目的 Corpus Snapshot 时，同一 Kernel 事务完成 `SCOPED→SURVEYING`，响应后 projection 必须给出 `idea_generate`；citation edges 必须随 snapshot 保存，connector 每源结果必须聚合为权威 `source_status`（任一来源失败=`pending`，全部成功=`complete`），部分失败不得伪装成 complete。
 

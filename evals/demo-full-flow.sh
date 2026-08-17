@@ -121,20 +121,22 @@ api -X POST "http://127.0.0.1:$KPORT/v1/gates/$G_IDEA/decisions" -d '{"actor":"w
 S5=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
 [[ "$S5" == "IDEA_APPROVED" ]] && ok "Idea Gate 批准 → $S5" || bad "期望 IDEA_APPROVED 得到 $S5"
 
+say "6. ExperimentContract + Contract Gate(冻结)"
+api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
+CT=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/contracts" -d "{\"idea_id\":\"$I1\",\"data\":{\"dataset_id\":\"fixture\",\"version\":\"v1\",\"split\":\"official\"},\"methods\":{\"baseline\":\"b\",\"treatment\":\"a\"},\"metrics\":{\"primary\":\"macro_f1\",\"secondary\":[]},\"seeds\":[11,23,47],\"analysis\":{\"effect_size\":\"mean_difference\",\"interval\":\"bootstrap_95\",\"multiple_testing\":\"holm\"},\"ablations\":[],\"stop_conditions\":{\"max_gpu_hours\":2,\"min_completed_seeds\":3,\"stop_on_data_leakage\":true}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
+G_CT=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Contract Gate\",\"payload\":{\"contract_id\":\"$CT\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "http://127.0.0.1:$KPORT/v1/gates/$G_CT/decisions" -d '{"actor":"web-user","principal":{"principal_id":"demo-pi"},"decision":"approved","diff":"v1"}' > /dev/null
+CSTATUS=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+[[ "$CSTATUS" == "CONTRACT_APPROVED" ]] && ok "Contract $CT 冻结 → $CSTATUS" || bad "期望 CONTRACT_APPROVED 得到 $CSTATUS"
+api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
+
 # ── 6. Baseline 真实容器复现(代码归档→物化→执行)────────────────────────
-say "6. Baseline 复现(代码快照归档 + 容器执行)"
+say "7. Baseline 复现(代码快照归档 + 容器执行)"
 # P0-4 (SNAPSHOT-01/API-01): seed the fixture into an approved project
 # workspace and archive via workspace_id + root_relative_path ('' = whole
 # workspace) — the kernel resolves the root server-side.
 DEMO_WS=$(code_snapshot_seed_workspace "$KPORT" "$PROJ" "repo" "$WORK/repo")
 CODE=$(code_snapshot_api "$KPORT" "$PROJ" "$DEMO_WS" "" "fixture train.js" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).archive_artifact_id))")
-api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"BASELINE_REPRO\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
-# P0 (acceptance-tests.md §4): baseline jobs MUST bind an APPROVED contract —
-# register + freeze it BEFORE submission via the internal approval route (the
-# Contract Gate in step 7 re-confirms the freeze and drives the state machine).
-CT=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/contracts" -d "{\"idea_id\":\"$I1\",\"data\":{\"dataset_id\":\"fixture\",\"version\":\"v1\",\"split\":\"official\"},\"methods\":{\"baseline\":\"b\",\"treatment\":\"a\"},\"metrics\":{\"primary\":\"macro_f1\",\"secondary\":[]},\"seeds\":[11,23,47],\"analysis\":{\"effect_size\":\"mean_difference\",\"interval\":\"bootstrap_95\",\"multiple_testing\":\"holm\"},\"ablations\":[],\"stop_conditions\":{\"max_gpu_hours\":2,\"min_completed_seeds\":3,\"stop_on_data_leakage\":true}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
-api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"demo-orchestrator"}' > /dev/null
-ok "contract $CT registered + frozen (P0 binding for baseline/formal)"
 B_JOB=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/jobs" -d "{\"idempotency_key\":\"baseline-demo\",\"kind\":\"baseline\",\"contract_id\":\"$CT\",\"code_snapshot_id\":\"$CODE\",\"image_digest\":\"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\",\"command\":[\"node\",\"/work/train.js\",\"--seed\",\"0\",\"--data\",\"/work/data.json\",\"--output\",\"/outputs/metrics.json\",\"--contract-id\",\"$CT\"],\"payload\":{},\"output_contract\":{\"metrics\":\"/outputs/metrics.json\",\"logs\":\"/outputs/run.log\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).job_id))")
 # §13.6 paired design: baseline runs at the SAME seeds as the formals so the
 # analysis engine can pair baseline/treatment per seed.
@@ -147,12 +149,7 @@ BACT=$(curl -s "http://127.0.0.1:$KPORT/v1/artifacts/$BVAL?project_id=$PROJ" | n
 [[ "$BS" == "succeeded" && "$BACT" == "0.6" ]] && ok "Baseline 容器执行成功:macro_f1=$BACT(代码从 CAS 物化,期望 0.6)" || bad "baseline $BS value=$BACT"
 
 # ── 7. 实验合同 + Contract Gate(冻结)────────────────────────────────────
-say "7. ExperimentContract + Contract Gate(冻结)"
-CT=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/contracts" -d "{\"idea_id\":\"$I1\",\"data\":{\"dataset_id\":\"fixture\",\"version\":\"v1\",\"split\":\"official\"},\"methods\":{\"baseline\":\"b\",\"treatment\":\"a\"},\"metrics\":{\"primary\":\"macro_f1\",\"secondary\":[]},\"seeds\":[11,23,47],\"analysis\":{\"effect_size\":\"mean_difference\",\"interval\":\"bootstrap_95\",\"multiple_testing\":\"holm\"},\"ablations\":[],\"stop_conditions\":{\"max_gpu_hours\":2,\"min_completed_seeds\":3,\"stop_on_data_leakage\":true}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
-G_CT=$(api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Contract Gate\",\"payload\":{\"contract_id\":\"$CT\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "http://127.0.0.1:$KPORT/v1/gates/$G_CT/decisions" -d '{"actor":"web-user","principal":{"principal_id":"demo-pi"},"decision":"approved","diff":"v1"}' > /dev/null
-CSTATUS=$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
-[[ "$CSTATUS" == "CONTRACT_APPROVED" ]] && ok "Contract $CT 冻结 → $CSTATUS" || bad "期望 CONTRACT_APPROVED 得到 $CSTATUS"
+# Baseline 通过后才进入正式实验阶段。
 api -X POST "http://127.0.0.1:$KPORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"EXPERIMENTING\",\"expected_revision\":$(api "http://127.0.0.1:$KPORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")}" > /dev/null
 
 # ── 8. 正式实验:3 seeds 容器执行 ─────────────────────────────────────────

@@ -39,11 +39,13 @@ function normalized(text: string): string {
 }
 
 function actionReady(projection: ChatTurnProjection, code: string): boolean {
-  return (projection.next_actions_v2 ?? []).some(action => action.code === code && action.state === 'ready' && action.required === true)
+  return (projection.next_actions_v2 ?? []).some(action => action.code === code && action.state === 'ready'
+    && action.required === true && action.required_by === 'agent')
 }
 
 function readyNoArgumentCommand(projection: ChatTurnProjection): { code: string; command: string } | null {
   const commands: Record<string, string> = {
+    contract_register: '/contract draft',
     manuscript_write: '/write',
     reviewer_run: '/review',
     release_bundle: '/release-bundle',
@@ -59,6 +61,21 @@ function surveyQuery(text: string): string {
   return text.trim()
     .replace(/^(?:请|帮我|麻烦)?\s*(?:调研|检索(?:文献)?|搜索(?:论文|文献)?|survey|research)\s*[:：-]?\s*/i, '')
     .trim()
+}
+
+function requestedIdeaCount(text: string): number {
+  const digit = /(?:生成|创建|提出|想出|generate|create|propose)\D{0,8}([1-5])\s*(?:个|条|种)?\s*(?:想法|创意|假设|ideas?|hypotheses)?/i.exec(text)?.[1]
+  if (digit !== undefined) return Number(digit)
+  const chinese = /(?:生成|创建|提出|想出)\D{0,8}([一二三四五])\s*(?:个|条|种)?/.exec(text)?.[1]
+  return chinese === undefined ? 3 : ({ 一: 1, 二: 2, 三: 3, 四: 4, 五: 5 } as const)[chinese as '一' | '二' | '三' | '四' | '五']
+}
+
+function explicitIdeaGeneration(text: string): boolean {
+  const normalizedText = text.normalize('NFKC').trim()
+  const negative = /(?:(?:不要|别|无需|不需要|停止|取消|避免).{0,20}(?:生成|创建|提出|想出|构思).{0,40}(?:想法|创意|假设|ideas?|hypotheses)|\b(?:do\s+not|don't|dont|stop|cancel|avoid)\b.{0,24}\b(?:generate|create|propose)\b.{0,30}\b(?:ideas?|hypotheses)\b)/i
+  if (negative.test(normalizedText)) return false
+  return /^(?:(?:请|帮我|请帮我|麻烦|请你|我想(?:让你)?|我需要你|能否|可以(?:帮我)?)\s*)?(?:给我\s*)?(?:生成|创建|提出|想出|构思).{0,40}(?:想法|创意|假设|ideas?|hypotheses)/i.test(normalizedText)
+    || /^(?:please\s+|could\s+you\s+|can\s+you\s+|i\s+(?:want|need)\s+you\s+to\s+)?(?:generate|create|propose)\s+.{0,30}(?:ideas?|hypotheses)(?:\b|$)/i.test(normalizedText)
 }
 
 /**
@@ -88,6 +105,17 @@ export function planNaturalChatTurn(text: string, projection: ChatTurnProjection
     if (next !== null) return { kind: 'command', intentCode: 'continue', command: next.command, effect: 'agent-write', actionCode: next.code }
     return { kind: 'conversation', intentCode: 'continue', effect: 'agent-write' }
   }
+  if (explicitIdeaGeneration(input)) {
+    const command = `/ideas generate ${requestedIdeaCount(input)}`
+    return actionReady(projection, 'idea_generate')
+      ? { kind: 'command', intentCode: 'idea_generate', command, effect: 'agent-write', actionCode: 'idea_generate' }
+      : { kind: 'conversation', intentCode: 'idea_generate', effect: 'agent-write', suggestedCommand: command }
+  }
+  if (/(?:生成|创建|起草|准备|拟定).{0,12}(?:实验)?合同|(?:draft|create|prepare)\s+(?:the\s+)?(?:experiment\s+)?contract/i.test(input)) {
+    return actionReady(projection, 'contract_register')
+      ? { kind: 'command', intentCode: 'contract_register', command: '/contract draft', effect: 'agent-write', actionCode: 'contract_register' }
+      : { kind: 'conversation', intentCode: 'contract_register', effect: 'agent-write', suggestedCommand: '/contract draft' }
+  }
   if (/(?:想法|创意|idea|hypothesis)/.test(input)) {
     return { kind: 'command', intentCode: 'ideas', command: '/ideas', effect: 'read' }
   }
@@ -107,6 +135,9 @@ export function planNaturalChatTurn(text: string, projection: ChatTurnProjection
       return { kind: 'command', intentCode: 'survey', command, effect: 'agent-write', actionCode: 'survey_run' }
     }
     return { kind: 'conversation', intentCode: 'survey', effect: 'agent-write', suggestedCommand: command }
+  }
+  if (/(?:准备|启动|运行|执行|复现).{0,8}(?:基线|baseline)|(?:prepare|start|run|reproduce)\s+(?:the\s+)?baseline/i.test(input)) {
+    return { kind: 'conversation', intentCode: 'baseline_reproduce', effect: 'agent-write', suggestedCommand: '/reproduce' }
   }
   if (/(?:运行实验|开始实验|执行实验|run\s+(?:an?\s+)?experiment)/.test(input)) {
     return { kind: 'conversation', intentCode: 'run', effect: 'agent-write', suggestedCommand: '/run ' }

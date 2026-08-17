@@ -57,9 +57,11 @@ export const NEXT_ACTION_LABEL_KEYS: Record<string, string> = {
   scope_gate_submit: 'overview.nextaction.code.scope_gate_submit',
   survey_run: 'overview.nextaction.code.survey_run',
   idea_generate: 'overview.nextaction.code.idea_generate',
+  idea_select: 'overview.nextaction.code.idea_select',
   idea_gate_approve: 'overview.nextaction.code.idea_gate_approve',
   baseline_reproduce: 'overview.nextaction.code.baseline_reproduce',
   contract_register: 'overview.nextaction.code.contract_register',
+  contract_gate_approve: 'overview.nextaction.code.contract_gate_approve',
   pilot_formal_submit: 'overview.nextaction.code.pilot_formal_submit',
   evidence_verify: 'overview.nextaction.code.evidence_verify',
   manuscript_write: 'overview.nextaction.code.manuscript_write',
@@ -86,8 +88,14 @@ export const NEXT_ACTION_LABEL_KEYS: Record<string, string> = {
  *  verbatim (wire data). */
 export const NEXT_ACTION_GAP_KEYS: Record<string, string> = {
   approved_contract: 'overview.nextaction.missing.approved_contract',
+  approved_idea: 'overview.nextaction.missing.approved_idea',
+  baseline_reproduction: 'overview.nextaction.missing.baseline_reproduction',
+  baseline_command: 'overview.nextaction.missing.baseline_command',
+  code_snapshot: 'overview.nextaction.missing.code_snapshot',
+  runner_environment: 'overview.nextaction.missing.runner_environment',
   succeeded_runs: 'overview.nextaction.missing.succeeded_runs',
   proposed_idea: 'overview.nextaction.missing.proposed_idea',
+  pending_idea_gate: 'overview.nextaction.missing.pending_idea_gate',
   budget_headroom: 'overview.nextaction.missing.budget_headroom',
   repair_decision: 'overview.nextaction.missing.repair_decision',
   state_mapping: 'overview.nextaction.missing.state_mapping',
@@ -186,7 +194,11 @@ export function nextActionCardModel(
   const problem = typeof context.briefProblem === 'string'
     ? context.briefProblem.trim().replace(/\s+/g, ' ')
     : ''
-  const commandDraft = code === 'survey_run' ? `/survey ${problem}` : null
+  const commandDraft = code === 'survey_run'
+    ? `/survey ${problem}`
+    : code === 'contract_register' ? '/contract draft'
+      : code === 'baseline_reproduce' ? '/reproduce'
+        : null
   return {
     code,
     title,

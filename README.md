@@ -144,7 +144,7 @@ At every stage, Overview and Chat read the authoritative `NextAction` from the K
 Chat supports natural-language messages and top-level slash commands. Common commands include:
 
 ```text
-/new  /status  /survey  /ideas  /gates  /contract  /run
+/new  /status  /survey  /ideas  /ideas generate 3  /ideas select <idea_id>  /gates  /contract  /run
 /evidence  /claims  /write  /review  /release-bundle  /release
 ```
 

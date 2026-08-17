@@ -141,7 +141,7 @@ const ALLOWED_HARDCODED: Record<string, string> = {
   'packages/dsh-research-ui/src/client/panels/budget.ts:120': 'raw budget numbers: value / max (nested template)',
   'packages/dsh-research-ui/src/client/panels/gates.ts:260': 'raw wire join: actor · decision · timestamp (nested template)',
   'packages/dsh-research-ui/src/client/panels/manuscript.ts:269': 'raw wire: rev · build_id (nested template)',
-  'packages/dsh-research-ui/src/client/panels/phase.ts:96': 'raw budget numbers: used / max (nested template)',
+  'packages/dsh-research-ui/src/client/panels/phase.ts:97': 'raw budget numbers: used / max (nested template)',
   'packages/dsh-research-ui/src/client/panels/phase.ts:179': 'raw wire: baseline vs treatment methods · version (nested template)',
 }
 

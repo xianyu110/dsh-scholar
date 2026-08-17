@@ -69,8 +69,8 @@ describe('governance: gate target freeze (GOV-02)', () => {
     const ideaGate = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'Idea Gate', payload: { idea_id: 'idea_x' } })
     kernel.decideGate({ gate_id: ideaGate.gate_id, actor: 'web-user', principal: { principal_id: 'u1' }, decision: 'approved' })
     expect(kernel.getProject(project.project_id).status).toBe('IDEA_APPROVED')
-    // IDEA_APPROVED -> BASELINE_REPRO (the contract gate's from-state).
-    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
+    // IDEA_APPROVED -> CONTRACT_PENDING (the contract gate's from-state).
+    kernel.transition(project.project_id, 'CONTRACT_PENDING', kernel.getProject(project.project_id).revision)
     // A contract + its gate; approval must freeze the contract in the SAME
     // transaction as the decision.
     const contract = kernel.registerContract({
@@ -105,8 +105,8 @@ describe('governance: gate type flows & gate-controlled states (acceptance-tests
     const idea = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'Idea' })
     kernel.decideGate({ gate_id: idea.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
     expect(kernel.getProject(project.project_id).status).toBe('IDEA_APPROVED')
-    // contract: BASELINE_REPRO -> CONTRACT_APPROVED (freezes the contract)
-    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
+    // contract: CONTRACT_PENDING -> CONTRACT_APPROVED (freezes the contract)
+    kernel.transition(project.project_id, 'CONTRACT_PENDING', kernel.getProject(project.project_id).revision)
     const contract = kernel.registerContract({
       project_id: project.project_id,
       idea_id: 'idea_x', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
@@ -117,7 +117,7 @@ describe('governance: gate type flows & gate-controlled states (acceptance-tests
     expect(kernel.getProject(project.project_id).status).toBe('CONTRACT_APPROVED')
     expect(kernel.getContract(contract.contract_id).status).toBe('approved')
     // release: RELEASE_READY -> RELEASED (the mapping exists and migrates)
-    for (const to of ['EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'] as const) {
+    for (const to of ['BASELINE_REPRO', 'EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'] as const) {
       kernel.transition(project.project_id, to, kernel.getProject(project.project_id).revision)
     }
     expect(kernel.getProject(project.project_id).status).toBe('RELEASE_READY')
@@ -154,11 +154,21 @@ describe('governance: gate type flows & gate-controlled states (acceptance-tests
     kernel.transition(project.project_id, 'SURVEYING', kernel.getProject(project.project_id).revision)
     kernel.transition(project.project_id, 'IDEATING', kernel.getProject(project.project_id).revision)
     attempt('IDEA_APPROVED')
-    // IDEATING -> BASELINE_REPRO via idea gate, then CONTRACT_APPROVED: gate-controlled.
+    // IDEA_APPROVED -> CONTRACT_PENDING, then CONTRACT_APPROVED remains gate-controlled.
     const idea = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'Idea' })
     kernel.decideGate({ gate_id: idea.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
-    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
+    kernel.transition(project.project_id, 'CONTRACT_PENDING', kernel.getProject(project.project_id).revision)
     attempt('CONTRACT_APPROVED')
+    const contract = kernel.registerContract({
+      project_id: project.project_id,
+      idea_id: 'idea_x', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
+      metrics: { primary: 'macro_f1' }, seeds: [1], analysis: {}, ablations: [], stop_conditions: {},
+    })
+    const contractGate = kernel.createGate({
+      project_id: project.project_id, type: 'contract', title: 'Contract', payload: { contract_id: contract.contract_id },
+    })
+    kernel.decideGate({ gate_id: contractGate.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
+    kernel.transition(project.project_id, 'BASELINE_REPRO', kernel.getProject(project.project_id).revision)
     // Walk to RELEASE_READY; RELEASE_READY -> RELEASED: gate-controlled.
     for (const to of ['EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'] as const) {
       kernel.transition(project.project_id, to, kernel.getProject(project.project_id).revision)

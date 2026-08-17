@@ -116,7 +116,7 @@ const STATUS_STAGE: Record<string, ScholarStageId> = {
 
 const ACTION_STAGE: Record<string, ScholarStageId> = {
   intake_resume: 'init', intake_scan: 'init', intake_answer: 'init', intake_propose: 'init', intake_adopt: 'init',
-  scope_gate_submit: 'init', survey_run: 'survey', idea_generate: 'idea', idea_gate_approve: 'idea',
+  scope_gate_submit: 'init', survey_run: 'survey', idea_generate: 'idea', idea_select: 'idea', idea_gate_approve: 'idea',
   baseline_reproduce: 'reproduce', contract_register: 'contract', pilot_formal_submit: 'experiment',
   evidence_verify: 'evidence', manuscript_write: 'writing', reviewer_run: 'review',
   release_bundle: 'release', release_gate: 'release', gate_resolve: 'init', gate_decide: 'init', budget_resolve: 'init',

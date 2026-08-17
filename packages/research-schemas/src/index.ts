@@ -6,6 +6,7 @@
 export * from './project.js'
 export * from './corpus.js'
 export * from './idea.js'
+export * from './chat-agent.js'
 export * from './experiment.js'
 export * from './evidence.js'
 export * from './kernel.js'

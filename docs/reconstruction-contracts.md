@@ -70,12 +70,12 @@ Gate type 有五种；Gate 控制的目标状态有四个。Budget Gate 不进�
 | SURVEYING | IDEATING | Orchestrator | frozen corpus exists |
 | SURVEYING | STOPPED/FAILED | PI/Policy | reason |
 | IDEATING | IDEA_APPROVED | Idea Gate transaction | target Idea version frozen |
-| IDEA_APPROVED | BASELINE_REPRO | Orchestrator | snapshot action created |
-| BASELINE_REPRO | CONTRACT_PENDING | Orchestrator | baseline succeeded within tolerance |
-| BASELINE_REPRO | IDEATING/FAILED/STOPPED | PI/Policy | refine/failure reason |
+| IDEA_APPROVED | CONTRACT_PENDING | Contract draft transaction | approved Idea 生成 Contract，创建 payload-bound Contract Gate |
 | CONTRACT_PENDING | CONTRACT_APPROVED | Contract Gate transaction | target Contract frozen |
-| CONTRACT_PENDING | IDEATING/STOPPED | revised/rejected workflow | new Idea or stop |
-| CONTRACT_APPROVED | EXPERIMENTING | Orchestrator | formal actions created |
+| CONTRACT_PENDING | IDEA_APPROVED/IDEATING/STOPPED | revised/rejected workflow | 重起草 Contract、新 Idea 或停止 |
+| CONTRACT_APPROVED | BASELINE_REPRO | Orchestrator/Director | approved Contract 绑定的 baseline action created |
+| BASELINE_REPRO | EXPERIMENTING | Orchestrator/Director | baseline succeeded within tolerance |
+| BASELINE_REPRO | IDEATING/FAILED/STOPPED | PI/Policy | refine/failure reason |
 | EXPERIMENTING | EVIDENCE_READY | Orchestrator | minimum runs and accepted Evidence |
 | EXPERIMENTING | IDEA_APPROVED/STOPPED/FAILED | PI/Policy | refine/stop/fatal |
 | EVIDENCE_READY | WRITING | Orchestrator/Writer | TexDocument created |

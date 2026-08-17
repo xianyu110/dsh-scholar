@@ -601,6 +601,37 @@ function paintWorkspace(body: HTMLElement, st: WorkspacePanelState, projectId: s
     refresh.title = t('workspace', 'workspace.toolbar.refresh.title')
     refresh.onclick = () => { void loadTree(body, projectId, st) }
     toolbar.appendChild(refresh)
+    const activeWorkspace = st.workspaces.find(workspace => workspace.workspace_id === st.activeWorkspaceId)
+    if (activeWorkspace?.kind === 'code') {
+      const freeze = el('button', 'hbtn', t('workspace', 'workspace.toolbar.freezeCode'))
+      freeze.title = t('workspace', 'workspace.toolbar.freezeCode.title')
+      freeze.onclick = async () => {
+        freeze.disabled = true
+        const result = await apiResult<{ snapshot_id?: string }>(
+          `/v1/projects/${encodeURIComponent(projectId)}/code-snapshots`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              workspace_id: st.activeWorkspaceId,
+              root_relative_path: '',
+              description: 'baseline execution snapshot',
+            }),
+          },
+        )
+        freeze.disabled = false
+        if (result.ok && typeof result.data.snapshot_id === 'string') {
+          st.notice = t('workspace', 'workspace.toolbar.freezeCode.done', { id: result.data.snapshot_id })
+          st.noticeError = false
+        } else {
+          st.notice = t('workspace', 'workspace.toolbar.freezeCode.failed', {
+            code: result.ok ? 'invalid_response' : (result.error.code ?? `http_${result.status}`),
+          })
+          st.noticeError = true
+        }
+        paintWorkspace(body, st, projectId)
+      }
+      toolbar.appendChild(freeze)
+    }
     const search = el('input')
     search.type = 'text'
     search.dataset.wsSearch = 'true'

@@ -67,8 +67,8 @@ export function statusLabel(status: string | undefined): string {
 export function phasePipeline(): Array<[string, string]> {
   return [
     ['DRAFT', t('overview', 'overview.pipeline.draft')], ['SCOPED', t('overview', 'overview.pipeline.scoped')], ['SURVEYING', t('overview', 'overview.pipeline.survey')],
-    ['IDEATING', t('overview', 'overview.pipeline.ideas')], ['IDEA_APPROVED', t('overview', 'overview.pipeline.ideaApproved')], ['BASELINE_REPRO', t('overview', 'overview.pipeline.baseline')],
-    ['CONTRACT_APPROVED', t('overview', 'overview.pipeline.contract')], ['EXPERIMENTING', t('overview', 'overview.pipeline.run')], ['EVIDENCE_READY', t('overview', 'overview.pipeline.analyze')],
+    ['IDEATING', t('overview', 'overview.pipeline.ideas')], ['IDEA_APPROVED', t('overview', 'overview.pipeline.ideaApproved')], ['CONTRACT_PENDING', t('overview', 'overview.pipeline.contract')],
+    ['CONTRACT_APPROVED', t('overview', 'overview.pipeline.contractApproved')], ['BASELINE_REPRO', t('overview', 'overview.pipeline.baseline')], ['EXPERIMENTING', t('overview', 'overview.pipeline.run')], ['EVIDENCE_READY', t('overview', 'overview.pipeline.analyze')],
     ['WRITING', t('overview', 'overview.pipeline.write')], ['REVIEWING', t('overview', 'overview.pipeline.review')], ['RELEASE_READY', t('overview', 'overview.pipeline.package')],
     ['RELEASED', t('overview', 'overview.pipeline.released')],
   ]

@@ -69,8 +69,9 @@ export type ProjectStatus =
   | 'SURVEYING'
   | 'IDEATING'
   | 'IDEA_APPROVED'
-  | 'BASELINE_REPRO'
+  | 'CONTRACT_PENDING'
   | 'CONTRACT_APPROVED'
+  | 'BASELINE_REPRO'
   | 'EXPERIMENTING'
   | 'EVIDENCE_READY'
   | 'WRITING'
@@ -178,7 +179,8 @@ export class KernelApiError extends Error {
 /**
  * Pure mapping: project status → the single next action per §8.3.
  * Returns null when nothing should be automated for this status
- * (SURVEYING→IDEATING is model/human work; terminal statuses only observe).
+ * (SURVEYING→IDEATING and its payload-bound Idea Gate are Human selection
+ * work; terminal statuses only observe).
  */
 export function planForStatus(status: ProjectStatus): ActionPlan | null {
   switch (status) {
@@ -190,12 +192,18 @@ export function planForStatus(status: ProjectStatus): ActionPlan | null {
       // 不自动:调研→选题是模型/用户工作,orchestrator 不代跑。
       return null
     case 'IDEATING':
-      return { type: 'idea-gate', idempotency_key: 'idea-gate', kind: 'gate', gate_type: 'idea', title: 'Idea Gate', note: '等待人类在 Scholar 面板批准 Idea Gate' }
+      // The atomic idea-selection transaction already created a Gate bound
+      // to the chosen idea. Never race it with a payload-less Gate.
+      return null
     case 'IDEA_APPROVED':
-      return { type: 'baseline-ready', idempotency_key: 'baseline-ready', kind: 'note', note: '等待 baseline 复现执行(隔离 runner;IDEA_APPROVED→BASELINE_REPRO)' }
-    case 'BASELINE_REPRO':
-      return { type: 'contract-gate', idempotency_key: 'contract-gate', kind: 'gate', gate_type: 'contract', title: 'Contract Gate', note: '等待人类在 Scholar 面板批准 Contract Gate' }
+      // The Contract draft transaction creates a payload-bound Gate. Never
+      // race it with an orchestrator-created payload-less Contract Gate.
+      return null
+    case 'CONTRACT_PENDING':
+      return null
     case 'CONTRACT_APPROVED':
+      return { type: 'baseline-ready', idempotency_key: 'baseline-ready', kind: 'note', note: '等待 approved Contract 绑定的 baseline 复现(CONTRACT_APPROVED→BASELINE_REPRO)' }
+    case 'BASELINE_REPRO':
       return { type: 'experiment-ready', idempotency_key: 'experiment-ready', kind: 'note', note: '等待正式实验执行(CONTRACT_APPROVED→EXPERIMENTING)' }
     case 'EXPERIMENTING':
       return { type: 'analysis-ready', idempotency_key: 'analysis-ready', kind: 'note', note: '等待正式运行完成并产出证据(EXPERIMENTING→EVIDENCE_READY)' }

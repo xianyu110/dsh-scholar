@@ -135,29 +135,27 @@ describe('planForStatus — §8.3 automatic-advance mapping', () => {
     expect(planForStatus('SURVEYING')).toBeNull()
   })
 
-  it('IDEATING → Idea Gate request', () => {
-    const plan = planForStatus('IDEATING')
-    expect(plan?.type).toBe('idea-gate')
-    expect(plan?.kind).toBe('gate')
-    expect(plan?.gate_type).toBe('idea')
+  it('IDEATING → no payload-less Idea Gate (selection transaction owns it)', () => {
+    expect(planForStatus('IDEATING')).toBeNull()
   })
 
-  it('IDEA_APPROVED → baseline-ready note (waits for baseline reproduction)', () => {
-    const plan = planForStatus('IDEA_APPROVED')
+  it('IDEA_APPROVED → no payload-less Contract Gate (draft transaction owns it)', () => {
+    expect(planForStatus('IDEA_APPROVED')).toBeNull()
+  })
+
+  it('CONTRACT_PENDING → no payload-less Contract Gate', () => {
+    expect(planForStatus('CONTRACT_PENDING')).toBeNull()
+  })
+
+  it('CONTRACT_APPROVED → baseline-ready note', () => {
+    const plan = planForStatus('CONTRACT_APPROVED')
     expect(plan?.type).toBe('baseline-ready')
     expect(plan?.kind).toBe('note')
     expect(plan?.note).toContain('baseline')
   })
 
-  it('BASELINE_REPRO → Contract Gate request', () => {
+  it('BASELINE_REPRO → experiment-ready note', () => {
     const plan = planForStatus('BASELINE_REPRO')
-    expect(plan?.type).toBe('contract-gate')
-    expect(plan?.kind).toBe('gate')
-    expect(plan?.gate_type).toBe('contract')
-  })
-
-  it('CONTRACT_APPROVED → experiment-ready note', () => {
-    const plan = planForStatus('CONTRACT_APPROVED')
     expect(plan?.type).toBe('experiment-ready')
     expect(plan?.kind).toBe('note')
   })

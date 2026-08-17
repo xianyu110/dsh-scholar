@@ -55,6 +55,8 @@ import { RoleRegistry, RESEARCH_TOOLS, stageProjectScopeDenial, type ResearchRol
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
 import { createScholarRpcHandler, createScholarViewRpcHandler } from './settings-rpc.js'
+import { createHarnessScholarAgent } from './chat-agent.js'
+import { ScholarAgentBridge } from './chat-agent-service.js'
 import { projectCreateIdempotencyKey } from './native-chat.js'
 import {
   buildScholarSessionProjection,
@@ -258,10 +260,14 @@ declare module '@deepseek-ai/cordis' {
  *  Same path contract as packages/dsh-research-ui/src/standalone/server.ts. */
 const STANDALONE_MODEL_FILE = 'model.json'
 
+function standaloneDataDir(): string {
+  return process.env.DSH_SCHOLAR_STANDALONE_DATA
+    ?? join(homedir(), '.dsh-scholar-standalone', 'research-ui-standalone')
+}
+
 function standaloneModelPreference(): string {
   try {
-    const base = process.env.DSH_SCHOLAR_STANDALONE_DATA ?? join(homedir(), '.dsh-scholar-standalone', 'research-ui-standalone')
-    const raw = readFileSync(join(base, STANDALONE_MODEL_FILE), 'utf8')
+    const raw = readFileSync(join(standaloneDataDir(), STANDALONE_MODEL_FILE), 'utf8')
     const parsed = JSON.parse(raw) as { model?: unknown }
     return typeof parsed.model === 'string' ? parsed.model : ''
   } catch {
@@ -309,6 +315,23 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   })
   const effectiveConfig = settingsScope?.get() ?? config
   const unattended = effectiveConfig.unattended ?? false
+
+  // Scholar's standalone Chat talks to this plugin-owned model callback only
+  // through the authenticated loopback bridge started after the Kernel is
+  // healthy. The callback tracks the optional DSH llm service lifecycle.
+  let scholarAgent: ReturnType<typeof createHarnessScholarAgent> | undefined
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['llm'], llmCtx => {
+      const handler = createHarnessScholarAgent(
+        llmCtx.llm,
+        () => effectiveConfig.models?.pi ?? standaloneModelPreference(),
+      )
+      scholarAgent = handler
+      return llmCtx.effect(() => () => {
+        if (scholarAgent === handler) scholarAgent = undefined
+      }, 'research-plugin.chat-agent-model')
+    })
+  }
 
   let readSessionWorkspace: ((sessionId: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
   let bindSessionProject: ((sessionId: string, projectId: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
@@ -380,6 +403,28 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     throw error
   }
   if (disposed) return
+
+  // The standalone BFF and this plugin are separate processes. Publish a
+  // private loopback endpoint + one-time bearer under their shared local
+  // data directory; neither value is exposed to the browser or settings.
+  if (typeof ctx.inject === 'function') {
+    const agentBridge = new ScholarAgentBridge({
+      dataDir: standaloneDataDir(),
+      handler: () => scholarAgent,
+      log: line => ctx.logger('research').info(line),
+    })
+    ctx.effect(() => () => agentBridge.stop(), 'research-plugin.chat-agent-bridge')
+    try {
+      await agentBridge.start()
+    } catch (error) {
+      ctx.logger('research').error(`Scholar agent bridge failed to start: ${(error as Error).message}`)
+      throw error
+    }
+    if (disposed) {
+      await agentBridge.stop()
+      return
+    }
+  }
 
   // The endpoint getter is only read AFTER start: with `port: 0` it resolves
   // the real bound port from the kernel's 0600 runtime/endpoint.json; with a

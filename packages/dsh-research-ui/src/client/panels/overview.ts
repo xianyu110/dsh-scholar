@@ -13,7 +13,7 @@ import { el, rootHost } from '../ui'
 import { t } from '../i18n/index'
 import { chromeTabs } from '../i18n/chrome'
 import { state, tabSave } from '../state'
-import { DEEP_LINK_TAB_PREFIX } from '../nav'
+import { DEEP_LINK_TAB_PREFIX, isTabVisible } from '../nav'
 import { nextActionCardModel, resolveNextActionInput, type NextActionCardModel } from '../next-action-cards'
 import { openIntakeModal } from '../modals/intake'
 import { runChatLine } from '../modals/commands'
@@ -33,7 +33,9 @@ function navigateTo(model: NextActionCardModel): void {
     })
     return
   }
-  const tab = model.route
+  // Budget governance remains reachable through Approvals while the optional
+  // diagnostic Budget page is hidden.
+  const tab = model.route === 'budget' && !isTabVisible('budget') ? 'gates' : model.route
   state.activeTab = tab
   tabSave()
   state.rerender()
@@ -95,9 +97,10 @@ export function nextActionCardNode(model: NextActionCardModel): HTMLElement {
   if (model.hasRoute) {
     const foot = el('div', 'row nax-foot')
     foot.style.cssText = 'margin-top:8px;justify-content:flex-end'
-    const tabLabel = model.route === 'intake'
+    const destination = model.route === 'budget' && !isTabVisible('budget') ? 'gates' : model.route
+    const tabLabel = destination === 'intake'
       ? t('intake', 'intake.title')
-      : (chromeTabs().find(tab => tab.key === model.route)?.label ?? model.route)
+      : (chromeTabs().find(tab => tab.key === destination)?.label ?? destination)
     const go = el('button', 'hbtn nax-go', t('overview', 'overview.nextaction.open', { tab: tabLabel }))
     if (model.disabled) {
       go.disabled = true

@@ -70,13 +70,13 @@ Project 另有 `brief_status: collecting | confirmed`。v2 name-only Init 创建
 
 ## 3. 状态机
 
-状态全集：DRAFT、SCOPED、SURVEYING、IDEATING、IDEA_APPROVED、BASELINE_REPRO、CONTRACT_PENDING、CONTRACT_APPROVED、EXPERIMENTING、EVIDENCE_READY、WRITING、REVIEWING、RELEASE_READY、RELEASED、BLOCKED_GATE、STOPPED、FAILED、ARCHIVED。
+状态全集：DRAFT、SCOPED、SURVEYING、IDEATING、IDEA_APPROVED、CONTRACT_PENDING、CONTRACT_APPROVED、BASELINE_REPRO、EXPERIMENTING、EVIDENCE_READY、WRITING、REVIEWING、RELEASE_READY、RELEASED、BLOCKED_GATE、STOPPED、FAILED、ARCHIVED。
 
 ~~~mermaid
 flowchart LR
   DRAFT -->|Scope Gate| SCOPED --> SURVEYING --> IDEATING
-  IDEATING -->|Idea Gate| IDEA_APPROVED --> BASELINE_REPRO --> CONTRACT_PENDING
-  CONTRACT_PENDING -->|Contract Gate| CONTRACT_APPROVED --> EXPERIMENTING
+  IDEATING -->|Idea Gate; freeze selected IdeaCard| IDEA_APPROVED -->|draft Contract| CONTRACT_PENDING
+  CONTRACT_PENDING -->|Contract Gate; freeze Contract| CONTRACT_APPROVED --> BASELINE_REPRO --> EXPERIMENTING
   EXPERIMENTING --> EVIDENCE_READY --> WRITING --> REVIEWING --> RELEASE_READY
   RELEASE_READY -->|Release Gate| RELEASED
 ~~~
@@ -307,7 +307,13 @@ Intake status 为 draft、uploading、scanning、needs_input、grilling、propos
 
 NextAction 是 Kernel 投影，不是 UI 本地状态（GUIDE-01）。字段：`id`（`${code}:${projectId}` 稳定，ref-bound 覆盖动作追加 ref id）、`code`（稳定机器码：scope_gate_submit / survey_run / idea_generate / idea_gate_approve / contract_register / baseline_reproduce / pilot_formal_submit / evidence_verify / manuscript_write / reviewer_run / release_bundle / release_gate / gate_resolve / budget_resolve / gate_decide / job_retry / project_stop / project_archived / project_released / project_stopped / unknown）、`label`（i18n key 或英文默认文案；legacy `next_actions: string[]` 由此派生）、`reason`（为什么现在做）、`required`（true 或缺失前置项列表，如 `['approved_contract']`）、`route`（chat/gates/runs/evidence/manuscript/budget/ideas/contracts/release/overview）、`capability` 可选（如 researcher/pi）、`revision`（依赖对象版本：gate 决策=project.revision、run 动作=contract version、idea gate=idea version；null=不适用）、`state`（ready=现在做 / blocked=前置缺失 / done=已完成）、`blocking`（是否阻塞阶段完成）、`refs`（gate/job/contract/idea/evidence 权威对象）、`required_by`（human/agent/runner）。`required` 只表达前置条件，不能用来表示执行者；执行者只能读取 `required_by`。
 
-NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code（`unknown` 退化）只能只读显示。每阶段至少一个动作：confirmed DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate、IDEATING→idea_gate_approve、IDEA_APPROVED/BASELINE_REPRO→contract_register+baseline_reproduce、CONTRACT_APPROVED/EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done。pending gate 产生 gate 决策动作（budget→budget_resolve，其余→gate_decide，base 已引用不重复）；失败/retryable 作业产生 job_retry（attempts 耗尽→blocked+repair_decision）。Intake/Grill 覆盖动作包括 `intake_resume`、`intake_scan`、`intake_answer`、`intake_propose`、`intake_adopt`；collecting DRAFT 不得产生 `scope_gate_submit`。
+NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolved gap 确定性生成；未知 code（`unknown` 退化）只能只读显示。每阶段至少一个动作：confirmed DRAFT→scope_gate_submit、SCOPED→survey_run、SURVEYING→idea_generate/idea_select、IDEATING→idea_gate_approve、IDEA_APPROVED→contract_register、CONTRACT_PENDING→contract_gate_approve 或 contract_register（Gate 被拒绝/要求修改后）、CONTRACT_APPROVED→baseline_reproduce、BASELINE_REPRO→baseline_reproduce+pilot_formal_submit、EXPERIMENTING→pilot_formal_submit+evidence_verify、EVIDENCE_READY→manuscript_write、WRITING→reviewer_run、REVIEWING→release_bundle+release_gate、RELEASE_READY→release_gate、BLOCKED_GATE→gate_resolve（+budget_resolve）、FAILED→project_stop、ARCHIVED/RELEASED/STOPPED→done。pending gate 产生 gate 决策动作（budget→budget_resolve，其余→gate_decide，base 已引用不重复）；失败/retryable 作业产生 job_retry（attempts 耗尽→blocked+repair_decision）。Intake/Grill 覆盖动作包括 `intake_resume`、`intake_scan`、`intake_answer`、`intake_propose`、`intake_adopt`；collecting DRAFT 不得产生 `scope_gate_submit`。所有非终态投影必须满足进展不变量：存在 pending Human Gate，或至少一个非 done 动作为 ready；禁止全部 blocked 的闭环依赖。
+
+`CONTRACT_APPROVED` 的 `baseline_reproduce` 同时承担执行前交接投影：尚无 baseline Job 时，它是 Runs 中可见但不计入 Job 统计的准备任务。`required` 可以列出 `baseline_command`、`code_snapshot`、`runner_environment` 等缺口；动作保持可进入 Chat/Workspace/Settings，以便 Agent 与用户消解缺口，不能因缺口把整个项目变成无入口的全 blocked。准备任务不是 Job、Run 或 Evidence，不拥有伪造的运行状态。只有 `startBaselineRun` 成功后才创建 Job 并原子推进 `BASELINE_REPRO`。
+
+`startBaselineRun` 是 Contract→Execution 的唯一原子交接：输入固定 expected project revision、approved contract id、CodeSnapshot id、非空 argv、可选 Runner target/image override、output contract 和 project-scoped idempotency key；输出同时包含 queued Job 与推进后的 Project。Kernel 在同一事务验证合同归属/批准状态、代码快照归属、Runner/Profile/target、镜像 pin、预算与状态。任一校验或状态迁移失败均回滚 Job、Event 和 Project 更新；相同幂等键只返回原 Job，不创建第二次运行。
+
+SURVEYING 的 Idea 子流程按权威数据细分：没有 proposed IdeaCard 时为 Agent `idea_generate`；已有候选但尚未选择时为 Human `idea_select`，refs 列出候选 idea，不能再次误报“需要生成”。选择操作完成真实 counter-search NoveltyAudit 后，由 Kernel 原子写入 audit、推进到 IDEATING 并创建 payload 绑定所选 idea 的 pending Gate。IDEATING 只有在 pending Idea Gate 存在时才投影 `idea_gate_approve`；禁止 orchestrator 预先创建 payload-less Idea Gate。
 
 `survey_run` 不是 Runner Job：它由当前项目 Chat 的 `/survey <query>` 驱动 connector 并冻结 Corpus Snapshot，因此 route 必须是 `chat`，不能把用户导航到没有 Job 的空 Runs 列表。浏览器 CTA 只预填由 Brief problem 得出的 slash command，必须由用户确认发送，不能因打开卡片自动产生外部检索副作用。SCOPED 项目第一次成功冻结 Corpus Snapshot 时，snapshot、`SCOPED→SURVEYING` 与对应 Outbox 必须在同一事务提交；随后投影主动作变为 `idea_generate`，不能继续重复显示 `survey_run`。其他状态补充/重做 Corpus Snapshot 不擅自改变阶段。
 

@@ -12,7 +12,7 @@ import { chromeTabGroups, chromeTabs, chromeModelChoices } from './i18n/chrome'
 import { api } from './api'
 import { el, pill, copyText, ACCENTS, ACCENT_DARK, rootHost } from './ui'
 import type { ProjectRow, Projection } from './types'
-import { ALL_TAB_KEYS, isTabKey, navOrder, navShortcutIndex, parseDeepLink, startActions, tabGroups, type TabKey } from './nav'
+import { isTabKey, isTabVisible, navOrder, navShortcutIndex, parseDeepLink, reconcileVisibleNavigation, startActions, tabGroups, visibleTabKeys, type TabKey } from './nav'
 import {
   DOCK_BOTTOM_MAX,
   DOCK_BOTTOM_MIN,
@@ -751,7 +751,7 @@ export function apply(options: ApplyOptions = {}): void {
     try { history.replaceState(null, '', `#tab=${tab}`) } catch { /* sandboxed iframe */ }
   }
   const activateTab = (key: string): void => {
-    if (!isTabKey(key)) return
+    if (!isTabVisible(key)) return
     // A page has one live renderer. Opening its full-page route first removes
     // the same page from the dock, avoiding duplicate Chat/PTY/TeX state.
     if (dockLayout.openPanel === key) {
@@ -876,6 +876,20 @@ export function apply(options: ApplyOptions = {}): void {
   workspaceShell.append(dockResize, dockSurface)
 
   const saveDock = (): void => { dockStore.save(dockLayout) }
+  const applyNavigationVisibility = (): void => {
+    const next = reconcileVisibleNavigation(state.activeTab, dockLayout.openPanel)
+    if (next.activeTab !== state.activeTab) {
+      if (isTabKey(state.activeTab)) deactivatePanelTransport(state.activeTab)
+      state.activeTab = next.activeTab
+      tabSave()
+      syncHash(next.activeTab)
+    }
+    if (next.dockPanel !== dockLayout.openPanel) {
+      if (dockLayout.openPanel !== null) deactivatePanelTransport(dockLayout.openPanel)
+      dockLayout = updateDockLayout(dockLayout, { type: 'close' })
+      saveDock()
+    }
+  }
   const currentDockPosition = (): DockPosition => effectiveDockPosition(dockLayout, window.innerWidth)
   const applyDockGeometry = (): void => {
     const visible = dockLayout.openPanel !== null && state.projectId !== undefined
@@ -902,6 +916,7 @@ export function apply(options: ApplyOptions = {}): void {
     applyDockGeometry()
   }
   const openDock = (panelKey: TabKey, position?: DockPosition): void => {
+    if (!isTabVisible(panelKey)) return
     const previousDock = dockLayout.openPanel
     if (previousDock !== null && previousDock !== panelKey) deactivatePanelTransport(previousDock)
     if (state.activeTab === panelKey) deactivatePanelTransport(panelKey)
@@ -947,7 +962,7 @@ export function apply(options: ApplyOptions = {}): void {
     dockPicker.title = t('shell', 'shell.dock.panelPicker')
     const selected = dockPicker.value || current || ''
     dockPicker.replaceChildren()
-    for (const key of ALL_TAB_KEYS) {
+    for (const key of visibleTabKeys()) {
       const def = chromeTabs().find(item => item.key === key)
       const option = el('option', '', def?.label ?? key)
       option.value = key
@@ -966,7 +981,7 @@ export function apply(options: ApplyOptions = {}): void {
     applyDockGeometry()
   }
   dockPicker.onchange = () => {
-    if (isTabKey(dockPicker.value)) openDock(dockPicker.value)
+    if (isTabVisible(dockPicker.value)) openDock(dockPicker.value)
   }
   dockRight.onclick = () => setDockPosition('right')
   dockBottom.onclick = () => setDockPosition('bottom')
@@ -1150,6 +1165,7 @@ export function apply(options: ApplyOptions = {}): void {
 
   const renderOnce = async (): Promise<void> => {
     retainArtifactPreviewForProject(state.projectId)
+    applyNavigationVisibility()
     styleTabs()
     // Keep the live chat dock mounted during chat refreshes. Hiding it before
     // the async project requests complete makes the body gain its height for a
@@ -1383,6 +1399,11 @@ export function apply(options: ApplyOptions = {}): void {
   }
   paintChrome()
   state.rerender = () => { void render() }
+  state.navigationChanged = () => {
+    applyNavigationVisibility()
+    paintChrome()
+    void render()
+  }
   // dsh-web i18n: locale switch re-paints the static chrome AND re-renders
   // the active panel (panels/terminal/status pills evaluate t() per render,
   // so the body follows the new locale in the same tick); setLocale itself
@@ -1401,7 +1422,7 @@ export function apply(options: ApplyOptions = {}): void {
     if (link === null) return
     if (link.kind === 'tab') {
       if (renderNow) activateTab(link.target)
-      else if (isTabKey(link.target)) {
+      else if (isTabVisible(link.target)) {
         state.activeTab = link.target
         tabSave()
       }
@@ -1412,6 +1433,7 @@ export function apply(options: ApplyOptions = {}): void {
   const onHashChange = (): void => applyDeepLink(true)
   window.addEventListener('hashchange', onHashChange)
   tabLoad()
+  applyNavigationVisibility()
   applyDeepLink(false)
   notifLoad()
   favProjectsLoad()

@@ -12,7 +12,7 @@ import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, RunnerTargetCreateInput, RunnerTargetUpdateInput, type PtySession } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, NoveltyAudit, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, RunnerTargetCreateInput, RunnerTargetUpdateInput, IdeaDraft, type PtySession } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
@@ -258,6 +258,20 @@ const jobSchema = z.object({
   created_by_principal_id: z.string().nullable().optional(),
 })
 
+const baselineRunSchema = z.object({
+  expected_revision: z.number().int().nonnegative(),
+  idempotency_key: z.string().min(1),
+  contract_id: z.string().min(1),
+  code_snapshot_id: z.string().min(1),
+  command: z.array(z.string().min(1)).min(1),
+  runner_target_id: z.string().min(1).nullable().optional(),
+  image_digest: z.string().min(1).optional(),
+  output_contract: z.object({
+    metrics: z.string().min(1),
+    logs: z.string().min(1),
+  }).strict().optional(),
+}).strict()
+
 // P0-4 (hardening-v0.2-status.md §5 SNAPSHOT-01/API-01): the code-snapshot
 // API accepts ONLY a project workspace + root-relative path — never a caller
 // supplied host path. `.strict()` rejects the deprecated `{path: …}` shape
@@ -306,6 +320,26 @@ const ideaSchema = z.object({
   }),
   risk_notes: z.string().optional(),
 })
+
+const ideaBatchSchema = z.object({
+  expected_project_revision: z.number().int().nonnegative(),
+  corpus_snapshot_id: z.string().min(1),
+  ideas: z.array(IdeaDraft).min(1).max(5),
+}).strict()
+
+const ideaGatePrepareSchema = z.object({
+  idea_id: z.string().min(1),
+  expected_project_revision: z.number().int().nonnegative(),
+  expected_idea_version: z.number().int().positive(),
+  novelty_audit: NoveltyAudit,
+}).strict()
+
+const contractGatePrepareSchema = z.object({
+  idea_id: z.string().min(1),
+  expected_project_revision: z.number().int().nonnegative(),
+  expected_idea_version: z.number().int().positive(),
+  contract: contractSchema.omit({ project_id: true, idea_id: true }).strict(),
+}).strict()
 
 const evidenceSchema = z.object({
   project_id: z.string().min(1).optional(),
@@ -909,6 +943,8 @@ const PI_ONLY_WRITE_ROUTES: ReadonlyArray<RegExp> = [
   // Brief + 创建唯一 Scope Gate）—— researcher/viewer/auditor 一律 403。
   /(?:^|\/)grill\/confirm(?:\/|$)/,
   /(?:^|\/)execution(?:\/|$)/,
+  /(?:^|\/)idea-gate(?:\/|$)/,
+  /(?:^|\/)contract-gate(?:\/|$)/,
 ]
 
 function isPiOnlyWrite(pathname: string): boolean {
@@ -1940,7 +1976,13 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               ok(res, kernel.recordUsage(id, input))
               return
             }
-            if (method === 'POST' && sub === 'ideas') {
+            if (method === 'POST' && sub === 'ideas' && subId === 'batch') {
+              const input = ideaBatchSchema.parse(body)
+              const ideas = kernel.createIdeasBatch({ ...input, project_id: id })
+              send(res, 201, { ideas })
+              return
+            }
+            if (method === 'POST' && sub === 'ideas' && subId === undefined) {
               const input = ideaSchema.parse(body)
               const idea = kernel.createIdea({ ...input, project_id: id } as never)
               send(res, 201, idea)
@@ -1960,6 +2002,23 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== '' ? req.headers['x-principal-id'] : undefined
               const job = kernel.submitJob({ ...input, project_id: id, created_by_principal_id: input.created_by_principal_id ?? headerPrincipal ?? null })
               send(res, 201, job)
+              return
+            }
+            if (method === 'POST' && sub === 'baseline-runs') {
+              const input = baselineRunSchema.parse(body)
+              const headerPrincipal = typeof req.headers['x-principal-id'] === 'string' && req.headers['x-principal-id'] !== ''
+                ? req.headers['x-principal-id']
+                : null
+              const started = kernel.startBaselineRun({
+                ...input,
+                project_id: id,
+                created_by_principal_id: headerPrincipal,
+              })
+              send(res, 201, started)
+              return
+            }
+            if (method === 'GET' && sub === 'code-snapshots') {
+              ok(res, kernel.listCodeSnapshots(id))
               return
             }
             if (method === 'POST' && sub === 'code-snapshots') {
@@ -3284,6 +3343,20 @@ async function handleV2(ctx: {
     if (!requirePiOnly(kernel, req, res, id, body, 'project execution configuration')) return
     const input = projectRunnerTargetSchema.parse(body)
     ok(res, kernel.configureProjectRunnerTarget({ project_id: id, ...input }))
+    return
+  }
+  if (id !== undefined && sub === 'idea-gate' && method === 'POST') {
+    memberOr404(id)
+    if (!requirePiOnly(kernel, req, res, id, body, 'Idea selection')) return
+    const input = ideaGatePrepareSchema.parse(body)
+    send(res, 201, kernel.prepareIdeaGate({ project_id: id, ...input }))
+    return
+  }
+  if (id !== undefined && sub === 'contract-gate' && method === 'POST') {
+    memberOr404(id)
+    if (!requirePiOnly(kernel, req, res, id, body, 'Contract draft preparation')) return
+    const input = contractGatePrepareSchema.parse(body)
+    send(res, 201, kernel.prepareContractGate({ project_id: id, ...input } as never))
     return
   }
   if (id !== undefined && sub === undefined && method === 'DELETE') {

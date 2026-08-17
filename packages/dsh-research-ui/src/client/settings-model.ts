@@ -126,6 +126,7 @@ export function settingsSections(): SettingsSectionDef[] {
       rows: [
         { id: 'preferences.language', labelKey: 'shell.settings.language' },
         { id: 'preferences.autoRefresh', labelKey: 'shell.settings.autoRefresh' },
+        { id: 'preferences.budgetPage', labelKey: 'shell.settings.budgetPage' },
         { id: 'preferences.transcript', labelKey: 'shell.settings.transcript' },
         { id: 'preferences.summary', labelKey: 'shell.settings.summary' },
         { id: 'preferences.shortcuts', labelKey: 'shell.settings.help', actionKey: 'shell.settings.shortcuts' },
