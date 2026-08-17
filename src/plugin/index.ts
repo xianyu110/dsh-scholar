@@ -40,6 +40,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-user-questions'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
@@ -78,7 +79,7 @@ export const RESEARCH_SETTINGS_NAMESPACE = settingsNamespace(name)
 // Settings is a boot dependency, not an opportunistic lookup: the persisted
 // restart-scoped section must be registered and resolved before the kernel is
 // constructed. DSH's loader activates this fiber once all four services exist.
-export const inject = ['tools', 'commands', 'subagents', 'settings']
+export const inject = ['tools', 'commands', 'subagents', 'settings', 'userQuestions']
 
 export interface ResearchPluginConfig {
   kernel?: {

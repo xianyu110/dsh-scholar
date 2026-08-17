@@ -1,6 +1,7 @@
 /**
- * INIT-GRILL-02 chat guide card model (client/grill-guide-model.ts): the
- * PURE logic behind "创建完项目后跳转到 chat 页面,对用户进行使用引导" —
+ * INIT-GRILL-02 conversational Brief prompt model
+ * (client/grill-guide-model.ts): the PURE logic behind asking each question
+ * as a Chat turn while reusing the normal composer —
  *
  *   grillGuideModel(projection, projectStatus): visible/current/readyToConfirm/
  *     progress/nextActionKey state transitions (collecting+question →

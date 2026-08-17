@@ -63,6 +63,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 0.1.0-rc.2
         version: 0.1.0-rc.2(a5f6c7c7fa2e7a67e6a5c6f20a2e37e5)
+      '@deepseek-ai/dsh-user-questions':
+        specifier: 0.1.0-rc.2
+        version: 0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-agent@0.1.0-rc.2(ea6da0d9081993066db7671b1313bf21))(@deepseek-ai/dsh-invariants@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-llm@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.2(@deepseek-ai/cordis@4.0.1))))
       '@deepseek-ai/schemastery':
         specifier: 3.18.1
         version: 3.18.1

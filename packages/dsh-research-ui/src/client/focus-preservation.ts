@@ -26,6 +26,26 @@ export function shouldDeferBackgroundRefresh(tagName: string, isContentEditable:
   return isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select'
 }
 
+function isEditableEventNode(target: EventTarget | null): boolean {
+  if (target === null || typeof target !== 'object') return false
+  const candidate = target as EventTarget & { tagName?: unknown, isContentEditable?: unknown }
+  const tagName = typeof candidate.tagName === 'string' ? candidate.tagName.toLowerCase() : ''
+  return candidate.isContentEditable === true
+    || tagName === 'input'
+    || tagName === 'textarea'
+    || tagName === 'select'
+}
+
+/**
+ * Keyboard events observed outside a ShadowRoot expose the host as
+ * `event.target`. The composed path retains the actual editor, so global
+ * shortcuts must inspect it before deciding that the user is not typing.
+ */
+export function eventComesFromEditable(event: Pick<Event, 'target' | 'composedPath'>): boolean {
+  const path = event.composedPath()
+  return (path.length > 0 ? path : [event.target]).some(isEditableEventNode)
+}
+
 /** Coalesce re-entrant renders and defer polling while a user edits. */
 export class RenderCoordinator {
   private active: Promise<void> | null = null

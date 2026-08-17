@@ -15,6 +15,45 @@ afterEach(() => {
 })
 
 describe('project-scoped free conversation', () => {
+  it('records a collecting Brief answer from the ordinary Chat composer without duplicating the next question', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/grill') && init?.method !== 'POST') {
+        return json({
+          project_id: 'prj_1', project_revision: 1, intake_id: 'int_1', intake_revision: 1,
+          question: { question_code: 'brief.problem', question_revision: 1, prompt_key: 'grill.question.problem', required: true },
+          answers: [], brief_preview: { problem: '', scope: '', primary_metrics: [], target_outputs: [] },
+          ready_to_confirm: false,
+        })
+      }
+      if (path.endsWith('/grill/answers')) {
+        return json({
+          project_id: 'prj_1', project_revision: 1, intake_id: 'int_1', intake_revision: 2,
+          question: { question_code: 'brief.scope', question_revision: 1, prompt_key: 'grill.question.scope', required: true },
+          answers: [{
+            question_code: 'brief.problem', question_revision: 2, value: '提升低资源 OCR', disposition: 'answered',
+            answered_by: 'local-operator', answered_at: '2026-08-17T00:00:00.000Z',
+          }],
+          brief_preview: { problem: '提升低资源 OCR', scope: '', primary_metrics: [], target_outputs: [] },
+          ready_to_confirm: false,
+        })
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const host = vi.fn()
+
+    const result = await executeChatTurn('提升低资源 OCR', 'prj_1', host)
+
+    expect(result.text).toMatch(/已记录|recorded/i)
+    expect(result.text).not.toContain('研究范围是什么')
+    expect(host).not.toHaveBeenCalled()
+    const post = fetch.mock.calls.find(([, init]) => init?.method === 'POST')
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({
+      question_code: 'brief.problem', question_revision: 1, value: '提升低资源 OCR', disposition: 'answered',
+    })
+  })
+
   it('uses the Host model with a bounded project projection and keeps slash suggestions editable', async () => {
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const path = String(input)

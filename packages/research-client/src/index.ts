@@ -43,6 +43,30 @@ export interface KernelClientOptions {
   timeoutMs?: number
 }
 
+/** Kernel-authoritative state for the seven-question name-only project Grill. */
+export interface ProjectGrillProjection {
+  project_id: string
+  project_revision: number
+  intake_id: string
+  intake_revision: number
+  question: {
+    question_code: string
+    question_revision: number
+    prompt_key: string
+    required: boolean
+  } | null
+  answers: Array<{
+    question_code: string
+    question_revision: number
+    value: unknown
+    disposition: string
+    answered_by: string
+    answered_at: string
+  }>
+  brief_preview: ResearchProject['brief']
+  ready_to_confirm: boolean
+}
+
 export class ResearchClient {
   readonly endpoint: string
   private readonly token: string | undefined
@@ -340,6 +364,23 @@ export class ResearchClient {
     }>
   }> {
     return this.request('GET', `/v1/projects/${encodeURIComponent(projectId)}/projection`, undefined, {}, signal)
+  }
+
+  /** Read the current question in a name-only project's deterministic Grill. */
+  projectGrill(projectId: string, signal?: AbortSignal): Promise<ProjectGrillProjection> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/grill`, undefined, {}, signal)
+  }
+
+  /** Persist one human answer selected through Scholar Chat or DSH's native question UI. */
+  answerProjectGrill(projectId: string, input: {
+    question_code: string
+    question_revision: number
+    value?: unknown
+    disposition: 'answered' | 'skipped' | 'unknown'
+  }, principalId: string, signal?: AbortSignal): Promise<ProjectGrillProjection> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/grill/answers`, input, {
+      'x-principal-id': principalId,
+    }, signal)
   }
 
   transition(projectId: string, to: string, expectedRevision: number, reason?: string): Promise<ResearchProject> {

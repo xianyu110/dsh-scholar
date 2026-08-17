@@ -11,7 +11,7 @@ import {
   type UploadQueueItem,
 } from './chunked-upload'
 import {
-  grillAnswerPayload, grillConfirmPayload, grillErrorKey, grillGuideModel, grillQuestionLabelKey,
+  grillAnswerPayload, grillConfirmPayload, grillErrorKey, grillGuideModel,
   loadGrillGuideState,
   type GrillDisposition, type GrillGuideLoaded, type GrillProjection,
 } from './grill-guide-model'
@@ -94,13 +94,7 @@ export function chatAttachmentBeginPayload(): Record<string, unknown> {
   return intakeBeginPayload('Scholar chat attachments', null)
 }
 
-interface ProjectGrillProjection {
-  project_revision: number
-  intake_revision: number
-  question: { question_code: string; question_revision: number; prompt_key: string; required: boolean } | null
-  brief_preview: { problem: string; scope: string; primary_metrics: string[]; target_outputs: string[] }
-  ready_to_confirm: boolean
-}
+type ProjectGrillProjection = GrillProjection
 
 function grillPrompt(projection: ProjectGrillProjection): string {
   if (projection.question !== null) return t('intake', projection.question.prompt_key)
@@ -113,18 +107,14 @@ function grillPrompt(projection: ProjectGrillProjection): string {
   return t('intake', 'grill.complete')
 }
 
-/* ───────────────────── INIT-GRILL-02 chat guide card ───────────────────── */
-// Post-create onboarding: the card renders above the composer while the
-// active project is still collecting its Brief (7 deterministic Grill
-// questions → PI confirm). Data is cached per project id and refreshed after
-// every answers/confirm write, so the 8s panel refresh does not re-GET both
-// endpoints per render (2 requests per render → 1 cache read + in-place
-// card update).
+/* ─────────────── INIT-GRILL-02 conversational Brief intake ─────────────── */
+// Post-create onboarding is part of the conversation: the current Grill
+// question is rendered as an assistant turn in the transcript and the only
+// free-text answer surface is the ordinary Chat composer. Data is cached per
+// project id so periodic panel refreshes do not duplicate reads.
 
 /** Per-project guide cache: {projectId → loaded projection+status}. */
 let grillGuideCache: { projectId: string; loaded: GrillGuideLoaded } | null = null
-/** One-time per-page-session "project ready" hint for confirmed projects. */
-let grillReadyHintShown = false
 
 /** Stable error-code copy: mapped key → t(), unmapped → verbatim code. */
 function grillErrorText(code: string | undefined, status: number): string {
@@ -137,128 +127,99 @@ function grillErrorText(code: string | undefined, status: number): string {
   return t('grill-guide', 'grill-guide.error.unknown', { code: key })
 }
 
-/** Answered-list disposition tag label (raw wire dispositions stay verbatim). */
-function grillDispositionLabel(disposition: string): string {
-  if (disposition === 'answered') return t('grill-guide', 'grill-guide.disposition.answered')
-  if (disposition === 'skipped') return t('grill-guide', 'grill-guide.disposition.skipped')
-  if (disposition === 'unknown') return t('grill-guide', 'grill-guide.disposition.unknown')
-  return disposition
-}
-
-/** Answered-list value snippet (raw user data, kept verbatim + truncated). */
-function grillAnswerSnippet(value: unknown): string {
-  if (typeof value === 'string') return value.length > 80 ? `${value.slice(0, 80)}…` : value
-  if (Array.isArray(value)) {
-    const head = value.map(String).slice(0, 3).join(', ')
-    return value.length > 3 ? `${head}…` : head
-  }
-  return ''
-}
-
-/** Load (or read from cache) and render the guide card into `host`. */
-async function fillGrillGuide(host: HTMLElement, projectId: string): Promise<void> {
+/** Load (or read from cache) and render the current question as a Chat turn. */
+async function fillGrillConversationTurn(
+  host: HTMLElement,
+  projectId: string,
+  sessionId: string,
+  input: HTMLTextAreaElement,
+  normalPlaceholder: string,
+  onRendered: () => void,
+): Promise<void> {
   let loaded = grillGuideCache !== null && grillGuideCache.projectId === projectId ? grillGuideCache.loaded : null
   if (loaded === null) {
     loaded = await loadGrillGuideState((path) => api(path), projectId)
     if (loaded === null) {
-      // silent: the chat keeps working without the guide card
+      // Silent: Chat keeps working even when the Brief projection is absent.
       if (grillGuideCache !== null && grillGuideCache.projectId === projectId) grillGuideCache = null
       return
     }
     grillGuideCache = { projectId, loaded }
   }
   if (!host.isConnected) return // a panel refresh raced us — stale render
-  renderGrillGuideCard(host, projectId, loaded)
+  renderGrillConversationTurn(host, projectId, sessionId, loaded, input, normalPlaceholder)
+  onRendered()
 }
 
-/** Render the guide card (visible only while the Brief is collecting). */
-function renderGrillGuideCard(host: HTMLElement, projectId: string, loaded: GrillGuideLoaded): void {
+/** Render one ephemeral assistant question; answers remain normal Chat turns. */
+function renderGrillConversationTurn(
+  host: HTMLElement,
+  projectId: string,
+  sessionId: string,
+  loaded: GrillGuideLoaded,
+  input: HTMLTextAreaElement,
+  normalPlaceholder: string,
+): void {
   const model = grillGuideModel(loaded.projection, loaded.projectStatus)
   host.replaceChildren()
+  input.placeholder = normalPlaceholder
   if (!model.visible) {
-    // confirmed project: one-time "project ready" hint per page session
-    if (!grillReadyHintShown) {
-      grillReadyHintShown = true
-      const hint = el('div', 'muted', t('grill-guide', 'grill-guide.projectReady'))
-      hint.style.cssText = 'font-size:10.5px;padding:2px 4px'
-      host.appendChild(hint)
-    }
     return
   }
-  const card = el('div')
-  card.style.cssText = 'border:1px solid var(--accent);border-radius:10px;padding:10px 12px;background:var(--accent-soft);display:flex;flex-direction:column;gap:8px'
-  // header: title + progress
+  const turn = el('div', 'chat-grill-turn')
   const head = el('div', 'row')
-  head.style.cssText = 'align-items:center;gap:8px'
+  head.style.cssText = 'align-items:center;gap:8px;margin-bottom:7px'
   head.appendChild(el('span', '', '📋'))
-  const title = el('span', 'pname', t('grill-guide', model.titleKey))
-  title.style.cssText = 'font-size:12px'
+  const title = el('span', 'pname', t('grill-guide', 'grill-guide.chatTitle'))
+  title.style.cssText = 'font-size:13px'
   head.appendChild(title)
   head.appendChild(el('span', 'grow'))
   const progress = el('span', 'muted', t('grill-guide', 'grill-guide.progress', {
     answered: String(model.answeredCount),
     total: String(model.totalCount),
   }))
-  progress.style.cssText = 'font-size:10.5px'
+  progress.style.cssText = 'font-size:11px'
   head.appendChild(progress)
-  card.appendChild(head)
+  turn.appendChild(head)
 
-  // current question: prompt + input + submit / skip / mark-unknown
+  // The prompt lives in the transcript; free text is entered only in the
+  // shared Chat composer. Quick dispositions do not create another editor.
   if (model.current !== null && loaded.projection.question !== null) {
     const wireQuestion = loaded.projection.question
-    const qbox = el('div')
-    qbox.style.cssText = 'display:flex;flex-direction:column;gap:6px'
     const qrow = el('div', 'row')
-    qrow.style.cssText = 'align-items:flex-start;gap:6px;flex-wrap:wrap'
+    qrow.style.cssText = 'align-items:flex-start;gap:8px;flex-wrap:wrap'
     if (model.current.required) {
       const req = el('span', 'artifact-kind', t('intake', 'intake.grill.required'))
-      req.style.cssText = 'color:var(--tone-amber);font-size:9px;padding:1px 6px;border:1px solid var(--tone-amber);border-radius:8px;flex-shrink:0'
+      req.style.cssText = 'color:var(--tone-amber);font-size:10px;padding:1px 7px;border:1px solid var(--tone-amber);border-radius:8px;flex-shrink:0'
       qrow.appendChild(req)
     }
     const prompt = el('div', '', t('intake', model.current.promptKey))
-    prompt.style.cssText = 'font-size:11.5px;line-height:1.5;color:var(--text)'
+    prompt.style.cssText = 'font-size:15px;line-height:1.55;color:var(--text)'
     qrow.appendChild(prompt)
-    qbox.appendChild(qrow)
-    const input = document.createElement('textarea')
-    input.rows = 2
-    input.placeholder = t('grill-guide', 'grill-guide.answerPlaceholder')
-    input.setAttribute('aria-label', t('grill-guide', 'grill-guide.answerPlaceholder'))
-    input.style.cssText = 'width:100%;box-sizing:border-box;resize:vertical;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font:11.5px/1.5 system-ui,sans-serif;outline:none'
-    input.onfocus = () => { input.style.borderColor = 'var(--accent)' }
-    input.onblur = () => { input.style.borderColor = 'var(--border)' }
+    turn.appendChild(qrow)
+    input.placeholder = t('grill-guide', 'grill-guide.chatAnswerPlaceholder')
     const error = el('div', 'error-banner')
-    error.style.cssText = 'display:none;font-size:10.5px;margin:0'
-    qbox.appendChild(input)
-    qbox.appendChild(error)
+    error.style.cssText = 'display:none;font-size:11px;margin:8px 0 0'
+    turn.appendChild(error)
     const actions = el('div', 'row')
-    actions.style.cssText = 'gap:6px'
-    const submit = el('button', 'btn approve', t('grill-guide', 'grill-guide.submit'))
-    submit.style.cssText = 'padding:4px 14px;font-size:11px'
+    actions.style.cssText = 'gap:6px;margin-top:9px'
     const skip = el('button', 'hbtn', t('grill-guide', 'grill-guide.skip'))
-    skip.style.cssText = 'padding:3px 10px;font-size:10.5px'
+    skip.style.cssText = 'padding:3px 10px;font-size:11px'
     const unknown = el('button', 'hbtn', t('grill-guide', 'grill-guide.markUnknown'))
-    unknown.style.cssText = 'padding:3px 10px;font-size:10.5px'
-    actions.append(submit, skip, unknown)
-    qbox.appendChild(actions)
-    card.appendChild(qbox)
+    unknown.style.cssText = 'padding:3px 10px;font-size:11px'
+    actions.append(skip, unknown)
+    turn.appendChild(actions)
     const setBusy = (busy: boolean): void => {
-      submit.disabled = busy
       skip.disabled = busy
       unknown.disabled = busy
       input.disabled = busy
     }
     const postAnswer = async (disposition: GrillDisposition): Promise<void> => {
       error.style.display = 'none'
-      if (disposition === 'answered' && input.value.trim() === '') {
-        error.textContent = t('grill-guide', 'grill-guide.answerEmpty')
-        error.style.display = 'block'
-        input.focus()
-        return
-      }
       setBusy(true)
       const res = await apiResult<GrillProjection>(
         `/v2/projects/${encodeURIComponent(projectId)}/grill/answers`,
-        { method: 'POST', body: JSON.stringify(grillAnswerPayload(wireQuestion, input.value, disposition)) },
+        { method: 'POST', body: JSON.stringify(grillAnswerPayload(wireQuestion, '', disposition)) },
       )
       setBusy(false)
       if (!res.ok) {
@@ -271,23 +232,20 @@ function renderGrillGuideCard(host: HTMLElement, projectId: string, loaded: Gril
         error.style.display = 'block'
         return
       }
-      // refresh the cached projection + re-render the card in place (no
-      // full panel rerender, so composer focus and draft survive)
       grillGuideCache = { projectId, loaded: { ...loaded, projection: res.data } }
-      if (host.isConnected) renderGrillGuideCard(host, projectId, grillGuideCache.loaded)
+      chatPushToProjectSession(projectId, sessionId, {
+        role: 'user',
+        text: t('grill-guide', disposition === 'skipped' ? 'grill-guide.chatSkipped' : 'grill-guide.chatUnknown'),
+        time: new Date().toLocaleTimeString(getLocale()),
+      }, true)
+      state.rerender()
     }
-    submit.onclick = () => { void postAnswer('answered') }
     skip.onclick = () => { void postAnswer('skipped') }
     unknown.onclick = () => { void postAnswer('unknown') }
-    input.onkeydown = (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault()
-        void postAnswer('answered')
-      }
-    }
   }
 
-  // ready to confirm: Brief preview + PI confirm button
+  // PI confirmation remains an explicit human action but is presented as the
+  // next assistant turn, not as a second composer.
   if (model.readyToConfirm) {
     const ready = el('div')
     ready.style.cssText = 'display:flex;flex-direction:column;gap:6px'
@@ -295,7 +253,7 @@ function renderGrillGuideCard(host: HTMLElement, projectId: string, loaded: Gril
       problem: loaded.projection.brief_preview.problem,
       scope: loaded.projection.brief_preview.scope,
     }))
-    readyText.style.cssText = 'font-size:11px;line-height:1.5;white-space:pre-line;color:var(--text)'
+    readyText.style.cssText = 'font-size:14px;line-height:1.55;white-space:pre-line;color:var(--text)'
     ready.appendChild(readyText)
     const confirmError = el('div', 'error-banner')
     confirmError.style.cssText = 'display:none;font-size:10.5px;margin:0'
@@ -323,48 +281,18 @@ function renderGrillGuideCard(host: HTMLElement, projectId: string, loaded: Gril
         confirmError.style.display = 'block'
         return
       }
-      // project flipped to confirmed: drop the cache, land a success message
-      // in the transcript, and rerender (the guide card disappears).
       grillGuideCache = null
-      chatPush('assistant', t('intake', 'grill.confirmed', { gate: res.data.gate.gate_id }))
+      chatPushToProjectSession(projectId, sessionId, {
+        role: 'assistant',
+        text: t('intake', 'grill.confirmed', { gate: res.data.gate.gate_id }),
+        time: new Date().toLocaleTimeString(getLocale()),
+      }, true)
       state.rerender()
     }
     ready.append(confirmError, confirmBtn)
-    card.appendChild(ready)
+    turn.appendChild(ready)
   }
-
-  // answered list (collapsible summary of earlier questions)
-  const answers = loaded.projection.answers
-  if (answers.length > 0) {
-    const details = el('details')
-    details.style.cssText = 'border-top:1px solid var(--border);padding-top:6px'
-    const summary = el('summary', 'muted', t('grill-guide', 'grill-guide.answeredList', { count: String(answers.length) }))
-    summary.style.cssText = 'cursor:pointer;font-size:10.5px;user-select:none'
-    details.appendChild(summary)
-    const list = el('div')
-    list.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:6px'
-    for (const a of answers) {
-      const row = el('div', 'row')
-      row.style.cssText = 'align-items:flex-start;gap:6px;font-size:10.5px'
-      const label = el('span', 'muted', t('intake', grillQuestionLabelKey(a.question_code)))
-      label.style.cssText = 'flex-shrink:0;max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-      row.appendChild(label)
-      const tag = el('span', 'artifact-kind', grillDispositionLabel(a.disposition))
-      tag.style.cssText = 'flex-shrink:0;font-size:9px'
-      row.appendChild(tag)
-      const snippet = grillAnswerSnippet(a.value)
-      if (snippet !== '') {
-        const value = el('span', 'grow', snippet)
-        value.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-        row.appendChild(value)
-      }
-      list.appendChild(row)
-    }
-    details.appendChild(list)
-    card.appendChild(details)
-  }
-
-  host.appendChild(card)
+  host.appendChild(turn)
 }
 
 function naturalGuidanceText(projection: ChatTurnProjection): string {
@@ -434,16 +362,18 @@ export async function executeChatTurn(
   if (current === null) return { text: t('shell', 'shell.chat.natural.noProjection') }
   if (current !== null && (current.question !== null || current.ready_to_confirm)) {
     if (current.question === null) return { text: grillPrompt(current) }
-    const answered = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill/answers`, {
+    const answered = await apiResult<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/grill/answers`, {
       method: 'POST',
-      body: JSON.stringify({
-        question_code: current.question.question_code,
-        question_revision: current.question.question_revision,
-        value: input.text,
-      }),
+      body: JSON.stringify(grillAnswerPayload(current.question, input.text, 'answered')),
     })
-    if (answered === null) return { text: t('intake', 'grill.answerFailed') }
-    return { text: grillPrompt(answered) }
+    if (!answered.ok || answered.data === null) {
+      return { text: answered.ok ? t('intake', 'grill.answerFailed') : grillErrorText(answered.error.code, answered.status) }
+    }
+    grillGuideCache = {
+      projectId: activeProjectId,
+      loaded: { projectStatus: 'collecting', projection: answered.data },
+    }
+    return { text: t('grill-guide', 'grill-guide.chatAnswerRecorded') }
   }
 
   const projection = await api<Projection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/projection`)
@@ -535,9 +465,12 @@ export async function executeChatCommand(line: string, activeProjectId: string |
       const project = created?.project
       if (project == null || project.project_id === undefined) return 'create failed — kernel unreachable?'
       state.projectId = project.project_id
-      void state.rerender()
       const grill = await api<ProjectGrillProjection>(`/v2/projects/${encodeURIComponent(project.project_id)}/grill`)
-      return `${t('intake', 'grill.projectCreated', { id: project.project_id, name })}\n\n${grill === null ? '' : grillPrompt(grill)}`
+      if (grill !== null) {
+        grillGuideCache = { projectId: project.project_id, loaded: { projectStatus: 'collecting', projection: grill } }
+      }
+      void state.rerender()
+      return t('intake', 'grill.projectCreated', { id: project.project_id, name })
     }
     case 'confirm-brief': {
       const id = parts[1] ?? activeProjectId
@@ -553,6 +486,7 @@ export async function executeChatCommand(line: string, activeProjectId: string |
           expected_intake_revision: current.intake_revision,
         }),
       })
+      if (result?.gate?.gate_id !== undefined) grillGuideCache = null
       return result?.gate?.gate_id === undefined
         ? t('intake', 'grill.confirmFailed')
         : t('intake', 'grill.confirmed', { gate: result.gate.gate_id })
@@ -1803,6 +1737,10 @@ export async function renderChat(
     empty.style.cssText = 'padding:10px 2px'
     stream.appendChild(empty)
   }
+  // The active Brief prompt is a final assistant turn in the ordinary
+  // transcript. Filtered transcript views intentionally show only messages.
+  const grillConversationHost = el('div', 'chat-grill-turn-host')
+  if (searchQ === '' && !state.chatCommandsOnly) stream.appendChild(grillConversationHost)
   column.appendChild(streamWrap)
 
   // dsh-web "details" side panel: raw transcript of the selected message.
@@ -1893,16 +1831,6 @@ export async function renderChat(
     panel.appendChild(copyRow)
     shell.appendChild(panel)
   }
-  // INIT-GRILL-02: post-create Chat guide card — a persistent on-ramp above
-  // the composer (always visible while the transcript scrolls). Renders only
-  // while the project is still collecting its Brief; confirmed projects get
-  // a one-time "project ready" hint instead.
-  const grillGuideHost = el('div', 'grill-guide')
-  grillGuideHost.style.cssText = 'margin-bottom:8px'
-  dock.appendChild(grillGuideHost)
-  if (projectId !== '' && projectId !== undefined) {
-    void fillGrillGuide(grillGuideHost, projectId)
-  }
   // The composer is rendered into the main-level dock, outside both the
   // transcript shell and the scrollable panel body.
   const composerRow = el('div', 'chat-composer-row')
@@ -1928,9 +1856,10 @@ export async function renderChat(
   input.rows = 2
   input.className = 'chat-composer-input'
   // dsh-web context: the placeholder shows the active project.
-  input.placeholder = projectId !== '' && projectId !== undefined
+  const normalPlaceholder = projectId !== '' && projectId !== undefined
     ? t('shell', 'shell.chat.composerPlaceholderActive', { id: projectId.slice(0, 16) })
     : t('shell', 'shell.chat.composerPlaceholderNone')
+  input.placeholder = normalPlaceholder
   input.setAttribute('aria-label', t('shell', 'shell.chat.composerAria'))
   input.value = state.chatDraft
   const autosize = (): void => {
@@ -2360,6 +2289,20 @@ export async function renderChat(
   dock.hidden = false
 
   body.appendChild(shell)
+  if (projectId !== '' && projectId !== undefined && searchQ === '' && !state.chatCommandsOnly) {
+    void fillGrillConversationTurn(
+      grillConversationHost,
+      projectId,
+      renderedSessionId,
+      input,
+      normalPlaceholder,
+      () => {
+        if (scrollPosition.followBottom) {
+          requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight })
+        }
+      },
+    )
+  }
   const restoreScroll = (): void => {
     const top = restoreChatScrollTop(scrollPosition, stream.scrollHeight, stream.clientHeight)
     stream.scrollTop = top

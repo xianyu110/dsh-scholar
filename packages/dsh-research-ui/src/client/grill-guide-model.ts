@@ -1,7 +1,7 @@
 /**
- * INIT-GRILL-02 (init-grill-upload-models.md §2): the Chat guide-card MODEL
- * behind the post-create onboarding flow — after creating a project the UI
- * jumps to the Chat tab and this card walks the user through the Init Grill.
+ * INIT-GRILL-02 (init-grill-upload-models.md §2): the conversational Brief
+ * prompt model behind post-create onboarding. After creating a project the
+ * UI asks each Init Grill question inside Chat and reuses its composer.
  * PURE logic — no DOM, no fetch — so unit tests can assert every state
  * transition without a browser (mirrors next-action-cards.ts).
  *
@@ -12,7 +12,7 @@
  *   GET /v2/projects/{id}/grill   → projectGrillProjection
  *
  * and renders only while the project is still collecting its Brief
- * (brief_status=collecting). Confirmed projects are invisible (guide done).
+ * (brief_status=collecting). Confirmed projects have no active prompt.
  *
  * `loadGrillGuideState` is the async seam with an INJECTABLE fetcher so the
  * chat wiring (chat.ts) and the tests share one implementation: the chat
@@ -51,7 +51,7 @@ export interface GrillProjection {
   ready_to_confirm: boolean
 }
 
-/** The state the chat guide card renders from. */
+/** The state the current conversational Brief prompt renders from. */
 export interface GrillGuideModelState {
   visible: boolean
   titleKey: string
@@ -87,7 +87,7 @@ export function grillQuestionLabelKey(questionCode: string): string {
 }
 
 /**
- * The guide model (INIT-GRILL-02):
+ * The conversational prompt model (INIT-GRILL-02):
  *   - brief_status=collecting + projection.question → visible, current set;
  *   - collecting + ready_to_confirm → visible, current=null, readyToConfirm;
  *   - non-collecting → visible=false (project confirmed, guide done);
@@ -207,12 +207,12 @@ export interface GrillGuideLoaded {
 }
 
 /**
- * Load + validate both reads for the guide card. The Grill projection is
+ * Load + validate both reads for the conversational prompt. The Grill projection is
  * authoritative for `collecting`: only collecting projects carry a question
  * or ready_to_confirm=true, so when the project GET fails (or lags) the
- * status is derived from the projection instead of hiding the guide.
+ * status is derived from the projection instead of hiding the prompt.
  * Returns null when the projection is missing/malformed (caller stays
- * silent — the chat keeps working without the guide).
+ * silent — the chat keeps working without the prompt).
  */
 export async function loadGrillGuideState(
   fetchApi: GrillGuideFetcher,

@@ -1,4 +1,7 @@
-import { KernelUnavailableError, type ResearchClient } from '@dsh-scholar/research-client'
+import {
+  KernelUnavailableError,
+  type ResearchClient,
+} from '@dsh-scholar/research-client'
 import { createHash } from 'node:crypto'
 import { buildPassages, multiSourceSearch, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import {
@@ -11,6 +14,20 @@ import {
 
 export type ScholarNativeLocale = 'zh' | 'en'
 export type ScholarNativeIntent = 'create' | 'status' | 'next' | 'gates' | 'jobs' | 'ideas' | 'survey' | 'conversation'
+
+/** One Scholar Brief prompt presented through DSH's native question UI. */
+export interface NativeGrillQuestionPrompt {
+  id: string
+  header: string
+  question: string
+  unknownLabel: string
+  unknownDescription: string
+}
+
+export interface NativeGrillAnswer {
+  disposition: 'answered' | 'skipped' | 'unknown'
+  value?: string
+}
 
 export interface ScholarNativeReply extends ScholarSessionProjection {
   assistant_text: string
@@ -40,6 +57,32 @@ const NEGATIVE_SURVEY_PATTERN = /(?:(?:不要|不需要|无需|别|停止|取消
 const EXPLICIT_SURVEY_PATTERN = /(?:^(?:(?:请|帮我|请帮我)\s*)?(?:(?:开始|继续|执行|进行)\s*)?(?:调研|文献检索|搜索文献)(?:一下|下去)?(?:\s|$)|^(?:我)?(?:要|想要)\s*(?:开始|继续|执行|进行)\s*(?:调研|文献检索|搜索文献)(?:\s|$)|(?:^|\b)(?:please\s+)?(?:run|start|continue|perform|conduct|do)\s+(?:a\s+|the\s+)?(?:survey|literature search|research)(?:\b|$))/i
 const IDEA_WRITE_PATTERN = /(?:^(?:(?:请|帮我|请帮我)\s*)?(?:生成|创建|提出).{0,12}(?:想法|创意|假设)|^(?:please\s+)?(?:generate|create|propose)\s+(?:research\s+)?ideas?(?:\b|$))/i
 const CONTINUE_PATTERN = /(?:^|\b)(?:continue|proceed)(?:\b|$)|继续(?:推进|执行|研究|调研)?(?:吧|下去)?$/i
+const PROJECT_GRILL_TOTAL = 7
+
+/** Node-side copy for the same stable prompt keys used by standalone Chat. */
+export function nativeGrillQuestionText(promptKey: string, locale: ScholarNativeLocale): string {
+  const prompts: Record<ScholarNativeLocale, Record<string, string>> = {
+    zh: {
+      'grill.question.problem': '你想解决的核心研究问题是什么？',
+      'grill.question.scope': '研究范围是什么，明确不做什么？',
+      'grill.question.questions': '需要回答哪些具体研究问题？可用逗号或换行分隔。',
+      'grill.question.primaryMetrics': '主要指标及方向/口径是什么？可用逗号或换行分隔。',
+      'grill.question.targetOutputs': '期望产出是什么？例如 conference-paper、report、code。',
+      'grill.question.constraints': '数据、隐私、成本、算力和时间约束是什么？',
+      'grill.question.materialContext': '你已有何种材料，要从哪个研究阶段继续？',
+    },
+    en: {
+      'grill.question.problem': 'What core research problem do you want to solve?',
+      'grill.question.scope': 'What is in scope, and what is explicitly out of scope?',
+      'grill.question.questions': 'Which specific research questions must be answered? Separate them with commas or new lines.',
+      'grill.question.primaryMetrics': 'What are the primary metrics and their direction/definition? Separate them with commas or new lines.',
+      'grill.question.targetOutputs': 'What outputs do you want, such as conference-paper, report, or code?',
+      'grill.question.constraints': 'What data, privacy, cost, compute, and time constraints apply?',
+      'grill.question.materialContext': 'What materials do you already have, and from which research phase should this continue?',
+    },
+  }
+  return prompts[locale][promptKey] ?? promptKey
+}
 
 function assertNotAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw new Error('aborted')
@@ -157,6 +200,76 @@ function projectNameRequiredText(locale: ScholarNativeLocale): string {
     : 'I can create the research project directly in this DSH session. Please give its exact name, for example: “Create a research project named OCR Reproduction.”'
 }
 
+function briefCollectedText(locale: ScholarNativeLocale): string {
+  return locale === 'zh'
+    ? '研究 Brief 的问题已收集完成。请打开 dsh Scholar 核对并由 PI 确认 Brief；系统不会在对话中替你作出 Gate 决策。'
+    : 'The Research Brief questions are complete. Open dsh Scholar to review and have the PI confirm the Brief; the conversation will not make a Gate decision for you.'
+}
+
+function projectCreatedAndCollectedText(locale: ScholarNativeLocale, snapshot: ScholarSessionProjection): string {
+  const project = snapshot.project!
+  return locale === 'zh'
+    ? `已在当前 DSH 会话创建并关联研究项目“${project.name}”。${briefCollectedText(locale)}`
+    : `Created and linked “${project.name}” to this DSH session. ${briefCollectedText(locale)}`
+}
+
+async function collectNativeBrief(input: {
+  projectId: string
+  sessionId: string
+  locale: ScholarNativeLocale
+  client: ResearchClient
+  principalId: string
+  ask: (prompt: NativeGrillQuestionPrompt) => Promise<NativeGrillAnswer>
+  signal?: AbortSignal
+}): Promise<{ projection: ProjectionLike; answersCollected: number }> {
+  if (input.principalId.trim() === '') throw new Error('dsh_scholar requires an operator principal for Brief answers')
+  let grill = await input.client.projectGrill(input.projectId, input.signal)
+  let answersCollected = 0
+  while (grill.question !== null && answersCollected < PROJECT_GRILL_TOTAL) {
+    assertNotAborted(input.signal)
+    const question = grill.question
+    const index = grill.answers.length + 1
+    const answer = await input.ask({
+      id: question.question_code,
+      header: input.locale === 'zh'
+        ? `完善研究 Brief · ${index}/${PROJECT_GRILL_TOTAL}`
+        : `Refine Research Brief · ${index}/${PROJECT_GRILL_TOTAL}`,
+      question: nativeGrillQuestionText(question.prompt_key, input.locale),
+      unknownLabel: input.locale === 'zh' ? '暂时未知' : 'Unknown for now',
+      unknownDescription: input.locale === 'zh'
+        ? '保留为明确缺口，后续可在 Scholar 中补充。'
+        : 'Keep this as an explicit gap that can be completed later in Scholar.',
+    })
+    assertNotAborted(input.signal)
+    if (answer.disposition === 'answered' && (answer.value === undefined || answer.value.trim() === '')) {
+      throw new Error('dsh_scholar native Brief answer must not be empty')
+    }
+
+    // The question UI may stay open while another surface advances or
+    // relinks the project. Re-read both authorities before every write.
+    const [currentLink, currentGrill] = await Promise.all([
+      input.client.getProjectBySession(input.sessionId, input.signal),
+      input.client.projectGrill(input.projectId, input.signal),
+    ])
+    assertNotAborted(input.signal)
+    if (currentLink?.project_id !== input.projectId) throw new Error('DSH session link changed during Brief collection')
+    if (currentGrill.question?.question_code !== question.question_code
+      || currentGrill.question.question_revision !== question.question_revision) {
+      throw new Error('dsh_scholar Brief question changed while awaiting the answer')
+    }
+    grill = await input.client.answerProjectGrill(input.projectId, {
+      question_code: question.question_code,
+      question_revision: question.question_revision,
+      disposition: answer.disposition,
+      ...(answer.disposition === 'answered' ? { value: answer.value } : {}),
+    }, input.principalId)
+    answersCollected += 1
+  }
+  if (grill.question !== null) throw new Error('dsh_scholar Brief collection did not converge')
+  const projection = await input.client.projectProjection(input.projectId) as ProjectionLike
+  return { projection, answersCollected }
+}
+
 export async function runNativeScholarTurn(input: {
   text: string
   projectName?: string
@@ -166,6 +279,8 @@ export async function runNativeScholarTurn(input: {
   client: ResearchClient
   cache: ConnectorCache
   search?: typeof multiSourceSearch
+  operatorPrincipal?: string
+  askGrillQuestion?: (prompt: NativeGrillQuestionPrompt) => Promise<NativeGrillAnswer>
   signal?: AbortSignal
 }): Promise<ScholarNativeReply> {
   const text = input.text.trim()
@@ -187,11 +302,27 @@ export async function runNativeScholarTurn(input: {
         if (confirmed?.project_id !== projectId || normalizeProjectName(confirmed.name) !== projectName || confirmed.brief_status !== 'collecting') {
           throw new Error('DSH session link changed during project creation')
         }
-        const projection = await input.client.projectProjection(projectId) as ProjectionLike
+        let projection = await input.client.projectProjection(projectId) as ProjectionLike
+        let answersCollected = 0
+        if (input.askGrillQuestion !== undefined && input.signal?.aborted !== true) {
+          const collected = await collectNativeBrief({
+            projectId,
+            sessionId,
+            locale,
+            client: input.client,
+            principalId: input.operatorPrincipal ?? '',
+            ask: input.askGrillQuestion,
+            signal: input.signal,
+          })
+          projection = collected.projection
+          answersCollected = collected.answersCollected
+        }
         const snapshot = buildScholarSessionProjection(sessionId, projection)
         return {
           ...snapshot,
-          assistant_text: projectCreatedText(locale, snapshot),
+          assistant_text: answersCollected === 0
+            ? projectCreatedText(locale, snapshot)
+            : projectCreatedAndCollectedText(locale, snapshot),
           intent: { kind: 'create', confidence: 'deterministic' },
           execution: { status: 'executed', operation: 'project_create', suggested_command: null },
         }
@@ -241,6 +372,24 @@ export async function runNativeScholarTurn(input: {
   assertNotAborted(input.signal)
   if (projectionLink?.project_id !== linked.project_id) throw new Error('DSH session link changed during the request')
   let snapshot = buildScholarSessionProjection(sessionId, projection)
+  if (projection.project.brief_status === 'collecting' && input.askGrillQuestion !== undefined) {
+    const collected = await collectNativeBrief({
+      projectId: linked.project_id,
+      sessionId,
+      locale,
+      client: input.client,
+      principalId: input.operatorPrincipal ?? '',
+      ask: input.askGrillQuestion,
+      signal: input.signal,
+    })
+    snapshot = buildScholarSessionProjection(sessionId, collected.projection)
+    return {
+      ...snapshot,
+      assistant_text: briefCollectedText(locale),
+      intent: { kind: 'conversation', confidence: 'deterministic' },
+      execution: { status: 'needs_human', operation: 'brief_collect', suggested_command: null },
+    }
+  }
   const intent = classifyNativeIntent(text, snapshot.next_action)
   let status: ScholarNativeReply['execution']['status'] = 'read_only'
   let operation: string | null = intent === 'conversation' ? 'research_status' : `research_${intent}`

@@ -36,6 +36,7 @@
     "verify:docs": "node scripts/verify-docs.mjs",
     "test": "vitest run && pnpm --filter @dsh-scholar/research-ui typecheck",
     "test:watch": "vitest",
+    "test:ui:ocr": "node tests/browser/ocr-settings-layout.mjs --width 1280 && node tests/browser/ocr-settings-layout.mjs --width 680",
     "test:fault": "bash tests/fault-injection/run-fault-tests.sh",
     "test:security": "bash tests/security/run-hardening-tests.sh && bash tests/security/run-all-v2-blocking-tests.sh",
     "test:dsh-private": "bash tests/integration/run-dsh-private-registry-tests.sh",
@@ -70,6 +71,7 @@
     "@deepseek-ai/dsh-settings": "^0.0.1-rc.1 || ^0.1.0-rc.2",
     "@deepseek-ai/dsh-skill-filesystem": "^0.0.1-rc.2 || ^0.1.0-rc.2",
     "@deepseek-ai/dsh-tools": "^0.0.1-rc.1 || ^0.1.0-rc.2",
+    "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.2",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
@@ -87,6 +89,7 @@
     "@deepseek-ai/dsh-settings": { "optional": true },
     "@deepseek-ai/dsh-skill-filesystem": { "optional": true },
     "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/dsh-user-questions": { "optional": true },
     "react": { "optional": true }
   },
   "devDependencies": {
@@ -103,6 +106,7 @@
     "@deepseek-ai/dsh-settings": "0.1.0-rc.2",
     "@deepseek-ai/dsh-skill-filesystem": "0.1.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.2",
+    "@deepseek-ai/dsh-user-questions": "0.1.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.1",
     "@types/react": "~18.3.1",
     "@types/node": "^24.0.0",
