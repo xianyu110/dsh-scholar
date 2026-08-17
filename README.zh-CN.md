@@ -96,7 +96,7 @@ pnpm dsh web
 pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
 ```
 
-插件向 DSH 提供 Scholar Agent 的 tools、slash commands、Skills、配置卡和 `dsh Scholar` 页签；页签复用已启动的 standalone 工作台。
+插件向 DSH 提供 Scholar Agent 的 tools、slash commands、Skills、配置卡和 `dsh Scholar` 页签。页签是面向当前 DSH 对话的紧凑视图：未绑定时可选择已有项目或只填写名称创建项目并绑定，绑定后显示项目阶段与下一步；完整 Scholar 工作台只通过按钮或快捷键在新页面打开。
 
 ## Plugin config
 
@@ -108,7 +108,7 @@ pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
 |---|---|---|
 | 默认治理模式 | `gate-only` | 新建项目没有显式指定 mode 时使用。`gate-only` 保留人工关卡；`full-auto` 仅适合已配置 FixtureProfile 的低风险沙箱。 |
 | 无人值守运行 | 关闭 | 不绕过人工 Gate；遇到 Gate 时暂停项目，而不是等待交互式回答。 |
-| Standalone 地址 | `http://127.0.0.1:18610/` | 插件页签和“在新页面打开”的目标地址。仅允许 HTTPS 或 loopback HTTP。 |
+| Standalone 地址 | `http://127.0.0.1:18610/` | “在新页面打开”和快捷键的目标地址。仅允许 HTTPS 或 loopback HTTP。 |
 | 新页面快捷键 | `Alt+Shift+S` | 可改为禁用；正在输入或使用输入法时不会触发。 |
 
 Standalone 地址不允许凭据、查询参数或 URL 片段，令牌不应放入 URL。“复制 standalone 访问令牌”只在本机 loopback DSH 中、由用户显式点击后读取固定的 `0600` 令牌文件；页面不会显示令牌。它不会复制 Kernel、Runner、Provider 或 SSH 密钥。

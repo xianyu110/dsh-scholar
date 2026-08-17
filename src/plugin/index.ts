@@ -39,7 +39,6 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-client-connection'
-import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
@@ -47,7 +46,7 @@ import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ResearchClient } from '@dsh-scholar/research-client'
+import { KernelUnavailableError, ResearchClient } from '@dsh-scholar/research-client'
 import { DiskCache } from '@dsh-scholar/scholar-connectors'
 import { KernelSidecar, resolveDshHome } from './sidecar.js'
 import { registerResearchTools } from './tools.js'
@@ -56,8 +55,12 @@ import { RoleRegistry, RESEARCH_TOOLS, stageProjectScopeDenial, type ResearchRol
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
 import { createScholarRpcHandler, createScholarViewRpcHandler } from './settings-rpc.js'
-import { createHarnessChatTurn, type HarnessChatTurnReply } from './chat-turn.js'
-import { buildScholarSessionProjection, type ScholarSessionProjection } from '../shared/research-stage.js'
+import { projectCreateIdempotencyKey } from './native-chat.js'
+import {
+  buildScholarSessionProjection,
+  type ScholarProjectSummary,
+  type ScholarSessionWorkspace,
+} from '../shared/research-stage.js'
 import {
   DEFAULT_STAGE_SUBAGENT_CONFIG,
   StageSubagentCoordinator,
@@ -307,28 +310,13 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   const effectiveConfig = settingsScope?.get() ?? config
   const unattended = effectiveConfig.unattended ?? false
 
-  // Chat uses the Host's configured model, but remains an optional service:
-  // settings, token copy and the Scholar workbench still load without llm.
-  // The callback is owned by this plugin fiber and cleared when the injected
-  // llm child is unloaded or replaced.
-  let hostChatTurn: ((payload: unknown, signal?: AbortSignal) => Promise<HarnessChatTurnReply>) | undefined
-  let readSessionProjection: ((sessionId: string, signal: AbortSignal) => Promise<ScholarSessionProjection>) | undefined
-  if (typeof ctx.inject === 'function') {
-    ctx.inject(['llm'], llmCtx => {
-      const handler = createHarnessChatTurn(
-        llmCtx.llm,
-        () => effectiveConfig.models?.pi ?? standaloneModelPreference(),
-      )
-      hostChatTurn = handler
-      return llmCtx.effect(() => () => {
-        if (hostChatTurn === handler) hostChatTurn = undefined
-      }, 'research-plugin.chat-model')
-    })
-  }
+  let readSessionWorkspace: ((sessionId: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
+  let bindSessionProject: ((sessionId: string, projectId: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
+  let createSessionProject: ((sessionId: string, name: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
 
   // Optional browser Host seam. Privileged settings/token operations remain
-  // loopback-only; the trusted-host view channel owns only tool-free Chat and
-  // a redacted, session-bound projection for an HTTPS DSH deployment.
+  // loopback-only; the trusted-host view channel owns only the redacted,
+  // session-bound panel and its exclusive select/create link operations.
   if (typeof ctx.inject === 'function') {
     ctx.inject(['connection'], connectionCtx => {
       const disposePrivate = connectionCtx.connection.rpc.handle(
@@ -338,16 +326,20 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
       )
       const disposeView = connectionCtx.connection.rpc.handle(
         '/dsh-scholar-view',
-        createScholarViewRpcHandler(
-          (payload, signal) => {
-            if (hostChatTurn === undefined) throw new Error('Scholar Chat model is unavailable')
-            return hostChatTurn(payload, signal)
+        createScholarViewRpcHandler({
+          readSessionWorkspace: (sessionId, signal) => {
+            if (readSessionWorkspace === undefined) throw new Error('Scholar session workspace is unavailable')
+            return readSessionWorkspace(sessionId, signal)
           },
-          (sessionId, signal) => {
-            if (readSessionProjection === undefined) throw new Error('Scholar session projection is unavailable')
-            return readSessionProjection(sessionId, signal)
+          bindSessionProject: (sessionId, projectId, signal) => {
+            if (bindSessionProject === undefined) throw new Error('Scholar session binding is unavailable')
+            return bindSessionProject(sessionId, projectId, signal)
           },
-        ),
+          createSessionProject: (sessionId, projectName, signal) => {
+            if (createSessionProject === undefined) throw new Error('Scholar session project creation is unavailable')
+            return createSessionProject(sessionId, projectName, signal)
+          },
+        }),
         { authority: 'trusted-host' },
       )
       return async () => {
@@ -414,24 +406,82 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     ...effectiveConfig.subagents,
   })
 
-  const projectionReader = async (sessionId: string, signal: AbortSignal): Promise<ScholarSessionProjection> => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+  const projectSummary = (project: {
+    project_id: string; name: string; status: string; revision: number; brief_status?: string
+  }): ScholarProjectSummary => ({
+    project_id: project.project_id,
+    name: project.name,
+    status: project.status,
+    revision: project.revision,
+    ...(project.brief_status === undefined ? {} : { brief_status: project.brief_status }),
+  })
+  const workspaceReader = async (sessionId: string, signal: AbortSignal): Promise<ScholarSessionWorkspace> => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       if (signal.aborted) throw new Error('aborted')
       const project = await client.getProjectBySession(sessionId, signal)
       if (signal.aborted) throw new Error('aborted')
-      if (project === null) return buildScholarSessionProjection(sessionId)
-      const projection = await client.projectProjection(project.project_id, signal)
+      if (project !== null) {
+        const projection = await client.projectProjection(project.project_id, signal)
+        if (signal.aborted) throw new Error('aborted')
+        const confirmed = await client.getProjectBySession(sessionId, signal)
+        if (signal.aborted) throw new Error('aborted')
+        if (confirmed?.project_id === project.project_id) {
+          return {
+            session_id: sessionId,
+            projection: buildScholarSessionProjection(sessionId, projection),
+            available_projects: [],
+          }
+        }
+        continue
+      }
+      const projects = await client.listProjectsForDshSession(sessionId, signal)
       if (signal.aborted) throw new Error('aborted')
       const confirmed = await client.getProjectBySession(sessionId, signal)
       if (signal.aborted) throw new Error('aborted')
-      if (confirmed?.project_id === project.project_id) return buildScholarSessionProjection(sessionId, projection)
+      if (confirmed === null) {
+        return {
+          session_id: sessionId,
+          projection: buildScholarSessionProjection(sessionId),
+          available_projects: [...projects]
+            .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+            .map(projectSummary),
+        }
+      }
     }
-    throw new Error('Scholar session link changed during projection')
+    throw new Error('Scholar session link changed during workspace read')
   }
-  readSessionProjection = projectionReader
+  const bindingWriter = async (sessionId: string, projectId: string, signal: AbortSignal): Promise<ScholarSessionWorkspace> => {
+    try {
+      await client.linkProjectForDshSession(sessionId, projectId, signal)
+    } catch (error) {
+      if (!(error instanceof KernelUnavailableError)) throw error
+      const linked = await client.getProjectBySession(sessionId)
+      if (linked?.project_id !== projectId) throw error
+    }
+    return workspaceReader(sessionId, new AbortController().signal)
+  }
+  const creationWriter = async (sessionId: string, projectName: string, signal: AbortSignal): Promise<ScholarSessionWorkspace> => {
+    const idempotencyKey = projectCreateIdempotencyKey(sessionId, projectName)
+    try {
+      await client.createProjectForDshSession({ session_id: sessionId, name: projectName, idempotency_key: idempotencyKey }, signal)
+    } catch (error) {
+      if (!(error instanceof KernelUnavailableError)) throw error
+      try {
+        await client.createProjectForDshSession({
+          session_id: sessionId, name: projectName, idempotency_key: idempotencyKey, replay_only: true,
+        })
+      } catch { throw error }
+    }
+    return workspaceReader(sessionId, new AbortController().signal)
+  }
+  readSessionWorkspace = workspaceReader
+  bindSessionProject = bindingWriter
+  createSessionProject = creationWriter
   ctx.effect(() => () => {
-    if (readSessionProjection === projectionReader) readSessionProjection = undefined
-  }, 'research-plugin.session-projection')
+    if (readSessionWorkspace === workspaceReader) readSessionWorkspace = undefined
+    if (bindSessionProject === bindingWriter) bindSessionProject = undefined
+    if (createSessionProject === creationWriter) createSessionProject = undefined
+  }, 'research-plugin.session-workspace')
 
   // Project resolution service for other plugins / commands.
   ctx.provide('research', {

@@ -57,7 +57,7 @@ bash scripts/start-standalone-ui.sh
 bash scripts/start-dsh-agent-dev.sh
 ~~~
 
-脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 是 DSH 的会话入口，并加载 Scholar 的 Plugin config 与 `dsh Scholar` conversation view；该 view 只嵌入/启动另行运行的 standalone 18610，`/research-api` 和 `/research-ui-api` bridge 仍不存在。
+脚本设置独立 DSH_HOME、Web 3081、Kernel 17412 并安装根 Agent 插件。Web 是 DSH 的会话入口，并加载 Scholar 的 Plugin config 与 `dsh Scholar` conversation view；该 view 只显示 Host 原生 session workspace，并在新页面启动另行运行的 standalone 18610，`/research-api` 和 `/research-ui-api` bridge 仍不存在。
 
 当前仓库迁移期验证：
 

@@ -13,14 +13,15 @@ import {
   DEFAULT_STANDALONE_URL,
   DISABLED_STANDALONE_SHORTCUT,
   normalizeStandaloneUrl,
-  standaloneChatBridgeOrigin,
   type StandaloneShortcut,
 } from '../shared/standalone.js'
 import type { ResearchSettings } from '../shared/settings-rpc.js'
 import {
   SCHOLAR_STAGE_IDS,
   normalizeDshSessionId,
+  type ScholarProjectSummary,
   type ScholarSessionProjection,
+  type ScholarSessionWorkspace,
   type ScholarStageId,
   type ScholarStageState,
 } from '../shared/research-stage.js'
@@ -34,9 +35,12 @@ type ResearchConfigKey =
   | 'unattended' | 'unattendedHint' | 'overridden' | 'reset'
   | 'standaloneUrl' | 'standaloneUrlHint' | 'shortcut' | 'shortcutHint' | 'shortcutDisabled'
   | 'openStandalone' | 'copyToken' | 'copyingToken' | 'tokenCopied' | 'tokenCopyFailed'
-  | 'viewDescription' | 'viewFrameTitle' | 'viewUnavailable' | 'frameLoading' | 'frameLoadFailed'
-  | 'retryFrame' | 'resetStandalone'
+  | 'viewDescription' | 'viewUnavailable'
   | 'sessionTimeline' | 'sessionLoading' | 'sessionUnavailable' | 'sessionUnlinked' | 'refreshStages'
+  | 'sessionUnlinkedTitle' | 'sessionUnlinkedHint' | 'chooseProject' | 'chooseProjectPlaceholder'
+  | 'bindProject' | 'bindingProject' | 'createProjectTitle' | 'projectName'
+  | 'projectNamePlaceholder' | 'createProject' | 'creatingProject' | 'noProjects'
+  | 'bindFailed' | 'createFailed' | 'archivedProject'
   | 'projectRevision' | 'nextAction' | 'nextReason' | 'pendingGates' | 'jobsSummary'
   | 'stageInit' | 'stageSurvey' | 'stageIdea' | 'stageReproduce' | 'stageContract'
   | 'stageExperiment' | 'stageEvidence' | 'stageWriting' | 'stageReview' | 'stageRelease'
@@ -65,17 +69,27 @@ const en: Record<ResearchConfigKey, string> = {
   copyingToken: 'Copying…',
   tokenCopied: 'Access token copied.',
   tokenCopyFailed: 'The access token could not be copied safely.',
-  viewDescription: 'The standalone Scholar workbench is displayed here.',
-  viewFrameTitle: 'dsh Scholar standalone workbench',
-  viewUnavailable: 'The standalone workbench URL is unavailable. Check Plugin config.',
-  frameLoading: 'Connecting to the standalone Scholar workbench…',
-  frameLoadFailed: 'Scholar could not be loaded safely. Open it in a new page to inspect the certificate, or check the URL and allowed frame origins.',
-  retryFrame: 'Retry',
-  resetStandalone: 'Use local default',
+  viewDescription: 'A focused view of the research project linked to this DSH conversation.',
+  viewUnavailable: 'The full Scholar URL is unavailable. Check Plugin config.',
   sessionTimeline: 'Research stages for this DSH session',
   sessionLoading: 'Loading the session research stages…',
   sessionUnavailable: 'The session research stages are temporarily unavailable.',
-  sessionUnlinked: 'This DSH session has no linked research project. Start in Chat with a project name or /new <project name>.',
+  sessionUnlinked: 'This DSH conversation has no linked research project.',
+  sessionUnlinkedTitle: 'Connect this conversation to research',
+  sessionUnlinkedHint: 'Choose an existing Scholar project or create a name-only project. The link is exclusive and cannot silently replace another project.',
+  chooseProject: 'Existing project',
+  chooseProjectPlaceholder: 'Choose a project…',
+  bindProject: 'Link project',
+  bindingProject: 'Linking…',
+  createProjectTitle: 'Create a project',
+  projectName: 'Project name',
+  projectNamePlaceholder: 'Enter a research project name',
+  createProject: 'Create and link',
+  creatingProject: 'Creating…',
+  noProjects: 'No existing projects are available. Create one below.',
+  bindFailed: 'The project could not be linked. Refresh to check whether this conversation was linked elsewhere.',
+  createFailed: 'The project could not be created and linked.',
+  archivedProject: 'archived',
   refreshStages: 'Refresh stages',
   projectRevision: 'Revision',
   nextAction: 'Next action',
@@ -125,17 +139,27 @@ const zh: Record<ResearchConfigKey, string> = {
   copyingToken: '复制中…',
   tokenCopied: '访问令牌已复制。',
   tokenCopyFailed: '无法安全复制访问令牌。',
-  viewDescription: '这里显示独立运行的 Scholar 工作台。',
-  viewFrameTitle: 'dsh Scholar 独立工作台',
-  viewUnavailable: 'Standalone 工作台地址不可用，请检查 Plugin config。',
-  frameLoading: '正在连接独立运行的 Scholar 工作台…',
-  frameLoadFailed: '无法安全加载 Scholar。请在新页面检查证书，或检查地址与允许嵌入的来源。',
-  retryFrame: '重试',
-  resetStandalone: '恢复本机默认地址',
+  viewDescription: '只显示当前 DSH 对话关联项目的阶段、下一步和执行摘要。',
+  viewUnavailable: '完整 Scholar 地址不可用，请检查 Plugin config。',
   sessionTimeline: '当前 DSH 会话的研究阶段',
   sessionLoading: '正在加载会话研究阶段…',
   sessionUnavailable: '暂时无法读取当前会话的研究阶段。',
-  sessionUnlinked: '当前 DSH 会话尚未关联研究项目。请在 Chat 中输入项目名，或使用 /new <项目名>。',
+  sessionUnlinked: '当前 DSH 对话尚未关联研究项目。',
+  sessionUnlinkedTitle: '把当前对话接入研究',
+  sessionUnlinkedHint: '选择已有 Scholar 项目，或只填写名称创建项目。关联是唯一且不可静默换绑的。',
+  chooseProject: '已有项目',
+  chooseProjectPlaceholder: '选择一个项目…',
+  bindProject: '关联项目',
+  bindingProject: '关联中…',
+  createProjectTitle: '新建项目',
+  projectName: '项目名称',
+  projectNamePlaceholder: '输入研究项目名称',
+  createProject: '新建并关联',
+  creatingProject: '创建中…',
+  noProjects: '目前没有可选项目，请在下方新建。',
+  bindFailed: '无法关联项目。请刷新确认当前对话是否已在别处完成关联。',
+  createFailed: '无法创建并关联项目。',
+  archivedProject: '已归档',
   refreshStages: '刷新阶段',
   projectRevision: '版本',
   nextAction: '下一步',
@@ -188,9 +212,9 @@ type ResearchCardProps =
 interface ScholarViewFace {
   hooks: { researchSettings: SettingsScope<ResearchSettings> }
   openStandalone: (url: string) => void
-  resetStandalone: () => Promise<void>
-  callHostChatTurn: (payload: unknown, signal?: AbortSignal) => Promise<unknown>
-  readSessionProjection: (sessionId: string, signal?: AbortSignal) => Promise<ScholarSessionProjection>
+  readSessionWorkspace: (sessionId: string, signal?: AbortSignal) => Promise<ScholarSessionWorkspace>
+  bindSessionProject: (sessionId: string, projectId: string, signal?: AbortSignal) => Promise<ScholarSessionWorkspace>
+  createSessionProject: (sessionId: string, name: string, signal?: AbortSignal) => Promise<ScholarSessionWorkspace>
 }
 
 type ScholarViewProps = ConvViewProps
@@ -239,17 +263,18 @@ const style = {
     border: 0, borderRadius: 8, padding: '6px 14px', cursor: 'pointer',
     background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-3)',
   },
-  view: { height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-layer-1)' },
+  view: { height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-layer-1)', overflow: 'hidden' },
   viewHeader: {
     display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px',
     borderBottom: '1px solid var(--dsw-alias-border-l2)',
   },
   viewText: { flex: 1, minWidth: 0, margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' },
-  sessionPanel: { padding: '12px 16px', borderBottom: '1px solid var(--dsw-alias-border-l2)', display: 'flex', flexDirection: 'column', gap: 10 },
+  viewBody: { flex: 1, minHeight: 0, overflow: 'auto', padding: '20px clamp(16px, 4vw, 48px)' },
+  sessionPanel: { width: '100%', maxWidth: 980, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 },
   sessionHeading: { display: 'flex', alignItems: 'center', gap: 10 },
   sessionTitle: { flex: 1, margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
   projectMeta: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
-  stages: { display: 'grid', gridTemplateColumns: 'repeat(10, minmax(64px, 1fr))', gap: 6, overflowX: 'auto' },
+  stages: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(72px, 1fr))', gap: 6 },
   stage: { minWidth: 64, borderRadius: 8, padding: '7px 6px', textAlign: 'center', fontSize: 11, border: '1px solid var(--dsw-alias-border-l2)', display: 'flex', flexDirection: 'column', gap: 2 },
   stageName: { fontWeight: 600 },
   stageState: { fontSize: 10, opacity: 0.82 },
@@ -258,45 +283,20 @@ const style = {
   stageUpcoming: { background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-tertiary)' },
   stageBlocked: { background: 'color-mix(in srgb, var(--dsw-alias-label-error) 10%, transparent)', color: 'var(--dsw-alias-label-error)', fontWeight: 600 },
   nextLine: { margin: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
-  frameRegion: { flex: 1, minHeight: 240, position: 'relative', overflow: 'hidden', background: 'var(--dsw-alias-bg-layer-1)' },
-  frame: { position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0, background: '#fff' },
-  frameStatus: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  frameFailure: { maxWidth: 600, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, textAlign: 'center' },
-  frameActions: { display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 8 },
+  workspaceCard: { border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 14, background: 'var(--dsw-alias-bg-layer-2)', padding: 18, display: 'flex', flexDirection: 'column', gap: 14 },
+  emptyTitle: { margin: 0, fontSize: 18, fontWeight: 650, color: 'var(--dsw-alias-label-primary)' },
+  choiceGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 },
+  choiceCard: { border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12, background: 'var(--dsw-alias-bg-layer-3)', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 },
+  choiceTitle: { margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
+  input: { width: '100%', boxSizing: 'border-box', height: 38, padding: '0 10px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)', font: 'inherit' },
+  primary: { alignSelf: 'flex-start', border: 0, borderRadius: 8, padding: '8px 14px', cursor: 'pointer', background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-3)' },
+  summaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 },
+  summaryItem: { border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 10, padding: 10, background: 'var(--dsw-alias-bg-layer-2)' },
   unavailable: { margin: 0, color: 'var(--dsw-alias-label-error)', lineHeight: 1.5 },
 } satisfies Record<string, CSSProperties>
 
 type RpcCaller = {
   call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<unknown>
-}
-
-const CHAT_BRIDGE_REQUEST = 'dsh-scholar/chat-turn-request'
-const CHAT_BRIDGE_RESPONSE = 'dsh-scholar/chat-turn-response'
-const FRAME_READY = 'dsh-scholar/frame-ready'
-const FRAME_READY_QUERY = 'dsh-scholar/frame-ready-query'
-
-export type ScholarFrameState = 'loading' | 'ready' | 'failed'
-export type ScholarFrameEvent = 'ready' | 'timeout' | 'error' | 'retry'
-
-/** Small deterministic state machine used by the iframe timeout UI. */
-export function nextScholarFrameState(state: ScholarFrameState, event: ScholarFrameEvent): ScholarFrameState {
-  if (event === 'retry') return 'loading'
-  if (state !== 'loading') return state
-  return event === 'ready' ? 'ready' : 'failed'
-}
-
-/** URL changes must render a fresh iframe before the effect can bind its ref. */
-export function scholarFrameStateForUrl(
-  stateUrl: string | null,
-  currentUrl: string | null,
-  state: ScholarFrameState,
-): ScholarFrameState {
-  return stateUrl === currentUrl ? state : 'loading'
-}
-
-/** A same-URL retry is a distinct iframe/source and must rebind every bridge. */
-export function scholarFrameAttemptKey(url: string | null, generation: number): string | null {
-  return url === null ? null : `${url}\u0000${generation}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -306,51 +306,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   const allowedSet = new Set(allowed)
   return Object.keys(value).every(key => allowedSet.has(key))
-}
-
-export interface ScholarChatBridgeRequest {
-  requestId: string
-  payload: Record<string, unknown>
-}
-
-/** Accept requests only from this exact Scholar iframe and configured origin. */
-export function parseScholarChatBridgeRequest(
-  event: { source?: unknown; origin?: unknown; data?: unknown },
-  expectedSource: unknown,
-  expectedOrigin: string,
-): ScholarChatBridgeRequest | null {
-  if (event.source !== expectedSource || event.origin !== expectedOrigin) return null
-  const envelope = isRecord(event.data) ? event.data : null
-  if (envelope?.type !== CHAT_BRIDGE_REQUEST || typeof envelope.request_id !== 'string') return null
-  const requestId = envelope.request_id
-  if (requestId.length === 0 || requestId.length > 256 || !isRecord(envelope.payload)) return null
-  return { requestId, payload: envelope.payload }
-}
-
-/** Accept readiness only from the exact configured iframe window and origin. */
-export function parseScholarFrameReadyMessage(
-  event: { source?: unknown; origin?: unknown; data?: unknown },
-  expectedSource: unknown,
-  expectedOrigin: string,
-): boolean {
-  if (event.source !== expectedSource || event.origin !== expectedOrigin) return false
-  const envelope = isRecord(event.data) ? event.data : null
-  return envelope?.type === FRAME_READY && envelope.protocol === 1 && hasOnlyKeys(envelope, ['type', 'protocol'])
-}
-
-/** Trusted-host browser seam for the Host-owned, tool-free chat model RPC. */
-export async function callScholarChatTurn(
-  rpc: RpcCaller,
-  payload: unknown,
-  signal?: AbortSignal,
-): Promise<unknown> {
-  const response = signal === undefined
-    ? await rpc.call('/dsh-scholar-view', 'chat-turn', payload)
-    : await rpc.call('/dsh-scholar-view', 'chat-turn', payload, signal)
-  if (!isRecord(response) || response.ok !== true || !('value' in response)) {
-    throw new Error('Scholar Chat model is unavailable')
-  }
-  return response.value
 }
 
 function isScholarProjection(value: unknown, expectedSessionId: string): value is ScholarSessionProjection {
@@ -390,21 +345,59 @@ function isScholarProjection(value: unknown, expectedSessionId: string): value i
     && (stage.state === 'done' || stage.state === 'current' || stage.state === 'upcoming' || stage.state === 'blocked'))
 }
 
-/** Trusted-host, session-bound phase projection from the plugin Kernel. */
-export async function callScholarSessionProjection(
+function isProjectSummary(value: unknown): value is ScholarProjectSummary {
+  return isRecord(value) && hasOnlyKeys(value, ['project_id', 'name', 'status', 'revision', 'brief_status'])
+    && typeof value.project_id === 'string' && /^rsp_[a-z0-9_]+$/.test(value.project_id)
+    && typeof value.name === 'string' && typeof value.status === 'string'
+    && Number.isInteger(value.revision) && (value.revision as number) >= 0
+    && (value.brief_status === undefined || typeof value.brief_status === 'string')
+}
+
+function isScholarWorkspace(value: unknown, expectedSessionId: string): value is ScholarSessionWorkspace {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['session_id', 'projection', 'available_projects'])) return false
+  if (value.session_id !== expectedSessionId || !isScholarProjection(value.projection, expectedSessionId)
+    || !Array.isArray(value.available_projects) || !value.available_projects.every(isProjectSummary)) return false
+  return value.projection.linked ? value.available_projects.length === 0 : true
+}
+
+async function callScholarWorkspaceEndpoint(
   rpc: RpcCaller,
+  endpoint: 'session-workspace' | 'session-bind' | 'session-create',
   sessionId: string,
+  detail: Record<string, unknown>,
   signal?: AbortSignal,
-): Promise<ScholarSessionProjection> {
+): Promise<ScholarSessionWorkspace> {
   const normalized = normalizeDshSessionId(sessionId)
-  if (normalized === undefined) throw new Error('Scholar session projection is unavailable')
+  if (normalized === undefined) throw new Error('Scholar session workspace is unavailable')
+  const payload = { session_id: normalized, ...detail }
   const response = signal === undefined
-    ? await rpc.call('/dsh-scholar-view', 'session-projection', { session_id: normalized })
-    : await rpc.call('/dsh-scholar-view', 'session-projection', { session_id: normalized }, signal)
-  if (!isRecord(response) || response.ok !== true || !isScholarProjection(response.value, normalized)) {
-    throw new Error('Scholar session projection is unavailable')
+    ? await rpc.call('/dsh-scholar-view', endpoint, payload)
+    : await rpc.call('/dsh-scholar-view', endpoint, payload, signal)
+  if (!isRecord(response) || response.ok !== true || !isScholarWorkspace(response.value, normalized)) {
+    throw new Error('Scholar session workspace is unavailable')
   }
   return response.value
+}
+
+export function callScholarSessionWorkspace(
+  rpc: RpcCaller, sessionId: string, signal?: AbortSignal,
+): Promise<ScholarSessionWorkspace> {
+  return callScholarWorkspaceEndpoint(rpc, 'session-workspace', sessionId, {}, signal)
+}
+
+export function callScholarSessionBind(
+  rpc: RpcCaller, sessionId: string, projectId: string, signal?: AbortSignal,
+): Promise<ScholarSessionWorkspace> {
+  if (!/^rsp_[a-z0-9_]+$/.test(projectId)) return Promise.reject(new Error('Scholar session workspace is unavailable'))
+  return callScholarWorkspaceEndpoint(rpc, 'session-bind', sessionId, { project_id: projectId }, signal)
+}
+
+export function callScholarSessionCreate(
+  rpc: RpcCaller, sessionId: string, name: string, signal?: AbortSignal,
+): Promise<ScholarSessionWorkspace> {
+  const normalizedName = name.trim()
+  if (normalizedName === '' || normalizedName.length > 120) return Promise.reject(new Error('Scholar session workspace is unavailable'))
+  return callScholarWorkspaceEndpoint(rpc, 'session-create', sessionId, { name: normalizedName }, signal)
 }
 
 const STAGE_KEYS: Record<ScholarStageId, ResearchConfigKey> = {
@@ -478,22 +471,34 @@ function resolvedStandaloneUrl(settings: ResearchSettings | undefined): string |
   }
 }
 
-/** Conversation view: one thin host for the separately running standalone UI. */
+/** Focused DSH conversation panel; the full Scholar workbench opens separately. */
 function ScholarView(props: ScholarViewProps) {
   const snapshot = props.useResearchSettings(value => value)
   const url = resolvedStandaloneUrl(snapshot.status === 'ready' ? snapshot.value : undefined)
-  const frameRef = useRef<HTMLIFrameElement>(null)
   const sessionId = typeof props.sessionId === 'string' ? props.sessionId.trim() : ''
-  const [sessionProjection, setSessionProjection] = useState<ScholarSessionProjection | null>(null)
+  const actionController = useRef<AbortController | null>(null)
+  const [workspace, setWorkspace] = useState<ScholarSessionWorkspace | null>(null)
   const [sessionState, setSessionState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [refreshGeneration, setRefreshGeneration] = useState(0)
-  const [frameGeneration, setFrameGeneration] = useState(0)
-  const [frameState, setFrameState] = useState<ScholarFrameState>('loading')
-  const [frameStateUrl, setFrameStateUrl] = useState<string | null>(url)
-  const visibleFrameState = scholarFrameStateForUrl(frameStateUrl, url, frameState)
-  const frameAttemptKey = scholarFrameAttemptKey(url, frameGeneration)
-  const frameFailed = visibleFrameState === 'failed'
+  const [selectedProjectId, setSelectedProjectId] = useState('')
+  const [projectName, setProjectName] = useState('')
+  const [actionState, setActionState] = useState<'idle' | 'binding' | 'creating'>('idle')
+  const [actionError, setActionError] = useState<'bind' | 'create' | null>(null)
+  const busy = actionState !== 'idle'
+
   useEffect(() => {
+    actionController.current?.abort()
+    actionController.current = null
+    setWorkspace(null)
+    setSessionState('loading')
+    setSelectedProjectId('')
+    setProjectName('')
+    setActionState('idle')
+    setActionError(null)
+  }, [sessionId])
+
+  useEffect(() => {
+    if (busy) return
     const controller = new AbortController()
     let timer: number | undefined
     let active = true
@@ -505,7 +510,7 @@ function ScholarView(props: ScholarViewProps) {
     }
     const read = async (): Promise<void> => {
       if (!active || sessionId === '') {
-        if (active) { setSessionProjection(null); setSessionState('failed') }
+        if (active) setSessionState('failed')
         return
       }
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
@@ -515,9 +520,9 @@ function ScholarView(props: ScholarViewProps) {
       if (inFlight) return
       inFlight = true
       try {
-        const value = await props.readSessionProjection(sessionId, controller.signal)
+        const value = await props.readSessionWorkspace(sessionId, controller.signal)
         if (!active || controller.signal.aborted) return
-        setSessionProjection(value)
+        setWorkspace(value)
         setSessionState('ready')
       } catch {
         if (!active || controller.signal.aborted) return
@@ -532,8 +537,6 @@ function ScholarView(props: ScholarViewProps) {
       if (timer !== undefined) window.clearTimeout(timer)
       void read()
     }
-    setSessionProjection(null)
-    setSessionState('loading')
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
     void read()
     return () => {
@@ -542,208 +545,135 @@ function ScholarView(props: ScholarViewProps) {
       if (timer !== undefined) window.clearTimeout(timer)
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [props.readSessionProjection, refreshGeneration, sessionId])
-  useEffect(() => {
-    setFrameStateUrl(url)
-    setFrameState('loading')
-    if (url === null) return
-    const source = frameRef.current?.contentWindow
-    if (source === null || source === undefined) return
-    let origin: string
-    try { origin = new URL(url).origin } catch { return }
-    let active = true
-    let timer: number | undefined
-    const cleanupReady = (): void => {
-      if (!active) return
-      active = false
-      if (timer !== undefined) window.clearTimeout(timer)
-      window.removeEventListener('message', onMessage)
+  }, [busy, props.readSessionWorkspace, refreshGeneration, sessionId])
+
+  useEffect(() => () => { actionController.current?.abort() }, [])
+
+  const runAction = async (kind: 'bind' | 'create'): Promise<void> => {
+    if (busy || sessionId === '') return
+    const controller = new AbortController()
+    actionController.current?.abort()
+    actionController.current = controller
+    setActionState(kind === 'bind' ? 'binding' : 'creating')
+    setActionError(null)
+    try {
+      const value = kind === 'bind'
+        ? await props.bindSessionProject(sessionId, selectedProjectId, controller.signal)
+        : await props.createSessionProject(sessionId, projectName, controller.signal)
+      if (controller.signal.aborted) return
+      setWorkspace(value)
+      setSessionState('ready')
+      setProjectName('')
+    } catch {
+      if (!controller.signal.aborted) setActionError(kind)
+    } finally {
+      if (actionController.current === controller) actionController.current = null
+      if (!controller.signal.aborted) setActionState('idle')
     }
-    const onMessage = (event: MessageEvent): void => {
-      if (!parseScholarFrameReadyMessage(event, source, origin)) return
-      cleanupReady()
-      setFrameState(state => nextScholarFrameState(state, 'ready'))
-    }
-    timer = window.setTimeout(() => {
-      cleanupReady()
-      setFrameState(state => nextScholarFrameState(state, 'timeout'))
-    }, 8_000)
-    window.addEventListener('message', onMessage)
-    try { source.postMessage({ type: FRAME_READY_QUERY, protocol: 1 }, origin) } catch {
-      cleanupReady()
-      setFrameState(state => nextScholarFrameState(state, 'error'))
-    }
-    return cleanupReady
-  }, [frameAttemptKey, url])
-  useEffect(() => {
-    if (url === null || frameFailed) return
-    const source = frameRef.current?.contentWindow
-    if (source === null || source === undefined) return
-    const origin = standaloneChatBridgeOrigin(url, window.location.origin)
-    if (origin === null) return
-    const pending = new Map<string, AbortController>()
-    const completed: string[] = []
-    const completedSet = new Set<string>()
-    const remember = (requestId: string): void => {
-      completed.push(requestId)
-      completedSet.add(requestId)
-      if (completed.length <= 128) return
-      const evicted = completed.shift()
-      if (evicted !== undefined) completedSet.delete(evicted)
-    }
-    const replyUnavailable = (requestId: string): void => {
-      if (frameRef.current?.contentWindow !== source) return
-      source.postMessage({
-        type: CHAT_BRIDGE_RESPONSE,
-        request_id: requestId,
-        error: { code: 'unavailable' },
-      }, origin)
-    }
-    const onMessage = (event: MessageEvent): void => {
-      const request = parseScholarChatBridgeRequest(event, source, origin)
-      if (request === null) return
-      if (pending.has(request.requestId) || completedSet.has(request.requestId)) {
-        replyUnavailable(request.requestId)
-        return
-      }
-      if (pending.size >= 1) {
-        replyUnavailable(request.requestId)
-        return
-      }
-      const controller = new AbortController()
-      pending.set(request.requestId, controller)
-      remember(request.requestId)
-      const timer = window.setTimeout(() => { controller.abort() }, 20_000)
-      void props.callHostChatTurn(request.payload, controller.signal).then(
-        value => {
-          if (frameRef.current?.contentWindow !== source) return
-          source.postMessage({ type: CHAT_BRIDGE_RESPONSE, request_id: request.requestId, value }, origin)
-        },
-        () => { replyUnavailable(request.requestId) },
-      ).finally(() => {
-        window.clearTimeout(timer)
-        if (pending.get(request.requestId) === controller) pending.delete(request.requestId)
-      })
-    }
-    window.addEventListener('message', onMessage)
-    return () => {
-      window.removeEventListener('message', onMessage)
-      for (const controller of pending.values()) controller.abort()
-      pending.clear()
-    }
-  }, [frameAttemptKey, frameFailed, props.callHostChatTurn, url])
+  }
+
+  const projection = workspace?.projection ?? null
+  const options = workspace?.available_projects ?? []
   return (
     <section style={style.view} aria-label={props.t('title')}>
       <header style={style.viewHeader}>
         <p style={style.viewText}>{props.t('viewDescription')}</p>
-        <button
-          type="button"
-          style={style.secondary}
-          disabled={url === null}
-          onClick={() => { if (url !== null) props.openStandalone(url) }}
-        >
+        <button type="button" style={style.secondary} disabled={url === null} onClick={() => { if (url !== null) props.openStandalone(url) }}>
           {props.t('openStandalone')}
         </button>
       </header>
-      <section style={style.sessionPanel} aria-label={props.t('sessionTimeline')}>
-        <div style={style.sessionHeading}>
-          <h2 style={style.sessionTitle}>{props.t('sessionTimeline')}</h2>
-          <button type="button" style={style.secondary} onClick={() => { setRefreshGeneration(value => value + 1) }}>
-            {props.t('refreshStages')}
-          </button>
-        </div>
-        {sessionState === 'loading' ? <p role="status" style={style.projectMeta}>{props.t('sessionLoading')}</p> : null}
-        {sessionState === 'failed' ? <p role="alert" style={style.error}>{props.t('sessionUnavailable')}</p> : null}
-        {sessionState === 'ready' && sessionProjection?.linked === false
-          ? <p role="status" style={style.projectMeta}>{props.t('sessionUnlinked')}</p>
-          : null}
-        {sessionState === 'ready' && sessionProjection?.linked === true && sessionProjection.project !== undefined
-          ? (
-            <>
+      <div style={style.viewBody}>
+        <section style={style.sessionPanel} aria-label={props.t('sessionTimeline')}>
+          <div style={style.sessionHeading}>
+            <h2 style={style.sessionTitle}>{props.t('sessionTimeline')}</h2>
+            <button type="button" style={style.secondary} disabled={busy} onClick={() => { setRefreshGeneration(value => value + 1) }}>
+              {props.t('refreshStages')}
+            </button>
+          </div>
+          {url === null ? <p role="alert" style={style.unavailable}>{props.t('viewUnavailable')}</p> : null}
+          {sessionState === 'loading' ? <p role="status" style={style.projectMeta}>{props.t('sessionLoading')}</p> : null}
+          {sessionState === 'failed' ? <p role="alert" style={style.error}>{props.t('sessionUnavailable')}</p> : null}
+          {sessionState === 'ready' && projection?.linked === false ? (
+            <div style={style.workspaceCard}>
+              <div>
+                <h3 style={style.emptyTitle}>{props.t('sessionUnlinkedTitle')}</h3>
+                <p style={style.hint}>{props.t('sessionUnlinkedHint')}</p>
+              </div>
+              <div style={style.choiceGrid}>
+                <form style={style.choiceCard} onSubmit={(event) => { event.preventDefault(); void runAction('bind') }}>
+                  <h4 style={style.choiceTitle}>{props.t('chooseProject')}</h4>
+                  {options.length === 0 ? <p style={style.hint}>{props.t('noProjects')}</p> : (
+                    <select
+                      aria-label={props.t('chooseProject')}
+                      style={style.input}
+                      value={selectedProjectId}
+                      disabled={busy}
+                      onChange={(event) => { setSelectedProjectId(event.target.value); setActionError(null) }}
+                    >
+                      <option value="">{props.t('chooseProjectPlaceholder')}</option>
+                      {options.map(project => (
+                        <option key={project.project_id} value={project.project_id} disabled={project.status === 'ARCHIVED'}>
+                          {project.name} · {project.status}{project.status === 'ARCHIVED' ? ` (${props.t('archivedProject')})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button type="submit" style={style.primary} disabled={busy || selectedProjectId === ''}>
+                    {props.t(actionState === 'binding' ? 'bindingProject' : 'bindProject')}
+                  </button>
+                  {actionError === 'bind' ? <p role="alert" style={style.error}>{props.t('bindFailed')}</p> : null}
+                </form>
+                <form style={style.choiceCard} onSubmit={(event) => { event.preventDefault(); void runAction('create') }}>
+                  <h4 style={style.choiceTitle}>{props.t('createProjectTitle')}</h4>
+                  <label style={style.label} htmlFor="dsh-scholar-project-name">{props.t('projectName')}</label>
+                  <input
+                    id="dsh-scholar-project-name"
+                    style={style.input}
+                    value={projectName}
+                    maxLength={120}
+                    disabled={busy}
+                    placeholder={props.t('projectNamePlaceholder')}
+                    onChange={(event) => { setProjectName(event.target.value); setActionError(null) }}
+                  />
+                  <button type="submit" style={style.primary} disabled={busy || projectName.trim() === ''}>
+                    {props.t(actionState === 'creating' ? 'creatingProject' : 'createProject')}
+                  </button>
+                  {actionError === 'create' ? <p role="alert" style={style.error}>{props.t('createFailed')}</p> : null}
+                </form>
+              </div>
+            </div>
+          ) : null}
+          {sessionState === 'ready' && projection?.linked === true && projection.project !== undefined ? (
+            <div style={style.workspaceCard}>
               <p style={style.projectMeta}>
-                {sessionProjection.project.name} · {sessionProjection.project.status} · {props.t('projectRevision')} {sessionProjection.project.revision}
+                {projection.project.name} · {projection.project.status} · {props.t('projectRevision')} {projection.project.revision}
               </p>
               <div style={style.stages} role="list">
-                {sessionProjection.stages.map(stage => (
+                {projection.stages.map(stage => (
                   <span
                     key={stage.id}
                     role="listitem"
                     style={{ ...style.stage, ...style[`stage${stage.state[0]!.toUpperCase()}${stage.state.slice(1)}` as 'stageDone' | 'stageCurrent' | 'stageUpcoming' | 'stageBlocked'] }}
                     aria-label={`${props.t(STAGE_KEYS[stage.id])}: ${props.t(STAGE_STATE_KEYS[stage.state])}`}
                     aria-current={stage.state === 'current' || stage.state === 'blocked' ? 'step' : undefined}
-                    title={props.t(STAGE_STATE_KEYS[stage.state])}
                   >
                     <span style={style.stageName}>{props.t(STAGE_KEYS[stage.id])}</span>
                     <span style={style.stageState}>{props.t(STAGE_STATE_KEYS[stage.state])}</span>
                   </span>
                 ))}
               </div>
-              <p style={style.nextLine}>
-                {props.t('nextAction')}: {sessionProjection.next_action?.label ?? '—'}
-                {sessionProjection.next_action === undefined ? '' : ` (${sessionProjection.next_action.code})`}
-                {' · '}{props.t('pendingGates')}: {sessionProjection.summary.pending_gates} · {props.t('jobsSummary')}: {sessionProjection.summary.jobs.total}
-              </p>
-              {sessionProjection.next_action === undefined ? null : (
-                <p style={style.nextLine}>{props.t('nextReason')}: {sessionProjection.next_action.reason}</p>
+              <div style={style.summaryGrid}>
+                <div style={style.summaryItem}><p style={style.nextLine}>{props.t('pendingGates')}</p><strong>{projection.summary.pending_gates}</strong></div>
+                <div style={style.summaryItem}><p style={style.nextLine}>{props.t('jobsSummary')}</p><strong>{projection.summary.jobs.total}</strong></div>
+                <div style={style.summaryItem}><p style={style.nextLine}>{props.t('nextAction')}</p><strong>{projection.next_action?.label ?? '—'}</strong></div>
+              </div>
+              {projection.next_action === undefined ? null : (
+                <p style={style.nextLine}>{props.t('nextReason')}: {projection.next_action.reason}</p>
               )}
-            </>
-          )
-          : null}
-      </section>
-      {url === null
-        ? <div style={style.frameStatus}><p role="alert" style={style.unavailable}>{props.t('viewUnavailable')}</p></div>
-        : (
-          <div style={style.frameRegion}>
-            {visibleFrameState === 'loading'
-              ? <div style={style.frameStatus}><p role="status" style={style.projectMeta}>{props.t('frameLoading')}</p></div>
-              : null}
-            {visibleFrameState === 'failed'
-              ? (
-                <div style={style.frameStatus}>
-                  <div style={style.frameFailure} role="alert">
-                    <p style={style.unavailable}>{props.t('frameLoadFailed')}</p>
-                    <div style={style.frameActions}>
-                      <button
-                        type="button"
-                        style={style.secondary}
-                        onClick={() => {
-                          setFrameState(state => nextScholarFrameState(state, 'retry'))
-                          setFrameGeneration(value => value + 1)
-                        }}
-                      >
-                        {props.t('retryFrame')}
-                      </button>
-                      <button type="button" style={style.secondary} onClick={() => { props.openStandalone(url) }}>
-                        {props.t('openStandalone')}
-                      </button>
-                      {url === DEFAULT_STANDALONE_URL ? null : (
-                        <button type="button" style={style.secondary} onClick={() => { void props.resetStandalone() }}>
-                          {props.t('resetStandalone')}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-              : (
-                <iframe
-                  key={frameAttemptKey ?? url}
-                  ref={frameRef}
-                  src={url}
-                  title={props.t('viewFrameTitle')}
-                  style={{ ...style.frame, visibility: visibleFrameState === 'ready' ? 'visible' : 'hidden' }}
-                  referrerPolicy="origin"
-                  sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-modals allow-popups"
-                  onLoad={() => {
-                    const source = frameRef.current?.contentWindow
-                    if (source === null || source === undefined) return
-                    try { source.postMessage({ type: FRAME_READY_QUERY, protocol: 1 }, new URL(url).origin) } catch { /* invalid URL already handled */ }
-                  }}
-                  onError={() => { setFrameState(state => nextScholarFrameState(state, 'error')) }}
-                />
-              )}
-          </div>
-        )}
+            </div>
+          ) : null}
+        </section>
+      </div>
     </section>
   )
 }
@@ -942,16 +872,12 @@ export function apply(ctx: ClientContext): void {
     typeof navigator === 'undefined' ? undefined : navigator.clipboard,
     connection.isLoopback,
   )
-  const callHostChatTurn = (payload: unknown, signal?: AbortSignal): Promise<unknown> => callScholarChatTurn(
-    connection.rpc,
-    payload,
-    signal,
-  )
-  const readSessionProjection = (sessionId: string, signal?: AbortSignal): Promise<ScholarSessionProjection> => callScholarSessionProjection(
-    connection.rpc,
-    sessionId,
-    signal,
-  )
+  const readSessionWorkspace = (sessionId: string, signal?: AbortSignal): Promise<ScholarSessionWorkspace> =>
+    callScholarSessionWorkspace(connection.rpc, sessionId, signal)
+  const bindSessionProject = (sessionId: string, projectId: string, signal?: AbortSignal): Promise<ScholarSessionWorkspace> =>
+    callScholarSessionBind(connection.rpc, sessionId, projectId, signal)
+  const createSessionProject = (sessionId: string, projectName: string, signal?: AbortSignal): Promise<ScholarSessionWorkspace> =>
+    callScholarSessionCreate(connection.rpc, sessionId, projectName, signal)
   ctx.effect(() => ctx.locale.register(LOCALE_NAMESPACE, { zh, en }), 'dsh-scholar: configuration dictionaries')
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
@@ -978,9 +904,9 @@ export function apply(ctx: ClientContext): void {
     inject: (): ScholarViewFace => ({
       hooks: { researchSettings: scope },
       openStandalone,
-      resetStandalone: () => scope.unset('standalone'),
-      callHostChatTurn,
-      readSessionProjection,
+      readSessionWorkspace,
+      bindSessionProject,
+      createSessionProject,
     }),
   }, ScholarView))
 

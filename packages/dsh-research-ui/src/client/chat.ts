@@ -15,13 +15,7 @@ import {
   loadGrillGuideState,
   type GrillDisposition, type GrillGuideLoaded, type GrillProjection,
 } from './grill-guide-model'
-import { planNaturalChatTurn, projectStageGuidance, type ChatTurnProjection } from './chat-turn-model'
-import {
-  requestHostChatTurn,
-  safeSuggestedChatCommand,
-  type HostChatTurnReply,
-  type HostChatTurnRequest,
-} from './host-chat-bridge'
+import { planNaturalChatTurn, projectStageGuidance, safeSuggestedChatCommand, type ChatTurnProjection } from './chat-turn-model'
 import { captureChatScroll, restoreChatScrollTop, type ChatScrollPosition } from './chat-scroll-model'
 import { activeIntakeId, intakeBeginPayload } from './intake-flow'
 export let dragSessionId: string | null = null
@@ -86,6 +80,12 @@ export function chatInputKind(line: string): { kind: 'command'; line: string } |
   return trimmed.startsWith('/')
     ? { kind: 'command', line: trimmed }
     : { kind: 'prose', text: trimmed }
+}
+
+/** Return the normalized command-name prefix while the draft is completable. */
+export function chatCompletionPrefix(draft: string): string | null {
+  const match = /^\/([a-z-]*)$/i.exec(draft.trim())
+  return match === null ? null : (match[1] ?? '').toLowerCase()
 }
 
 /** New projects already have an Init Intake; later-stage projects receive a
@@ -319,11 +319,42 @@ export interface ChatTurnResult {
   suggestedCommand?: string
 }
 
-type HostChatTurn = (payload: HostChatTurnRequest) => Promise<HostChatTurnReply | null>
+interface ChatModelTurnRequest {
+  text: string
+  locale: 'zh' | 'en'
+  project: {
+    project_id: string
+    name?: string
+    status?: string
+    brief_status?: string
+    next_actions_v2?: unknown[]
+  }
+  history: Array<{ role: 'user' | 'assistant'; text: string }>
+}
+
+interface ChatModelTurnReply {
+  assistantText: string
+  suggestedCommand?: string
+}
+
+type ChatModelTurn = (payload: ChatModelTurnRequest) => Promise<ChatModelTurnReply | null>
+
+const unavailableChatModel: ChatModelTurn = async () => null
 
 function withGuidance(answer: string, projection: ChatTurnProjection): string {
   const guidance = naturalGuidanceText(projection)
   return guidance === '' ? answer : `${answer}\n\n${guidance}`
+}
+
+function phaseAwareConversationText(text: string, projection: ChatTurnProjection): string {
+  const guidance = projectStageGuidance(projection)
+  if (guidance === null) return t('shell', 'shell.chat.natural.freeform')
+  return t('shell', 'shell.chat.natural.contextual', {
+    message: text.trim().slice(0, 160),
+    status: statusLabel(guidance.status),
+    next: guidance.label,
+    reason: guidance.reason || '—',
+  })
 }
 
 function commandProjectId(line: string, activeProjectId: string | undefined): string | undefined {
@@ -341,7 +372,7 @@ function commandProjectId(line: string, activeProjectId: string | undefined): st
 export async function executeChatTurn(
   line: string,
   activeProjectId: string | undefined,
-  hostChatTurn: HostChatTurn = requestHostChatTurn,
+  chatModelTurn: ChatModelTurn = unavailableChatModel,
 ): Promise<ChatTurnResult> {
   const input = chatInputKind(line)
   if (input.kind === 'command') {
@@ -385,9 +416,9 @@ export async function executeChatTurn(
     return { text: withGuidance(answer, latest ?? projection) }
   }
 
-  let hostReply: HostChatTurnReply | null = null
+  let modelReply: ChatModelTurnReply | null = null
   try {
-    hostReply = await hostChatTurn({
+    modelReply = await chatModelTurn({
       text: input.text,
       locale: getLocale() === 'en' ? 'en' : 'zh',
       project: {
@@ -404,12 +435,12 @@ export async function executeChatTurn(
   }
 
   const deterministicSuggestion = safeSuggestedChatCommand(plan.suggestedCommand)
-  const suggestedCommand = deterministicSuggestion ?? safeSuggestedChatCommand(hostReply?.suggestedCommand)
-  let answer = hostReply?.assistantText
+  const suggestedCommand = deterministicSuggestion ?? safeSuggestedChatCommand(modelReply?.suggestedCommand)
+  let answer = modelReply?.assistantText
   if (answer === undefined) {
     if (plan.effect === 'human-only') answer = t('shell', 'shell.chat.natural.humanOnly')
     else if (suggestedCommand !== undefined) answer = t('shell', 'shell.chat.natural.suggested', { command: suggestedCommand })
-    else answer = t('shell', 'shell.chat.natural.freeform')
+    else answer = phaseAwareConversationText(input.text, projection)
   } else if (plan.effect === 'human-only') {
     answer = `${answer}\n\n${t('shell', 'shell.chat.natural.humanOnly')}`
   }
@@ -1866,11 +1897,10 @@ export async function renderChat(
     input.style.height = '48px'
   }
   input.onfocus = () => {
-    if (input.value.trim().startsWith('/')) renderCompletions(true)
+    renderCompletions()
   }
   input.onblur = () => {
     completionBox.style.display = 'none'
-    completionOpen = false
   }
   input.oninput = () => {
     state.chatDraft = input.value
@@ -1881,27 +1911,22 @@ export async function renderChat(
   // opens the command palette under the composer; typing filters it.
   const completionBox = el('div', 'chat-completions')
   completionBox.style.cssText = 'display:none;flex-direction:column;margin-top:6px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);overflow:hidden;max-height:40vh;overflow-y:auto'
-  let completionOpen = false
-  const renderCompletions = (force = false): void => {
-    const draft = input.value.trim()
-    const match = /^\/([a-z-]*)$/i.exec(draft)
-    const shouldOpen = (force || completionOpen) && match !== null
-    if (!shouldOpen) {
+  const renderCompletions = (): void => {
+    const prefix = chatCompletionPrefix(input.value)
+    if (prefix === null) {
       completionBox.style.display = 'none'
-      completionOpen = false
+      completionBox.replaceChildren()
       return
     }
-    const prefix = (match?.[1] ?? '').toLowerCase()
     // With no prefix show the whole palette; with a prefix filter it.
     const hits = prefix === ''
       ? CHAT_COMMANDS.slice(0, 10)
       : CHAT_COMMANDS.filter(([name]) => name.startsWith(prefix)).slice(0, 10)
     if (hits.length === 0) {
       completionBox.style.display = 'none'
-      completionOpen = false
+      completionBox.replaceChildren()
       return
     }
-    completionOpen = true
     completionBox.replaceChildren()
     for (const [name, line] of hits) {
       const row = el('button')

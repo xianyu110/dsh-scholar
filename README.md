@@ -52,8 +52,6 @@ The default page is <http://127.0.0.1:18610>. DSH and the standalone workspace s
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
 ```
 
-If DSH Web does not use the default local port `3080`, set `DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS` before startup to the exact allowed origins (comma-separated). Remote origins must use HTTPS; local origins may use loopback HTTP. Wildcards, credentials, paths, queries, and fragments are rejected.
-
 Use `--no-token` only in an isolated, supervised, loopback-only development environment.
 
 ### 3. Start the experiment Runner
@@ -94,7 +92,7 @@ To update Scholar, run `pnpm run build` in this repository, return to the DSH so
 pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
 ```
 
-The plugin provides Scholar Agent tools, slash commands, Skills, a configuration card, and the `dsh Scholar` tab. The tab reuses the running standalone workspace.
+The plugin provides Scholar Agent tools, slash commands, Skills, a configuration card, and the `dsh Scholar` tab. The tab is a compact session view: unlinked DSH conversations can bind an existing project or create a name-only project, while linked conversations show the current stages and next action. Use its button or the configured shortcut to open the complete standalone workspace in a new page.
 
 ## Plugin config
 
@@ -106,7 +104,7 @@ After installing the plugin, open **Settings → Plugin config → dsh Scholar**
 |---|---|---|
 | Default governance mode | `gate-only` | Used when a new project does not explicitly specify a mode. `gate-only` preserves human approval Gates; `full-auto` is only suitable for low-risk sandboxes with a configured FixtureProfile. |
 | Unattended runs | Off | Does not bypass Human Gates. At a Gate, the project pauses instead of waiting for an interactive answer. |
-| Standalone URL | `http://127.0.0.1:18610/` | Target used by the plugin tab and **Open in new page**. Only HTTPS or loopback HTTP is allowed. |
+| Standalone URL | `http://127.0.0.1:18610/` | Target used by **Open in new page** and the shortcut. Only HTTPS or loopback HTTP is allowed. |
 | Open-page shortcut | `Alt+Shift+S` | Can be disabled. It does not trigger while typing or using an IME. |
 
 The Standalone URL cannot contain credentials, query parameters, or fragments, and tokens must not be placed in the URL. **Copy standalone access token** is available only from a local loopback DSH instance and reads the fixed `0600` token file after an explicit user click. The page never displays the token. This action does not copy Kernel, Runner, Provider, or SSH secrets.

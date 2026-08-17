@@ -10,9 +10,9 @@ bash scripts/start-standalone-ui.sh
 
 访问 http://127.0.0.1:18610，输入启动脚本打印的 Token。完整工作台仍由 standalone 提供；安装根插件后，DSH 会话同时提供 `dsh Scholar` 页签和默认 `Alt+Shift+S` 新页面快捷键。打开页面后可以在 Settings → Language 选择中文或 English。没有手动选择时，系统先读 dsh.locale，再匹配浏览器语言，最后使用中文。切换语言不会翻译项目名、论文、命令输出和 TeX 原始错误。
 
-在 DSH 自带 Chat 里可以直接用自然语言说“创建研究项目 OCR 复现”“继续调研”“现在到哪一步了”或“下一步做什么”，无需先记住 slash command。Harness 会调用 Scholar 的受控会话入口：没有关联项目时，整句肯定创建指令与原文中的完整项目名会直接创建 name-only Init 并绑定当前 session；缺名称会在对话中追问，普通未关联对话才把 `/new <项目名>` 作为可选快捷入口。项目进入 Brief 收集时，每个问题直接复用 DSH 原生提问输入区逐题出现，可自由输入、跳过或选“暂时未知”，无需先打开 Scholar 页面或在 iframe 中面对第二个输入框；全部答完仍需打开 Scholar 由 PI 核对并确认 Brief。有项目时读取同一 session 的权威状态，明确回显识别到的研究动作、是否已执行、最新下一步与阻断。名称子串、疑问、否定、歧义不会创建；当前只有已就绪且用户以“开始/继续/执行”等正向动作词明确要求的调研快照可由这次对话直接执行。Gate、Brief 确认、外部研究采纳和发布决定仍需在 Scholar 中由人完成，生成想法等其他写动作会生成可编辑的 slash command。
+在 DSH 自带 Chat 里可以直接用自然语言说“创建研究项目 OCR 复现”“继续调研”“现在到哪一步了”或“下一步做什么”，无需先记住 slash command。Harness 会调用 Scholar 的受控会话入口：没有关联项目时，整句肯定创建指令与原文中的完整项目名会直接创建 name-only Init 并绑定当前 session；缺名称会在对话中追问，普通未关联对话才把 `/new <项目名>` 作为可选快捷入口。项目进入 Brief 收集时，每个问题直接复用 DSH 原生提问输入区逐题出现，可自由输入、跳过或选“暂时未知”，紧凑 `dsh Scholar` 页签不会再出现第二个输入框；全部答完仍需打开完整 Scholar 由 PI 核对并确认 Brief。有项目时读取同一 session 的权威状态，明确回显识别到的研究动作、是否已执行、最新下一步与阻断。名称子串、疑问、否定、歧义不会创建；当前只有已就绪且用户以“开始/继续/执行”等正向动作词明确要求的调研快照可由这次对话直接执行。Gate、Brief 确认、外部研究采纳和发布决定仍需在 Scholar 中由人完成，生成想法等其他写动作会生成可编辑的 slash command。
 
-会话的 `dsh Scholar` 页签顶部显示当前 DSH session 的项目阶段条、每阶段可见状态、revision、下一步、待审批和任务统计；它会随当前 session 切换和刷新。下方 iframe 与独立打开的完整工作台复用同一个 `~/.dsh/research-kernel` 权威数据目录和稳定本机操作员身份，因此两处项目列表、详情和写入必须一致；`~/.dsh-scholar-standalone/research-ui-standalone` 只保存浏览器 Token、会话和显示偏好，不得再包含第二个业务数据库。
+会话的 `dsh Scholar` 页签是面向当前 DSH session 的紧凑入口，不再把完整 Scholar 工作台压缩进 DSH 主区。未绑定时可直接从同一批有权限项目中选择并绑定，或只填写项目名创建 name-only 项目并绑定；已绑定时只显示阶段条、每阶段可见状态、revision、下一步、待审批和任务统计。完整工作台通过页签按钮或 `Alt+Shift+S` 在新页面打开。两处复用同一个 `~/.dsh/research-kernel` 权威数据目录和稳定本机操作员身份；`~/.dsh-scholar-standalone/research-ui-standalone` 只保存浏览器 Token、会话和显示偏好，不得包含第二个业务数据库。
 
 ### 1.1 把页面停靠在右侧或底部
 
@@ -42,9 +42,9 @@ Upload 可以创建新项目或选择有权限的现有项目。采用前材料�
 
 Chat 对话属于当前项目。切换项目时，会话列表、当前会话、消息、草稿、引用回复和附件也随项目切换；返回原项目才恢复原对话。项目 A 中仍在执行的命令或上传即使晚于切换完成，也只能回写 A，不能出现在项目 B。当前修复状态以 hardening 的 `CHAT-SCOPE-01` 为准。
 
-Chat 同时支持普通自然语言和一级 slash command。直接输入“现在进展怎么样”“看看审批”“有哪些想法”“查看运行任务”会按当前项目投影路由到对应只读操作；明确输入“调研 <主题>”可路由到 survey。显式 `/status`、`/gates`、`/ideas`、`/jobs`、`/survey ...` 仍是完全确定性的高级入口。在 composer 内输入 `/` 会原位打开补全并保持光标连续；从页面非编辑区域直接按 `/` 则跳到 composer，并把光标放在预填斜杠之后。Init Grill 尚有当前问题时，普通文本仍回答该问题；Brief confirmed 后才作为自由对话处理。系统会在回答后给出当前阶段的一项下一步建议，但不会自动替你批准 Gate、确认 Brief、adopt 导入或决定发布。未知或参数不足时只给候选，不执行副作用。
+Chat 同时支持普通自然语言和一级 slash command。直接输入“现在进展怎么样”“看看审批”“有哪些想法”“查看运行任务”会按当前项目投影路由到对应只读操作；明确输入“调研 <主题>”可在 `survey_run` ready 时执行 survey。显式 `/status`、`/gates`、`/ideas`、`/jobs`、`/survey ...` 仍是完全确定性的高级入口。在 composer 内输入 `/` 会原位打开补全并保持光标连续；从页面非编辑区域直接按 `/` 则跳到 composer，并把光标放在预填斜杠之后。Init Grill 尚有当前问题时，普通文本仍回答该问题；Brief confirmed 后普通文本进入阶段感知的自由对话，每次回答附当前阶段、下一步和阻断原因。
 
-在 DSH 的 `dsh Scholar` 页签内，当 Scholar 使用与 Host 不同 origin 的 loopback standalone，或与 Host 同主机但不同端口/origin 的 HTTPS standalone 时，开放问题会使用 Harness 当前可用的模型回答；模型不持有 Scholar 工具，也不能直接执行命令。它生成的非 Human-only 一级 slash command 会以“使用命令”按钮出现，点击后只填入输入框，你可以修改并再次发送。状态查询等确定性只读意图可以自动调用对应 canonical command；当前仅权威投影 ready 的 `survey_run` 可自动触发 Agent write，其他 write 只预填，人工审批及 blocked/歧义动作始终只解释和引导。独立新页面、跨主机 HTTPS、远端明文 HTTP、不受信 origin 或 Host 模型暂不可用时会退回基于当前阶段的确定性回答，核心 slash command 仍可正常使用。
+用户明确输入“继续”“推进”或“执行下一步”时，Scholar 只会执行当前权威投影已经 ready 且无需补参数的动作；当前可自动进入 `/write`、`/review` 和 `/release-bundle`。要求实验、复现等仍缺必要参数时，页面给出可编辑 slash 建议而不猜参数。Gate 决策、Brief 确认、Intake adoption 和 Release 决策始终只解释并引导人工处理；blocked、权限不足或歧义输入零副作用。对话和显式 slash 最终调用同一个 canonical operation，因此状态、权限和审计语义一致。
 
 对话在底部时会随新消息保持到底部；向上查看历史后，刷新和新消息不会把内容拉回顶部或强制到底部，使用“跳到最新”恢复跟随。项目、Chat session、主区与 Dock 分别保存自己的查看位置。
 

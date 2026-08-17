@@ -50,6 +50,19 @@ export interface ScholarSessionProjection {
   }
 }
 
+/** Narrow Host view for one DSH conversation.
+ *
+ * The full Scholar workbench deliberately does not cross this boundary. An
+ * unlinked conversation receives only the operator's project summaries so it
+ * can choose or create its authoritative project; a linked conversation
+ * receives only its stage projection.
+ */
+export interface ScholarSessionWorkspace {
+  session_id: string
+  projection: ScholarSessionProjection
+  available_projects: ScholarProjectSummary[]
+}
+
 export interface ProjectionLike {
   project: {
     project_id: string

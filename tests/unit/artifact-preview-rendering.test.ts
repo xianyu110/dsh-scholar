@@ -34,14 +34,13 @@ describe('Artifact preview renderer safety wiring', () => {
     expect(artifacts).toContain('artifactBulkDownload?.controller.abort()')
   })
 
-  it('keeps download links keyboard reachable and permits only sandboxed popups', () => {
+  it('keeps download links keyboard reachable and opens explicit preview pages safely', () => {
     expect(ui).toContain('button, a[href], input, select, textarea')
     expect(ui).toContain('root.activeElement ?? document.activeElement')
-    // The child needs the origin-only referrer to authenticate the optional
-    // loopback Host chat bridge; paths, queries and fragments remain hidden.
-    expect(pluginClient).toContain('referrerPolicy="origin"')
-    expect(pluginClient).toMatch(/sandbox="[^"]*allow-popups[^"]*"/)
-    expect(pluginClient).not.toContain('allow-popups-to-escape-sandbox')
+    expect(artifacts).toContain("window.open(previewUrl, '_blank', 'noopener,noreferrer')")
+    expect(pluginClient).not.toContain('<iframe')
+    expect(pluginClient).not.toContain('allow-popups')
+    expect(pluginClient).not.toContain('postMessage(')
     expect(artifacts).toContain("overlay.dataset.overlayDismiss = 'event'")
     expect(client).toContain("latest.dispatchEvent(new Event('dsh-overlay-dismiss'))")
   })

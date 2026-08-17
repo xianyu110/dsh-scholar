@@ -6,7 +6,7 @@
  * Import-safe under vitest (no DOM at module scope).
  */
 import { describe, expect, it } from 'vitest'
-import { chatAttachmentBeginPayload, chatInputKind, chatJsonArg, chatRunKind, chatRunnerTargetId, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
+import { chatAttachmentBeginPayload, chatCompletionPrefix, chatInputKind, chatJsonArg, chatRunKind, chatRunnerTargetId, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
 import { CHAT_COMMANDS } from '../../packages/dsh-research-ui/src/client/modals/commands'
 
 describe('name-only Init and Grill prose routing', () => {
@@ -36,6 +36,17 @@ describe('name-only Init and Grill prose routing', () => {
 
   it('rejects the removed aggregate prefix instead of silently aliasing it', async () => {
     expect(await executeChatCommand('/research help', undefined)).toBe('Unknown command: /research. Try /help')
+  })
+})
+
+describe('slash command completion', () => {
+  it('opens from the first slash and narrows only while the draft is a command name', () => {
+    expect(chatCompletionPrefix('/')).toBe('')
+    expect(chatCompletionPrefix('/s')).toBe('s')
+    expect(chatCompletionPrefix('  /STATUS  ')).toBe('status')
+    expect(chatCompletionPrefix('/status ')).toBe('status')
+    expect(chatCompletionPrefix('/status now')).toBeNull()
+    expect(chatCompletionPrefix('status')).toBeNull()
   })
 })
 

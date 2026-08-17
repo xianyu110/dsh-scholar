@@ -90,16 +90,15 @@ describe('DSH research plugin lifecycle', () => {
       }]),
       mutate,
     }
-    const chatTurn = vi.fn().mockResolvedValue({ assistant_text: '可以继续讨论。', suggested_command: '/status' })
-    const sessionProjection = vi.fn().mockResolvedValue({
-      linked: true,
-      session_id: 'session_1',
-      project: { project_id: 'rsp_1', name: 'Research', status: 'SCOPED', revision: 2 },
-      stages: [{ id: 'survey', state: 'current' }],
-      summary: { pending_gates: 0, jobs: { total: 0 }, counts: {} },
-    })
+    const sessionWorkspace = vi.fn().mockResolvedValue({ session_id: 'session_1', projection: { linked: false }, available_projects: [] })
+    const bindSessionProject = vi.fn().mockResolvedValue({ session_id: 'session_1', projection: { linked: true }, available_projects: [] })
+    const createSessionProject = vi.fn().mockResolvedValue({ session_id: 'session_1', projection: { linked: true }, available_projects: [] })
     const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token')
-    const viewHandler = createScholarViewRpcHandler(chatTurn, sessionProjection)
+    const viewHandler = createScholarViewRpcHandler({
+      readSessionWorkspace: sessionWorkspace,
+      bindSessionProject,
+      createSessionProject,
+    })
 
     const snapshot = await handler('settings-snapshot', {}, new AbortController().signal)
     expect(snapshot).toMatchObject({ ok: true, value: { available: true, snapshot: {
@@ -122,38 +121,37 @@ describe('DSH research plugin lifecycle', () => {
     expect(mutate).toHaveBeenCalledTimes(1)
 
     const controller = new AbortController()
-    const chat = await viewHandler('chat-turn', { text: '下一步是什么？' }, controller.signal)
-    expect(chat).toEqual({ ok: true, value: { assistant_text: '可以继续讨论。', suggested_command: '/status' } })
-    expect(chatTurn).toHaveBeenCalledWith({ text: '下一步是什么？' }, controller.signal)
+    const workspace = await viewHandler('session-workspace', { session_id: 'session_1' }, controller.signal)
+    expect(workspace).toMatchObject({ ok: true, value: { session_id: 'session_1', projection: { linked: false } } })
+    expect(sessionWorkspace).toHaveBeenCalledWith('session_1', controller.signal)
+    const bound = await viewHandler('session-bind', { session_id: 'session_1', project_id: 'rsp_1' }, controller.signal)
+    expect(bound).toMatchObject({ ok: true, value: { projection: { linked: true } } })
+    expect(bindSessionProject).toHaveBeenCalledWith('session_1', 'rsp_1', controller.signal)
+    const created = await viewHandler('session-create', { session_id: 'session_1', name: '  New research  ' }, controller.signal)
+    expect(created).toMatchObject({ ok: true, value: { projection: { linked: true } } })
+    expect(createSessionProject).toHaveBeenCalledWith('session_1', 'New research', controller.signal)
 
-    const phases = await viewHandler('session-projection', { session_id: 'session_1' }, controller.signal)
-    expect(phases).toMatchObject({ ok: true, value: { linked: true, session_id: 'session_1' } })
-    expect(sessionProjection).toHaveBeenCalledWith('session_1', controller.signal)
-    const invalidProjection = await viewHandler('session-projection', { session_id: '' }, controller.signal)
-    expect(invalidProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
-    const unsafeProjection = await viewHandler('session-projection', { session_id: 'x/../../projects/rsp_other' }, controller.signal)
-    expect(unsafeProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
-    const whitespaceProjection = await viewHandler('session-projection', { session_id: ' session_1' }, controller.signal)
-    expect(whitespaceProjection).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session projection request' } })
-    expect(sessionProjection).toHaveBeenCalledTimes(1)
+    const invalidWorkspace = await viewHandler('session-workspace', { session_id: '' }, controller.signal)
+    expect(invalidWorkspace).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session workspace request' } })
+    const unsafeWorkspace = await viewHandler('session-workspace', { session_id: 'x/../../projects/rsp_other' }, controller.signal)
+    expect(unsafeWorkspace).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session workspace request' } })
+    const extraField = await viewHandler('session-bind', { session_id: 'session_1', project_id: 'rsp_1', token: 'forged' }, controller.signal)
+    expect(extraField).toMatchObject({ ok: false, error: { code: 'internal', message: 'invalid Scholar session binding request' } })
+    expect(sessionWorkspace).toHaveBeenCalledTimes(1)
 
     await expect(viewHandler('standalone-token', {}, controller.signal)).resolves.toMatchObject({
       ok: false,
       error: { code: 'internal', message: 'unsupported Scholar view endpoint' },
     })
-    await expect(handler('chat-turn', {}, controller.signal)).resolves.toMatchObject({
+    await expect(handler('session-bind', {}, controller.signal)).resolves.toMatchObject({
       ok: false,
       error: { code: 'internal', message: 'unsupported Scholar endpoint' },
     })
 
     const unavailable = createScholarViewRpcHandler()
-    await expect(unavailable('chat-turn', {}, controller.signal)).resolves.toMatchObject({
+    await expect(unavailable('session-workspace', { session_id: 'session_1' }, controller.signal)).resolves.toMatchObject({
       ok: false,
-      error: { code: 'internal', message: 'Scholar Chat model is unavailable' },
-    })
-    await expect(unavailable('session-projection', { session_id: 'session_1' }, controller.signal)).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'internal', message: 'Scholar session projection is unavailable' },
+      error: { code: 'internal', message: 'Scholar session workspace is unavailable' },
     })
   })
 

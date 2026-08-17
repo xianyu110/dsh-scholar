@@ -1,4 +1,5 @@
 import type { NextActionV2 } from './types'
+import { CHAT_COMMANDS } from './modals/commands'
 
 export interface ChatTurnProjection {
   project?: { project_id?: string; name?: string; status?: string; brief_status?: string }
@@ -20,12 +21,38 @@ export type NaturalChatPlan =
   | { kind: 'command'; intentCode: string; command: string; effect: 'read' | 'agent-write'; actionCode?: string }
   | { kind: 'conversation'; intentCode: string; effect: 'none' | 'human-only' | 'agent-write'; suggestedCommand?: string }
 
+const COMMAND_NAMES = new Set(CHAT_COMMANDS.map(([name]) => name))
+const HUMAN_ONLY_COMMANDS = new Set(['confirm-brief', 'release'])
+
+/** Model or heuristic output may suggest, but never execute, one direct command. */
+export function safeSuggestedChatCommand(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const command = value.trim()
+  if (command.length === 0 || command.length > 8_192) return undefined
+  const match = /^\/([a-z][a-z0-9-]*)(?:\s|$)/.exec(command)
+  if (match === null || !COMMAND_NAMES.has(match[1]!) || HUMAN_ONLY_COMMANDS.has(match[1]!)) return undefined
+  return command
+}
+
 function normalized(text: string): string {
   return text.trim().toLocaleLowerCase('en-US')
 }
 
 function actionReady(projection: ChatTurnProjection, code: string): boolean {
   return (projection.next_actions_v2 ?? []).some(action => action.code === code && action.state === 'ready' && action.required === true)
+}
+
+function readyNoArgumentCommand(projection: ChatTurnProjection): { code: string; command: string } | null {
+  const commands: Record<string, string> = {
+    manuscript_write: '/write',
+    reviewer_run: '/review',
+    release_bundle: '/release-bundle',
+  }
+  const action = (projection.next_actions_v2 ?? []).find(item =>
+    typeof item.code === 'string' && item.state === 'ready' && item.required === true && commands[item.code] !== undefined)
+  if (action === undefined || typeof action.code !== 'string') return null
+  const command = commands[action.code]
+  return command === undefined ? null : { code: action.code, command }
 }
 
 function surveyQuery(text: string): string {
@@ -56,6 +83,11 @@ export function planNaturalChatTurn(text: string, projection: ChatTurnProjection
   if (/(?:状态|进展|进度|下一步|该做什么|现在做什么)|\b(?:status|progress|next\s+step|what\s+next)\b/.test(input)) {
     return { kind: 'command', intentCode: 'status', command: '/status', effect: 'read' }
   }
+  if (/^(?:请|帮我|请帮我)?\s*(?:继续|推进|执行下一步|开始下一步)(?:研究|执行|吧|下去)?$|^(?:please\s+)?(?:continue|proceed|run\s+the\s+next\s+step)$/i.test(input)) {
+    const next = readyNoArgumentCommand(projection)
+    if (next !== null) return { kind: 'command', intentCode: 'continue', command: next.command, effect: 'agent-write', actionCode: next.code }
+    return { kind: 'conversation', intentCode: 'continue', effect: 'agent-write' }
+  }
   if (/(?:想法|创意|idea|hypothesis)/.test(input)) {
     return { kind: 'command', intentCode: 'ideas', command: '/ideas', effect: 'read' }
   }
@@ -83,7 +115,19 @@ export function planNaturalChatTurn(text: string, projection: ChatTurnProjection
     return { kind: 'conversation', intentCode: 'reproduce', effect: 'agent-write', suggestedCommand: '/reproduce ' }
   }
   if (/(?:写论文|写作|生成稿件|write\s+(?:the\s+)?paper)/.test(input)) {
-    return { kind: 'conversation', intentCode: 'write', effect: 'agent-write', suggestedCommand: '/write' }
+    return actionReady(projection, 'manuscript_write')
+      ? { kind: 'command', intentCode: 'write', command: '/write', effect: 'agent-write', actionCode: 'manuscript_write' }
+      : { kind: 'conversation', intentCode: 'write', effect: 'agent-write', suggestedCommand: '/write' }
+  }
+  if (/(?:审阅稿件|评审稿件|检查论文|review\s+(?:the\s+)?(?:paper|manuscript))/.test(input)) {
+    return actionReady(projection, 'reviewer_run')
+      ? { kind: 'command', intentCode: 'review', command: '/review', effect: 'agent-write', actionCode: 'reviewer_run' }
+      : { kind: 'conversation', intentCode: 'review', effect: 'agent-write', suggestedCommand: '/review' }
+  }
+  if (/(?:生成|构建).*(?:发布包|release bundle)|(?:release bundle).*(?:generate|build)/.test(input)) {
+    return actionReady(projection, 'release_bundle')
+      ? { kind: 'command', intentCode: 'release_bundle', command: '/release-bundle', effect: 'agent-write', actionCode: 'release_bundle' }
+      : { kind: 'conversation', intentCode: 'release_bundle', effect: 'agent-write', suggestedCommand: '/release-bundle' }
   }
   return { kind: 'conversation', intentCode: 'freeform', effect: 'none' }
 }

@@ -172,6 +172,40 @@ describe('v2 project adapter', () => {
     kernel.close()
   })
 
+  it('lists only operator-owned projects and exclusively binds an existing project', async () => {
+    const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+    const ownedA = kernel.createProjectForDshSession({
+      session_id: 'session_owned_a', name: 'Owned A', idempotency_key: 'owned-a', request_hash: 'owned-a-hash',
+    })
+    const ownedB = kernel.createProjectForDshSession({
+      session_id: 'session_owned_b', name: 'Owned B', idempotency_key: 'owned-b', request_hash: 'owned-b-hash',
+    })
+    const foreign = kernel.createProjectForGrill({
+      name: 'Foreign', creator_principal_id: 'another-user', idempotency_key: 'foreign', request_hash: 'foreign-hash',
+    })
+    await withServer(kernel, async (base) => {
+      const client = new ResearchClient({ endpoint: base, serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
+      const options = await client.listProjectsForDshSession('session_unbound')
+      expect(options.map(project => project.project_id)).toEqual(expect.arrayContaining([
+        ownedA.project.project_id, ownedB.project.project_id,
+      ]))
+      expect(options.map(project => project.project_id)).not.toContain(foreign.project.project_id)
+
+      const linked = await client.linkProjectForDshSession('session_unbound', ownedA.project.project_id)
+      expect(linked).toMatchObject({ session_id: 'session_unbound', project_id: ownedA.project.project_id })
+      await expect(client.linkProjectForDshSession('session_unbound', ownedA.project.project_id)).resolves.toEqual(linked)
+      await expect(client.linkProjectForDshSession('session_unbound', ownedB.project.project_id))
+        .rejects.toMatchObject({ status: 409, code: 'session_link_conflict' })
+      await expect(client.linkProjectForDshSession('session_foreign', foreign.project.project_id))
+        .rejects.toMatchObject({ status: 404, code: 'project_not_found' })
+
+      kernel.archiveProject(ownedB.project.project_id)
+      await expect(client.linkProjectForDshSession('session_archived', ownedB.project.project_id))
+        .rejects.toMatchObject({ status: 409, code: 'project_archived' })
+    })
+    kernel.close()
+  })
+
   it('requires the Kernel bearer before either internal credential is considered', async () => {
     const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
     const { server, port } = await startKernelServer({ kernel, host: '127.0.0.1', port: 0, token: 'kernel-secret' })

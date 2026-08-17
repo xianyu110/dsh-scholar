@@ -77,12 +77,28 @@ function mutation(payload: unknown): ScholarSettingsMutation | undefined {
 
 const internal = (message: string) => ({ ok: false as const, error: { code: 'internal' as const, message, details: {} } })
 
-export type ScholarChatTurnHandler = (payload: unknown, signal: AbortSignal) => Promise<unknown>
-export type ScholarSessionProjectionHandler = (sessionId: string, signal: AbortSignal) => Promise<unknown>
+export type ScholarSessionWorkspaceHandler = (sessionId: string, signal: AbortSignal) => Promise<unknown>
+export type ScholarSessionBindHandler = (sessionId: string, projectId: string, signal: AbortSignal) => Promise<unknown>
+export type ScholarSessionCreateHandler = (sessionId: string, name: string, signal: AbortSignal) => Promise<unknown>
 
 function sessionId(payload: unknown): string | undefined {
-  if (!isRecord(payload) || typeof payload.session_id !== 'string') return undefined
+  if (!isRecord(payload) || Object.keys(payload).some(key => key !== 'session_id') || typeof payload.session_id !== 'string') return undefined
   return normalizeDshSessionId(payload.session_id)
+}
+
+function sessionProject(payload: unknown): { sessionId: string; projectId: string } | undefined {
+  if (!isRecord(payload) || Object.keys(payload).some(key => key !== 'session_id' && key !== 'project_id')) return undefined
+  const parsedSession = normalizeDshSessionId(payload.session_id)
+  if (parsedSession === undefined || typeof payload.project_id !== 'string' || !/^rsp_[a-z0-9_]+$/.test(payload.project_id)) return undefined
+  return { sessionId: parsedSession, projectId: payload.project_id }
+}
+
+function sessionProjectName(payload: unknown): { sessionId: string; name: string } | undefined {
+  if (!isRecord(payload) || Object.keys(payload).some(key => key !== 'session_id' && key !== 'name')) return undefined
+  const parsedSession = normalizeDshSessionId(payload.session_id)
+  if (parsedSession === undefined || typeof payload.name !== 'string') return undefined
+  const name = payload.name.trim()
+  return name === '' || name.length > 120 ? undefined : { sessionId: parsedSession, name }
 }
 
 /** Public DSH Connection extension handler owned entirely by the Scholar plugin. */
@@ -117,23 +133,33 @@ export function createScholarRpcHandler(
   }
 }
 
-/** Trusted-host view RPC: deliberately excludes settings and token endpoints. */
-export function createScholarViewRpcHandler(
-  runChatTurn?: ScholarChatTurnHandler,
-  readSessionProjection?: ScholarSessionProjectionHandler,
-): ConnectionRpcHandler {
+/** Trusted-host conversation panel RPC: no secrets and no standalone embed. */
+export function createScholarViewRpcHandler(handlers: {
+  readSessionWorkspace?: ScholarSessionWorkspaceHandler
+  bindSessionProject?: ScholarSessionBindHandler
+  createSessionProject?: ScholarSessionCreateHandler
+} = {}): ConnectionRpcHandler {
   return async (endpoint, payload, signal) => {
-    if (endpoint === 'chat-turn') {
-      if (runChatTurn === undefined) return internal('Scholar Chat model is unavailable')
-      try { return { ok: true, value: await runChatTurn(payload, signal) } }
-      catch { return internal('Scholar Chat model is unavailable') }
-    }
-    if (endpoint === 'session-projection') {
+    if (endpoint === 'session-workspace') {
       const parsed = sessionId(payload)
-      if (parsed === undefined) return internal('invalid Scholar session projection request')
-      if (readSessionProjection === undefined) return internal('Scholar session projection is unavailable')
-      try { return { ok: true, value: await readSessionProjection(parsed, signal) } }
-      catch { return internal('Scholar session projection is unavailable') }
+      if (parsed === undefined) return internal('invalid Scholar session workspace request')
+      if (handlers.readSessionWorkspace === undefined) return internal('Scholar session workspace is unavailable')
+      try { return { ok: true, value: await handlers.readSessionWorkspace(parsed, signal) } }
+      catch { return internal('Scholar session workspace is unavailable') }
+    }
+    if (endpoint === 'session-bind') {
+      const parsed = sessionProject(payload)
+      if (parsed === undefined) return internal('invalid Scholar session binding request')
+      if (handlers.bindSessionProject === undefined) return internal('Scholar session binding is unavailable')
+      try { return { ok: true, value: await handlers.bindSessionProject(parsed.sessionId, parsed.projectId, signal) } }
+      catch { return internal('Scholar session binding failed') }
+    }
+    if (endpoint === 'session-create') {
+      const parsed = sessionProjectName(payload)
+      if (parsed === undefined) return internal('invalid Scholar session project request')
+      if (handlers.createSessionProject === undefined) return internal('Scholar session project creation is unavailable')
+      try { return { ok: true, value: await handlers.createSessionProject(parsed.sessionId, parsed.name, signal) } }
+      catch { return internal('Scholar session project creation failed') }
     }
     return internal('unsupported Scholar view endpoint')
   }
