@@ -148,7 +148,7 @@ Standalone 地址不允许凭据、查询参数或 URL 片段，令牌不应放�
 Chat 支持普通文本和一级 slash command，常用命令包括：
 
 ```text
-/new  /status  /survey  /ideas  /gates  /contract  /run
+/new  /status  /survey  /ideas  /ideas generate 3  /ideas select <idea_id>  /gates  /contract  /run
 /evidence  /claims  /write  /review  /release-bundle  /release
 ```
 

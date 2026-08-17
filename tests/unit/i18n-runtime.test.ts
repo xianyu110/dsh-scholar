@@ -74,9 +74,10 @@ describe('i18n runtime: locale switching (acceptance §8 line 135)', () => {
   })
 
   it('tab labels/descriptions re-evaluate after a locale switch', () => {
+    const visibility = { budgetPage: true }
     setLocale('zh')
-    const zhTabs = chromeTabs()
-    const zhGroups = chromeTabGroups()
+    const zhTabs = chromeTabs(visibility)
+    const zhGroups = chromeTabGroups(visibility)
     expect(zhTabs.length).toBeGreaterThan(1)
     expect(zhGroups.length).toBeGreaterThan(1)
     // every tab carries non-empty copy in zh…
@@ -85,8 +86,8 @@ describe('i18n runtime: locale switching (acceptance §8 line 135)', () => {
       expect(tab.description).not.toBe('')
     }
     setLocale('en')
-    const enTabs = chromeTabs()
-    const enGroups = chromeTabGroups()
+    const enTabs = chromeTabs(visibility)
+    const enGroups = chromeTabGroups(visibility)
     // …same keys/order in en (structure is locale-independent)…
     expect(enTabs.map(t => t.key)).toEqual(zhTabs.map(t => t.key))
     expect(enGroups.map(g => g.tabs.map(t => t.key))).toEqual(zhGroups.map(g => g.tabs.map(t => t.key)))
@@ -113,7 +114,7 @@ describe('i18n runtime: locale switching (acceptance §8 line 135)', () => {
     setLocale('zh')
     expect(getLocale()).toBe('zh')
     expect(t('shell', 'shell.tab.chat')).toBe(zhBrand)
-    expect(chromeTabs().map(x => x.label)).toEqual(zhTabs.map(x => x.label))
+    expect(chromeTabs(visibility).map(x => x.label)).toEqual(zhTabs.map(x => x.label))
   })
 
   it('model selector choices re-evaluate with the locale', () => {

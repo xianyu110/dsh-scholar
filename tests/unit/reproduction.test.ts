@@ -853,7 +853,7 @@ function contractFixture() {
   }
 }
 
-function actionCtx(overrides: Partial<NextActionContext> & { status: 'IDEA_APPROVED' | 'BASELINE_REPRO' }): NextActionContext {
+function actionCtx(overrides: Partial<NextActionContext> & { status: 'BASELINE_REPRO' }): NextActionContext {
   return {
     project: {
       project_id: 'rsp_x', name: 'x', workspace: '/w', mode: 'gate-only', status: overrides.status,
@@ -870,17 +870,17 @@ function actionCtx(overrides: Partial<NextActionContext> & { status: 'IDEA_APPRO
 describe('NextAction reproduction semantics', () => {
   it('baseline_reproduce is done ONLY with a persisted pass report; fail/inconclusive reports keep it ready + retry action', () => {
     // Legacy context (no reproductions): job-based semantics unchanged.
-    const legacy = nextActionProjection(actionCtx({ status: 'IDEA_APPROVED', jobs: [{ job_id: 'j1', kind: 'baseline', status: 'succeeded', failure_class: null, attempts: 1, max_attempts: 3, contract_id: null, created_at: NOW }] }))
+    const legacy = nextActionProjection(actionCtx({ status: 'BASELINE_REPRO', jobs: [{ job_id: 'j1', kind: 'baseline', status: 'succeeded', failure_class: null, attempts: 1, max_attempts: 3, contract_id: null, created_at: NOW }] }))
     expect(legacy.find(a => a.code === 'baseline_reproduce')?.state).toBe('done')
     // Pass report → done (even without a baseline job row — the report is authoritative).
     const pass = nextActionProjection(actionCtx({
-      status: 'IDEA_APPROVED',
+      status: 'BASELINE_REPRO',
       reproductions: [reproView({ spec_id: 'repro_1', status: 'completed', report_count: 1, latest_report_status: 'pass' })],
     }))
     expect(pass.find(a => a.code === 'baseline_reproduce')?.state).toBe('done')
     // Fail report → NOT done + reproduction_retry_or_repair overlay.
     const fail = nextActionProjection(actionCtx({
-      status: 'IDEA_APPROVED',
+      status: 'BASELINE_REPRO',
       contracts: [{ contract_id: 'expc_1', project_id: 'rsp_x', status: 'approved', version: 1, idea_id: '', data: {} as never, methods: {} as never, metrics: {} as never, seeds: [], analysis: {} as never, ablations: [], stop_conditions: {} as never, created_at: NOW, updated_at: NOW }] as never,
       jobs: [{ job_id: 'j1', kind: 'baseline', status: 'succeeded', failure_class: null, attempts: 1, max_attempts: 3, contract_id: 'expc_1', created_at: NOW }],
       reproductions: [reproView({ spec_id: 'repro_1', status: 'completed', report_count: 1, latest_report_status: 'fail', attempt_count: 1 })],
@@ -889,7 +889,7 @@ describe('NextAction reproduction semantics', () => {
     expect(fail.some(a => a.code === 'reproduction_retry_or_repair' && a.state === 'ready')).toBe(true)
     // Blocked report → blocked retry with the environment gap.
     const blocked = nextActionProjection(actionCtx({
-      status: 'IDEA_APPROVED',
+      status: 'BASELINE_REPRO',
       contracts: [contractFixture()] as never,
       reproductions: [reproView({ spec_id: 'repro_1', status: 'blocked', report_count: 1, latest_report_status: 'blocked' })],
     }))

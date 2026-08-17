@@ -180,15 +180,18 @@ Orchestrator 使用 SQLite/PostgreSQL ActionStore，Action status 为 queued、r
 | SCOPED | Scholar Panel、Corpus Snapshot | 来源/策略 |
 | SURVEYING | Idea Panel、Novelty Audit | 覆盖不足 |
 | IDEATING | 创建 Idea Gate | Human Idea |
-| IDEA_APPROVED | Baseline snapshot 与复现 | 失败/预算 |
-| BASELINE_REPRO | Contract Draft 和 AnalysisPlan | Human Contract |
-| CONTRACT_APPROVED | Patch、Smoke、Pilot、Formal | 执行/预算 |
+| IDEA_APPROVED | 从获批 Idea 起草 Experiment Contract | 合同字段不足 |
+| CONTRACT_PENDING | 展示 payload-bound Contract Gate | Human Contract |
+| CONTRACT_APPROVED | 投影基线准备任务；补齐 argv、CodeSnapshot 与 Runner 环境后原子创建 baseline Job 并进入 BASELINE_REPRO | 代码/命令/环境/失败/预算 |
+| BASELINE_REPRO | Patch、Smoke、Pilot、Formal | baseline 未通过/执行/预算 |
 | EXPERIMENTING | Analysis、Evidence、Claims | Seed/数据问题 |
 | EVIDENCE_READY | TeX workspace、图表和 BibTeX | Evidence 不完整 |
 | WRITING | latex-compile、Reviewer | 构建或 major revision |
 | REVIEWING | clean-room、Bundle、Release Gate | Human Release |
 
 Orchestrator 不直接保存或执行任意 shell，不在 Gate 期间保持会话占用。
+
+Contract Gate 批准后 Orchestrator 只负责保持 `baseline_reproduce` 权威动作可见，不能把合同中的自然语言方法字段转换为 shell，也不能写 note 后把用户导航到空 Runs。Runs 将该 NextAction 投影成不计入 Job 数的准备任务。实际执行必须经 Kernel `startBaselineRun`：在同一事务校验 approved Contract、不可变 CodeSnapshot、非空 argv、registered Runner/Profile/target、镜像和 output contract，创建 queued Job 并推进到 BASELINE_REPRO；失败整体回滚。
 
 ## 11. Scholar Connectors
 

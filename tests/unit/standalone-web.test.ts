@@ -11,11 +11,53 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   loadOptions, bffError, bootstrapHtmlWithNonce, isProjectTrajectoryTopologyForward, standaloneContentSecurityPolicy,
-  parseStandaloneUnlockError, standaloneFrameAncestorSources, surveySnapshotBody, surveyWriteRoleAllowed,
+  contractDraftFromIdea, ideaAuditQueries, ideaNoveltyAudit, parseStandaloneUnlockError, standaloneFrameAncestorSources,
+  surveySnapshotBody, surveyWriteRoleAllowed,
 } from '../../packages/dsh-research-ui/lib/standalone/server.js'
 // @ts-expect-error re-export surface
 
 describe('standalone web application', () => {
+  it('derives a reviewable Contract draft from the approved idea MVE', () => {
+    expect(contractDraftFromIdea({
+      exact_delta: 'Replace the baseline head with temperature scaling.',
+      minimum_viable_experiment: {
+        dataset: 'CIFAR-10', baseline: 'ResNet-18', primary_metric: 'ECE', estimated_gpu_hours: 2.2,
+      },
+    })).toEqual({
+      data: { dataset_id: 'CIFAR-10', version: 'official', split: 'official' },
+      methods: { baseline: 'ResNet-18', treatment: 'Replace the baseline head with temperature scaling.' },
+      metrics: { primary: 'ECE', secondary: [], direction: 'higher_is_better' },
+      seeds: [11, 23, 47, 89, 101],
+      analysis: { effect_size: 'mean_difference', interval: 'bootstrap_95', multiple_testing: 'holm' },
+      ablations: [],
+      stop_conditions: { max_gpu_hours: 3, min_completed_seeds: 5, stop_on_data_leakage: true },
+    })
+  })
+
+  it('derives bounded idea counter-search queries and a strict audit from connector results', () => {
+    const queries = ideaAuditQueries({
+      title: '  CNN depth   effect  ',
+      hypothesis: 'Two layers improve calibration.',
+      exact_delta: 'Compare one versus two layers with matched parameters.',
+    })
+    expect(queries).toEqual([
+      'CNN depth effect',
+      'Two layers improve calibration.',
+      'Compare one versus two layers with matched parameters.',
+    ])
+    expect(ideaNoveltyAudit(queries, [{
+      hits: [{ paper: { paper_id: 'doi:10.1/a' } }, { paper: { paper_id: 'doi:10.1/a' } }],
+      source_status: [{ status: 'ok' }],
+    }], '2026-08-17T00:00:00.000Z')).toEqual({
+      queries,
+      result: 'overlap_found',
+      overlap_papers: ['doi:10.1/a'],
+      unresolved_risk: 'medium',
+      audited_at: '2026-08-17T00:00:00.000Z',
+    })
+    expect(ideaNoveltyAudit(queries, [{ hits: [], source_status: [{ status: 'failed' }] }]).result).toBe('inconclusive')
+  })
+
   it('loads options with defaults (port 18610, shared kernel 7412)', () => {
     const dir = join(tmpdir(), `dsh-standalone-defaults-${Date.now()}`)
     const o = loadOptions(['--data-dir', dir])

@@ -105,6 +105,10 @@ export interface NextActionContext {
   evidence: EvidenceItem[]
   claims: Claim[]
   corpus_snapshots: CorpusSnapshot[]
+  /** Immutable code snapshots currently available to execution setup. */
+  code_snapshots?: Array<{ snapshot_id: string }>
+  /** Project default profile+target currently resolve to an enabled target. */
+  runner_environment_ready?: boolean
   /** Active intake sessions of the project (ONBOARD-01 overlay; absent when
    *  the caller has no intake view — legacy callers stay compatible). */
   intakes?: NextActionIntake[]
@@ -188,10 +192,15 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
   const contract = approvedContract(contracts)
   const contractVersion = contract?.version ?? latestVersion(contracts)
   const proposedIdea = ideas.find(i => i.status === 'proposed')
+  const proposedIdeaRefs: NextActionRef[] = ideas
+    .filter(i => i.status === 'proposed')
+    .map(i => ({ kind: 'idea', id: i.idea_id }))
   const approvedIdea = ideas.find(i => i.status === 'approved')
   const ideaVersion = approvedIdea?.version ?? proposedIdea?.version ?? null
   const ideaRefs: NextActionRef[] = approvedIdea === undefined ? [] : [{ kind: 'idea', id: approvedIdea.idea_id }]
   const contractRefs: NextActionRef[] = contract === null ? [] : [{ kind: 'contract', id: contract.contract_id }]
+  const latestContract = contracts.length === 0 ? undefined : contracts[contracts.length - 1]
+  const latestContractRefs: NextActionRef[] = latestContract === undefined ? [] : [{ kind: 'contract', id: latestContract.contract_id }]
   const pendingGateOf = (type: Gate['type']): Gate | undefined => gates.find(g => g.type === type)
 
   switch (project.status) {
@@ -229,16 +238,26 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
         refs: [],
       }]
     case 'SURVEYING':
-      return [{
+      return proposedIdeaRefs.length === 0 ? [{
         code: 'idea_generate',
-        label: 'Generate idea cards + novelty audit',
-        reason: 'the survey corpus is ready — produce candidate ideas with novelty audits',
+        label: 'Generate idea cards',
+        reason: 'the survey corpus is ready — produce candidate ideas',
         route: 'ideas',
         state: 'ready',
         required: true,
         required_by: 'agent',
         revision: project.revision,
         refs: [],
+      }] : [{
+        code: 'idea_select',
+        label: 'Select an idea → novelty audit + Idea Gate',
+        reason: `${proposedIdeaRefs.length} proposed idea(s) are ready — a human must select one for counter-search before the Idea Gate`,
+        route: 'ideas',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: project.revision,
+        refs: proposedIdeaRefs,
       }]
     case 'IDEATING': {
       const ideaGate = pendingGateOf('idea')
@@ -249,8 +268,8 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
           ? `idea gate ${ideaGate.gate_id} is pending — approving it freezes the winning idea`
           : 'an Idea must be approved at the Idea Gate before the baseline phase',
         route: 'gates',
-        state: proposedIdea === undefined && ideaGate === undefined ? 'blocked' : 'ready',
-        required: proposedIdea === undefined && ideaGate === undefined ? ['proposed_idea'] : true,
+        state: ideaGate === undefined ? 'blocked' : 'ready',
+        required: ideaGate === undefined ? ['pending_idea_gate'] : true,
         required_by: 'human',
         revision: ideaGate !== undefined ? project.revision : ideaVersion,
         refs: ideaGate !== undefined ? [{ kind: 'gate', id: ideaGate.gate_id }, ...ideaRefs] : ideaRefs,
@@ -258,49 +277,95 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
     }
     case 'IDEA_APPROVED':
       return [{
+        code: 'contract_register',
+        label: 'Draft Experiment Contract from the approved idea',
+        reason: 'freeze the experiment design through a Human Contract Gate before any contract-bound baseline run',
+        route: 'contracts',
+        state: approvedIdea === undefined ? 'blocked' : 'ready',
+        required: approvedIdea === undefined ? ['approved_idea'] : true,
+        required_by: 'agent',
+        capability: 'researcher',
+        revision: ideaVersion,
+        refs: ideaRefs,
+      }]
+    case 'CONTRACT_PENDING': {
+      const contractGate = pendingGateOf('contract')
+      return contractGate === undefined ? [{
+        code: 'contract_register',
+        label: 'Revise and resubmit Experiment Contract',
+        reason: 'the previous Contract Gate is no longer pending — create a revised contract draft for human review',
+        route: 'contracts',
+        state: approvedIdea === undefined ? 'blocked' : 'ready',
+        required: approvedIdea === undefined ? ['approved_idea'] : true,
+        required_by: 'agent',
+        capability: 'researcher',
+        revision: ideaVersion,
+        refs: [...ideaRefs, ...latestContractRefs],
+      }] : [{
+        code: 'contract_gate_approve',
+        label: 'Review the Experiment Contract at the Contract Gate',
+        reason: `contract gate ${contractGate.gate_id} is pending — approve or reject the bound draft`,
+        route: 'gates',
+        state: 'ready',
+        required: true,
+        required_by: 'human',
+        revision: project.revision,
+        refs: [{ kind: 'gate', id: contractGate.gate_id }, ...latestContractRefs],
+      }]
+    }
+    case 'CONTRACT_APPROVED':
+      {
+        const baselineGaps: string[] = []
+        if (contract?.baseline_run === undefined || contract.baseline_run.trim() === '') baselineGaps.push('baseline_command')
+        if ((contract?.code_snapshot === undefined || contract.code_snapshot.trim() === '') && (ctx.code_snapshots?.length ?? 0) === 0) {
+          baselineGaps.push('code_snapshot')
+        }
+        if (ctx.runner_environment_ready === false) baselineGaps.push('runner_environment')
+        const snapshotRefs: NextActionRef[] = (ctx.code_snapshots ?? []).slice(0, 1).map(snapshot => ({
+          kind: 'code_snapshot',
+          id: snapshot.snapshot_id,
+        }))
+      return [{
         code: 'baseline_reproduce',
         label: 'Reproduce baseline in isolated runner',
-        reason: 'the approved idea needs a reproducible baseline before the experiment contract can bind to it',
+        reason: baselineGaps.length === 0
+          ? 'the approved contract and execution inputs are ready — start its baseline in the configured isolated environment'
+          : 'the contract is approved; prepare the missing execution inputs before starting a real baseline job',
         route: 'runs',
-        // REPRO-01 (docs/reproduction-contracts.md §3): exit 0 is execution
-        // succeeded — only a PERSISTED reproduction report in status=pass
-        // makes the action done. A reproduction spec without a passing
-        // report keeps it ready/blocked even when a legacy baseline job
-        // succeeded; without any reproduction view (legacy callers) the
-        // job-based semantics are preserved.
-        state: reproductionPassed(ctx) ? 'done' : (hasReproduction(ctx) ? (contract !== null ? 'ready' : 'blocked') : (succeededJob(jobs, ['baseline']) ? 'done' : (contract !== null ? 'ready' : 'blocked'))),
-        required: contract !== null ? true : ['approved_contract'],
+        state: 'ready',
+        required: baselineGaps.length === 0 ? true : baselineGaps,
         required_by: 'agent',
         capability: 'researcher',
         revision: contractVersion,
-        refs: [...contractRefs, ...ideaRefs],
+        refs: [...contractRefs, ...snapshotRefs],
       }]
+      }
     case 'BASELINE_REPRO': {
-      const baselineDone = succeededJob(jobs, ['baseline'])
+      const baselineDone = reproductionPassed(ctx) || (!hasReproduction(ctx) && succeededJob(jobs, ['baseline']))
       return [
         {
-          code: 'contract_register',
-          label: 'Register and approve Experiment Contract',
-          reason: 'secure baseline/pilot/formal jobs must bind an approved, gate-frozen contract',
-          route: 'contracts',
-          state: contract !== null ? 'done' : 'ready',
+          code: 'baseline_reproduce',
+          label: 'Reproduce baseline in isolated runner',
+          reason: baselineDone
+            ? 'the contract-bound baseline completed successfully'
+            : 'run the approved contract baseline before pilot and formal experiments',
+          route: 'runs',
+          state: baselineDone ? 'done' : 'ready',
           required: true,
-          required_by: 'human',
+          required_by: 'agent',
           capability: 'researcher',
           revision: contractVersion,
           refs: contractRefs,
         },
         {
-          code: 'baseline_reproduce',
-          label: 'Reproduce baseline in isolated runner',
-          reason: contract !== null
-            ? 'run the baseline reproduction bound to the approved contract'
-            : 'cannot run the baseline until the Experiment Contract is approved',
+          code: 'pilot_formal_submit',
+          label: 'Submit pilot + formal runs per contract',
+          reason: baselineDone
+            ? 'the baseline passed — submit pilot and formal runs bound to the frozen contract'
+            : 'pilot and formal runs wait for a successful baseline reproduction',
           route: 'runs',
-          // REPRO-01: done ONLY with a persisted pass report; a reproduction
-          // spec without a passing report keeps the action ready/blocked.
-          state: reproductionPassed(ctx) ? 'done' : (hasReproduction(ctx) ? (contract !== null ? 'ready' : 'blocked') : (baselineDone ? 'done' : (contract !== null ? 'ready' : 'blocked'))),
-          required: contract !== null ? true : ['approved_contract'],
+          state: baselineDone ? (succeededJob(jobs, ['pilot', 'formal']) ? 'done' : 'ready') : 'blocked',
+          required: baselineDone ? true : ['baseline_reproduction'],
           required_by: 'agent',
           capability: 'researcher',
           revision: contractVersion,
@@ -308,19 +373,6 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
         },
       ]
     }
-    case 'CONTRACT_APPROVED':
-      return [{
-        code: 'pilot_formal_submit',
-        label: 'Submit pilot + formal runs per contract',
-        reason: 'the approved contract is frozen — submit pilot and formal runs bound to it',
-        route: 'runs',
-        state: succeededJob(jobs, ['pilot', 'formal']) ? 'done' : 'ready',
-        required: true,
-        required_by: 'agent',
-        capability: 'researcher',
-        revision: contractVersion,
-        refs: contractRefs,
-      }]
     case 'EXPERIMENTING': {
       const runsDone = succeededJob(jobs, ['pilot', 'formal'])
       const evidenceAccepted = evidence.some(e => e.status === 'accepted')

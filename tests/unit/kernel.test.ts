@@ -77,6 +77,45 @@ function approvedContract(kernel: ResearchKernel, projectId: string): string {
   return contract.contract_id
 }
 
+function projectWithApprovedContract(kernel: ResearchKernel): { projectId: string; contractId: string; revision: number } {
+  const created = kernel.createProject({ name: 'baseline handoff', workspace: '/w', brief: makeBrief() })
+  const scope = kernel.createGate({ project_id: created.project_id, type: 'scope', title: 'scope' })
+  let project = kernel.decideGate({ gate_id: scope.gate_id, actor: 'pi', decision: 'approved' }).project
+  project = kernel.transition(project.project_id, 'SURVEYING', project.revision)
+  project = kernel.transition(project.project_id, 'IDEATING', project.revision)
+  const idea = kernel.createGate({ project_id: project.project_id, type: 'idea', title: 'idea' })
+  project = kernel.decideGate({ gate_id: idea.gate_id, actor: 'pi', decision: 'approved' }).project
+  project = kernel.transition(project.project_id, 'CONTRACT_PENDING', project.revision)
+  const contract = kernel.registerContract({
+    project_id: project.project_id,
+    idea_id: 'idea_baseline',
+    data: { dataset_id: 'fixture', version: 'v1' },
+    methods: { baseline: 'node train.js', treatment: 'node train.js --treatment' },
+    metrics: { primary: 'accuracy', secondary: [] },
+    seeds: [1],
+    analysis: {},
+    ablations: [],
+    stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 1, stop_on_data_leakage: true },
+  })
+  const gate = kernel.createGate({
+    project_id: project.project_id,
+    type: 'contract',
+    title: 'contract',
+    payload: { contract_id: contract.contract_id },
+  })
+  project = kernel.decideGate({ gate_id: gate.gate_id, actor: 'pi', decision: 'approved' }).project
+  return { projectId: project.project_id, contractId: contract.contract_id, revision: project.revision }
+}
+
+function thrownKernelCode(fn: () => unknown): string | undefined {
+  try {
+    fn()
+    return undefined
+  } catch (error) {
+    return (error as { code?: string }).code
+  }
+}
+
 /** P0: current lease fencing fields of a job (generation, token). */
 function fenceArgs(kernel: ResearchKernel, jobId: string): { lease_generation: number | null; lease_token: string | null } {
   const j = kernel.getJob(jobId)
@@ -341,8 +380,9 @@ describe('project state machine', () => {
     p = kernel.transition(p.project_id, 'SURVEYING', p.revision) // SCOPED -> SURVEYING
     p = kernel.transition(p.project_id, 'IDEATING', p.revision)  // SURVEYING -> IDEATING
     p = decide('idea')                            // IDEATING -> IDEA_APPROVED (gate)
+    p = kernel.transition(p.project_id, 'CONTRACT_PENDING', p.revision)
+    p = decide('contract')                        // CONTRACT_PENDING -> CONTRACT_APPROVED (gate)
     p = kernel.transition(p.project_id, 'BASELINE_REPRO', p.revision)
-    p = decide('contract')                        // BASELINE_REPRO -> CONTRACT_APPROVED (gate)
     p = kernel.transition(p.project_id, 'EXPERIMENTING', p.revision)
     p = kernel.transition(p.project_id, 'EVIDENCE_READY', p.revision)
     p = kernel.transition(p.project_id, 'WRITING', p.revision)
@@ -352,6 +392,67 @@ describe('project state machine', () => {
     expect(p.status).toBe('RELEASED')
     const events = kernel.listEvents(project.project_id)
     expect(events.filter(e => e.kind === 'project.transitioned').length).toBeGreaterThanOrEqual(10)
+    kernel.close()
+  })
+})
+
+describe('Contract-approved baseline handoff', () => {
+  it('atomically creates the first baseline Job and advances the project', () => {
+    const kernel = freshKernel()
+    const setup = projectWithApprovedContract(kernel)
+    const workspaceId = seedWorkspace(kernel, setup.projectId, { 'train.js': 'console.log("baseline")\n' })
+    const snapshot = kernel.snapshotCodeArchive(setup.projectId, workspaceId, '', 'baseline')
+    expect(kernel.listCodeSnapshots(setup.projectId).map(item => item.snapshot_id)).toEqual([snapshot.snapshot_id])
+
+    const request = {
+      project_id: setup.projectId,
+      expected_revision: setup.revision,
+      idempotency_key: 'baseline-contract-v1',
+      contract_id: setup.contractId,
+      code_snapshot_id: snapshot.snapshot_id,
+      command: ['node', 'train.js'],
+    }
+    const started = kernel.startBaselineRun(request)
+    expect(started.project.status).toBe('BASELINE_REPRO')
+    expect(started.job).toMatchObject({
+      project_id: setup.projectId,
+      kind: 'baseline',
+      status: 'queued',
+      contract_id: setup.contractId,
+      command: ['node', 'train.js'],
+    })
+    expect(kernel.listJobs(setup.projectId)).toHaveLength(1)
+
+    const replay = kernel.startBaselineRun(request)
+    expect(replay.job.job_id).toBe(started.job.job_id)
+    expect(kernel.listJobs(setup.projectId)).toHaveLength(1)
+    expect(thrownKernelCode(() => kernel.startBaselineRun({ ...request, command: ['node', 'other.js'] })))
+      .toBe('idempotency_conflict')
+    expect(kernel.listJobs(setup.projectId)).toHaveLength(1)
+    kernel.close()
+  })
+
+  it('leaves Project and Jobs untouched when required execution input is invalid', () => {
+    const kernel = freshKernel()
+    const setup = projectWithApprovedContract(kernel)
+    expect(thrownKernelCode(() => kernel.startBaselineRun({
+      project_id: setup.projectId,
+      expected_revision: setup.revision,
+      idempotency_key: 'missing-command',
+      contract_id: setup.contractId,
+      code_snapshot_id: 'code_snap_missing',
+      command: [],
+    }))).toBe('baseline_command_required')
+    expect(thrownKernelCode(() => kernel.startBaselineRun({
+      project_id: setup.projectId,
+      expected_revision: setup.revision,
+      idempotency_key: 'missing-snapshot',
+      contract_id: setup.contractId,
+      code_snapshot_id: 'code_snap_missing',
+      command: ['node', 'train.js'],
+    }))).toBe('code_snapshot_unknown')
+    expect(kernel.getProject(setup.projectId)).toMatchObject({ status: 'CONTRACT_APPROVED', revision: setup.revision })
+    expect(kernel.listJobs(setup.projectId)).toHaveLength(0)
     kernel.close()
   })
 })
@@ -901,6 +1002,180 @@ describe('CONFIG-01 canonical Config Registry integration', () => {
 })
 
 describe('corpus + ideas + manuscript', () => {
+  it('atomically creates ready IdeaCard drafts pinned to the frozen corpus and project revision', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'idea-batch', workspace: '/w', brief: makeBrief() })
+    const scope = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: scope.gate_id, actor: 'pi', decision: 'approved' })
+    const corpus = fixtureCorpus(project.project_id)
+    const snapshot = kernel.snapshotCorpus({ project_id: project.project_id, queries: corpus.queries, papers: corpus.papers })
+    const surveying = kernel.getProject(project.project_id)
+    expect(surveying.status).toBe('SURVEYING')
+    const fixture = fixtureIdea(project.project_id)
+    const draft = {
+      title: fixture.title,
+      hypothesis: fixture.hypothesis,
+      scientific_gap: fixture.scientific_gap,
+      nearest_prior_works: fixture.nearest_prior_works,
+      exact_delta: fixture.exact_delta,
+      falsification: fixture.falsification,
+      minimum_viable_experiment: fixture.minimum_viable_experiment,
+      scores: fixture.scores,
+      risk_notes: fixture.risk_notes,
+    }
+
+    const cards = kernel.createIdeasBatch({
+      project_id: project.project_id,
+      expected_project_revision: surveying.revision,
+      corpus_snapshot_id: snapshot.snapshot_id,
+      ideas: [draft, { ...draft, title: 'Second candidate' }],
+    })
+
+    expect(cards).toHaveLength(2)
+    expect(cards.every(card => card.corpus_snapshot_id === snapshot.snapshot_id && card.status === 'proposed')).toBe(true)
+    expect(kernel.getProject(project.project_id).status).toBe('SURVEYING')
+    expect(() => kernel.createIdeasBatch({
+      project_id: project.project_id,
+      expected_project_revision: surveying.revision + 1,
+      corpus_snapshot_id: snapshot.snapshot_id,
+      ideas: [draft],
+    })).toThrow(/expected revision/)
+
+    const before = kernel.listIdeas(project.project_id).length
+    expect(() => kernel.createIdeasBatch({
+      project_id: project.project_id,
+      expected_project_revision: surveying.revision,
+      corpus_snapshot_id: snapshot.snapshot_id,
+      ideas: [draft, { ...draft, title: '' } as never],
+    })).toThrow()
+    expect(kernel.listIdeas(project.project_id)).toHaveLength(before)
+    kernel.close()
+  })
+
+  it('atomically audits the human-selected idea, enters IDEATING and creates its pending Gate', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'idea-select', workspace: '/w', brief: makeBrief() })
+    const scope = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
+    kernel.decideGate({ gate_id: scope.gate_id, actor: 'pi', decision: 'approved' })
+    const corpus = fixtureCorpus(project.project_id)
+    const snapshot = kernel.snapshotCorpus({ project_id: project.project_id, queries: corpus.queries, papers: corpus.papers })
+    const surveying = kernel.getProject(project.project_id)
+    const fixture = fixtureIdea(project.project_id)
+    const [card] = kernel.createIdeasBatch({
+      project_id: project.project_id,
+      expected_project_revision: surveying.revision,
+      corpus_snapshot_id: snapshot.snapshot_id,
+      ideas: [{
+        title: fixture.title,
+        hypothesis: fixture.hypothesis,
+        scientific_gap: fixture.scientific_gap,
+        nearest_prior_works: fixture.nearest_prior_works,
+        exact_delta: fixture.exact_delta,
+        falsification: fixture.falsification,
+        minimum_viable_experiment: fixture.minimum_viable_experiment,
+        scores: fixture.scores,
+        risk_notes: fixture.risk_notes,
+      }],
+    })
+    const audit = {
+      queries: ['uncertainty temporal localization'],
+      result: 'overlap_found' as const,
+      overlap_papers: ['doi:10.1000/example1'],
+      unresolved_risk: 'medium' as const,
+      audited_at: '2026-08-17T12:00:00.000Z',
+    }
+
+    const prepared = kernel.prepareIdeaGate({
+      project_id: project.project_id,
+      idea_id: card!.idea_id,
+      expected_project_revision: surveying.revision,
+      expected_idea_version: card!.version,
+      novelty_audit: audit,
+    })
+
+    expect(prepared.project.status).toBe('IDEATING')
+    expect(prepared.idea.novelty_audit).toEqual(audit)
+    expect(prepared.gate).toMatchObject({ type: 'idea', status: 'pending', payload: { idea_id: card!.idea_id } })
+    expect(kernel.listDecisions(project.project_id).filter(decision => decision.gate_type === 'idea')).toHaveLength(0)
+    expect(kernel.projectProjection(project.project_id).next_actions_v2[0]).toMatchObject({
+      code: 'idea_gate_approve', state: 'ready', required_by: 'human',
+    })
+
+    kernel.decideGate({ gate_id: prepared.gate.gate_id, actor: 'pi', decision: 'approved' })
+    const frozenIdea = kernel.getIdea(card!.idea_id)
+    expect(frozenIdea.status).toBe('approved')
+    const ideaApproved = kernel.getProject(project.project_id)
+    expect(kernel.projectProjection(project.project_id).next_actions_v2).toContainEqual(expect.objectContaining({
+      code: 'contract_register', state: 'ready', required: true,
+    }))
+
+    const contractDraft = {
+      data: { dataset_id: frozenIdea.minimum_viable_experiment.dataset, version: 'official', split: 'official' },
+      methods: { baseline: frozenIdea.minimum_viable_experiment.baseline, treatment: frozenIdea.exact_delta },
+      metrics: { primary: frozenIdea.minimum_viable_experiment.primary_metric, secondary: [] },
+      seeds: [11, 23, 47],
+      analysis: { effect_size: 'mean_difference' as const, interval: 'bootstrap_95' as const, multiple_testing: 'holm' as const },
+      ablations: [],
+      stop_conditions: { max_gpu_hours: frozenIdea.minimum_viable_experiment.estimated_gpu_hours, min_completed_seeds: 3, stop_on_data_leakage: true },
+    }
+    expect(() => kernel.prepareContractGate({
+      project_id: project.project_id,
+      idea_id: frozenIdea.idea_id,
+      expected_project_revision: ideaApproved.revision,
+      expected_idea_version: frozenIdea.version + 1,
+      contract: contractDraft,
+    })).toThrow(/expected idea version/)
+    expect(kernel.getProject(project.project_id).status).toBe('IDEA_APPROVED')
+    expect(kernel.listContracts(project.project_id)).toHaveLength(0)
+    expect(kernel.listGates(project.project_id, 'pending').filter(gate => gate.type === 'contract')).toHaveLength(0)
+
+    const contractPrepared = kernel.prepareContractGate({
+      project_id: project.project_id,
+      idea_id: frozenIdea.idea_id,
+      expected_project_revision: ideaApproved.revision,
+      expected_idea_version: frozenIdea.version,
+      contract: contractDraft,
+    })
+    expect(contractPrepared.project.status).toBe('CONTRACT_PENDING')
+    expect(contractPrepared.contract.status).toBe('draft')
+    expect(contractPrepared.gate.payload).toEqual({ contract_id: contractPrepared.contract.contract_id })
+
+    kernel.decideGate({ gate_id: contractPrepared.gate.gate_id, actor: 'pi', decision: 'approved' })
+    expect(kernel.getProject(project.project_id).status).toBe('CONTRACT_APPROVED')
+    expect(kernel.getContract(contractPrepared.contract.contract_id).status).toBe('approved')
+
+    const rollbackKernel = freshKernel()
+    const rollbackProject = rollbackKernel.createProject({ name: 'idea-select-rollback', workspace: '/w2', brief: makeBrief() })
+    const rollbackScope = rollbackKernel.createGate({ project_id: rollbackProject.project_id, type: 'scope', title: 'Scope' })
+    rollbackKernel.decideGate({ gate_id: rollbackScope.gate_id, actor: 'pi', decision: 'approved' })
+    const rollbackCorpus = fixtureCorpus(rollbackProject.project_id)
+    const rollbackSnapshot = rollbackKernel.snapshotCorpus({ project_id: rollbackProject.project_id, queries: rollbackCorpus.queries, papers: rollbackCorpus.papers })
+    const rollbackSurveying = rollbackKernel.getProject(rollbackProject.project_id)
+    const [rollbackCard] = rollbackKernel.createIdeasBatch({
+      project_id: rollbackProject.project_id,
+      expected_project_revision: rollbackSurveying.revision,
+      corpus_snapshot_id: rollbackSnapshot.snapshot_id,
+      ideas: [{
+        title: fixture.title, hypothesis: fixture.hypothesis, scientific_gap: fixture.scientific_gap,
+        nearest_prior_works: fixture.nearest_prior_works, exact_delta: fixture.exact_delta,
+        falsification: fixture.falsification, minimum_viable_experiment: fixture.minimum_viable_experiment,
+        scores: fixture.scores, risk_notes: fixture.risk_notes,
+      }],
+    })
+    expect(() => rollbackKernel.prepareIdeaGate({
+      project_id: rollbackProject.project_id,
+      idea_id: rollbackCard!.idea_id,
+      expected_project_revision: rollbackSurveying.revision,
+      expected_idea_version: rollbackCard!.version + 1,
+      novelty_audit: audit,
+    })).toThrow(/expected idea version/)
+    expect(rollbackKernel.getProject(rollbackProject.project_id).status).toBe('SURVEYING')
+    expect(rollbackKernel.getIdea(rollbackCard!.idea_id).novelty_audit).toBeUndefined()
+    expect(rollbackKernel.listGates(rollbackProject.project_id, 'pending').filter(gate => gate.type === 'idea')).toHaveLength(0)
+    rollbackKernel.close()
+    kernel.close()
+  })
+
   it('CAS-fences an automatic corpus snapshot by project revision', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 'cas-survey', workspace: '/w', brief: makeBrief(), session_id: 'session_a' })

@@ -32,6 +32,7 @@ import {
   type MineruSecretRefScheme,
   type MineruSettingsDraft,
 } from '../mineru-settings-model'
+import { budgetPageVisible, writeBudgetPageVisible } from '../navigation-preferences'
 /* ─────────────────────────── settings modal ─────────────────────────── */
 
 /**
@@ -969,6 +970,26 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       value.textContent = next ? t('shell', 'shell.settings.polling') : t('shell', 'shell.settings.off')
     }
     refreshSlot.append(value, toggle)
+  }
+  const budgetPageSlot = slot('preferences', 'preferences.budgetPage')
+  if (budgetPageSlot !== null) {
+    const toggle = el('label', 'settings-ocr-toggle')
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.checked = budgetPageVisible()
+    checkbox.setAttribute('aria-label', t('shell', 'shell.settings.budgetPage'))
+    const status = el('span', 'mono', checkbox.checked
+      ? t('shell', 'shell.settings.budgetPage.visible')
+      : t('shell', 'shell.settings.budgetPage.hidden'))
+    checkbox.onchange = () => {
+      writeBudgetPageVisible(checkbox.checked)
+      status.textContent = checkbox.checked
+        ? t('shell', 'shell.settings.budgetPage.visible')
+        : t('shell', 'shell.settings.budgetPage.hidden')
+      state.navigationChanged()
+    }
+    toggle.append(checkbox, document.createTextNode(t('shell', 'shell.settings.budgetPage.toggle')))
+    budgetPageSlot.append(toggle, status)
   }
   const transcriptSlot = slot('preferences', 'preferences.transcript')
   if (transcriptSlot !== null) {

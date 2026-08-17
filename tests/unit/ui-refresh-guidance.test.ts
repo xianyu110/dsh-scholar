@@ -10,21 +10,25 @@ import { setLocale } from '../../packages/dsh-research-ui/src/client/i18n/index'
 
 describe('survey-complete Runs guidance', () => {
   it('distinguishes survey completion, generic emptiness and filter misses', () => {
-    expect(runsEmptyStateModel('SURVEYING', 1, true, 0, 0)).toEqual({
+    expect(runsEmptyStateModel('SURVEYING', 1, true, false, 0, 0)).toEqual({
       kind: 'survey-ready',
       showOverviewCta: true,
     })
-    expect(runsEmptyStateModel('SCOPED', 1, true, 0, 0)).toEqual({
+    expect(runsEmptyStateModel('SCOPED', 1, true, false, 0, 0)).toEqual({
       kind: 'empty',
       showOverviewCta: false,
     })
-    expect(runsEmptyStateModel('SURVEYING', 1, true, 3, 0)).toEqual({
+    expect(runsEmptyStateModel('SURVEYING', 1, true, false, 3, 0)).toEqual({
       kind: 'no-match',
       showOverviewCta: false,
     })
-    expect(runsEmptyStateModel('SURVEYING', 1, true, 3, 2)).toBeNull()
-    expect(runsEmptyStateModel('SURVEYING', 0, true, 0, 0).kind).toBe('empty')
-    expect(runsEmptyStateModel('SURVEYING', 1, false, 0, 0).kind).toBe('empty')
+    expect(runsEmptyStateModel('SURVEYING', 1, true, false, 3, 2)).toBeNull()
+    expect(runsEmptyStateModel('SURVEYING', 0, true, false, 0, 0).kind).toBe('empty')
+    expect(runsEmptyStateModel('SURVEYING', 1, false, false, 0, 0).kind).toBe('empty')
+    expect(runsEmptyStateModel('CONTRACT_APPROVED', 1, false, true, 0, 0)).toEqual({
+      kind: 'baseline-setup',
+      showOverviewCta: false,
+    })
   })
 
   it('re-evaluates filter labels after locale changes', () => {

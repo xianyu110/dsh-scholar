@@ -22,6 +22,7 @@ export const state = {
   projectId: undefined as string | undefined,
   lastError: undefined as string | undefined,
   rerender: (() => {}) as () => void,
+  navigationChanged: (() => {}) as () => void,
   refreshTimer: null as number | null,
   startRefreshTimer: (() => null) as () => number | null,
   notifHistory: [] as NotifEntry[],

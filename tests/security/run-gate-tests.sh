@@ -160,21 +160,22 @@ GI=$(api -X POST "$BASE/v1/projects/$P2/gates" -d '{"type":"idea","title":"Idea 
 CODE=$(decide "$GI" human-1 approved)
 [[ "$CODE" == "200" ]] || bad "idea gate approve failed (HTTP $CODE)"
 REV=$(api "$BASE/v1/projects/$P2" | jfield '.revision')
-REV=$(trans "$P2" BASELINE_REPRO "$REV")
-# 3) BASELINE_REPRO -> CONTRACT_APPROVED (gate-controlled) must be 422.
+# Move into CONTRACT_PENDING, then verify CONTRACT_APPROVED stays gate-only.
+REV=$(trans "$P2" CONTRACT_PENDING "$REV")
+# 3) CONTRACT_PENDING -> CONTRACT_APPROVED (gate-controlled) must be 422.
 CODE=$(curl -s -o "$WORK/t.json" -w '%{http_code}' -X POST "$BASE/v1/projects/$P2/transitions" -H 'content-type: application/json' -d "{\"to\":\"CONTRACT_APPROVED\",\"expected_revision\":$REV}")
 ERR=$(jfield '.error.code' < "$WORK/t.json")
 if [[ "$CODE" == "422" && "$ERR" == "invalid_transition" ]]; then
-  ok "BASELINE_REPRO->CONTRACT_APPROVED generic transition -> HTTP 422 ($ERR)"
+  ok "CONTRACT_PENDING->CONTRACT_APPROVED generic transition -> HTTP 422 ($ERR)"
 else
-  bad "BASELINE_REPRO->CONTRACT_APPROVED: expected 422, got HTTP $CODE ($ERR)"
+  bad "CONTRACT_PENDING->CONTRACT_APPROVED: expected 422, got HTTP $CODE ($ERR)"
 fi
 CT=$(api -X POST "$BASE/v1/projects/$P2/contracts" -H 'content-type: application/json' -d '{"idea_id":"idea_x","data":{"dataset_id":"d"},"methods":{"baseline":"b","treatment":"a"},"metrics":{"primary":"macro_f1"},"seeds":[1],"analysis":{},"ablations":[],"stop_conditions":{}}' | jfield '.contract_id')
 GC=$(api -X POST "$BASE/v1/projects/$P2/gates" -H 'content-type: application/json' -d "{\"type\":\"contract\",\"title\":\"Contract Gate\",\"payload\":{\"contract_id\":\"$CT\"}}" | jfield '.gate_id')
 CODE=$(decide "$GC" human-1 approved)
 [[ "$CODE" == "200" ]] || bad "contract gate approve failed (HTTP $CODE)"
 REV=$(api "$BASE/v1/projects/$P2" | jfield '.revision')
-for TO in EXPERIMENTING EVIDENCE_READY WRITING REVIEWING RELEASE_READY; do
+for TO in BASELINE_REPRO EXPERIMENTING EVIDENCE_READY WRITING REVIEWING RELEASE_READY; do
   REV=$(trans "$P2" "$TO" "$REV")
 done
 # 4) RELEASE_READY -> RELEASED (gate-controlled) must be 422.
@@ -206,6 +207,10 @@ REV=$(trans "$P3" SURVEYING 1)
 REV=$(trans "$P3" IDEATING "$REV")
 GI3=$(api -X POST "$BASE/v1/projects/$P3/gates" -d '{"type":"idea","title":"Idea Gate"}' | jfield '.gate_id')
 decide "$GI3" human-1 approved > /dev/null
+REV=$(api "$BASE/v1/projects/$P3" | jfield '.revision')
+REV=$(trans "$P3" CONTRACT_PENDING "$REV")
+GC3=$(api -X POST "$BASE/v1/projects/$P3/gates" -d '{"type":"contract","title":"Contract Gate"}' | jfield '.gate_id')
+decide "$GC3" human-1 approved > /dev/null
 REV=$(api "$BASE/v1/projects/$P3" | jfield '.revision')
 REV=$(trans "$P3" BASELINE_REPRO "$REV")
 REV=$(trans "$P3" EXPERIMENTING "$REV")

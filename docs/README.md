@@ -75,7 +75,7 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 - 实验/复现只选择 opaque runner profile/target ID；远端 SSH/mTLS endpoint 与 credential 只在服务端 Settings/SecretRef，离线或能力不匹配不得静默回退本机；
 - 所有可配置行为必须登记到版本化 Config Schema，声明 scope、默认值、约束、来源、secret 属性、热更新/重启规则，并由同一 Schema 生成文件配置、HTTP 校验和 Settings UI；
 - 首次进入必须提供 Init、Resume、Upload 三入口；既有研究先进入隔离 Intake，经 Grill Me 和 Human adoption 后才能写入项目，导入历史不得伪造 Gate、Run、TerminalLog 或 accepted Evidence；
-- Chat 必须支持自由自然语言、按权威 NextAction 的阶段引导、canonical intent 路由、附件按钮、拖拽和粘贴；slash command 直接使用 `/new`、`/reproduce` 等一级命令，DSH 与 standalone 都不注册旧聚合前缀。Natural turn 不得绕过 Grill、Gate、adoption、release 或凭模型文本猜 mutation；
+- Chat 必须支持自由自然语言、按权威 NextAction 的阶段引导、canonical intent 路由、附件按钮、拖拽和粘贴；开放讨论使用当前 DSH 模型但模型文本不得直接写 Kernel，bridge 不可用时保留确定性引导。`/ideas` 只读，显式“生成 idea”与 `/ideas generate <1-5>` 仅在 ready Agent action + frozen corpus 下以严格草稿、revision CAS 和单事务写入；已有候选后必须显示 Human `idea_select`，通过卡片按钮或 `/ideas select <idea_id>` 执行真实 counter-search，并原子进入 payload-bound pending Idea Gate。slash command 直接使用 `/new`、`/reproduce` 等一级命令，DSH 与 standalone 都不注册旧聚合前缀。Natural turn 不得绕过 Grill、Gate、adoption、release 或凭模型文本猜 mutation；
 - Chat 是项目内上下文：session、active id、transcript、草稿、引用、附件、搜索与异步回写必须按 `project_id` 分区；固定全局 storage、跨项目 session 复用或把 A 的延迟结果写入 B 一律视为隔离缺陷；
 - Chat 滚动也属于 project/session/surface 上下文：底部跟随新消息，查看历史时刷新/新消息保持锚点并提供 Jump latest，不得反复回顶或抢到底部；
 - 论文复现必须持久化 Spec/Attempt/Report，固定 paper/code/data/environment/Contract/RunManifest，并区分 execution 成功与科学比较 pass；

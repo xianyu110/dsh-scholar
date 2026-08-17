@@ -16,7 +16,7 @@ import {
 } from '@dsh-scholar/research-kernel'
 import {
   NEXT_ACTION_UNKNOWN_CODE, NextAction, ProjectStatus,
-  fixtureContract, fixtureEvidence, fixtureProject,
+  fixtureContract, fixtureEvidence, fixtureIdea, fixtureProject,
   type Gate, type ResearchProject,
 } from '@dsh-scholar/research-schemas'
 
@@ -88,9 +88,10 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
       ['SCOPED', ['survey_run']],
       ['SURVEYING', ['idea_generate']],
       ['IDEATING', ['idea_gate_approve']],
-      ['IDEA_APPROVED', ['baseline_reproduce']],
-      ['BASELINE_REPRO', ['contract_register', 'baseline_reproduce']],
-      ['CONTRACT_APPROVED', ['pilot_formal_submit']],
+      ['IDEA_APPROVED', ['contract_register']],
+      ['CONTRACT_PENDING' as ResearchProject['status'], ['contract_register']],
+      ['CONTRACT_APPROVED', ['baseline_reproduce']],
+      ['BASELINE_REPRO', ['baseline_reproduce', 'pilot_formal_submit']],
       ['EXPERIMENTING', ['pilot_formal_submit', 'evidence_verify']],
       ['EVIDENCE_READY', ['manuscript_write']],
       ['WRITING', ['reviewer_run']],
@@ -108,22 +109,67 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
     }
   })
 
-  it('required gaps: baseline needs an approved contract; contract_register marks done once approved', () => {
-    const blocked = nextActionProjection(ctx({ status: 'IDEA_APPROVED' }))
-    const baseline = blocked.find(a => a.code === 'baseline_reproduce')
-    expect(baseline?.state).toBe('blocked')
-    expect(baseline?.required).toEqual(['approved_contract'])
-    expect(baseline?.blocking).toBe(true)
+  it('stops asking to generate ideas once SURVEYING already has proposed candidates', () => {
+    const actions = nextActionProjection(ctx({
+      status: 'SURVEYING',
+      ideas: [{ ...fixtureIdea(PROJECT_ID), status: 'proposed' }],
+    }))
+    expect(actions[0]).toMatchObject({
+      code: 'idea_select',
+      route: 'ideas',
+      state: 'ready',
+      required: true,
+      required_by: 'human',
+    })
+    expect(actions[0]?.refs).toEqual([{ kind: 'idea', id: 'idea_003' }])
+    expect(actions.some(action => action.code === 'idea_generate')).toBe(false)
+  })
 
-    const withContract = nextActionProjection(ctx({ status: 'IDEA_APPROVED', contracts: [fixtureContract()] }))
-    const ready = withContract.find(a => a.code === 'baseline_reproduce')
-    expect(ready?.state).toBe('ready')
-    expect(ready?.required).toBe(true)
-    expect(ready?.revision).toBe(1) // contract version
+  it('never deadlocks after Idea approval: contract draft is ready before contract-bound baseline', () => {
+    const approvedIdea = { ...fixtureIdea(PROJECT_ID), status: 'approved' as const }
+    const awaitingContract = nextActionProjection(ctx({ status: 'IDEA_APPROVED', ideas: [approvedIdea] }))
+    expect(awaitingContract).toHaveLength(1)
+    expect(awaitingContract[0]).toMatchObject({
+      code: 'contract_register', state: 'ready', required: true, required_by: 'agent', route: 'contracts',
+    })
+
+    const withContract = nextActionProjection(ctx({
+      status: 'IDEA_APPROVED', ideas: [approvedIdea], contracts: [fixtureContract()],
+    }))
+    expect(withContract.some(action => action.state === 'ready')).toBe(true)
+
+    const pending = nextActionProjection(ctx({
+      status: 'CONTRACT_PENDING' as ResearchProject['status'],
+      ideas: [approvedIdea], contracts: [{ ...fixtureContract(), status: 'draft' }], gates: [gate('contract')],
+    }))
+    expect(pending.some(action => action.code === 'contract_gate_approve' && action.state === 'ready')).toBe(true)
+
+    const rejected = nextActionProjection(ctx({
+      status: 'CONTRACT_PENDING' as ResearchProject['status'],
+      ideas: [approvedIdea], contracts: [{ ...fixtureContract(), status: 'draft' }], gates: [],
+    }))
+    expect(rejected).toContainEqual(expect.objectContaining({ code: 'contract_register', state: 'ready' }))
+
+    const contractApproved = nextActionProjection(ctx({ status: 'CONTRACT_APPROVED', contracts: [fixtureContract()] }))
+    expect(contractApproved).toContainEqual(expect.objectContaining({
+      code: 'baseline_reproduce', state: 'ready', required: true,
+    }))
+
+    const contractNeedsExecutionInputs = nextActionProjection(ctx({
+      status: 'CONTRACT_APPROVED',
+      contracts: [{ ...fixtureContract(), baseline_run: undefined, code_snapshot: undefined }],
+      code_snapshots: [],
+      runner_environment_ready: true,
+    }))
+    expect(contractNeedsExecutionInputs).toContainEqual(expect.objectContaining({
+      code: 'baseline_reproduce',
+      state: 'ready',
+      required: ['baseline_command', 'code_snapshot'],
+    }))
 
     const repro = nextActionProjection(ctx({ status: 'BASELINE_REPRO', contracts: [fixtureContract()] }))
-    expect(repro.find(a => a.code === 'contract_register')?.state).toBe('done')
     expect(repro.find(a => a.code === 'baseline_reproduce')?.state).toBe('ready')
+    expect(repro.find(a => a.code === 'pilot_formal_submit')?.state).toBe('blocked')
 
     const reproDone = nextActionProjection(ctx({
       status: 'BASELINE_REPRO',
@@ -131,6 +177,7 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
       jobs: [job({ job_id: 'job_bl_1', kind: 'baseline', status: 'succeeded', contract_id: 'expc_007' })],
     }))
     expect(reproDone.find(a => a.code === 'baseline_reproduce')?.state).toBe('done')
+    expect(reproDone.find(a => a.code === 'pilot_formal_submit')?.state).toBe('ready')
   })
 
   it('EXPERIMENTING: evidence_verify needs succeeded runs, done after accepted evidence', () => {

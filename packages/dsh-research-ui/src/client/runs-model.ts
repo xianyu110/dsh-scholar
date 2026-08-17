@@ -1,6 +1,6 @@
 import { t } from './i18n/index'
 
-export type RunsEmptyStateKind = 'survey-ready' | 'empty' | 'no-match'
+export type RunsEmptyStateKind = 'survey-ready' | 'baseline-setup' | 'empty' | 'no-match'
 
 export interface RunsEmptyStateModel {
   kind: RunsEmptyStateKind
@@ -19,11 +19,15 @@ export function runsEmptyStateModel(
   projectStatus: string | undefined,
   corpusSnapshotCount: number,
   hasIdeaGenerateAction: boolean,
+  hasBaselineReproduceAction: boolean,
   allJobsCount: number,
   visibleJobsCount: number,
 ): RunsEmptyStateModel | null {
   if (visibleJobsCount > 0) return null
   if (allJobsCount > 0) return { kind: 'no-match', showOverviewCta: false }
+  if (projectStatus === 'CONTRACT_APPROVED' && hasBaselineReproduceAction) {
+    return { kind: 'baseline-setup', showOverviewCta: false }
+  }
   if (projectStatus === 'SURVEYING' && corpusSnapshotCount > 0 && hasIdeaGenerateAction) {
     return { kind: 'survey-ready', showOverviewCta: true }
   }

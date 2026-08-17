@@ -26,13 +26,18 @@ import {
 import {
   ALL_TAB_KEYS, MORE_TAB_KEYS, PRIMARY_TAB_KEYS, START_ACTION_CODES,
   filterProjects, isTabKey, navOrder, navShortcutIndex, parseDeepLink,
-  pickProject, startActions, startScreenVisible, tabGroups,
+  pickProject, reconcileVisibleNavigation, startActions, startScreenVisible, tabGroups, visibleTabKeys,
 } from '../../packages/dsh-research-ui/src/client/nav'
 import { SETTINGS_SECTION_IDS, settingsKey, settingsSections } from '../../packages/dsh-research-ui/src/client/settings-model'
+import {
+  NAVIGATION_VISIBILITY_KEY, readNavigationVisibility, writeBudgetPageVisible,
+  type NavigationPreferenceStorage,
+} from '../../packages/dsh-research-ui/src/client/navigation-preferences'
 
 interface Missing { namespace: string; key: string; locale: string }
 
 let missing: Missing[] = []
+const ALL_VISIBLE = { budgetPage: true }
 
 beforeEach(() => {
   missing = []
@@ -116,7 +121,7 @@ describe('UI-SIMPLE-01 four primary tabs + More (acceptance §8 ui-routes)', () 
   })
 
   it('tabGroups(): FULL coverage — every panel tab belongs to primary or More', () => {
-    const groups = tabGroups()
+    const groups = tabGroups(ALL_VISIBLE)
     const tabEntries = [
       ...groups.primary.map(t => t.key),
       ...groups.more.filter(e => e.kind !== 'modal').map(e => e.key),
@@ -134,7 +139,7 @@ describe('UI-SIMPLE-01 four primary tabs + More (acceptance §8 ui-routes)', () 
   })
 
   it('tabGroups(): deep-link ids are stable, unique and non-empty', () => {
-    const groups = tabGroups()
+    const groups = tabGroups(ALL_VISIBLE)
     const links = [...groups.primary, ...groups.more].map(e => e.deepLink)
     expect(links.length).toBeGreaterThan(0)
     expect(new Set(links).size).toBe(links.length)
@@ -143,9 +148,9 @@ describe('UI-SIMPLE-01 four primary tabs + More (acceptance §8 ui-routes)', () 
 
   it('tabGroups(): labels/descriptions re-evaluate with the locale (zh ↔ en)', () => {
     setLocale('zh')
-    const zh = tabGroups()
+    const zh = tabGroups(ALL_VISIBLE)
     setLocale('en')
-    const en = tabGroups()
+    const en = tabGroups(ALL_VISIBLE)
     expect(en.primary.map(t => t.key)).toEqual(zh.primary.map(t => t.key))
     expect(en.more.map(m => m.key)).toEqual(zh.more.map(m => m.key))
     for (const z of zh.primary) {
@@ -159,24 +164,24 @@ describe('UI-SIMPLE-01 four primary tabs + More (acceptance §8 ui-routes)', () 
   })
 
   it('navOrder()/navShortcutIndex(): every reachable target has a stable index', () => {
-    const order = navOrder()
+    const order = navOrder(ALL_VISIBLE)
     expect(order).toEqual([...PRIMARY_TAB_KEYS, ...MORE_TAB_KEYS, 'settings'])
     expect(new Set(order).size).toBe(order.length)
     for (let i = 0; i < order.length; i += 1) {
-      expect(navShortcutIndex(order[i]!)).toBe(i + 1)
+      expect(navShortcutIndex(order[i]!, ALL_VISIBLE)).toBe(i + 1)
     }
-    expect(navShortcutIndex('bogus')).toBe(0)
+    expect(navShortcutIndex('bogus', ALL_VISIBLE)).toBe(0)
     // every panel tab is reachable through the flat order (深链/键盘可达)
     for (const key of ALL_TAB_KEYS) expect(order).toContain(key)
   })
 
   it('parseDeepLink(): #tab=<key> / #settings deep links resolve; unknown is null', () => {
     for (const key of ALL_TAB_KEYS) {
-      expect(parseDeepLink(`#tab=${key}`)).toEqual({ kind: 'tab', target: key })
+      expect(parseDeepLink(`#tab=${key}`, ALL_VISIBLE)).toEqual({ kind: 'tab', target: key })
     }
-    expect(parseDeepLink('#settings')).toEqual({ kind: 'modal', target: 'settings' })
+    expect(parseDeepLink('#settings', ALL_VISIBLE)).toEqual({ kind: 'modal', target: 'settings' })
     // existing query routing survives (query strings are stripped)
-    expect(parseDeepLink('#tab=manuscript?x=1')).toEqual({ kind: 'tab', target: 'manuscript' })
+    expect(parseDeepLink('#tab=manuscript?x=1', ALL_VISIBLE)).toEqual({ kind: 'tab', target: 'manuscript' })
     // unknown / empty hashes are a no-op
     expect(parseDeepLink('#tab=bogus')).toBeNull()
     expect(parseDeepLink('#unknown')).toBeNull()
@@ -185,6 +190,56 @@ describe('UI-SIMPLE-01 four primary tabs + More (acceptance §8 ui-routes)', () 
     expect(isTabKey('runs')).toBe(true)
     expect(isTabKey('settings')).toBe(false)
     expect(isTabKey('bogus')).toBe(false)
+  })
+
+  it('Budget page is hidden by default and cannot be reached through nav, shortcut, or deep link', () => {
+    const groups = tabGroups({ budgetPage: false })
+    expect(groups.more.some(entry => entry.key === 'budget')).toBe(false)
+    expect(visibleTabKeys({ budgetPage: false })).not.toContain('budget')
+    expect(navOrder({ budgetPage: false })).not.toContain('budget')
+    expect(navShortcutIndex('budget', { budgetPage: false })).toBe(0)
+    expect(parseDeepLink('#tab=budget', { budgetPage: false })).toBeNull()
+    expect(groups.more.some(entry => entry.key === 'settings')).toBe(true)
+  })
+
+  it('closing visibility returns a Budget main page to Overview and closes a Budget dock', () => {
+    expect(reconcileVisibleNavigation('budget', 'budget', { budgetPage: false })).toEqual({
+      activeTab: 'phase',
+      dockPanel: null,
+    })
+    expect(reconcileVisibleNavigation('runs', 'budget', { budgetPage: false })).toEqual({
+      activeTab: 'runs',
+      dockPanel: null,
+    })
+    expect(reconcileVisibleNavigation('budget', null, ALL_VISIBLE)).toEqual({
+      activeTab: 'budget',
+      dockPanel: null,
+    })
+  })
+})
+
+describe('UI-BUDGET-OPT-IN browser-local preference', () => {
+  function memoryStorage(initial: string | null = null): NavigationPreferenceStorage & { value: string | null } {
+    return {
+      value: initial,
+      getItem(key: string) { return key === NAVIGATION_VISIBILITY_KEY ? this.value : null },
+      setItem(key: string, value: string) { if (key === NAVIGATION_VISIBILITY_KEY) this.value = value },
+    }
+  }
+
+  it('defaults and malformed values fail closed to a hidden Budget page', () => {
+    expect(readNavigationVisibility(memoryStorage())).toEqual({ budgetPage: false })
+    expect(readNavigationVisibility(memoryStorage('{broken'))).toEqual({ budgetPage: false })
+    expect(readNavigationVisibility(memoryStorage(JSON.stringify({ budgetPage: 'yes' })))).toEqual({ budgetPage: false })
+  })
+
+  it('persists only the boolean visibility decision and round-trips it', () => {
+    const storage = memoryStorage()
+    expect(writeBudgetPageVisible(true, storage)).toBe(true)
+    expect(readNavigationVisibility(storage)).toEqual({ budgetPage: true })
+    expect(JSON.parse(storage.value ?? '{}')).toEqual({ budgetPage: true })
+    expect(writeBudgetPageVisible(false, storage)).toBe(true)
+    expect(readNavigationVisibility(storage)).toEqual({ budgetPage: false })
   })
 })
 

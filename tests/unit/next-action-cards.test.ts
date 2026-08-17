@@ -114,6 +114,19 @@ describe('nextActionCardModel: route mapping (kernel route → panel tab)', () =
     expect(m.commandDraft).toBe('/survey ')
   })
 
+  it('baseline handoff opens the guided Chat preparation command instead of an empty Runs page', () => {
+    setLocale('zh')
+    const m = nextActionCardModel(action({
+      code: 'baseline_reproduce',
+      route: 'runs',
+      required: ['baseline_command', 'code_snapshot'],
+      required_by: 'agent',
+    }), 'zh')
+    expect(m.route).toBe('runs')
+    expect(m.commandDraft).toBe('/reproduce')
+    expect(m.missingList).toEqual(['缺少可执行的基线命令（argv）', '缺少不可变代码快照'])
+  })
+
   it('panel routes map to the same tab', () => {
     for (const route of ['gates', 'runs', 'evidence', 'manuscript', 'budget']) {
       const m = nextActionCardModel(action({ code: 'scope_gate_submit', route }))

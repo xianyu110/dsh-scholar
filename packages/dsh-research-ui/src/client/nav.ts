@@ -15,6 +15,7 @@
 import { t } from './i18n/index'
 import { chromeTabs } from './i18n/chrome'
 import type { ProjectRow } from './types'
+import { readNavigationVisibility, type NavigationVisibility } from './navigation-preferences'
 
 /** Every panel tab key that exists in the app (panel renderers in index.ts). */
 export const ALL_TAB_KEYS = [
@@ -30,6 +31,38 @@ export type TabKey = (typeof ALL_TAB_KEYS)[number]
 
 export function isTabKey(key: string): key is TabKey {
   return (ALL_TAB_KEYS as readonly string[]).includes(key)
+}
+
+/** Canonical tabs filtered through browser-local optional-page visibility. */
+export function visibleTabKeys(visibility: NavigationVisibility = readNavigationVisibility()): TabKey[] {
+  return ALL_TAB_KEYS.filter(key => key !== 'budget' || visibility.budgetPage)
+}
+
+export function isTabVisible(
+  key: string,
+  visibility: NavigationVisibility = readNavigationVisibility(),
+): key is TabKey {
+  return isTabKey(key) && (key !== 'budget' || visibility.budgetPage)
+}
+
+export interface VisibleNavigationSelection {
+  activeTab: TabKey
+  dockPanel: TabKey | null
+}
+
+/**
+ * Reconcile persisted/live surfaces after optional-page visibility changes.
+ * A hidden main page returns to Overview; a hidden dock page is closed.
+ */
+export function reconcileVisibleNavigation(
+  activeTab: string,
+  dockPanel: TabKey | null,
+  visibility: NavigationVisibility = readNavigationVisibility(),
+): VisibleNavigationSelection {
+  return {
+    activeTab: isTabVisible(activeTab, visibility) ? activeTab : 'phase',
+    dockPanel: dockPanel !== null && isTabVisible(dockPanel, visibility) ? dockPanel : null,
+  }
 }
 
 /** Four primary tabs (概览 / 运行 / 证据 / 文稿). */
@@ -67,13 +100,17 @@ export interface TabGroups {
 }
 
 /** Flat reachable order (primary tabs → More entries); Alt+1..9 maps across it. */
-export function navOrder(): string[] {
-  return [...PRIMARY_TAB_KEYS, ...MORE_TAB_KEYS, ...MORE_MODAL_KEYS]
+export function navOrder(visibility: NavigationVisibility = readNavigationVisibility()): string[] {
+  return [
+    ...PRIMARY_TAB_KEYS,
+    ...MORE_TAB_KEYS.filter(key => isTabVisible(key, visibility)),
+    ...MORE_MODAL_KEYS,
+  ]
 }
 
 /** 1-based Alt shortcut index for a navigation key (0 = no shortcut). */
-export function navShortcutIndex(key: string): number {
-  return navOrder().indexOf(key) + 1
+export function navShortcutIndex(key: string, visibility: NavigationVisibility = readNavigationVisibility()): number {
+  return navOrder(visibility).indexOf(key) + 1
 }
 
 /**
@@ -82,8 +119,8 @@ export function navShortcutIndex(key: string): number {
  * current locale, keys/deep links are stable. Every ALL_TAB_KEYS entry is in
  * exactly one group; More also carries the Settings modal entry.
  */
-export function tabGroups(): TabGroups {
-  const defs = new Map(chromeTabs().map(def => [def.key, def]))
+export function tabGroups(visibility: NavigationVisibility = readNavigationVisibility()): TabGroups {
+  const defs = new Map(chromeTabs(visibility).map(def => [def.key, def]))
   const tabDef = (key: TabKey): NavTabDef => {
     const def = defs.get(key)
     return {
@@ -93,7 +130,7 @@ export function tabGroups(): TabGroups {
       deepLink: `${DEEP_LINK_TAB_PREFIX}${key}`,
     }
   }
-  const more: NavEntry[] = MORE_TAB_KEYS.map(tabDef)
+  const more: NavEntry[] = MORE_TAB_KEYS.filter(key => isTabVisible(key, visibility)).map(tabDef)
   more.push({
     key: 'settings',
     kind: 'modal',
@@ -187,12 +224,15 @@ export function pickProject(projects: readonly ProjectRow[], input: string): str
  * for the Settings modal; query strings after `?` are ignored so the hash
  * survives existing query routing. Unknown targets return null (no-op).
  */
-export function parseDeepLink(hash: string): { kind: 'tab' | 'modal'; target: string } | null {
+export function parseDeepLink(
+  hash: string,
+  visibility: NavigationVisibility = readNavigationVisibility(),
+): { kind: 'tab' | 'modal'; target: string } | null {
   const clean = hash.replace(/^#/, '').split('?')[0] ?? ''
   const head = clean.split('/')[0] ?? ''
   if (head === '') return null
   if (head === 'settings') return { kind: 'modal', target: 'settings' }
   const m = /^tab=(.+)$/.exec(head)
-  if (m !== null && isTabKey(m[1]!)) return { kind: 'tab', target: m[1]! }
+  if (m !== null && isTabVisible(m[1]!, visibility)) return { kind: 'tab', target: m[1]! }
   return null
 }

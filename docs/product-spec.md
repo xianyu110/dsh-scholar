@@ -73,7 +73,11 @@ Chat 是项目内部工作面，不是跨项目共享的全局收件箱。每个
 
 Chat composer 内首次输入 `/` 必须立即显示命令补全并连续得到 `/…`，候选可见性只能由当前草稿是否为 slash command name prefix 决定，不能依赖菜单此前已经打开；也不得因命令补全或页面级快捷键把 caret 移到 `/` 前。页面级键盘监听位于 Shadow DOM 外时，必须使用 `event.composedPath()` 判断事件是否源自 `input/textarea/select/contenteditable`，不能只依赖被重定向为宿主节点的 `event.target`；编辑态、IME composition 和按键 repeat 均不得触发全局 `/` 接管。真正从非编辑区域使用 `/` 快捷键时，预填后必须聚焦 composer，并把 selection 显式放到文本末尾。
 
-Chat composer 必须同时接受自由自然语言与一级 slash command。显式 `/...` 是确定性高级入口；普通文本在 active Init Grill 时仍只回答当前唯一问题，其他阶段进入 project-scoped natural turn，由意图路由器结合 Kernel `next_actions_v2` 选择只读查询、可安全执行的 Agent 动作或阶段感知对话，不能把 prose 当成未知命令。用户明确说“继续/推进/执行下一步”时，只能执行当前投影中 `state=ready`、`required=true` 且不需要额外参数的 canonical Agent 动作；当前包括 `/write`、`/review`、`/release-bundle`，而 survey 仅在用户同时给出 query 且 `survey_run` ready 时执行。实验、复现和其他缺参数动作返回可编辑 slash 建议，不得猜参数。active Grill 的下一题由权威 projection 作为 transcript 末尾的 assistant question 显示；提交回答后 transcript 保存普通 user/assistant 回合，下一题就地推进，不能再显示一套独立 Brief 输入框、重复下一题或抢夺 composer 焦点。自然语言路由不得根据状态 label 猜 mutation：未知/歧义/blocked/权限不足时只解释并给出候选；Gate Decision、Brief confirm、Intake adoption、Release 决定等 Human-only 动作永远不能由模型代做。任何自动触发结果都必须回显解析出的动作、参数、执行状态和最新权威 NextAction；显式 slash 与自然语言必须进入同一 canonical operation/权限/审计语义。`/new <name> [<brief-json>]` 的唯一必填参数是非空 `name`；省略 `brief-json` 必须创建 name-only `DRAFT/collecting` 项目并进入 Grill Me，不能要求用户先构造 Brief。命令 adapter 必须按 DSH Command Registry 的真实 `rawInput` 契约处理命令名后的保留分隔空白。
+Chat composer 必须同时接受自由自然语言与一级 slash command。显式 `/...` 是确定性高级入口；普通文本在 active Init Grill 时仍只回答当前唯一问题，其他阶段进入 project-scoped natural turn，由意图路由器结合 Kernel `next_actions_v2` 选择只读查询、可安全执行的 Agent 动作或阶段感知对话，不能把 prose 当成未知命令。开放讨论通过当前 DSH `llm` service 回答，但模型只产文本，不能直接写 Kernel；DSH 插件与 standalone 间只能使用不暴露给浏览器的 authenticated loopback bridge，模型不可用时保留确定性阶段引导。用户明确说“继续/推进/执行下一步”时，只能执行当前投影中 `state=ready`、`required=true`、`required_by=agent` 且不需要额外参数的 canonical Agent 动作；当前包括 `/write`、`/review`、`/release-bundle`，而 survey 仅在用户同时给出 query 且 `survey_run` ready 时执行。`/ideas` 只读；“生成几个 idea”或 `/ideas generate <1-5>` 仅在 `idea_generate/ready/agent` 且存在最新非空 frozen corpus 时执行，模型只返回严格 `IdeaDraft`，Kernel 用 project revision CAS、corpus provenance 和单事务整批写入；任一草稿无效或竞争均零写，且不选择 winner 或批准 Idea Gate。实验、复现和其他缺参数动作返回可编辑 slash 建议，不得猜参数。active Grill 的下一题由权威 projection 作为 transcript 末尾的 assistant question 显示；提交回答后 transcript 保存普通 user/assistant 回合，下一题就地推进，不能再显示一套独立 Brief 输入框、重复下一题或抢夺 composer 焦点。自然语言路由不得根据状态 label 猜 mutation：未知/歧义/blocked/权限不足时只解释并给出候选；Gate Decision、Brief confirm、Intake adoption、Release 决定等 Human-only 动作永远不能由模型代做。任何自动触发结果都必须回显解析出的动作、参数、执行状态和最新权威 NextAction；显式 slash 与自然语言必须进入同一 canonical operation/权限/审计语义。`/new <name> [<brief-json>]` 的唯一必填参数是非空 `name`；省略 `brief-json` 必须创建 name-only `DRAFT/collecting` 项目并进入 Grill Me，不能要求用户先构造 Brief。命令 adapter 必须按 DSH Command Registry 的真实 `rawInput` 契约处理命令名后的保留分隔空白。
+
+IdeaCard 生成成功后不得继续投影为 `idea_generate`。只要 SURVEYING 项目已有 proposed 候选，NextAction 必须切换为 Human `idea_select`，在 Overview 每张候选上提供“选择并审计”入口，同时支持 `/ideas select <idea_id>`。该操作必须先用 Scholar connectors 对所选候选执行真实 counter-search，失败时零写；随后由 Kernel 在单事务中校验 project/idea revision、候选归属与 frozen corpus，保存 NoveltyAudit、执行 `SURVEYING→IDEATING` 并创建唯一 pending Idea Gate（payload 固定所选 `idea_id`）。不得自动挑选候选、不得创建 payload-less 正常 Idea Gate、不得自动批准 Gate；成功后的 NextAction 才能是 Human `idea_gate_approve`。
+
+Idea Gate 批准必须在同一事务把 payload 指向的 IdeaCard 冻结为 `approved`，不能只推进 Project。随后流程固定为 `IDEA_APPROVED → contract_register → CONTRACT_PENDING → Human Contract Gate → CONTRACT_APPROVED → baseline_reproduce`：`contract_register` 必须是可执行动作，按钮、自然语言“继续”和 `/contract draft` 共用一个 BFF；它从唯一 approved IdeaCard 的 minimum viable experiment 形成可审计合同草案，由 Kernel 以 project/idea revision CAS 单事务登记 Contract、进入 `CONTRACT_PENDING` 并创建 payload 绑定 contract_id 的 pending Contract Gate。Gate 拒绝或要求修改后必须重新给出 `contract_register`，不得让项目只剩 blocked 动作；Orchestrator 禁止创建 payload-less Contract Gate。任一非终态、无 pending Human Gate 时至少存在一个 `state=ready` 的权威 NextAction，动作不得依赖只能在后续阶段创建的对象。
 
 DSH 本体 Chat 必须注册单一受控入口工具 `dsh_scholar`。DSH Agent 在用户用普通自然语言提出“创建研究、继续调研、查看进度、下一步做什么”等项目研究意图时，把用户原文和当前 DSH `session_id` 交给该入口；用户明确创建且给出名称时额外传 `project_name`。入口只按 session link 解析一个 Scholar 项目，不能读取或写入其他项目。Host 提供的 session id 必须符合 1–256 位安全 opaque-id 语法（首位字母或数字，其余仅字母、数字、`. _ : @ -`），所有进入 URL path 的 id 必须按单个 path segment 编码；`/`、`\`、`?`、`#`、`%`、首尾/内部空白和控制字符一律 fail closed。未关联时，明确创建 + 1–120 字符名称必须直接创建 name-only `DRAFT/collecting` Project、active Init Intake 和 PI membership，并在同一 Kernel transaction 绑定当前 session；名称不明确则只追问，不能产生占位项目，也不能强迫用户先进入 standalone 页面。创建或继续遇到 collecting Brief 时，插件必须通过正式依赖的 Harness `ctx.userQuestions`，把每个权威 Grill question 逐题交给 DSH 原生 composer takeover UI；必须传递 exact live root Agent、复用原生自由文本/跳过交互，并提供“暂时未知”选项，紧凑 `dsh Scholar` 页签禁止复制第二套提问框。等待答案期间重新核对 session link、question code/revision 后才写入；缺少 userQuestions service/provider 属部署错误并 fail closed，不得启用旧表单、猜答或自动确认。创建通过 service-token + `dsh-plugin` identity 的 internal route，Human Principal 由持久的 DSH plugin route credential 通过固定 HMAC 域派生；同一 Kernel 实例的全部 DSH session 与 standalone BFF 使用同一个稳定本机操作员身份，客户端/模型不能提交或覆盖该 principal；idempotency 按 session + 规范化名称固定，重试返回同一项目，已有不同 link 或竞争 relink 必须 409。已关联项目返回权威阶段时间线、主要 NextAction、Gate/Job 摘要、解析出的意图和执行结果。Unknown DSH role 只允许调用这个有界入口，不因此获得 `research_project`、Gate、Evidence 或 Runner 等低层工具权限。自动写集合只包含上述显式 name-only 创建、由 Human 在原生提问 UI 中逐题提交的 Brief answer，以及权威投影为 ready 且用户本次话术以正向动作词明确确认的 `survey_run`；Brief confirm 仍为 PI-only。“研究”“research”等主题讨论、疑问、歧义以及“不要调研 / do not research”等否定话术不得写入。检索完成后必须重新读取 revision/NextAction/session link，并在 Kernel Corpus transaction 内同时校验 `expected_revision + expected_session_id→project_id`；检索期间从项目 A relink 到 B 时不得再向 A 写入。提交写入前取消为零写，进入不可回滚 commit boundary 后按已提交处理，不能声称“取消即零写”。对外错误只能使用稳定安全摘要，不能回显 Kernel endpoint、内部 path 或上游错误。其他 Agent/Runner 写动作只生成 canonical slash 建议，Human-only 动作只解释并引导到人工页面，绝不代做。
 
@@ -211,6 +215,22 @@ Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 g
 - Dock 的打开页面、首选位置和尺寸是当前浏览器的本地展示偏好，不是 Kernel Config Registry、运行时 config pin、项目数据或跨设备同步配置，不得保存 token、secret、聊天内容或研究文件；
 - 视口小于 720 px 时，右侧首选位置只在视觉上投影为底部，不覆盖已保存的右侧偏好；Dock 标题、选择器、移动/关闭动作、分隔条 aria 和提示全部支持 zh/en 即时切换。
 
+### 5.14 合同批准后的基线运行交接
+
+- Contract Gate 批准只冻结实验约束，不等于已经存在可执行 Job。系统不得把 Contract 中的自然语言 baseline 描述直接当作 shell 命令，也不得伪造“运行中”；
+- `CONTRACT_APPROVED` 且尚无 baseline Job 时，Runs 不能显示通用空白态。它必须显示一项由权威 `baseline_reproduce` NextAction 投影出的“基线运行准备任务”，列明缺少的代码快照、可执行命令或实验环境，并提供进入项目 Chat/Workspace/Settings 的明确入口；
+- 用户在 Chat 中可以自然语言要求“准备/启动基线实验”。系统必须结合当前 approved Contract 逐项引导补齐代码、命令和 Runner 配置；参数不完整时零 Job 写入，不能退化成仅返回 `No jobs` 或要求用户猜 JSON；
+- 参数完整后，baseline Job 提交与 `CONTRACT_APPROVED → BASELINE_REPRO` 必须是同一个 Kernel 原子操作，并绑定 approved Contract、不可变 CodeSnapshot、固定镜像/Runner target、输出契约、提交人和幂等键。失败时 Project 与 Jobs 均不产生半写；
+- Runs 的计数只统计真实持久化 Job。准备任务要明确标为“待准备”，不混入 queued/running/succeeded 统计；真实 Job 创建后准备任务消失并由 Job 卡片接管。
+
+### 5.15 运维预算页面按需启用
+
+- Budget 是运维诊断页面，不是默认研究流程入口。新浏览器实例默认不在“运维”导航、快捷键顺序或页面选择器中展示 Budget；预算记账、硬限制与 Budget Gate 仍由 Kernel 始终执行，隐藏页面绝不能关闭预算治理；
+- 用户可在 Settings → Preferences 中显式启用或关闭“显示预算页面”。该值是当前浏览器的本地展示偏好，不进入项目、Kernel Config Registry 或运行时 config pin；不得包含预算值、token 或研究内容；
+- 关闭后必须立即从导航与键盘顺序移除 Budget。若 Budget 正在主区显示，主区回到 Overview；若停靠在 Panel Dock，关闭该 Dock 页面。刷新后保持用户选择；清除本地偏好后恢复默认关闭；
+- 预算页关闭时，`#tab=budget` 深链与快捷键不得绕过配置打开页面；预算超限、pending Budget Gate 或 `budget_resolve` NextAction 仍必须通过 Overview/Approvals 给出治理入口，不得因隐藏诊断页而形成流程死路；
+- 设置项及隐藏/启用状态支持 zh/en 即时切换，并保持键盘、ARIA 与窄屏可用。
+
 ## 6. 明确不做
 
 - 不把 LLM 对新颖性或结果的自评当作 Evidence；
@@ -241,7 +261,7 @@ Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 g
 | Review | Artifacts | 搜索、预览、下载项目产物 |
 | Review | Evidence | Claim–Evidence、CI、效应量和限制 |
 | Review | Manuscript | TeX 文件、编辑、编译、诊断和 PDF |
-| Operations | Budget | 模型、API、GPU、并发和硬限制 |
+| Operations | Budget（默认隐藏，可在 Settings 启用） | 模型、API、GPU、并发和硬限制；页面可见性不影响 Kernel 预算治理 |
 | Operations | Settings | 配置作用域、Runner targets、TeX、Terminal、限制、来源和 Secret 引用 |
 
 Settings 首次进入时所有 section 默认折叠，按 Essentials、Execution、Workspace、Terminal、LaTeX、Agent/Trajectory、Security & Secrets、Diagnostics 分组；非默认项显示 badge，每项显示 effective value、来源 scope/revision/hash、热更新或重启标识以及 reset-to-default。配置不得散落在业务页常驻展示。
@@ -251,7 +271,7 @@ Settings 首次进入时所有 section 默认折叠，按 Essentials、Execution
 | 类别 | 最低标准 |
 |---|---|
 | Gate | 100% Gate Decision 绑定认证人类；通用 transition 无法进入 Gate 状态 |
-| Run | 正式 Job 100% 容器执行；非 echo 不存在合成成功 |
+| Run | 正式 Job 100% 容器执行；非 echo 不存在合成成功；Contract 批准后 Runs 总能显示真实 Job 或明确的基线准备任务，不出现无解释空白 |
 | Terminal | 日志断线恢复无静默丢失；截断、缺口和退出原因可见 |
 | Interactive PTY | 输入、resize、signal、重连和关闭可操作；无权限、过期会话或背压 fail closed |
 | Workspace | 文件树/搜索/编辑/冲突/快照无越界与丢失更新；桌面和窄屏核心动作可达 |

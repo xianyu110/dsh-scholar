@@ -94,6 +94,144 @@ describe('project-scoped free conversation', () => {
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 
+  it('turns an explicit ready idea request into generated persisted cards instead of the empty list response', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/grill')) {
+        return json({
+          project_revision: 3, intake_revision: 2, question: null,
+          brief_preview: { problem: 'CNN robustness', scope: 'low data', primary_metrics: ['macro_f1'], target_outputs: [] },
+          ready_to_confirm: false,
+        })
+      }
+      if (path.endsWith('/api/chat/ideas') && init?.method === 'POST') {
+        return json({
+          ok: true, snapshot_id: 'corpus_1',
+          ideas: [1, 2, 3].map(index => ({ idea_id: `idea_${index}`, title: `Candidate ${index}` })),
+        })
+      }
+      if (path.includes('/v2/projects/prj_1/projection')) {
+        return json({
+          project: { project_id: 'prj_1', name: 'cnn test', status: 'SURVEYING', revision: 3, brief_status: 'confirmed' },
+          next_actions_v2: [{
+            code: 'idea_generate', label: 'Generate ideas', reason: 'Corpus ready',
+            state: 'ready', required: true, required_by: 'agent', route: 'ideas',
+          }],
+        })
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const host = vi.fn()
+
+    const result = await executeChatTurn('生成几个idea，用来进行研究', 'prj_1', host)
+
+    expect(result.text).toMatch(/生成并保存 3 个 IdeaCard|Generated and saved 3 IdeaCards/)
+    expect(result.text).not.toContain('No IdeaCards')
+    expect(host).not.toHaveBeenCalled()
+    const write = fetch.mock.calls.find(([input]) => String(input).endsWith('/api/chat/ideas'))
+    expect(JSON.parse(String(write?.[1]?.body))).toMatchObject({
+      project_id: 'prj_1', text: '生成几个idea，用来进行研究', count: 3,
+    })
+  })
+
+  it('routes explicit idea selection through counter-search preparation and then shows the pending Gate', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/api/chat/ideas/select') && init?.method === 'POST') {
+        return json({
+          idea: { idea_id: 'idea_1', title: 'Candidate 1', novelty_audit: { result: 'overlap_found' } },
+          gate: { gate_id: 'gate_idea_1', type: 'idea', status: 'pending', payload: { idea_id: 'idea_1' } },
+          project: { project_id: 'prj_1', status: 'IDEATING', revision: 4 },
+        })
+      }
+      if (path.includes('/v2/projects/prj_1/projection')) {
+        return json({
+          project: { project_id: 'prj_1', status: 'IDEATING', revision: 4 },
+          next_actions_v2: [{
+            code: 'idea_gate_approve', label: 'Approve idea', reason: 'Gate pending',
+            state: 'ready', required: true, required_by: 'human', route: 'gates',
+          }],
+        })
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const result = await executeChatTurn('/ideas select idea_1', 'prj_1')
+
+    expect(result.text).toMatch(/Candidate 1/)
+    expect(result.text).toContain('gate_idea_1')
+    expect(result.text).toContain('idea_gate_approve')
+    const write = fetch.mock.calls.find(([input]) => String(input).endsWith('/api/chat/ideas/select'))
+    expect(JSON.parse(String(write?.[1]?.body))).toEqual({ project_id: 'prj_1', idea_id: 'idea_1' })
+  })
+
+  it('turns /reproduce without JSON into a project-aware baseline preparation guide with zero writes', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.includes('/v1/projects/prj_1/projection')) {
+        return json({
+          project: { project_id: 'prj_1', status: 'CONTRACT_APPROVED', revision: 7 },
+          next_actions_v2: [{
+            code: 'baseline_reproduce', label: 'Reproduce baseline', reason: 'prepare inputs',
+            state: 'ready', required: ['baseline_command', 'code_snapshot'], required_by: 'agent', route: 'runs',
+          }],
+        })
+      }
+      if (path.endsWith('/v1/projects/prj_1/contracts')) {
+        return json([{ contract_id: 'expc_1', status: 'approved' }])
+      }
+      if (path.endsWith('/v1/projects/prj_1/code-snapshots')) return json([])
+      if (path.includes('/v2/projects/prj_1/projection')) {
+        return json({ project: { project_id: 'prj_1', status: 'CONTRACT_APPROVED' }, next_actions_v2: [] })
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const result = await executeChatTurn('/reproduce', 'prj_1')
+
+    expect(result.text).toContain('baseline_command, code_snapshot')
+    expect(result.text).toContain('expc_1')
+    expect(result.text).toContain('<code-snapshot-id>')
+    expect(fetch.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+  })
+
+  it('starts a complete baseline request through the atomic handoff endpoint', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.includes('/v1/projects/prj_1/projection')) {
+        return json({ project: { project_id: 'prj_1', status: 'CONTRACT_APPROVED', revision: 7 }, next_actions_v2: [] })
+      }
+      if (path.endsWith('/v1/projects/prj_1/contracts')) return json([{ contract_id: 'expc_1', status: 'approved' }])
+      if (path.endsWith('/v1/projects/prj_1/code-snapshots')) return json([{ snapshot_id: 'code_snap_1' }])
+      if (path.endsWith('/v1/projects/prj_1/baseline-runs') && init?.method === 'POST') {
+        return json({ project: { status: 'BASELINE_REPRO' }, job: { job_id: 'job_1', status: 'queued' } })
+      }
+      if (path.includes('/v2/projects/prj_1/projection')) {
+        return json({ project: { project_id: 'prj_1', status: 'BASELINE_REPRO' }, next_actions_v2: [] })
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const result = await executeChatTurn(
+      '/reproduce {"contract_id":"expc_1","code_snapshot_id":"code_snap_1","command":["node","train.js"]}',
+      'prj_1',
+    )
+
+    expect(result.text).toContain('job_1')
+    const write = fetch.mock.calls.find(([input]) => String(input).endsWith('/baseline-runs'))
+    expect(JSON.parse(String(write?.[1]?.body))).toMatchObject({
+      expected_revision: 7,
+      contract_id: 'expc_1',
+      code_snapshot_id: 'code_snap_1',
+      command: ['node', 'train.js'],
+    })
+    expect(JSON.parse(String(write?.[1]?.body))).not.toHaveProperty('kind')
+  })
+
   it('falls back to deterministic phase guidance when the model adapter is unavailable', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => String(input).endsWith('/grill')
       ? json({
@@ -116,6 +254,42 @@ describe('project-scoped free conversation', () => {
     expect(result.text).toContain('survey_run')
     expect(result.text).not.toContain('provider detail')
     expect(result.suggestedCommand).toBeUndefined()
+  })
+
+  it('uses the standalone DSH model bridge for ordinary project conversation by default', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/grill')) {
+        return json({
+          project_revision: 2, intake_revision: 2, question: null,
+          brief_preview: { problem: '', scope: '', primary_metrics: [], target_outputs: [] },
+          ready_to_confirm: false,
+        })
+      }
+      if (path.endsWith('/api/chat/turn') && init?.method === 'POST') {
+        return json({ operation: 'conversation', assistant_text: '可以从校准误差和长尾鲁棒性两个方向展开。' })
+      }
+      if (path.includes('/v2/projects/prj_1/projection')) {
+        return json({
+          project: { project_id: 'prj_1', status: 'SURVEYING', brief_status: 'confirmed' },
+          next_actions_v2: [{
+            code: 'idea_generate', label: 'Generate ideas', reason: 'Corpus ready',
+            state: 'ready', required: true, required_by: 'agent', route: 'ideas',
+          }],
+        })
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const result = await executeChatTurn('我们先讨论一下哪些方向最值得做', 'prj_1')
+
+    expect(result.text).toContain('校准误差和长尾鲁棒性')
+    const modelCall = fetch.mock.calls.find(([input]) => String(input).endsWith('/api/chat/turn'))
+    expect(modelCall).toBeDefined()
+    expect(JSON.parse(String(modelCall?.[1]?.body))).toMatchObject({
+      project_id: 'prj_1', text: '我们先讨论一下哪些方向最值得做',
+    })
   })
 
   it('freezes the originating session history before asynchronous project reads', async () => {

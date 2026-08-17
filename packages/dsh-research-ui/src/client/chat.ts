@@ -339,7 +339,25 @@ interface ChatModelTurnReply {
 
 type ChatModelTurn = (payload: ChatModelTurnRequest) => Promise<ChatModelTurnReply | null>
 
-const unavailableChatModel: ChatModelTurn = async () => null
+const standaloneChatModel: ChatModelTurn = async payload => {
+  const response = await fetch(`${base()}/api/chat/turn`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(await authHeaders()), 'x-csrf-token': (await ensureCsrfToken()) ?? '' },
+    body: JSON.stringify({
+      project_id: payload.project.project_id,
+      text: payload.text,
+      locale: payload.locale,
+      history: payload.history,
+    }),
+  })
+  if (!response.ok) return null
+  const result = await response.json() as { operation?: unknown; assistant_text?: unknown; suggested_command?: unknown }
+  if (result.operation !== 'conversation' || typeof result.assistant_text !== 'string') return null
+  return {
+    assistantText: result.assistant_text,
+    ...(typeof result.suggested_command === 'string' ? { suggestedCommand: result.suggested_command } : {}),
+  }
+}
 
 function withGuidance(answer: string, projection: ChatTurnProjection): string {
   const guidance = naturalGuidanceText(projection)
@@ -372,7 +390,7 @@ function commandProjectId(line: string, activeProjectId: string | undefined): st
 export async function executeChatTurn(
   line: string,
   activeProjectId: string | undefined,
-  chatModelTurn: ChatModelTurn = unavailableChatModel,
+  chatModelTurn: ChatModelTurn = standaloneChatModel,
 ): Promise<ChatTurnResult> {
   const input = chatInputKind(line)
   if (input.kind === 'command') {
@@ -411,7 +429,7 @@ export async function executeChatTurn(
   if (projection === null) return { text: t('shell', 'shell.chat.natural.noProjection') }
   const plan = planNaturalChatTurn(input.text, projection)
   if (plan.kind === 'command') {
-    const answer = await executeChatCommand(plan.command, activeProjectId)
+    const answer = await executeChatCommand(plan.command, activeProjectId, { naturalText: input.text })
     const latest = await api<Projection>(`/v2/projects/${encodeURIComponent(activeProjectId)}/projection`)
     return { text: withGuidance(answer, latest ?? projection) }
   }
@@ -459,7 +477,11 @@ export async function executeChatInput(line: string, activeProjectId: string | u
  * maps to one. Aggregate command prefixes are intentionally not parsed.
  * Returns the assistant answer text.
  */
-export async function executeChatCommand(line: string, activeProjectId: string | undefined): Promise<string> {
+export async function executeChatCommand(
+  line: string,
+  activeProjectId: string | undefined,
+  context: { naturalText?: string } = {},
+): Promise<string> {
   const trimmed = line.trim().replace(/^\//, '')
   const parts = trimmed.split(/\s+/)
   const sub = (parts[0] ?? '').toLowerCase()
@@ -474,11 +496,11 @@ export async function executeChatCommand(line: string, activeProjectId: string |
         + '  /list                             all projects\n'
         + '  /status [project_id]              phase, gates, jobs, budget\n'
         + '  /survey <query>                   multi-source search + snapshot\n'
-        + '  /ideas                            IdeaCards\n'
+        + '  /ideas [generate 1-5|select <id>] list, generate or select IdeaCards\n'
         + '  /gates [project_id]               gate list + decisions\n'
         + '  /jobs [project_id]                job list\n'
         + '  /reproduce [json]                 start a paper reproduction\n'
-        + '  /contract <json>                  pre-register a contract\n'
+        + '  /contract draft                   draft a Contract from the approved Idea\n'
         + '  /run <kind> <json>                submit a job\n'
         + '  /evidence <json>                  ingest evidence\n'
         + '  /claims [project_id]              claims + verification status\n'
@@ -560,6 +582,52 @@ export async function executeChatCommand(line: string, activeProjectId: string |
     }
     case 'ideas': {
       if (activeProjectId === undefined) return 'No project selected — /new <name> first'
+      if ((parts[1] ?? '').toLowerCase() === 'select') {
+        const ideaId = parts[2] ?? ''
+        if (ideaId === '') return 'usage: /ideas select <idea_id>'
+        const response = await fetch(`${base()}/api/chat/ideas/select`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(await authHeaders()), 'x-csrf-token': (await ensureCsrfToken()) ?? '' },
+          body: JSON.stringify({ project_id: activeProjectId, idea_id: ideaId }),
+        })
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null) as { error?: { code?: unknown } } | null
+          const code = typeof payload?.error?.code === 'string' ? payload.error.code : `http_${response.status}`
+          return t('shell', 'shell.chat.ideas.selectFailed', { code })
+        }
+        const prepared = await response.json() as { gate?: { gate_id?: unknown }; idea?: { title?: unknown } }
+        return t('shell', 'shell.chat.ideas.selected', {
+          title: String(prepared.idea?.title ?? ideaId),
+          gate: String(prepared.gate?.gate_id ?? '—'),
+        })
+      }
+      if ((parts[1] ?? '').toLowerCase() === 'generate') {
+        const parsedCount = Number(parts[2] ?? 3)
+        if (!Number.isInteger(parsedCount) || parsedCount < 1 || parsedCount > 5) return 'usage: /ideas generate [1-5]'
+        const response = await fetch(`${base()}/api/chat/ideas`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(await authHeaders()), 'x-csrf-token': (await ensureCsrfToken()) ?? '' },
+          body: JSON.stringify({
+            project_id: activeProjectId,
+            text: context.naturalText ?? `/ideas generate ${parsedCount}`,
+            count: parsedCount,
+            locale: getLocale() === 'en' ? 'en' : 'zh',
+          }),
+        })
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null) as { error?: { code?: unknown } } | null
+          const code = typeof payload?.error?.code === 'string' ? payload.error.code : `http_${response.status}`
+          return t('shell', 'shell.chat.ideas.generateFailed', { code })
+        }
+        const generated = await response.json() as { snapshot_id?: unknown; ideas?: Array<{ idea_id?: unknown; title?: unknown }> }
+        const ideas = Array.isArray(generated.ideas) ? generated.ideas : []
+        if (ideas.length !== parsedCount) return t('shell', 'shell.chat.ideas.generateFailed', { code: 'invalid_response' })
+        return t('shell', 'shell.chat.ideas.generated', {
+          count: String(ideas.length),
+          snapshot: typeof generated.snapshot_id === 'string' ? generated.snapshot_id : '—',
+          items: ideas.map(idea => `- \`${String(idea.idea_id ?? '')}\` ${String(idea.title ?? '')}`).join('\n'),
+        })
+      }
       const ideas = (await api<Array<Record<string, unknown>>>(`/v1/projects/${encodeURIComponent(activeProjectId)}/ideas`)) ?? []
       if (ideas.length === 0) return 'No IdeaCards yet — create them with the idea_create tool, then novelty_audit before the Idea Gate.'
       return `IdeaCards:\n${ideas.map(i => `- \`${String(i.idea_id)}\` [${String(i.status ?? '')}] ${String(i.title ?? '')}`).join('\n')}`
@@ -580,53 +648,90 @@ export async function executeChatCommand(line: string, activeProjectId: string |
     }
     case 'contract': {
       if (activeProjectId === undefined) return 'No project selected'
-      const json = chatJsonArg(rest)
-      if (json === null) return 'usage: /contract {"idea_id":"...","dataset_id":"...","baseline":"b","treatment":"a","primary_metric":"m","seeds":[11,23,47]}'
-      const seeds = Array.isArray(json.seeds) ? json.seeds.map(Number) : [11, 23, 47]
-      const c = await api<{ contract_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/contracts`, {
+      if (rest.toLowerCase() !== 'draft') return t('shell', 'shell.chat.contract.usage')
+      const result = await apiResult<{
+        contract?: { contract_id?: unknown }
+        gate?: { gate_id?: unknown }
+      }>('/api/chat/contracts/draft', {
         method: 'POST',
-        body: JSON.stringify({
-          idea_id: String(json.idea_id ?? ''),
-          data: { dataset_id: String(json.dataset_id ?? ''), version: 'official', split: 'official' },
-          methods: { baseline: String(json.baseline ?? ''), treatment: String(json.treatment ?? '') },
-          metrics: { primary: String(json.primary_metric ?? ''), secondary: [] },
-          seeds,
-          analysis: { effect_size: 'mean_difference', interval: 'bootstrap_95', multiple_testing: 'holm' },
-          ablations: [],
-          stop_conditions: { max_gpu_hours: 48, min_completed_seeds: seeds.length, stop_on_data_leakage: true },
-        }),
+        body: JSON.stringify({ project_id: activeProjectId }),
       })
-      if (c === null || c.contract_id === undefined) return 'contract registration failed'
-      return `Contract **${c.contract_id}** registered — approve it in Execution → Approvals (human).`
+      if (!result.ok) {
+        return t('shell', 'shell.chat.contract.failed', { code: result.error.code ?? `http_${result.status}` })
+      }
+      const payload = result.data
+      if (typeof payload.contract?.contract_id !== 'string' || typeof payload.gate?.gate_id !== 'string') {
+        return t('shell', 'shell.chat.contract.failed', { code: 'invalid_response' })
+      }
+      return t('shell', 'shell.chat.contract.created', {
+        contract: payload.contract.contract_id,
+        gate: payload.gate.gate_id,
+      })
     }
     case 'reproduce': {
       if (activeProjectId === undefined) return 'No project selected'
       const json = chatJsonArg(rest)
-      const start = rest.indexOf('{')
-      const positional = (start < 0 ? rest : rest.slice(0, start)).trim()
-      const command = Array.isArray(json?.command) ? json.command.map(String)
-        : positional !== '' ? positional.split(/\s+/)
-          : []
-      const job = await api<{ job_id?: string; status?: string }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/jobs`, {
+      const projection = await api<Projection>(`/v1/projects/${encodeURIComponent(activeProjectId)}/projection`)
+      if (projection === null || projection.project?.revision === undefined) {
+        return t('shell', 'shell.chat.natural.noProjection')
+      }
+      const contracts = (await api<Array<{ contract_id?: string; status?: string; baseline_run?: string }>>(
+        `/v1/projects/${encodeURIComponent(activeProjectId)}/contracts`,
+      )) ?? []
+      const snapshots = (await api<Array<{ snapshot_id?: string }>>(
+        `/v1/projects/${encodeURIComponent(activeProjectId)}/code-snapshots`,
+      )) ?? []
+      const approvedContract = contracts.slice().reverse().find(contract => contract.status === 'approved')
+      if (rest.trim() === '') {
+        const action = projection.next_actions_v2?.find(candidate => candidate.code === 'baseline_reproduce')
+        const gaps = Array.isArray(action?.required) ? action.required.join(', ') : 'baseline_command, code_snapshot'
+        const contractId = approvedContract?.contract_id ?? '<approved-contract-id>'
+        const snapshotId = snapshots[0]?.snapshot_id ?? '<code-snapshot-id>'
+        const template = `/reproduce ${JSON.stringify({
+          contract_id: contractId,
+          code_snapshot_id: snapshotId,
+          command: ['python', 'train.py'],
+          idempotency_key: `baseline-${contractId}`,
+        })}`
+        return t('shell', 'shell.chat.baseline.prepare', {
+          gaps,
+          contract: contractId,
+          snapshots: snapshots.length === 0 ? '0' : snapshots.map(snapshot => snapshot.snapshot_id ?? '?').join(', '),
+          template,
+        })
+      }
+      if (json === null) return t('shell', 'shell.chat.baseline.invalid')
+      const command = Array.isArray(json.command) && json.command.every(part => typeof part === 'string' && part.trim() !== '')
+        ? json.command as string[]
+        : []
+      const contractId = typeof json.contract_id === 'string' ? json.contract_id : approvedContract?.contract_id
+      const codeSnapshotId = typeof json.code_snapshot_id === 'string' ? json.code_snapshot_id : undefined
+      if (command.length === 0 || contractId === undefined || codeSnapshotId === undefined) {
+        return t('shell', 'shell.chat.baseline.invalid')
+      }
+      const started = await apiResult<{
+        project?: { status?: string }
+        job?: { job_id?: string; status?: string }
+      }>(`/v1/projects/${encodeURIComponent(activeProjectId)}/baseline-runs`, {
         method: 'POST',
         body: JSON.stringify({
-          idempotency_key: String(json?.idempotency_key ?? `baseline-${Date.now()}`),
-          kind: 'baseline',
+          expected_revision: projection.project.revision,
+          idempotency_key: String(json.idempotency_key ?? `baseline-${contractId}`),
+          contract_id: contractId,
+          code_snapshot_id: codeSnapshotId,
           command,
-          payload: {
-            message: '/reproduce',
-            repo: typeof json?.repo === 'string' ? json.repo : undefined,
-            commit: typeof json?.commit === 'string' ? json.commit : undefined,
-            expected_metrics: json?.expected_metrics,
-            tolerance: json?.tolerance,
-            ...(json ?? {}),
-          },
-          contract_id: typeof json?.contract_id === 'string' ? json.contract_id : null,
+          ...(typeof json.image_digest === 'string' ? { image_digest: json.image_digest } : {}),
+          ...(typeof json.output_contract === 'object' && json.output_contract !== null ? { output_contract: json.output_contract } : {}),
           runner_target_id: chatRunnerTargetId(json),
         }),
       })
-      if (job === null || job.job_id === undefined) return 'baseline reproduction submission failed'
-      return `Baseline reproduction job **${job.job_id}** submitted (${job.status}). Watch it in the Runs tab.`
+      if (!started.ok || started.data.job?.job_id === undefined) {
+        return t('shell', 'shell.chat.baseline.failed', { code: started.ok ? 'invalid_response' : (started.error.code ?? `http_${started.status}`) })
+      }
+      return t('shell', 'shell.chat.baseline.started', {
+        job: started.data.job.job_id,
+        status: started.data.job.status ?? 'queued',
+      })
     }
     case 'run': {
       if (activeProjectId === undefined) return 'No project selected'
