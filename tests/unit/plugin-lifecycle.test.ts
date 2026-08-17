@@ -9,6 +9,7 @@ import { createScholarRpcHandler, createScholarViewRpcHandler } from '../../src/
 describe('DSH research plugin lifecycle', () => {
   it('waits for the settings provider before applying the host plugin', () => {
     expect(inject).toContain('settings')
+    expect(inject).toContain('userQuestions')
   })
 
   it('keeps privileged RPC loopback-only and exposes only the view channel to trusted hosts', () => {

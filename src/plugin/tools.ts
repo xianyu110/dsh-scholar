@@ -11,7 +11,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { KernelApiError, type ResearchClient } from '@dsh-scholar/research-client'
 import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { selectSkillPacks, selectedSkillNames } from './skills.js'
-import { runNativeScholarTurn } from './native-chat.js'
+import { runNativeScholarTurn, type NativeGrillAnswer, type NativeGrillQuestionPrompt } from './native-chat.js'
 import {
   PANEL_KINDS,
   type PanelKind,
@@ -45,6 +45,8 @@ export interface ResearchToolContext {
   /** Cordis context: for `ctx.subagents.start()` panel orchestration (§4.3). */
   ctx: {
     subagents: SubagentRuntimeLike
+    /** DSH Host Brief questions take over the native composer. */
+    userQuestions: NativeQuestionServiceLike
   }
   /** Role registry for ACL of spawned panel children. */
   roles: { set(sessionId: string, role: ResearchRole): void; delete(sessionId: string): void }
@@ -60,6 +62,20 @@ export interface ResearchToolContext {
   operatorPrincipal: string
 }
 
+interface NativeQuestionServiceLike {
+  ask(request: {
+    questions: Array<{
+      id: string
+      question: string
+      header?: string
+      options?: Array<{ label: string; description?: string }>
+      multiSelect?: boolean
+    }>
+    agent?: { id: string }
+    signal?: AbortSignal
+  }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
+}
+
 interface ResearchToolDef {
   name: string
   description: string
@@ -67,6 +83,18 @@ interface ResearchToolDef {
   output: ObjectValueSchemaSpec
   /** Args are the validated parameter values; returns the canonical tool value. */
   execute(args: Record<string, any>, ctx: ResearchToolContext, sessionId: string | undefined, exec: { agent?: { id: string }; signal: AbortSignal }): Promise<Record<string, unknown>>
+}
+
+function nativeQuestionAnswer(
+  prompt: NativeGrillQuestionPrompt,
+  answer: { id: string; selected: string[]; custom?: string } | undefined,
+): NativeGrillAnswer {
+  if (answer?.id !== prompt.id) throw new Error('dsh_scholar native Brief answer did not match the question')
+  const custom = answer.custom?.trim() ?? ''
+  if (custom !== '') return { disposition: 'answered', value: custom }
+  if (answer.selected.includes(prompt.unknownLabel)) return { disposition: 'unknown' }
+  if (answer.selected.length > 0) return { disposition: 'answered', value: answer.selected.join(', ') }
+  return { disposition: 'skipped' }
 }
 
 /**
@@ -275,7 +303,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
   // exposes a deterministic, capability-bounded research conversation.
   ctx.tools.register(researchTool({
     name: 'dsh_scholar',
-    description: 'Primary entry for research requests made in native DSH Chat. Call this when the user asks in ordinary language to create, continue, inspect or discuss research; pass the current user text verbatim. For a complete affirmative create request in an unlinked calling DSH session, pass project_name only when it equals the complete name after the create command in the current user text, never a substring; never invent, rewrite or infer it from history, and never pass it for questions, discussion, ambiguous, negative, cancel or avoid wording. The tool performs name-only Init and links that session, or asks for a missing name without requiring slash commands. It returns the authoritative dsh Scholar phase/next action, may execute only that explicit create or an explicitly requested ready literature survey, and otherwise suggests a direct slash command. It never decides Gates, confirms a Brief, adopts an Intake, accepts Evidence or releases a project.',
+    description: 'Primary entry for research requests made in native DSH Chat. Call this when the user asks in ordinary language to create, continue, inspect or discuss research; pass the current user text verbatim. For a complete affirmative create request in an unlinked calling DSH session, pass project_name only when it equals the complete name after the create command in the current user text, never a substring; never invent, rewrite or infer it from history, and never pass it for questions, discussion, ambiguous, negative, cancel or avoid wording. The tool performs name-only Init and links that session, or asks for a missing name without requiring slash commands. During Brief collection it reuses DSH\'s native user-question composer one question at a time when that Host capability is available. It returns the authoritative dsh Scholar phase/next action, may execute only that explicit create or an explicitly requested ready literature survey, and otherwise suggests a direct slash command. It never decides Gates, confirms a Brief, adopts an Intake, accepts Evidence or releases a project.',
     parameters: {
       text: { type: 'string', required: true, description: 'User text verbatim; runtime-enforced trimmed length 1–4000 characters.' },
       project_name: { type: 'string', description: 'Complete 1–120 character project name parsed after the create command in the current user text; never a substring and only for an affirmative request in an unlinked session.' },
@@ -285,6 +313,24 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     output: scholarNativeReplySchema,
     execute: async (args, ctx_, sessionId, exec) => {
       try {
+        const askGrillQuestion = exec.agent === undefined
+          ? undefined
+          : async (prompt: NativeGrillQuestionPrompt): Promise<NativeGrillAnswer> => {
+              const result = await ctx_.ctx.userQuestions.ask({
+                questions: [{
+                  id: prompt.id,
+                  header: prompt.header,
+                  question: prompt.question,
+                  options: [{ label: prompt.unknownLabel, description: prompt.unknownDescription }],
+                  multiSelect: false,
+                }],
+                // Pass the exact live object received from DSH. The Host
+                // service rejects copied/session-only agent identities.
+                agent: exec.agent,
+                signal: exec.signal,
+              })
+              return nativeQuestionAnswer(prompt, result.answers[0])
+            }
         return { ...await runNativeScholarTurn({
           text: String(args.text),
           projectName: typeof args.project_name === 'string' ? args.project_name : undefined,
@@ -293,6 +339,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
           sessionId,
           client: ctx_.client,
           cache: ctx_.cache,
+          operatorPrincipal: ctx_.operatorPrincipal,
+          askGrillQuestion,
           signal: exec.signal,
         }) }
       } catch (error) {

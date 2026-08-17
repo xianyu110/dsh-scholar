@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { KernelApiError, KernelUnavailableError, ResearchClient } from '@dsh-scholar/research-client'
 import { RoleRegistry, RESEARCH_TOOLS } from '../../src/plugin/acl.js'
-import { classifyNativeIntent, runNativeScholarTurn, suggestedCommand } from '../../src/plugin/native-chat.js'
+import { classifyNativeIntent, nativeGrillQuestionText, runNativeScholarTurn, suggestedCommand } from '../../src/plugin/native-chat.js'
 import { registerResearchTools, type ResearchToolContext } from '../../src/plugin/tools.js'
 import { buildScholarSessionProjection, stagesForProject, type ProjectionLike } from '../../src/shared/research-stage.js'
 
@@ -101,6 +101,106 @@ describe('DSH native Scholar conversation façade', () => {
     expect(classifyNativeIntent('please do not research', action())).toBe('conversation')
     expect(classifyNativeIntent('生成想法', action({ code: 'idea_generate' }))).toBe('ideas')
     expect(suggestedCommand(action({ code: 'manuscript_write' }))).toBe('/write')
+  })
+
+  it('keeps native Brief question copy aligned in Chinese and English', () => {
+    expect(nativeGrillQuestionText('grill.question.problem', 'zh')).toBe('你想解决的核心研究问题是什么？')
+    expect(nativeGrillQuestionText('grill.question.materialContext', 'en')).toContain('What materials')
+    expect(nativeGrillQuestionText('future.prompt', 'zh')).toBe('future.prompt')
+  })
+
+  it('collects a linked project Brief one question at a time through the Host question seam', async () => {
+    const collecting = projection('DRAFT', action({
+      code: 'intake_resume', label: 'Resume intake', reason: 'brief required', route: 'chat',
+      required_by: 'human', state: 'ready',
+    }))
+    collecting.project.brief_status = 'collecting'
+    const first = {
+      project_id: 'rsp_1', project_revision: 0, intake_id: 'int_1', intake_revision: 0,
+      question: { question_code: 'brief.problem', question_revision: 1, prompt_key: 'grill.question.problem', required: true },
+      answers: [], brief_preview: {}, ready_to_confirm: false,
+    }
+    const second = {
+      ...first, intake_revision: 1,
+      question: { question_code: 'brief.scope', question_revision: 1, prompt_key: 'grill.question.scope', required: true },
+      answers: [{ question_code: 'brief.problem', disposition: 'answered' }],
+    }
+    const ready = {
+      ...second, intake_revision: 2, question: null,
+      answers: [...second.answers, { question_code: 'brief.scope', disposition: 'unknown' }],
+      ready_to_confirm: true,
+    }
+    const answerProjectGrill = vi.fn().mockResolvedValueOnce(second).mockResolvedValueOnce(ready)
+    const client = {
+      getProjectBySession: vi.fn().mockResolvedValue({ project_id: 'rsp_1' }),
+      projectProjection: vi.fn().mockResolvedValue(collecting),
+      projectGrill: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(first).mockResolvedValueOnce(second),
+      answerProjectGrill,
+    } as unknown as ResearchClient
+    const askGrillQuestion = vi.fn()
+      .mockResolvedValueOnce({ disposition: 'answered', value: 'Robust low-resource OCR' })
+      .mockResolvedValueOnce({ disposition: 'unknown' })
+
+    const reply = await runNativeScholarTurn({
+      text: '继续研究', sessionId: 'session_a', client, operatorPrincipal: 'dsh:operator', askGrillQuestion,
+      cache: { get: async () => undefined, set: async () => undefined },
+    })
+
+    expect(askGrillQuestion).toHaveBeenCalledTimes(2)
+    expect(askGrillQuestion).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      id: 'brief.problem', header: '完善研究 Brief · 1/7', question: '你想解决的核心研究问题是什么？',
+    }))
+    expect(answerProjectGrill).toHaveBeenNthCalledWith(1, 'rsp_1', {
+      question_code: 'brief.problem', question_revision: 1, disposition: 'answered', value: 'Robust low-resource OCR',
+    }, 'dsh:operator')
+    expect(answerProjectGrill).toHaveBeenNthCalledWith(2, 'rsp_1', {
+      question_code: 'brief.scope', question_revision: 1, disposition: 'unknown',
+    }, 'dsh:operator')
+    expect(reply).toMatchObject({ execution: { status: 'needs_human', operation: 'brief_collect' } })
+    expect(reply.assistant_text).toContain('PI 确认 Brief')
+  })
+
+  it('reuses the exact live DSH agent in the native user-question composer', async () => {
+    const collecting = projection('DRAFT', action({
+      code: 'intake_resume', label: 'Resume intake', reason: 'brief required', route: 'chat', required_by: 'human',
+    }))
+    collecting.project.brief_status = 'collecting'
+    const question = {
+      project_id: 'rsp_1', project_revision: 0, intake_id: 'int_1', intake_revision: 0,
+      question: { question_code: 'brief.problem', question_revision: 1, prompt_key: 'grill.question.problem', required: true },
+      answers: [], brief_preview: {}, ready_to_confirm: false,
+    }
+    const ready = { ...question, question: null, answers: [{ question_code: 'brief.problem', disposition: 'answered' }], ready_to_confirm: true }
+    const client = {
+      getProjectBySession: vi.fn().mockResolvedValue({ project_id: 'rsp_1' }),
+      projectProjection: vi.fn().mockResolvedValue(collecting),
+      projectGrill: vi.fn().mockResolvedValue(question),
+      answerProjectGrill: vi.fn().mockResolvedValue(ready),
+    } as unknown as ResearchClient
+    const ask = vi.fn().mockResolvedValue({ answers: [{ id: 'brief.problem', selected: [], custom: 'OCR robustness' }] })
+    const registered: Array<{ name: string; execute?: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+    registerResearchTools({ tools: { register: tool => registered.push(tool as never) } }, {
+      client,
+      cache: { get: async () => undefined, set: async () => undefined },
+      ctx: { userQuestions: { ask } },
+      roles: { set() {}, delete() {} }, projectScopes: new Map(), modelFor: () => undefined,
+      operatorPrincipal: 'dsh:operator',
+    } as unknown as ResearchToolContext)
+    const liveAgent = { id: 'session_a' }
+    const tool = registered.find(candidate => candidate.name === 'dsh_scholar')
+
+    await tool?.execute?.({ text: '继续研究' }, { agent: liveAgent, signal: new AbortController().signal })
+
+    expect(ask).toHaveBeenCalledWith(expect.objectContaining({
+      agent: liveAgent,
+      questions: [expect.objectContaining({
+        id: 'brief.problem', question: '你想解决的核心研究问题是什么？',
+        options: [expect.objectContaining({ label: '暂时未知' })],
+      })],
+    }))
+    expect(client.answerProjectGrill).toHaveBeenCalledWith('rsp_1', expect.objectContaining({
+      disposition: 'answered', value: 'OCR robustness',
+    }), 'dsh:operator')
   })
 
   it('asks for a name without mutating when an unlinked DSH session has no explicit project name', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { runsEmptyStateModel, runsFilterDefinitions } from '../../packages/dsh-research-ui/src/client/runs-model'
 import {
   RenderCoordinator,
+  eventComesFromEditable,
   focusCandidateScore,
   shouldDeferBackgroundRefresh,
 } from '../../packages/dsh-research-ui/src/client/focus-preservation'
@@ -37,6 +38,20 @@ describe('survey-complete Runs guidance', () => {
 })
 
 describe('focus-safe refresh coordination', () => {
+  it('recognizes an editor from the composed path when Shadow DOM retargets the event', () => {
+    const textarea = { tagName: 'TEXTAREA', isContentEditable: false }
+    const shadowHost = { tagName: 'DSH-SCHOLAR-UI', isContentEditable: false }
+
+    expect(eventComesFromEditable({
+      target: shadowHost as unknown as EventTarget,
+      composedPath: () => [textarea, shadowHost] as unknown as EventTarget[],
+    })).toBe(true)
+    expect(eventComesFromEditable({
+      target: shadowHost as unknown as EventTarget,
+      composedPath: () => [shadowHost] as unknown as EventTarget[],
+    })).toBe(false)
+  })
+
   it('defers and coalesces background refreshes while an editor is focused', async () => {
     let focused = true
     const render = vi.fn(async () => {})

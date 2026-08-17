@@ -53,6 +53,7 @@ import xtermCss from '@xterm/xterm/css/xterm.css?inline'
 import {
   RenderCoordinator,
   captureFocus,
+  eventComesFromEditable,
   restoreFocus,
   shouldDeferBackgroundRefresh,
 } from './focus-preservation'
@@ -477,6 +478,9 @@ export function apply(options: ApplyOptions = {}): void {
 .chat-message.assistant { align-self:center; width:min(840px,100%); padding:0; border:0; border-radius:0; background:transparent; color:var(--text); }
 .chat-message.error { align-self:center; width:min(840px,100%); padding:8px 12px; border:0; border-radius:8px; background:var(--tone-red-bg); color:var(--tone-red); }
 .chat-message.selected { outline:2px solid var(--accent); outline-offset:4px; }
+.chat-grill-turn-host { align-self:center; width:min(840px,100%); }
+.chat-grill-turn-host:empty { display:none; }
+.chat-grill-turn { width:100%; padding:14px 16px; border:1px solid var(--accent); border-radius:14px; background:var(--accent-soft); color:var(--text); }
 .chat-running { align-self:center; width:min(840px,100%); display:flex; align-items:center; gap:8px; color:var(--text-2); font:400 14px/22px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
 .chat-dock { flex:none; position:relative; z-index:4; width:100%; padding:8px 24px 12px; border-top:1px solid var(--border-2); background:var(--bg); }
 .chat-dock[hidden] { display:none; }
@@ -499,7 +503,7 @@ export function apply(options: ApplyOptions = {}): void {
 @media (max-width: 1024px) {
   .header-secondary,.mode-badge { display:none; }
   .sidebar { width:240px; }
-  .chat-message.assistant,.chat-message.error { width:min(712px,100%); }
+  .chat-message.assistant,.chat-message.error,.chat-grill-turn-host { width:min(712px,100%); }
   .chat-composer-row { max-width:712px; }
 }
 @media (max-width: 720px) {
@@ -555,6 +559,32 @@ export function apply(options: ApplyOptions = {}): void {
 .settings-chip { font:400 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--text-3); background:var(--bg-hover); border:1px solid var(--border-2); border-radius:6px; padding:0 6px; }
 .settings-field-desc { color:var(--text-3); font-size:10.5px; line-height:1.5; }
 .settings-readonly-note { display:flex; align-items:center; gap:10px; justify-content:space-between; border:1px dashed var(--border-2); border-radius:10px; padding:8px 12px; margin:8px 0; color:var(--text-2); font-size:11px; }
+/* OCR-UI-01: grouped, responsive MinerU configuration; never reuse the
+   single-row settings layout for a multi-field form. */
+.settings-ocr-form { display:flex; flex-direction:column; gap:12px; min-width:0; padding:10px 0 2px; }
+.settings-ocr-status { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; min-width:0; }
+.settings-ocr-copy { min-width:0; }
+.settings-ocr-copy .settings-row-label { width:auto; margin-bottom:2px; color:var(--text); font-weight:600; }
+.settings-ocr-group { display:flex; flex-direction:column; gap:10px; min-width:0; margin:0; padding:12px; border:1px solid var(--border-2); border-radius:12px; background:var(--bg-2); }
+.settings-ocr-group-title { margin:0; color:var(--text); font:600 12px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.settings-ocr-grid,.settings-ocr-secret-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 12px; min-width:0; }
+.settings-ocr-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.settings-ocr-field-label { color:var(--text-2); font-size:11.5px; }
+.settings-ocr-field .field-input { width:100%; min-width:0; box-sizing:border-box; }
+.settings-ocr-field .muted { font-size:10.5px; line-height:1.5; }
+.settings-ocr-toggle { display:flex; align-items:center; gap:8px; width:max-content; max-width:100%; color:var(--text); font-size:11.5px; }
+.settings-ocr-secret-grid { padding-top:2px; }
+.settings-ocr-secret-grid[hidden] { display:none; }
+.settings-ocr-help { color:var(--text-3); font-size:10.5px; line-height:1.5; }
+.settings-ocr-footer { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.settings-ocr-footer .settings-readonly-note { align-self:stretch; margin:0; }
+.settings-ocr-save { min-width:132px; }
+@media (max-width:720px) {
+  .settings-ocr-grid,.settings-ocr-secret-grid { grid-template-columns:minmax(0,1fr); }
+  .settings-ocr-status { flex-direction:column; }
+  .settings-ocr-footer { align-items:stretch; }
+  .settings-ocr-save { width:100%; }
+}
 `
   root.appendChild(style)
 
@@ -1411,8 +1441,7 @@ export function apply(options: ApplyOptions = {}): void {
   // not typing in an input/textarea); Cmd/Ctrl+Shift+T toggles the theme;
   // a bare "/" (not typing) focuses the chat composer.
   const onKey = (event: KeyboardEvent): void => {
-    const target = event.target as HTMLElement | null
-    const typing = target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    const typing = eventComesFromEditable(event)
     const chatVisible = state.activeTab === 'chat' || dockLayout.openPanel === 'chat'
     if (event.metaKey || event.ctrlKey) {
       if (event.key.toLowerCase() === 'k' && !typing) {
@@ -1489,7 +1518,10 @@ export function apply(options: ApplyOptions = {}): void {
       // Focus the composer once the chat tab has rendered.
       setTimeout(() => {
         const ta = root.querySelector('.chat-composer-input') as HTMLTextAreaElement | null
-        ta?.focus()
+        if (ta !== null) {
+          ta.focus()
+          ta.setSelectionRange(ta.value.length, ta.value.length)
+        }
       }, 120)
     }
     // dsh-web behavior: Escape closes any open modal/overlay, the message

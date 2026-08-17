@@ -189,11 +189,9 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
     if (providers === null) {
       setError(t('shell', 'shell.settings.ocr.loadFailed'))
     } else {
-      const form = el('div', 'settings-row settings-row-stack')
-      form.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);gap:8px'
-      const status = el('div', 'row')
-      status.style.cssText = 'justify-content:space-between;width:100%'
-      const providerIdentity = el('div')
+      const form = el('div', 'settings-ocr-form')
+      const status = el('div', 'settings-ocr-status')
+      const providerIdentity = el('div', 'settings-ocr-copy')
       providerIdentity.append(
         el('div', 'settings-row-label', t('shell', 'shell.settings.ocr.provider')),
         el('div', 'muted', t('shell', 'shell.settings.ocr.providerHint')),
@@ -214,14 +212,12 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       const enabled = document.createElement('input')
       enabled.type = 'checkbox'
       enabled.checked = initial.enabled
-      const enabledWrap = el('label', 'row')
-      enabledWrap.style.cssText = 'gap:8px'
+      const enabledWrap = el('label', 'settings-ocr-toggle')
       enabledWrap.append(enabled, document.createTextNode(t('shell', 'shell.settings.ocr.enabled')))
 
       const field = (labelKey: string, control: HTMLElement, hintKey?: string): HTMLElement => {
-        const wrapper = el('label')
-        wrapper.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0'
-        wrapper.append(el('span', 'settings-row-label', t('shell', labelKey)), control)
+        const wrapper = el('label', 'settings-ocr-field')
+        wrapper.append(el('span', 'settings-ocr-field-label', t('shell', labelKey)), control)
         if (hintKey !== undefined) wrapper.appendChild(el('span', 'muted', t('shell', hintKey)))
         return wrapper
       }
@@ -230,7 +226,6 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         input.className = 'field-input mono'
         input.value = value
         input.placeholder = placeholder
-        input.style.cssText = 'width:100%;box-sizing:border-box'
         return input
       }
       const baseUrl = textInput(initial.baseUrl)
@@ -250,12 +245,10 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       const useCredential = document.createElement('input')
       useCredential.type = 'checkbox'
       useCredential.checked = initial.useCredential
-      const credentialToggle = el('label', 'row')
-      credentialToggle.style.cssText = 'gap:8px'
+      const credentialToggle = el('label', 'settings-ocr-toggle')
       credentialToggle.append(useCredential, document.createTextNode(t('shell', 'shell.settings.ocr.credentialToggle')))
 
-      const credentialFields = el('div')
-      credentialFields.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:8px;border:1px solid var(--border);border-radius:var(--radius-sm)'
+      const credentialFields = el('div', 'settings-ocr-secret-grid')
       const scheme = document.createElement('select')
       scheme.className = 'field-input mono'
       for (const value of ['file', 'keyring', 'vault'] as const) {
@@ -274,7 +267,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         field('shell.settings.targets.ref.version', credentialVersion),
         field('shell.settings.targets.ref.scope', credentialScope),
       )
-      const refreshCredential = (): void => { credentialFields.style.display = useCredential.checked ? 'grid' : 'none' }
+      const refreshCredential = (): void => { credentialFields.hidden = !useCredential.checked }
       useCredential.onchange = refreshCredential
       model.onchange = () => {
         if (model.value !== 'flash') useCredential.checked = true
@@ -288,7 +281,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
           ? 'shell.settings.ocr.credentialAvailable'
           : 'shell.settings.ocr.credentialUnavailable'))
 
-      const save = el('button', 'hbtn', t('shell', 'shell.settings.ocr.save')) as HTMLButtonElement
+      const save = el('button', 'btn primary settings-ocr-save', t('shell', 'shell.settings.ocr.save')) as HTMLButtonElement
       if (activeProjectLoadFailed || modelBindingLoadFailed) {
         save.disabled = true
         setError(t('shell', 'shell.settings.ocr.bindingLoadFailed'))
@@ -357,23 +350,36 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
           save.disabled = false
         }
       }
-      form.append(
-        status,
-        providerName,
-        enabledWrap,
-        field('shell.settings.ocr.baseUrl', baseUrl, 'shell.settings.ocr.baseUrlHint'),
-        field('shell.settings.ocr.model', model, 'shell.settings.ocr.modelHint'),
-      )
-      if (activeProject === null && !activeProjectLoadFailed) {
-        form.appendChild(el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.noProject')))
+      const group = (titleKey: string): HTMLElement => {
+        const section = el('section', 'settings-ocr-group')
+        section.appendChild(el('h3', 'settings-ocr-group-title', t('shell', titleKey)))
+        return section
       }
-      form.append(credentialToggle, credentialFields)
-      if (credentialState !== null) form.appendChild(credentialState)
-      form.append(
-        el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.credentialHint')),
+      const providerGroup = group('shell.settings.ocr.providerGroup')
+      const providerGrid = el('div', 'settings-ocr-grid')
+      providerGrid.append(
+        field('shell.settings.ocr.provider', providerName),
+        field('shell.settings.ocr.baseUrl', baseUrl, 'shell.settings.ocr.baseUrlHint'),
+      )
+      providerGroup.append(enabledWrap, providerGrid)
+
+      const projectGroup = group('shell.settings.ocr.projectGroup')
+      projectGroup.appendChild(field('shell.settings.ocr.model', model, 'shell.settings.ocr.modelHint'))
+      if (activeProject === null && !activeProjectLoadFailed) {
+        projectGroup.appendChild(el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.noProject')))
+      }
+
+      const credentialGroup = group('shell.settings.ocr.credentialGroup')
+      credentialGroup.append(credentialToggle, credentialFields)
+      if (credentialState !== null) credentialGroup.appendChild(credentialState)
+      credentialGroup.appendChild(el('div', 'settings-ocr-help', t('shell', 'shell.settings.ocr.credentialHint')))
+
+      const footer = el('div', 'settings-ocr-footer')
+      footer.append(
         el('div', 'settings-readonly-note', t('shell', 'shell.settings.ocr.executionPending')),
         save,
       )
+      form.append(status, providerGroup, projectGroup, credentialGroup, footer)
       body.appendChild(form)
     }
     modal.appendChild(acc)
