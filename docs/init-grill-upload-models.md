@@ -21,7 +21,7 @@
 
 “自由对话”不改变 Grill 的确定性：存在 current Grill question 时，普通文本只作为该题一个 Human answer 提交；用户要讨论而不回答时必须显式选择跳过/未知或切换会话。Brief confirmed 后，普通文本才进入 natural turn/intent router。模型可以改写问题或解释材料，但不能把聊天推断自动写成 Human answer、确认 Brief 或创建 Scope Gate。
 
-Chat composer 支持附件按钮、拖拽和粘贴。附件进入同一 active Intake 的批量分块队列，消息只保存 attachment/stage ref；scan/OCR 与 Human 确认前不写 Project Artifact。命令直接使用 `/new`、`/confirm-brief`、`/reproduce` 等一级 slash command；DSH 与 standalone 都不注册、不解析或兼容旧聚合 descriptor/prefix。
+Chat composer 必须持续显示带文字的“上传文件”按钮以及选择/拖放/粘贴提示，不能把入口隐藏为难以识别的单独图标。附件进入同一 active Intake 的批量分块队列；若当前项目没有 active Intake，composer 先为该项目创建一个隔离 Intake 再上传，不要求用户离开对话页。上传队列显示在 composer 内部，消息只保存 attachment/stage ref；scan/OCR 与 Human 确认前不写 Project Artifact。命令直接使用 `/new`、`/confirm-brief`、`/reproduce` 等一级 slash command；DSH 与 standalone 都不注册、不解析或兼容旧聚合 descriptor/prefix。
 
 首版问题顺序固定且可版本化：
 

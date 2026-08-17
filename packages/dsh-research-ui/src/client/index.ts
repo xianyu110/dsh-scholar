@@ -487,6 +487,8 @@ export function apply(options: ApplyOptions = {}): void {
 .chat-composer-input::placeholder { color:var(--text-3); }
 .chat-composer-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .chat-composer-tools { display:flex; align-items:center; gap:4px; min-width:0; }
+.chat-attach-button { flex:none; padding:4px 10px; border-color:var(--accent); color:var(--accent); font-size:11px; font-weight:600; }
+.chat-attach-hint { overflow:hidden; color:var(--text-3); font-size:10px; white-space:nowrap; text-overflow:ellipsis; }
 .chat-send { flex:none; display:grid; place-items:center; width:34px; height:34px; padding:0; border:0; border-radius:999px; background:var(--accent); color:#fff; font:600 18px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; cursor:pointer; }
 .chat-send:hover { filter:brightness(1.08); }
 .chat-send:disabled { opacity:.4; cursor:default; }

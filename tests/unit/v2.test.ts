@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ResearchKernel } from '@dsh-scholar/research-kernel'
+import { ResearchKernel, dshOperatorPrincipal } from '@dsh-scholar/research-kernel'
 import { ResearchClient } from '@dsh-scholar/research-client'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
 import { runNativeScholarTurn } from '../../src/plugin/native-chat.js'
@@ -45,6 +45,23 @@ async function withServer(kernel: ResearchKernel, fn: (base: string) => Promise<
 }
 
 describe('v2 project adapter', () => {
+  it('uses one credential-derived operator principal across DSH sessions', () => {
+    const kernel = freshKernel({ dshPluginToken: 'stable-dsh-secret' })
+    const first = kernel.createProjectForDshSession({
+      name: 'First session project', session_id: 'session_first',
+      idempotency_key: 'first', request_hash: 'first-hash',
+    })
+    const second = kernel.createProjectForDshSession({
+      name: 'Second session project', session_id: 'session_second',
+      idempotency_key: 'second', request_hash: 'second-hash',
+    })
+    const expected = dshOperatorPrincipal('stable-dsh-secret')
+    expect(first.membership).toContainEqual(expect.objectContaining({ principal_id: expected, role: 'pi' }))
+    expect(second.membership).toContainEqual(expect.objectContaining({ principal_id: expected, role: 'pi' }))
+    expect(expected).toMatch(/^dsh:[a-f0-9]{32}$/)
+    kernel.close()
+  })
+
   it('service-creates a name-only project and atomically links the exact DSH session', async () => {
     const kernel = freshKernel({ serviceToken: 'service-secret', dshPluginToken: 'dsh-secret' })
     await withServer(kernel, async (base) => {

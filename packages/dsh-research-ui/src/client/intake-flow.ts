@@ -27,6 +27,16 @@ export const INTAKE_ACTIVE_STATUSES = [
   'proposal_ready', 'awaiting_human',
 ] as const
 
+/** Resolve the one resumable Intake from a project list response. */
+export function activeIntakeId(
+  rows: Array<{ intake_id?: string; status?: string }> | null | undefined,
+): string | null {
+  const active = rows?.find(row => typeof row.intake_id === 'string'
+    && row.intake_id !== ''
+    && (INTAKE_ACTIVE_STATUSES as readonly string[]).includes(row.status ?? ''))
+  return active?.intake_id ?? null
+}
+
 /** Terminal statuses: the session can no longer continue. */
 export const INTAKE_TERMINAL_STATUSES = ['rejected', 'expired', 'failed'] as const
 

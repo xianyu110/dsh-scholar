@@ -99,7 +99,7 @@
 以下场景开发期不接真实环境，统一标记 `NOT_RUN_MANUAL_PENDING`（代码侧实现与自动证据见 hardening §3 INIT-GRILL-02 / CHUNK-01 / MODEL-01 行与 acceptance-tests.md §22/§23 标注，2026-08-12）：
 
 1. `MANUAL-INIT-GRILL-I18N`：zh/en 浏览器仅输入 project name 创建；逐题 answer/edit/skip/unknown；中途刷新/换浏览器恢复；确认前零 Gate，PI confirm 后唯一 Gate；语言切换不丢输入，所有下一步/aria 正确。
-2. `MANUAL-UPLOAD-2G`：至少 50 个混合材料与一个跨 8 MiB 边界文件；暂停、断网、刷新、重放同 chunk、gap/错误 hash；完成后 hash/页数一致；在可控环境分别验证 2 GiB 默认拒绝和配置到 10 GiB 的边界，保留服务端/浏览器报告但不上传材料内容。队列每文件独立显示 hashing/queued/uploading/paused/scanning/needs-input/ready/quarantined/failed，队列级显示总配额/进度/失败数与下一步；Chat 附件（按钮/拖拽/粘贴）进入同一 active Intake 队列且消息只保存 attachment/stage ref（浏览器观感与真实断网重连属本项）。
+2. `MANUAL-UPLOAD-2G`：至少 50 个混合材料与一个跨 8 MiB 边界文件；暂停、断网、刷新、重放同 chunk、gap/错误 hash；完成后 hash/页数一致；在可控环境分别验证 2 GiB 默认拒绝和配置到 10 GiB 的边界，保留服务端/浏览器报告但不上传材料内容。Chat composer 在主区、右 Dock、底 Dock 都必须持续显示“上传文件”文字按钮与选择/拖放/粘贴提示，队列位于输入框内部；项目有 active Intake 时复用，没有时首次选文件自动创建隔离 Intake 且不离开 Chat。队列每文件独立显示 hashing/queued/uploading/paused/scanning/needs-input/ready/quarantined/failed，队列级显示总配额/进度/失败数与下一步；消息只保存 attachment/stage ref（浏览器观感与真实断网重连属本项）。
 3. `MANUAL-EXECUTION-ENVIRONMENTS`：在 Settings 分别创建本机进程、本机 Docker、远程 SSH Target/Profile；验证 revision CAS、zh/en、secret 零回显和 safe health。trusted smoke 可选本机进程，formal 对本机进程必须拒绝；本机 Docker 验证 digest/non-root/read-only/network/resource；远程主机验证 host-key/SecretRef、容器同构、CAS/日志/Artifact、断网恢复。停机、错误 host key、撤权、能力不匹配时任务 blocked/retryable 且本机零执行；显式新 attempt 更换 target 后记录新 pin。保留脱敏 target revision/hash、RunManifest、日志和截图，不保存 credential。
 3. `MANUAL-PROVIDER-SECRET`：接私有测试 Provider，创建/编辑/禁用与 restart；确认 SecretRef 明文不出浏览器、argv、日志、Trajectory/Bundle；验证非法 URL/redirect/DNS/proxy；项目选择只提交 ID，运行固定 revision/hash。
 4. `MANUAL-OCR-PROVENANCE`：多页 PDF、扫描图片、中英混合、低置信度与 Provider 失败；无显式模型时不发请求、不回退；结果逐项显示 source/page/confidence，Grill 确认前不进入 Brief/Gate/Evidence。
@@ -152,6 +152,7 @@
 
 ## 10. DSH Scholar 会话入口与 Token 复制人工队列
 
+1. `MANUAL-SHARED-KERNEL-PROJECT-PARITY`：启动 DSH Web 与 standalone，确认进程表只有一个 Research Kernel，endpoint identity 的 dataDir 为 `~/.dsh/research-kernel`，standalone BFF 目录中没有运行中的 `kernel.db`。在两个不同 DSH session 分别创建项目，在 DSH 页签 iframe 与独立 `18610` 页面刷新；两处侧栏的 project id/name/status/revision 集合必须完全一致，`cnn测试` 必须可见。任选一处重命名、归档并恢复，另一处下一轮刷新看到相同状态；Network 不得访问 17413 或旧 standalone Kernel。
 1. `MANUAL-DSH-SCHOLAR-VIEW`：启动本机 standalone 与 DSH Web，确认会话顶部顺序为 Chat、Trajectory、dsh Scholar；打开页签后出现同一 standalone 解锁/工作台页面，不创建 `/research-api` 或 `/research-ui-api` 请求。切换三页签后 Chat 草稿、焦点与 Trajectory 状态不丢。
 2. 在 Plugin config 把 URL 改为允许的 loopback 地址，重启 DSH 后 iframe、显式“在新页面打开”和 `Alt+Shift+S` 必须同时指向新地址；新窗口必须无 opener/referrer。聚焦 Chat composer、Settings input、Workspace/TeX editor 与 Terminal 时按快捷键不得触发；IME composition、长按重复和插件 dispose 后也不得触发。
 3. `MANUAL-DSH-CONFIG-COPY-STANDALONE-TOKEN`：打开配置卡但不点击复制，检查 DOM/aria/Network/Settings snapshot/URL/localStorage/sessionStorage/日志均无 Token；用鼠标和键盘分别显式触发复制，Clipboard 内容应精确通过 standalone `/api/token-check`，页面只显示“已复制”而不显示值。
@@ -159,6 +160,7 @@
 5. 切换 zh/en、light/dark 和窄屏，核对页签、iframe title、按钮、快捷键说明、复制成功/失败状态即时更新且键盘可达。记录截图和脱敏 Network/Host 日志，状态为 `NOT_RUN_MANUAL_PENDING` 直到真实浏览器完成。
 6. `MANUAL-DSH-SCHOLAR-IFRAME-FAILURE`：先配置不可达 URL、未信任证书或不允许当前 DSH origin 的 CSP，打开页签等待最多 8 秒；必须出现本地化结构化失败态、重试与“在新页面打开”，非默认地址还显示恢复本机默认，页面不得残留占满主区的灰色 iframe。确认失败发生时旧 Host Chat RPC 被 abort，迟到响应不回写。随后安装/信任正确 CA 或修正 `standalone.frame_ancestors`，在不改变 URL 的情况下点击重试，确认创建新 iframe，并重新绑定 exact source/origin ready 与 Chat listener 后才展示工作台；再更改 URL/恢复默认值，确认旧失败状态不粘滞。对 HTTPS DSH→同主机不同端口 Scholar 再发一轮普通 Chat，确认 Host bridge 可用；父页导航后不得继续投递，跨主机 HTTPS、远端 HTTP、错误 protocol/source/origin 与伪造 postMessage 必须拒绝。提交错误 Token 时结构化 `unauthorized` 只显示本地化 `Invalid token`，不得出现 `[object Object]`。
 7. `MANUAL-STANDALONE-CSP-STYLE`：在 8443 解锁工作台，Network 确认 HTML/client.js/API 均 200；DevTools 检查 ShadowRoot 主 `<style>` 带当前响应 nonce、`sheet.cssRules.length > 0`、`.panel` computed display 为 flex，控制台没有 `style-src` violation。刷新两次并确认 nonce 每次变化且布局仍正常；DSH 嵌入与独立新页面各执行一次。
+8. `MANUAL-DSH-NEW-NAME-ONLY`：在全新空 DSH session 直接输入 `/new cnn测试`，不提供 `brief-json`；确认命令成功且 Kernel 只有一个同名 `DRAFT/collecting` Project、一个 active Init Intake、当前 session link 和零 Scope Gate。打开 `dsh Scholar` 页签，在可见态最多等待 4 秒，顶部 Host-owned session projection 必须显示相同 project id/name/status/brief status 与 `intake_resume`；下方 standalone 必须通过共享 Kernel 在下一轮刷新显示同一 project id/name/status/brief status，缺失即失败。再用 `/new 名称 含空格` 验证完整名称保留，并用仅 `/new` 验证只有真正缺名才返回用法错误。
 
 ### 10.1 2026-08-15 本地开发 smoke（不替代人工验收）
 

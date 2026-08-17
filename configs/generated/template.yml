@@ -182,10 +182,13 @@ standalone:
   # Standalone BFF listen port.
   # sources: cli/env/file
   port: 18610
-  # Research Kernel sidecar port spawned by the BFF.
+  # Shared Research Kernel port used by both DSH and the standalone BFF.
   # sources: cli/env/file
-  kernel_port: 17413
-  # Data directory (token/session/endpoint files); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone.
+  kernel_port: 7412
+  # Authoritative shared Kernel data directory; empty = $DSH_HOME/research-kernel or ~/.dsh/research-kernel.
+  # sources: cli/env/file
+  kernel_data_dir: ''
+  # Standalone BFF state directory (browser token/session/model only); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone.
   # sources: cli/env/file
   data_dir: ''
   # Loopback bearer token; auto-generated and persisted 0600 when empty.

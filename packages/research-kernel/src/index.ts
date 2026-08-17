@@ -4,6 +4,7 @@
  */
 
 export { ResearchKernel, KernelError, validateUploadFileName, type KernelOptions, type IntegrityScanReport } from './kernel.js'
+export { dshOperatorPrincipal } from './dsh-principal.js'
 export { createStartupBackup, type StartupBackupResult } from './backup.js'
 export { nextActionProjection, legacyNextActionStrings, INTAKE_ACTIVE_STATUSES, type NextActionContext, type NextActionJob, type NextActionIntake, type NextActionReproduction, type NextActionRoute } from './next-action.js'
 export { REPRODUCTION_DDL, reproductionCanonicalJson, reproductionSha256 } from './reproduction.js'

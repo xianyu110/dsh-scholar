@@ -457,14 +457,21 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535,
-          "description": "Research Kernel sidecar port spawned by the BFF.",
-          "default": 17413,
+          "description": "Shared Research Kernel port used by both DSH and the standalone BFF.",
+          "default": 7412,
           "x-dsh-scope": "standalone",
           "x-dsh-env": "DSH_SCHOLAR_STANDALONE_KERNEL_PORT"
         },
+        "kernel_data_dir": {
+          "type": "string",
+          "description": "Authoritative shared Kernel data directory; empty = $DSH_HOME/research-kernel or ~/.dsh/research-kernel.",
+          "default": "",
+          "x-dsh-scope": "standalone",
+          "x-dsh-env": "DSH_SCHOLAR_KERNEL_DATA"
+        },
         "data_dir": {
           "type": "string",
-          "description": "Data directory (token/session/endpoint files); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone.",
+          "description": "Standalone BFF state directory (browser token/session/model only); empty = $DSH_HOME/research-ui-standalone or ~/.dsh-scholar-standalone/research-ui-standalone.",
           "default": "",
           "x-dsh-scope": "standalone",
           "x-dsh-env": "DSH_SCHOLAR_STANDALONE_DATA"

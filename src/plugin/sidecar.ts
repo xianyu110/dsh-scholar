@@ -22,6 +22,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { chmodSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
+import { dshOperatorPrincipal } from '@dsh-scholar/research-kernel'
 
 export interface KernelSidecarOptions {
   host?: string
@@ -239,6 +240,11 @@ export class KernelSidecar {
     if (token === '') throw new Error(`DSH plugin token file must not be empty: ${file}`)
     this.dshPluginTokenValue = token
     return token
+  }
+
+  /** Stable local Human Principal shared with the standalone BFF. */
+  get operatorPrincipal(): string {
+    return dshOperatorPrincipal(this.dshPluginToken)
   }
 
   /**

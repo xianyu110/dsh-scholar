@@ -56,6 +56,8 @@ export interface ResearchToolContext {
   stageSubagents: StageSubagentCoordinator
   /** Project governance mode inherited when a create call omits `mode`. */
   defaultMode?: 'gate-only' | 'full-auto'
+  /** Stable local Human Principal shared with the Scholar BFF. */
+  operatorPrincipal: string
 }
 
 interface ResearchToolDef {
@@ -351,6 +353,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
               ? { execution: { fixture_id: args.fixture_id } }
               : {}),
             session_id: sessionId ?? null,
+            creator_principal_id: toolCtx.operatorPrincipal,
           })
           // §9: deterministic domain/venue -> skill pack selection from the Brief.
           const selection = selectSkillPacks(project.brief)

@@ -14,11 +14,14 @@ import type { ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 import { selectedSkillNames } from './skills.js'
 import { paperRefFromToken } from '@dsh-scholar/research-schemas'
+import { projectCreateIdempotencyKey } from './native-chat.js'
 
 export interface CommandContext {
   client: ResearchClient
   cache: ConnectorCache
   unattended: boolean
+  /** Stable local Human Principal shared with the Scholar BFF. */
+  operatorPrincipal: string
   /** Project governance mode inherited by /new unless its JSON overrides mode. */
   defaultMode?: 'gate-only' | 'full-auto'
 }
@@ -28,7 +31,7 @@ export interface CommandContext {
  * name {...}`) or absent. Non-JSON words stay in `positional`. */
 function jsonArg(rest: string): { json: string; positional: string } {
   const match = /^([^{]*)(\{.*\})\s*(.*)$/s.exec(rest)
-  if (match === null) return { json: '', positional: rest }
+  if (match === null) return { json: '', positional: rest.trim() }
   return { json: match[2] ?? '', positional: `${match[1] ?? ''}${match[3] ?? ''}`.trim() }
 }
 
@@ -52,7 +55,7 @@ function fmt(value: unknown): string {
  * subcommands (help|list|status|gates|jobs|claims are all implemented). */
 const RESEARCH_HELP = 'dsh Scholar — direct slash commands:\n'
   + '  /help                  this help text\n'
-  + '  /new <name> [json]     create project + Scope Gate\n'
+  + '  /new <name> [json]     create project; omitted JSON starts Grill Me\n'
   + '  /list                  list all research projects (kernel data)\n'
   + '  /status [project_id]   phase, gates, jobs, budget, next actions\n'
   + '  /gates [project_id]    pending/decided gates of the project\n'
@@ -101,9 +104,21 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
       switch (sub) {
           case 'new': {
             const { json, positional } = jsonArg(rest)
-            const name = positional.split(/\s+/)[0] ?? ''
+            const name = positional
             if (name === '') {
               return { kind: 'error' as const, text: '/new <name> [<brief-json>] — name is required' }
+            }
+            if (json === '') {
+              const created = await client.createProjectForDshSession({
+                session_id: sessionId,
+                name,
+                idempotency_key: projectCreateIdempotencyKey(sessionId, name),
+              })
+              return {
+                kind: 'success' as const,
+                text: `Research project created: **${created.project.project_id}** (${created.project.name})\n\n`
+                  + 'Status: DRAFT. The Research Brief is collecting; continue in dsh Scholar with Grill Me.',
+              }
             }
             const brief = briefFromJson(json)
             const requestedMode = brief?.mode === 'full-auto' || brief?.mode === 'gate-only'
@@ -129,6 +144,7 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
                 ? { execution: { fixture_id: String(brief.fixture_id) } }
                 : {}),
               session_id: sessionId,
+              creator_principal_id: commandCtx.operatorPrincipal,
             })
             const gate = await client.createGate({
               project_id: project.project_id,

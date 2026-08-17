@@ -92,7 +92,7 @@ function parseExplicitCreateCommand(text: string): { matched: boolean; name?: st
   return { matched: true, name: normalizeProjectName(unquoted) }
 }
 
-function projectCreateIdempotencyKey(sessionId: string, name: string): string {
+export function projectCreateIdempotencyKey(sessionId: string, name: string): string {
   const digest = createHash('sha256').update(`${sessionId}\u0000${name}`).digest('hex')
   return `dsh-create:${digest}`
 }

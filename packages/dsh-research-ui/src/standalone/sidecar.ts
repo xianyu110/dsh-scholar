@@ -20,6 +20,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { chmodSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
+import { dshOperatorPrincipal } from '@dsh-scholar/research-kernel'
 
 export interface UiKernelSidecarOptions {
   host?: string
@@ -61,6 +62,7 @@ const ENDPOINT_SCHEMA = 'v1'
 const DB_FILE_NAME = 'kernel.db'
 const SERVICE_TOKEN_FILE = 'service-token'
 const KERNEL_TOKEN_FILE = 'kernel-token'
+const DSH_PLUGIN_TOKEN_FILE = 'dsh-plugin-token'
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 function sleep(ms: number): Promise<void> {
@@ -77,6 +79,8 @@ export class UiKernelSidecar {
   private serviceTokenValue: string | undefined
   /** Cached value of <dataDir>/kernel-token (lazy, see ensureKernelToken). */
   private kernelTokenValue: string | undefined
+  /** Cached route credential used to derive the shared local operator. */
+  private dshPluginTokenValue: string | undefined
   private readonly require = createRequire(import.meta.url)
   readonly host: string
   /** Configured port; 0 means "ephemeral — resolve from runtime/endpoint.json". */
@@ -151,6 +155,40 @@ export class UiKernelSidecar {
    */
   get serviceToken(): string {
     return this.ensureServiceToken()
+  }
+
+  /** Route credential shared with the DSH plugin-managed Kernel. */
+  get dshPluginToken(): string {
+    if (this.dshPluginTokenValue !== undefined) return this.dshPluginTokenValue
+    const file = join(this.dataDir, DSH_PLUGIN_TOKEN_FILE)
+    let existing = false
+    try {
+      const stat = lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`DSH plugin token path must be a regular file: ${file}`)
+      existing = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    let token = existing ? readFileSync(file, 'utf8').trim() : ''
+    if (existing) chmodSync(file, 0o600)
+    if (token === '') {
+      mkdirSync(this.dataDir, { recursive: true })
+      token = randomBytes(16).toString('hex')
+      try {
+        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
+      } catch {
+        token = readFileSync(file, 'utf8').trim()
+      }
+      chmodSync(file, 0o600)
+    }
+    if (token === '') throw new Error(`DSH plugin token file must not be empty: ${file}`)
+    this.dshPluginTokenValue = token
+    return token
+  }
+
+  /** Human Principal used by both the DSH session adapter and Scholar BFF. */
+  get operatorPrincipal(): string {
+    return dshOperatorPrincipal(this.dshPluginToken)
   }
 
   private ensureServiceToken(): string {
@@ -411,6 +449,7 @@ export class UiKernelSidecar {
         ...process.env,
         DSH_SCHOLAR_KERNEL_TOKEN: this.kernelToken,
         DSH_SCHOLAR_SERVICE_TOKEN: this.serviceToken,
+        DSH_SCHOLAR_DSH_PLUGIN_TOKEN: this.dshPluginToken,
       },
     })
     this.child = child

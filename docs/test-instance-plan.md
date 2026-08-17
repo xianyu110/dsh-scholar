@@ -8,7 +8,7 @@
 |---|---|---:|---:|---|---|
 | 日常 DSH | 用户默认 | 3080 | 7412 | 禁止 | 非 Scholar 日常工作 |
 | Scholar Agent dev | ~/.dsh-scholar-agent-dev | 3081 | 17412 | 默认禁用 | DSH tools/commands/Skills，无 Scholar Web UI |
-| Scholar standalone | ~/.dsh-scholar-standalone | 18610 | 17413 | 不支持 | 独立 UI |
+| Scholar standalone BFF | ~/.dsh-scholar-standalone（仅 Token/session/UI） | 18610 | 复用 7412 / `~/.dsh/research-kernel` | 不支持 | 独立 UI，与 DSH 显示同一项目集 |
 | Scholar selfmod dev | 临时独立目录 | 自选 | 自选 | 显式启用 | Cordis 运行时调试 |
 | CI | mktemp workspace | 随机 | 随机/Unix | 仅专门 case | 自动验收 |
 | Remote Runner fixture | 独立临时 Agent data | 无 | CI Kernel | 禁止 | mTLS、CAS、partition/fencing/PTY |

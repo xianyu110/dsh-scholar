@@ -7,7 +7,7 @@ import { registerOverlayRebuild, t } from '../i18n/index'
 import { state } from '../state'
 import { el, pill, rootHost, showToast, trapFocus } from '../ui'
 import {
-  INTAKE_PHASE_OPTIONS, INTAKE_PHASE_KEYS, intakeAdoptPayload, intakeAnswersPayload,
+  INTAKE_PHASE_OPTIONS, INTAKE_PHASE_KEYS, activeIntakeId, intakeAdoptPayload, intakeAnswersPayload,
   intakeBeginPayload, intakeErrorText, intakeGuidance, intakeIdempotencyKey,
   intakeAnsweredCount, intakePhaseText, intakeQuestionState, intakeScanSummary,
   intakeStepModel, intakeUploadIssue, intakeVerdictText, intakeVerdictTone,
@@ -347,10 +347,9 @@ function renderBegin(ctx: WizardCtx): void {
 async function refreshBeginResume(ctx: WizardCtx): Promise<void> {
   if (ctx.selectedProjectId === '') return
   const list = await api<Array<{ intake_id?: string; status?: string }>>(`/v1/projects/${encodeURIComponent(ctx.selectedProjectId)}/intake`)
-  const active = (list ?? []).find(s => s.intake_id !== undefined
-    && ['draft', 'uploading', 'scanning', 'needs_input', 'grilling', 'proposal_ready', 'awaiting_human'].includes(String(s.status)))
-  if (active?.intake_id !== undefined) {
-    ctx.intakeId = active.intake_id
+  const intakeId = activeIntakeId(list)
+  if (intakeId !== null) {
+    ctx.intakeId = intakeId
     ctx.projectId = ctx.selectedProjectId
     await refresh(ctx)
   }

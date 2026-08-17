@@ -46,7 +46,7 @@ pnpm run build
 bash scripts/start-standalone-ui.sh
 ```
 
-The default page is <http://127.0.0.1:18610>, and the Research Kernel listens on `127.0.0.1:17413`. On first open, paste the access token from this `0600` file:
+The default page is <http://127.0.0.1:18610>. DSH and the standalone workspace share the Research Kernel at `127.0.0.1:7412` and the `~/.dsh/research-kernel` data directory, so both surfaces display and operate on the same project set. Browser authentication, session state, and display preferences remain in the separate BFF directory. On first open, paste the access token from this `0600` file:
 
 ```text
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
@@ -61,10 +61,10 @@ Use `--no-token` only in an isolated, supervised, loopback-only development envi
 You can manage projects and files without a Runner, but experiment Jobs will remain queued. To execute experiments in local Docker, open another terminal:
 
 ```bash
-export DSH_SCHOLAR_KERNEL_TOKEN="$(< ~/.dsh-scholar-standalone/research-ui-standalone/kernel-token)"
-export DSH_SCHOLAR_SERVICE_TOKEN="$(< ~/.dsh-scholar-standalone/research-ui-standalone/service-token)"
+export DSH_SCHOLAR_KERNEL_TOKEN="$(< ~/.dsh/research-kernel/kernel-token)"
+export DSH_SCHOLAR_SERVICE_TOKEN="$(< ~/.dsh/research-kernel/service-token)"
 node workers/runner-gateway/lib/bin/runner.js \
-  --kernel http://127.0.0.1:17413 \
+  --kernel http://127.0.0.1:7412 \
   --mode docker
 ```
 
