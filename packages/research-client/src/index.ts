@@ -306,6 +306,38 @@ export class ResearchClient {
     )
   }
 
+  /** Operator-owned projects offered by the DSH session binding panel. */
+  listProjectsForDshSession(sessionId: string, signal?: AbortSignal): Promise<ResearchProject[]> {
+    return this.request(
+      'GET',
+      `/internal/dsh-sessions/${encodeURIComponent(sessionId)}/project-options`,
+      undefined,
+      {
+        'x-service-principal': 'dsh-plugin',
+        ...this.dshPluginToken !== undefined ? { 'x-dsh-plugin-token': this.dshPluginToken } : {},
+      },
+      signal,
+    )
+  }
+
+  /** Exclusively bind an existing operator-owned project to one DSH session. */
+  linkProjectForDshSession(
+    sessionId: string,
+    projectId: string,
+    signal?: AbortSignal,
+  ): Promise<SessionLink> {
+    return this.request(
+      'POST',
+      `/internal/dsh-sessions/${encodeURIComponent(sessionId)}/project-link`,
+      { project_id: projectId },
+      {
+        'x-service-principal': 'dsh-plugin',
+        ...this.dshPluginToken !== undefined ? { 'x-dsh-plugin-token': this.dshPluginToken } : {},
+      },
+      signal,
+    )
+  }
+
   listProjects(): Promise<ResearchProject[]> {
     return this.request('GET', '/v1/projects')
   }

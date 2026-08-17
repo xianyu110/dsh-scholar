@@ -127,6 +127,10 @@ const createDshSessionProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
 }).strict()
 
+const linkDshSessionProjectSchema = z.object({
+  project_id: z.string().regex(/^rsp_[a-z0-9_]+$/),
+}).strict()
+
 const deleteProjectSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
   confirm_name: z.string(),
@@ -735,6 +739,30 @@ function serviceTokenEquals(provided: string, expected: string): boolean {
   return timingSafeEqual(a, b)
 }
 
+function requireDshPlugin(
+  req: IncomingMessage,
+  res: ServerResponse,
+  kernel: ResearchKernel,
+  action: string,
+): boolean {
+  if (kernel.serviceToken === undefined) {
+    send(res, 403, { error: errorEnvelope('service_token_required', `${action} requires a configured service token`) })
+    return false
+  }
+  const configured = kernel.dshPluginToken
+  const provided = req.headers['x-dsh-plugin-token']
+  if (configured === undefined || configured.trim() === '' || typeof provided !== 'string'
+    || provided.trim() === '' || !serviceTokenEquals(provided, configured)) {
+    send(res, 403, { error: errorEnvelope('dsh_plugin_token_required', `${action} requires the DSH plugin credential`) })
+    return false
+  }
+  if (req.headers['x-service-principal'] !== 'dsh-plugin') {
+    send(res, 403, { error: errorEnvelope('service_identity_required', `${action} requires x-service-principal: dsh-plugin`) })
+    return false
+  }
+  return true
+}
+
 /** OBS-01: loopback source addresses (IPv4, IPv6, IPv4-mapped IPv6). */
 export function isLoopbackAddress(address: string | undefined | null): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
@@ -1105,20 +1133,9 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   if (version === 'internal' && resource === 'dsh-sessions' && id !== undefined && sub === 'projects' && method === 'POST') {
     void readJson(req).then((body) => {
       try {
-        if (kernel.serviceToken === undefined) {
-          send(res, 403, { error: errorEnvelope('service_token_required', 'DSH project creation requires a configured service token') })
-          return
-        }
+        if (!requireDshPlugin(req, res, kernel, 'DSH project creation')) return
         const configuredDshPluginToken = kernel.dshPluginToken
-        const dshPluginToken = req.headers['x-dsh-plugin-token']
-        if (configuredDshPluginToken === undefined || configuredDshPluginToken.trim() === '' || typeof dshPluginToken !== 'string' || dshPluginToken.trim() === '' || !serviceTokenEquals(dshPluginToken, configuredDshPluginToken)) {
-          send(res, 403, { error: errorEnvelope('dsh_plugin_token_required', 'DSH project creation requires the DSH plugin credential') })
-          return
-        }
-        if (req.headers['x-service-principal'] !== 'dsh-plugin') {
-          send(res, 403, { error: errorEnvelope('service_identity_required', 'DSH project creation requires x-service-principal: dsh-plugin') })
-          return
-        }
+        if (configuredDshPluginToken === undefined) return
         if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(id)) {
           send(res, 422, { error: errorEnvelope('invalid_session_id', 'DSH session id is not a safe opaque id') })
           return
@@ -1147,6 +1164,31 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
           replay_only: replayHeader === '1',
         })
         send(res, 201, out)
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  if (version === 'internal' && resource === 'dsh-sessions' && id !== undefined && sub === 'project-options' && method === 'GET') {
+    try {
+      if (!requireDshPlugin(req, res, kernel, 'DSH project selection')) return
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(id)) {
+        send(res, 422, { error: errorEnvelope('invalid_session_id', 'DSH session id is not a safe opaque id') })
+        return
+      }
+      ok(res, kernel.listProjectsForDshOperator())
+    } catch (error) {
+      fail(res, error)
+    }
+    return
+  }
+  if (version === 'internal' && resource === 'dsh-sessions' && id !== undefined && sub === 'project-link' && method === 'POST') {
+    void readJson(req).then((body) => {
+      try {
+        if (!requireDshPlugin(req, res, kernel, 'DSH project binding')) return
+        const input = linkDshSessionProjectSchema.parse(body)
+        send(res, 201, kernel.linkProjectForDshSession({ session_id: id, project_id: input.project_id }))
       } catch (error) {
         fail(res, error)
       }

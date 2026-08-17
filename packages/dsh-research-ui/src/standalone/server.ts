@@ -672,18 +672,6 @@ const BOOTSTRAP_HTML = `<!doctype html>
     var input = document.getElementById('token-input');
     var err = document.getElementById('token-err');
     var form = document.getElementById('token-form');
-    var frameParentOrigin = null;
-    try { frameParentOrigin = document.referrer ? new URL(document.referrer).origin : null; } catch (e) {}
-    function notifyFrameReady() {
-      if (window.parent === window || frameParentOrigin === null) return;
-      window.parent.postMessage({ type: 'dsh-scholar/frame-ready', protocol: 1 }, frameParentOrigin);
-    }
-    window.addEventListener('message', function (e) {
-      if (e.source !== window.parent || e.origin !== frameParentOrigin) return;
-      if (!e.data || e.data.type !== 'dsh-scholar/frame-ready-query' || e.data.protocol !== 1) return;
-      notifyFrameReady();
-    });
-    notifyFrameReady();
     var saved = null;
     try { saved = localStorage.getItem(TOKEN_KEY); } catch (e) {}
     function unlock(token) {

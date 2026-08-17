@@ -76,11 +76,11 @@ if [ -n "$TOKEN_VALUE" ]; then
   mv -f "$TMP_TOKEN" "$SERVER_DATA_DIR/standalone-token"
 fi
 echo "starting standalone DSH Scholar: $WEB_URL (kernel :$KERNEL_PORT, kernel data: $KERNEL_DATA_DIR, BFF data: $SERVER_DATA_DIR)"
-# GOV-01: token mode requires the loopback operator principal (default ops-1,
-# override DSH_SCHOLAR_STANDALONE_PRINCIPAL); --no-token keeps loopback-dev
-# behavior without a principal.
-if ! [[ " ${PASSTHROUGH[*]} " == *" --no-token "* ]] && ! [[ " ${PASSTHROUGH[*]} " == *" --principal "* ]]; then
-  PASSTHROUGH+=(--principal "${DSH_SCHOLAR_STANDALONE_PRINCIPAL:-ops-1}")
+# GOV-01: without an explicit operator override, the standalone BFF derives
+# the same credential-bound principal as the DSH plugin from the shared
+# kernel data directory. This keeps both project lists identical.
+if [ -n "${DSH_SCHOLAR_STANDALONE_PRINCIPAL:-}" ] && ! [[ " ${PASSTHROUGH[*]} " == *" --principal "* ]]; then
+  PASSTHROUGH+=(--principal "$DSH_SCHOLAR_STANDALONE_PRINCIPAL")
 fi
 setsid nohup node "$BIN" \
   --host "$WEB_HOST" --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" \

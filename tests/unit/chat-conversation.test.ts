@@ -54,7 +54,7 @@ describe('project-scoped free conversation', () => {
     })
   })
 
-  it('uses the Host model with a bounded project projection and keeps slash suggestions editable', async () => {
+  it('uses an optional model adapter with a bounded project projection and keeps slash suggestions editable', async () => {
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const path = String(input)
       if (path.endsWith('/grill')) {
@@ -94,7 +94,7 @@ describe('project-scoped free conversation', () => {
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 
-  it('falls back to deterministic phase guidance when the Host model is unavailable', async () => {
+  it('falls back to deterministic phase guidance when the model adapter is unavailable', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => String(input).endsWith('/grill')
       ? json({
         project_revision: 2, intake_revision: 2, question: null,
@@ -112,7 +112,7 @@ describe('project-scoped free conversation', () => {
 
     const result = await executeChatTurn('我想讨论主指标的选择', 'prj_1', host)
 
-    expect(result.text).toMatch(/自由对话|free-form conversation/i)
+    expect(result.text).toMatch(/自由对话|discuss this freely/i)
     expect(result.text).toContain('survey_run')
     expect(result.text).not.toContain('provider detail')
     expect(result.suggestedCommand).toBeUndefined()

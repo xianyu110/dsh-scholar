@@ -11,7 +11,7 @@
 - Node.js 24、TypeScript 5.9、pnpm 11、ESM；
 - workspace：packages/*、workers/*、apps/*；
 - Zod 3、Vitest、node:sqlite、原生 fetch/http；
-- 完整科研浏览器 UI、BFF 与状态实现只有 standalone 一份，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；DSH client half 提供配置卡及会话 `dsh Scholar` 入口，入口只嵌入/启动同一 standalone URL，不复制业务实现；
+- 完整科研浏览器 UI、BFF 与状态实现只有 standalone 一份，可以使用 React 或原生 DOM，但必须满足同一接口、i18n 和测试；DSH client half 提供配置卡及 Host 原生会话 `dsh Scholar` session workspace，完整 standalone 只在新页面启动，不嵌入或复制业务实现；
 - Plugin config 可经 loopback-only、固定 `0600` 文件、零回显 seam 显式复制 standalone access token；Kernel、Runner、Provider、SSH 等其他 secret 永不可复制；
 - browser bundle 使用 tsdown 输出 classic-script handoff；根配置卡使用 `dsh.client`，禁止 legacy `dshClient` 字段；
 - 所有包 strict TypeScript，不使用 skipLibCheck 掩盖本项目错误。

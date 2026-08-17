@@ -1483,6 +1483,45 @@ export class ResearchKernel {
     return { ...out, link }
   }
 
+  /** Bind an existing operator-owned project to an unbound DSH session.
+   * The link is an authoritative fence: retries for the same pair are
+   * idempotent, while every attempted rebind fails with 409. */
+  linkProjectForDshSession(input: { session_id: string; project_id: string }): SessionLink {
+    if (this.dshPluginToken === undefined || this.dshPluginToken.trim() === '') {
+      throw new KernelError(403, 'dsh_plugin_token_required', 'DSH project binding requires the DSH plugin credential')
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(input.session_id)) {
+      throw new KernelError(422, 'invalid_session_id', 'DSH session id is not a safe opaque id')
+    }
+    return withTransaction(this.db, () => {
+      const project = this.getProject(input.project_id)
+      const principal = dshOperatorPrincipal(this.dshPluginToken!)
+      if (!this.listProjectMembers(project.project_id).some(member => member.principal_id === principal)) {
+        throw new KernelError(404, 'project_not_found', 'project not found or access denied')
+      }
+      if (project.status === 'ARCHIVED') {
+        throw new KernelError(409, 'project_archived', 'an archived project cannot be linked to a DSH session')
+      }
+      const existing = this.db.prepare('SELECT session_id, project_id, linked_at FROM session_links WHERE session_id = ?')
+        .get(input.session_id) as SessionLink | undefined
+      if (existing !== undefined) {
+        if (existing.project_id === project.project_id) return existing
+        throw new KernelError(409, 'session_link_conflict', 'DSH session already has an authoritative link')
+      }
+      return this.linkSessionExclusive(input.session_id, project.project_id)
+    })
+  }
+
+  /** Projects visible to the stable local DSH operator. */
+  listProjectsForDshOperator(): ResearchProject[] {
+    if (this.dshPluginToken === undefined || this.dshPluginToken.trim() === '') {
+      throw new KernelError(403, 'dsh_plugin_token_required', 'DSH project selection requires the DSH plugin credential')
+    }
+    const principal = dshOperatorPrincipal(this.dshPluginToken)
+    return this.listProjects().filter(project =>
+      this.listProjectMembers(project.project_id).some(member => member.principal_id === principal))
+  }
+
   /** Stable, versioned INIT-GRILL-02 question order. */
   private static readonly PROJECT_GRILL_QUESTIONS = [
     { question_code: 'brief.problem', prompt_key: 'grill.question.problem', required: true },

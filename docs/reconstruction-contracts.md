@@ -16,7 +16,7 @@ DSH 兼容基线：
 | cordis peer | >=4.0.0-rc.7 |
 | schemastery peer | >=3.18.0 |
 | required host modules | @deepseek-ai/dsh-tools、@deepseek-ai/dsh-commands、@deepseek-ai/dsh-skill-filesystem |
-| optional host module | @deepseek-ai/dsh-llm（Host Chat adapter；缺失时插件仍加载并使用 deterministic fallback） |
+| optional host module | @deepseek-ai/dsh-llm（Agent/tool 内容块类型；缺失时不影响 standalone 与紧凑 session workspace） |
 | optional dev module | @deepseek-ai/dsh-tool-cordis |
 
 构建仓库必须生成 packages/dsh-host-compat：只暴露本项目使用的 Context、Tool、Command 和 Session 类型。该模块不暴露 HttpServer、Slot、LocaleFace 或 ThemeFace。contract test 可对本地固定 commit 和最小 fake host 运行以加速反馈，但它们不是发布兼容性证据。插件集成兼容性必须从配置的私有 registry 在全新目录安装固定版本的真实 `@deepseek-ai/*` 包，使用全新 `DSH_HOME` 通过公开 DSH CLI/Profile/Cordis 生命周期完成加载、启动和 dispose。源码 checkout、symlink、伪造 host、`file:` override 或仅安装 Scholar tarball 均不得替代该证据。升级 DSH 版本时先更新本文件、锁定 spec 和兼容测试。

@@ -40,7 +40,7 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 - research package 使用 intake staged upload，不得暴露 Runner internal stage；每个 stage 绑定 Principal/intake/TTL/offset/hash；
 - 错误脱敏，禁止返回 SQL、绝对路径、环境、Token、stack；
 - Artifact 和 SSE 真正流式，保留媒体类型，禁用代理缓冲；
-- CSP：default-src self、script-src self+每响应 nonce、style-src self+nonce（运行时 style attribute 暂需 unsafe-inline）、object-src none、base-uri none、img-src self blob data、media-src self blob、frame-src self blob、connect-src self；bootstrap 必须把同一响应 nonce 通过显式参数交给客户端，所有运行时创建的 Shadow DOM `<style>` 在插入前设置该 nonce，不能依赖在 nonce 同时存在时会被浏览器忽略的 `unsafe-inline`。`frame-ancestors` 默认 self，仅可额外加入 `standalone.frame_ancestors` 显式配置的精确 HTTPS 或 loopback-HTTP DSH origin，默认本机端口 3080，禁止通配符、远端明文 HTTP、userinfo、path、query/hash。PDF 使用受控 Blob `<iframe>` 而非会被 `object-src none` 阻止的 `<embed>`；
+- CSP：default-src self、script-src self+每响应 nonce、style-src self+nonce（运行时 style attribute 暂需 unsafe-inline）、object-src none、base-uri none、img-src self blob data、media-src self blob、frame-src self blob、connect-src self；bootstrap 必须把同一响应 nonce 通过显式参数交给客户端，所有运行时创建的 Shadow DOM `<style>` 在插入前设置该 nonce，不能依赖在 nonce 同时存在时会被浏览器忽略的 `unsafe-inline`。完整 standalone 不嵌入 DSH 页签，`frame-ancestors` 使用最小部署策略；PDF 仍使用受控 Blob `<iframe>` 而非会被 `object-src none` 阻止的 `<embed>`；
 - HTML/SVG/XML 原始产物不预览、不顶层打开；SVG 只有经受控转换得到的安全栅格衍生物可进入 img。Office/ODF、archive、model 与未知二进制只提供元数据和 attachment 下载，不执行、不解包、不调用 `Blob.text()`；
 - PDF、安全栅格图与明确 allowlist 的 audio/video 只能通过项目鉴权后的 Blob URL 只读展示；Markdown/JSON/CSV/text/ANSI 使用 text node 或白名单 parser，设置字节/字符/行列上限；禁止 innerHTML。关闭、切项目和卸载必须 revoke Blob URL。
 
@@ -54,7 +54,7 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 - CI 运行 secret scan，Release Bundle 运行二次扫描。
 - 所有配置 secret 只以 SecretRef 存储和返回；Settings 不显示 value，effective config、argv、Manifest、Trajectory 和 diagnostic export 都必须脱敏。唯一例外是 Plugin config 中由用户显式触发的一次性 standalone access-token Clipboard 写入：仅限 loopback-only RPC 读取固定 `0600` 普通非 symlink 文件，Token 不进入 DOM、aria、React state、URL、日志、Settings snapshot、storage 或 fallback textarea；`kernel.token`、Kernel/Runner service token、Provider SecretRef、SSH 私钥始终不可复制或回显；
 
-DSH 中的 standalone 启动入口必须满足：配置 URL 无 userinfo/query/hash；HTTP 只允许 loopback，HTTPS 仍执行证书、Host 与 CSP 信任检查；新页面使用 `noopener,noreferrer`；iframe 使用 `referrerPolicy=origin` 与最小 sandbox，只向受控 loopback 子页或同主机的精确 HTTPS 子页提供父页面 origin（不发送 path/query/hash），供可选 Host chat bridge 的双向来源校验。父子页必须用 exact source/origin 和协议版本完成 ready 握手；8 秒内未握手、TLS/CSP/网络错误或 iframe error 必须显示有界本地化失败态、重试和新页面诊断入口，不能留下占满主区的灰色 iframe。为支持用户明确点击的安全 PDF/image/audio/video Blob 新页面，sandbox 可加入 `allow-popups`，但不得加入 `allow-popups-to-escape-sandbox`，主动内容与未知二进制仍无新页面入口；全局快捷键不得在可编辑控件、IME composition 或 key repeat 时触发。复制 Token、settings snapshot/mutation 的 Host RPC 必须保留在 `authority=loopback` 的 `/dsh-scholar`，不接受客户端文件路径，Token 文件缺失、过大、权限非 `0600` 或为 symlink 时 fail closed；同主机 HTTPS DSH 页面仅通过 `authority=trusted-host` 的 `/dsh-scholar-view` 访问无工具 Chat 与脱敏 session projection，该 handler 对 Token/settings endpoint 必须 fail closed。
+DSH 中的 standalone 启动入口必须满足：配置 URL 无 userinfo/query/hash；HTTP 只允许 loopback，HTTPS 仍执行证书与 Host 信任检查；只以 `noopener,noreferrer` 新页面打开，不把 Token、session 或 project id 放入 URL。全局快捷键不得在可编辑控件、IME composition 或 key repeat 时触发。复制 Token、settings snapshot/mutation 的 Host RPC 保留在 `authority=loopback` 的 `/dsh-scholar`，不接受客户端文件路径，Token 文件缺失、过大、权限非 `0600` 或为 symlink 时 fail closed；DSH 页签仅通过 `authority=trusted-host` 的 `/dsh-scholar-view` 访问字段严格的 session workspace/bind/create，该 handler 对 Token/settings endpoint fail closed。已有不同 link、归档/跨 Principal 项目与竞争改绑必须在 Kernel 内拒绝，不能依赖浏览器隐藏选项。
 
 ## 5. Runner 隔离
 
