@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KernelSidecar, SidecarIdentityError } from '../../src/plugin/sidecar.js'
 import { UiKernelSidecar } from '../../packages/dsh-research-ui/src/standalone/sidecar.js'
+import { dshOperatorPrincipal } from '@dsh-scholar/research-kernel'
 
 const KERNEL_BIN = fileURLToPath(new URL('../../packages/research-kernel/lib/bin/kernel.js', import.meta.url))
 
@@ -441,6 +442,10 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
       expect(token).toMatch(hex32)
       expect(statSync(tokenFile(dataDir)).mode & 0o777).toBe(0o600)
       expect(sidecar.kernelToken).toBe(token)
+      const dshPluginToken = readFileSync(join(dataDir, 'dsh-plugin-token'), 'utf8').trim()
+      expect(dshPluginToken).toMatch(hex32)
+      expect(statSync(join(dataDir, 'dsh-plugin-token')).mode & 0o777).toBe(0o600)
+      expect(sidecar.operatorPrincipal).toBe(dshOperatorPrincipal(dshPluginToken))
       expect((await request(port, '/v1/projects')).status).toBe(401)
       expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
       expect((await request(port, '/v1/projects', 'POST', {}, { name: 'x', workspace: '/w' })).status).toBe(401)

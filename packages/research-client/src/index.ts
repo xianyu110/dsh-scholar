@@ -246,6 +246,8 @@ export class ResearchClient {
     execution?: Record<string, unknown>
     integrity?: Record<string, unknown>
     session_id?: string | null
+    creator_principal_id?: string
+    creator_tenant_id?: string
   }): Promise<ResearchProject> {
     return this.request('POST', '/v1/projects', input)
   }

@@ -29,8 +29,8 @@ describe('config registry — key coverage', () => {
     for (const key of ['orchestrator.kernel', 'orchestrator.db', 'orchestrator.poll_ms', 'orchestrator.once', 'orchestrator.dry_run']) {
       expect(keys.has(key)).toBe(true)
     }
-    // standalone CLI (--host/--port/--token/--principal/--data-dir/--kernel-port/--no-token).
-    for (const key of ['standalone.host', 'standalone.port', 'standalone.token', 'standalone.principal', 'standalone.frame_ancestors', 'standalone.data_dir', 'standalone.kernel_port', 'standalone.no_token']) {
+    // standalone CLI (--host/--port/--token/--principal/--data-dir/--kernel-port/--kernel-data-dir/--no-token).
+    for (const key of ['standalone.host', 'standalone.port', 'standalone.token', 'standalone.principal', 'standalone.frame_ancestors', 'standalone.data_dir', 'standalone.kernel_port', 'standalone.kernel_data_dir', 'standalone.no_token']) {
       expect(keys.has(key)).toBe(true)
     }
     // images.lock path + digests + network_policy.
@@ -47,6 +47,7 @@ describe('config registry — key coverage', () => {
     expect(envs.get('standalone.host')).toBe('DSH_SCHOLAR_STANDALONE_HOST')
     expect(envs.get('standalone.port')).toBe('DSH_SCHOLAR_STANDALONE_PORT')
     expect(envs.get('standalone.kernel_port')).toBe('DSH_SCHOLAR_STANDALONE_KERNEL_PORT')
+    expect(envs.get('standalone.kernel_data_dir')).toBe('DSH_SCHOLAR_KERNEL_DATA')
     expect(envs.get('standalone.data_dir')).toBe('DSH_SCHOLAR_STANDALONE_DATA')
     expect(envs.get('standalone.frame_ancestors')).toBe('DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS')
   })
@@ -182,10 +183,11 @@ describe('config registry — parseCli (binary CLI parsing)', () => {
 
   it('standalone: every registry flag maps to its canonical key (booleans included)', () => {
     expect(parseCli(['--host', '127.0.0.1', '--port', '18611', '--kernel-port', '17414',
-      '--data-dir', '/tmp/d', '--token', 'st', '--principal', 'ops-1', '--frame-ancestors', 'http://127.0.0.1:3080'], 'standalone')).toEqual({
+      '--kernel-data-dir', '/tmp/kernel', '--data-dir', '/tmp/d', '--token', 'st', '--principal', 'ops-1', '--frame-ancestors', 'http://127.0.0.1:3080'], 'standalone')).toEqual({
       'standalone.host': '127.0.0.1',
       'standalone.port': 18611,
       'standalone.kernel_port': 17414,
+      'standalone.kernel_data_dir': '/tmp/kernel',
       'standalone.data_dir': '/tmp/d',
       'standalone.token': 'st',
       'standalone.principal': 'ops-1',

@@ -69,6 +69,7 @@ import {
 } from './provider.js'
 import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
 import { RunnerTargetRegistry } from './runner-target-registry.js'
+import { dshOperatorPrincipal } from './dsh-principal.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -1469,7 +1470,10 @@ export class ResearchKernel {
     request_hash: string
     replay_only?: boolean
   }): ReturnType<ResearchKernel['createProjectForGrill']> & { link: SessionLink } {
-    const creatorPrincipal = `dsh:${createHash('sha256').update(input.session_id).digest('hex').slice(0, 32)}`
+    if (this.dshPluginToken === undefined) {
+      throw new KernelError(403, 'dsh_plugin_token_required', 'DSH project creation requires the DSH plugin credential')
+    }
+    const creatorPrincipal = dshOperatorPrincipal(this.dshPluginToken)
     const out = this.createProjectForGrill({ ...input, creator_principal_id: creatorPrincipal })
     const link = this.db.prepare('SELECT session_id, project_id, linked_at FROM session_links WHERE session_id = ?')
       .get(input.session_id) as SessionLink | undefined

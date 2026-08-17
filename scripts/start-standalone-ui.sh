@@ -3,12 +3,13 @@
 #
 # This is the only supported browser UI. It runs the research-ui package's
 # own HTTP server and does not inject any panel into `dsh web`:
-#   - its own Research Kernel sidecar (default :17413)
+#   - the shared DSH Research Kernel (default :7412)
 #   - the full-screen UI at http://127.0.0.1:18610 (token-gated)
 #   - /v1/* proxied to that kernel with bearer-token auth + CSRF checks
 #
 # Usage: bash scripts/start-standalone-ui.sh [--host 127.0.0.1] [--port 18610]
-#        [--kernel-port 17413] [--data-dir <path>] [--token <value>|--no-token]
+#        [--kernel-port 7412] [--kernel-data-dir <path>] [--data-dir <path>]
+#        [--token <value>|--no-token]
 #
 # SEC-UI-01: a --token value is handed to the server through the 0600 token
 # file (written before spawn), never on the process argv — `ps`/`/proc`
@@ -18,7 +19,8 @@ set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 WEB_HOST="${DSH_SCHOLAR_STANDALONE_HOST:-127.0.0.1}"
 WEB_PORT="${DSH_SCHOLAR_STANDALONE_PORT:-18610}"
-KERNEL_PORT="${DSH_SCHOLAR_STANDALONE_KERNEL_PORT:-17413}"
+KERNEL_PORT="${DSH_SCHOLAR_STANDALONE_KERNEL_PORT:-7412}"
+KERNEL_DATA_DIR="${DSH_SCHOLAR_KERNEL_DATA:-$HOME/.dsh/research-kernel}"
 DATA_DIR="${DSH_SCHOLAR_STANDALONE_DATA:-$HOME/.dsh-scholar-standalone}"
 FRAME_ANCESTORS="${DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS:-http://127.0.0.1:3080,http://localhost:3080,http://[::1]:3080}"
 SERVER_DATA_DIR="$DATA_DIR/research-ui-standalone"
@@ -33,6 +35,8 @@ while [ "$#" -gt 0 ]; do
     --port=*) WEB_PORT=${1#*=}; shift ;;
     --kernel-port) KERNEL_PORT=$2; shift 2 ;;
     --kernel-port=*) KERNEL_PORT=${1#*=}; shift ;;
+    --kernel-data-dir) KERNEL_DATA_DIR=$2; shift 2 ;;
+    --kernel-data-dir=*) KERNEL_DATA_DIR=${1#*=}; shift ;;
     --data-dir) SERVER_DATA_DIR=$2; shift 2 ;;
     --data-dir=*) SERVER_DATA_DIR=${1#*=}; shift ;;
     --token) TOKEN_VALUE=$2; shift 2 ;;
@@ -71,15 +75,16 @@ if [ -n "$TOKEN_VALUE" ]; then
   chmod 600 "$TMP_TOKEN"
   mv -f "$TMP_TOKEN" "$SERVER_DATA_DIR/standalone-token"
 fi
-echo "starting standalone DSH Scholar: $WEB_URL (kernel :$KERNEL_PORT, data: $SERVER_DATA_DIR)"
+echo "starting standalone DSH Scholar: $WEB_URL (kernel :$KERNEL_PORT, kernel data: $KERNEL_DATA_DIR, BFF data: $SERVER_DATA_DIR)"
 # GOV-01: token mode requires the loopback operator principal (default ops-1,
 # override DSH_SCHOLAR_STANDALONE_PRINCIPAL); --no-token keeps loopback-dev
 # behavior without a principal.
 if ! [[ " ${PASSTHROUGH[*]} " == *" --no-token "* ]] && ! [[ " ${PASSTHROUGH[*]} " == *" --principal "* ]]; then
   PASSTHROUGH+=(--principal "${DSH_SCHOLAR_STANDALONE_PRINCIPAL:-ops-1}")
 fi
-DSH_HOME="$DATA_DIR" setsid nohup node "$BIN" \
-  --host "$WEB_HOST" --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$SERVER_DATA_DIR" \
+setsid nohup node "$BIN" \
+  --host "$WEB_HOST" --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" \
+  --kernel-data-dir "$KERNEL_DATA_DIR" --data-dir "$SERVER_DATA_DIR" \
   --frame-ancestors "$FRAME_ANCESTORS" \
   "${PASSTHROUGH[@]}" \
   >> "$DATA_DIR/standalone.log" 2>&1 < /dev/null &

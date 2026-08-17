@@ -12,7 +12,7 @@ bash scripts/start-standalone-ui.sh
 
 在 DSH 自带 Chat 里可以直接用自然语言说“创建研究项目 OCR 复现”“继续调研”“现在到哪一步了”或“下一步做什么”，无需先记住 slash command。Harness 会调用 Scholar 的受控会话入口：没有关联项目时，整句肯定创建指令与原文中的完整项目名会直接创建 name-only Init 并绑定当前 session；缺名称会在对话中追问，普通未关联对话才把 `/new <项目名>` 作为可选快捷入口。有项目时读取同一 session 的权威状态，明确回显识别到的研究动作、是否已执行、最新下一步与阻断。名称子串、疑问、否定、歧义不会创建；当前只有已就绪且用户以“开始/继续/执行”等正向动作词明确要求的调研快照可由这次对话直接执行。Gate、Brief 确认、外部研究采纳和发布决定仍需在 Scholar 中由人完成，生成想法等其他写动作会生成可编辑的 slash command。
 
-会话的 `dsh Scholar` 页签顶部显示 DSH 插件 Kernel 的项目阶段条、每阶段可见状态、revision、下一步、待审批和任务统计；它会随当前 session 切换和刷新。下方 iframe 是完整 standalone 工作台，可能使用另一份 dataDir，因此两边项目选择不一致时，以顶部同会话阶段条为 DSH Chat 调用链的权威状态。
+会话的 `dsh Scholar` 页签顶部显示当前 DSH session 的项目阶段条、每阶段可见状态、revision、下一步、待审批和任务统计；它会随当前 session 切换和刷新。下方 iframe 与独立打开的完整工作台复用同一个 `~/.dsh/research-kernel` 权威数据目录和稳定本机操作员身份，因此两处项目列表、详情和写入必须一致；`~/.dsh-scholar-standalone/research-ui-standalone` 只保存浏览器 Token、会话和显示偏好，不得再包含第二个业务数据库。
 
 ### 1.1 把页面停靠在右侧或底部
 
@@ -227,7 +227,7 @@ Settings 的「模型与 OCR」组当前提供 MinerU 配置：官方 Open API �
 | Claim inconclusive | Evidence 未 accepted 或缺统计字段 |
 | PDF stale | 源文件 revision 晚于 build input，重新 Compile |
 | Kernel unreachable | 检查 instance health、dataDir、port 和 sidecar ownership |
-| 直接访问 kernel 端口 401 | sidecar 启动的 Kernel（默认 127.0.0.1:17413）受 0600 `<dataDir>/kernel-token` 随机 bearer 保护（env 注入、不出 argv）；除 `/v1|v2/health` 外缺失/错误 token 一律 401。浏览器/BFF 无需关心——BFF 自动带上该 token；仅脚本或 orchestrator 直接访问时需要（kernel 用 `--token` 或 `DSH_SCHOLAR_KERNEL_TOKEN`；orchestrator 用 `--token-file` 读取同一 0600 文件）。`x-service-token` 是内部路由专用层，不能替代普通 bearer |
+| 直接访问 kernel 端口 401 | 共享 Kernel（默认 127.0.0.1:7412，数据目录 `~/.dsh/research-kernel`）受 0600 `<dataDir>/kernel-token` 随机 bearer 保护（env 注入、不出 argv）；除 `/v1|v2/health` 外缺失/错误 token 一律 401。浏览器/BFF 无需关心——BFF 自动带上该 token；仅脚本或 orchestrator 直接访问时需要（kernel 用 `--token` 或 `DSH_SCHOLAR_KERNEL_TOKEN`；orchestrator 用 `--token-file` 读取同一 0600 文件）。`x-service-token` 是内部路由专用层，不能替代普通 bearer |
 | 页面部分未翻译 | 缺失 key 会显示 key；这是缺陷，应按 docs 规则补资源和测试 |
 | intake/proposal stale | 上传接入期间项目或提案已变化，刷新并重新生成 Proposal |
 | chunk_gap / chunk_offset_conflict | 分块上传乱序或与已提交 offset 冲突；客户端队列会按 committed offset 顺序续传，刷新后从服务端 offset 继续 |

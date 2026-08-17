@@ -6,12 +6,16 @@
  * Import-safe under vitest (no DOM at module scope).
  */
 import { describe, expect, it } from 'vitest'
-import { chatInputKind, chatJsonArg, chatRunKind, chatRunnerTargetId, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
+import { chatAttachmentBeginPayload, chatInputKind, chatJsonArg, chatRunKind, chatRunnerTargetId, executeChatCommand, projectCreatePayload } from '../../packages/dsh-research-ui/src/client/chat'
 import { CHAT_COMMANDS } from '../../packages/dsh-research-ui/src/client/modals/commands'
 
 describe('name-only Init and Grill prose routing', () => {
   it('builds a name-only v2 project payload', () => {
     expect(projectCreatePayload('  My study  ')).toEqual({ name: 'My study' })
+  })
+
+  it('creates an isolated Intake when a later-stage project receives its first attachment', () => {
+    expect(chatAttachmentBeginPayload()).toEqual({ source_label: 'Scholar chat attachments' })
   })
 
   it('routes slash input to commands and ordinary prose to the active Grill', () => {

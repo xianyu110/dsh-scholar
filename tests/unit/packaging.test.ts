@@ -457,7 +457,12 @@ describe('standalone unlock page i18n (UI-03)', () => {
     const webPort = await freePort()
     const kernelPort = await freePort()
     const dataDir = mkdtempSync(join(tmpdir(), 'dsh-ui3-'))
-    const child = spawn(process.execPath, [uiLib, '--no-token', '--host', '127.0.0.1', '--port', String(webPort), '--kernel-port', String(kernelPort), '--data-dir', dataDir], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const kernelDataDir = join(dataDir, 'kernel')
+    const child = spawn(process.execPath, [
+      uiLib, '--no-token', '--host', '127.0.0.1', '--port', String(webPort),
+      '--kernel-port', String(kernelPort), '--kernel-data-dir', kernelDataDir,
+      '--data-dir', join(dataDir, 'bff'),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
     let serverErr = ''
     child.stderr?.on('data', (d: Buffer) => { serverErr += String(d) })
     try {

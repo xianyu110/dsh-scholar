@@ -46,7 +46,7 @@ pnpm run build
 bash scripts/start-standalone-ui.sh
 ```
 
-默认页面为 <http://127.0.0.1:18610>，Research Kernel 为 `127.0.0.1:17413`。首次打开时，粘贴以下 `0600` 文件中的访问令牌：
+默认页面为 <http://127.0.0.1:18610>。DSH 与独立工作台共享 `127.0.0.1:7412` 的 Research Kernel 和 `~/.dsh/research-kernel` 数据目录，因此两处显示并操作同一批项目。浏览器 Token、会话和显示偏好仍独立保存在 BFF 目录中。首次打开时，粘贴以下 `0600` 文件中的访问令牌：
 
 ```text
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
@@ -61,10 +61,10 @@ bash scripts/start-standalone-ui.sh
 没有 Runner 时仍可管理项目和文件，但实验 Job 会保持排队。需要在本机 Docker 中执行时，另开一个终端：
 
 ```bash
-export DSH_SCHOLAR_KERNEL_TOKEN="$(< ~/.dsh-scholar-standalone/research-ui-standalone/kernel-token)"
-export DSH_SCHOLAR_SERVICE_TOKEN="$(< ~/.dsh-scholar-standalone/research-ui-standalone/service-token)"
+export DSH_SCHOLAR_KERNEL_TOKEN="$(< ~/.dsh/research-kernel/kernel-token)"
+export DSH_SCHOLAR_SERVICE_TOKEN="$(< ~/.dsh/research-kernel/service-token)"
 node workers/runner-gateway/lib/bin/runner.js \
-  --kernel http://127.0.0.1:17413 \
+  --kernel http://127.0.0.1:7412 \
   --mode docker
 ```
 

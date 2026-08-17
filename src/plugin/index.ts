@@ -457,6 +457,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     modelFor: role => modelForRole(effectiveConfig, role),
     stageSubagents,
     defaultMode: effectiveConfig.defaultMode ?? 'gate-only',
+    operatorPrincipal: sidecar.operatorPrincipal,
   })
 
   // Role-based ACL: deny research tools outside the caller role's surface.
@@ -486,6 +487,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     cache,
     unattended,
     defaultMode: effectiveConfig.defaultMode ?? 'gate-only',
+    operatorPrincipal: sidecar.operatorPrincipal,
   })
 
   // Skill pack mount: methodology plus deterministic domain/venue packs.

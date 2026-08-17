@@ -30,7 +30,7 @@ import {
 } from '../../packages/dsh-research-ui/src/client/nav'
 import {
   INTAKE_ACTIVE_STATUSES, INTAKE_ERROR_KEYS, INTAKE_MAX_FILE_BYTES,
-  INTAKE_PHASE_OPTIONS, INTAKE_TERMINAL_STATUSES, intakeAdoptPayload,
+  INTAKE_PHASE_OPTIONS, INTAKE_TERMINAL_STATUSES, activeIntakeId, intakeAdoptPayload,
   intakeAnsweredCount, intakeAnswersPayload, intakeBeginPayload,
   intakeErrorText, intakeGuidance, intakeIdempotencyKey, intakePhaseText,
   intakeProjectRefId, intakeRefId, intakeScanSummary, intakeStatusText,
@@ -53,6 +53,18 @@ afterEach(() => {
 })
 
 const NOW = '2026-08-11T12:00:00.000Z'
+
+describe('activeIntakeId', () => {
+  it('selects only a resumable non-empty Intake', () => {
+    expect(activeIntakeId([
+      { intake_id: 'done', status: 'accepted' },
+      { intake_id: '', status: 'draft' },
+      { intake_id: 'live', status: 'uploading' },
+    ])).toBe('live')
+    expect(activeIntakeId([{ intake_id: 'done', status: 'accepted' }])).toBeNull()
+    expect(activeIntakeId(null)).toBeNull()
+  })
+})
 
 /** Minimal projection; per-test overrides win. */
 function projection(status: string, overrides?: Partial<IntakeProjectionLite>): IntakeProjectionLite {

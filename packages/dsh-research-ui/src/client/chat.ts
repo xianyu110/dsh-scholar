@@ -23,6 +23,7 @@ import {
   type HostChatTurnRequest,
 } from './host-chat-bridge'
 import { captureChatScroll, restoreChatScrollTop, type ChatScrollPosition } from './chat-scroll-model'
+import { activeIntakeId, intakeBeginPayload } from './intake-flow'
 export let dragSessionId: string | null = null
 
 export type ChatSurface = 'main' | 'dock'
@@ -85,6 +86,12 @@ export function chatInputKind(line: string): { kind: 'command'; line: string } |
   return trimmed.startsWith('/')
     ? { kind: 'command', line: trimmed }
     : { kind: 'prose', text: trimmed }
+}
+
+/** New projects already have an Init Intake; later-stage projects receive a
+ * fresh isolated Intake before their first Chat attachment. */
+export function chatAttachmentBeginPayload(): Record<string, unknown> {
+  return intakeBeginPayload('Scholar chat attachments', null)
 }
 
 interface ProjectGrillProjection {
@@ -2136,16 +2143,16 @@ export async function renderChat(
   // 分块队列。消息只保存 attachment/stage ref；scan/OCR 与 Human 确认前
   // 不写 Project Artifact。队列状态机在 chunked-upload.ts（PURE，已测）；
   // 浏览器视觉（真实拖拽/粘贴观感）NOT_RUN_MANUAL_PENDING。
-  const attachBtn = el('button', 'hbtn', '📎')
+  const attachBtn = el('button', 'hbtn chat-attach-button', `📎 ${t('shell', 'shell.chat.attachButton')}`)
   attachBtn.title = t('shell', 'shell.chat.attachTitle')
   attachBtn.setAttribute('aria-label', t('shell', 'shell.chat.attachTitle'))
-  attachBtn.style.cssText = 'padding:1px 8px;font-size:10px'
   const attachInput = document.createElement('input')
   attachInput.type = 'file'
   attachInput.multiple = true
+  attachInput.setAttribute('aria-label', t('shell', 'shell.chat.attachTitle'))
   attachInput.style.display = 'none'
   const queueStrip = el('div', 'chat-composer-tools')
-  queueStrip.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:10px;margin-bottom:4px'
+  queueStrip.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:10px'
   queueStrip.style.display = 'none'
   let queueItems: UploadQueueItem[] = []
   const filesById = new Map<string, File>()
@@ -2213,15 +2220,33 @@ export async function renderChat(
     pushRef(item)
     renderQueue()
   }
+  let intakeRequest: Promise<string | null> | null = null
+  const ensureAttachmentIntake = async (): Promise<string | null> => {
+    if (intakeRequest !== null) return intakeRequest
+    intakeRequest = (async () => {
+      const intakes = await api<Array<{ intake_id?: string; status?: string }>>(`/v1/projects/${encodeURIComponent(projectId)}/intake`)
+      const existing = activeIntakeId(intakes)
+      if (existing !== null) return existing
+      const created = await apiResult<{ intake_id?: string }>(`/v1/projects/${encodeURIComponent(projectId)}/intake`, {
+        method: 'POST',
+        body: JSON.stringify(chatAttachmentBeginPayload()),
+      })
+      return created.ok && typeof created.data.intake_id === 'string' ? created.data.intake_id : null
+    })()
+    try {
+      return await intakeRequest
+    } finally {
+      intakeRequest = null
+    }
+  }
   const attachFiles = async (files: File[]): Promise<void> => {
     if (projectId === '' || projectId === undefined) {
       showToast(rootHost(), t('shell', 'shell.chat.attachNoProject'))
       return
     }
-    const intakes = await api<Array<{ intake_id?: string; status?: string }>>(`/v1/projects/${encodeURIComponent(projectId)}/intake`)
-    const active = intakes?.find(i => ['draft', 'uploading', 'scanning', 'needs_input', 'grilling', 'proposal_ready', 'awaiting_human'].includes(i.status ?? ''))
-    if (active === undefined || active.intake_id === undefined) {
-      showToast(rootHost(), t('shell', 'shell.chat.attachNoIntake'))
+    const intakeId = await ensureAttachmentIntake()
+    if (intakeId === null) {
+      showToast(rootHost(), t('shell', 'shell.chat.attachIntakeFailed'))
       return
     }
     const items = enqueueFiles(files.map(f => ({ name: f.name, size: f.size, type: f.type })))
@@ -2242,7 +2267,7 @@ export async function renderChat(
         renderQueue()
         continue
       }
-      hashed = { ...hashed, intakeId: active.intake_id, projectId }
+      hashed = { ...hashed, intakeId, projectId }
       queueItems = queueItems.map(x => x.fileId === item.fileId ? hashed : x)
       const fin = await driveUpload(hashed, transport, {
         readBytes: (fid, s, e) => fileByteProvider(filesById).read(fid, s, e),
@@ -2290,7 +2315,7 @@ export async function renderChat(
       void attachFiles(pasted)
     }
   }
-  document.body.appendChild(attachInput)
+  composer.appendChild(attachInput)
   const mkBtn = (label: string, title: string): HTMLButtonElement => {
     const b = el('button', 'hbtn', label)
     b.title = title
@@ -2315,16 +2340,22 @@ export async function renderChat(
   linkBtn.onclick = () => insertMarkdown('[', '](https://)', 'text')
   const listBtn = mkBtn('•', t('shell', 'shell.chat.toolList'))
   listBtn.onclick = () => insertMarkdown('\n- ', '', 'item')
+  // Upload remains the first toolbar action so it stays discoverable when a
+  // narrow Dock clips lower-priority formatting controls.
+  toolbar.appendChild(attachBtn)
   if (modelSelect !== undefined) toolbar.appendChild(modelSelect)
-  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, attachBtn, clear)
+  toolbar.append(boldBtn, codeBtn, linkBtn, listBtn, clear)
+  const attachHint = el('span', 'chat-attach-hint', t('shell', 'shell.chat.attachHint'))
+  attachHint.title = t('shell', 'shell.chat.attachTitle')
+  toolbar.appendChild(attachHint)
   const composerActions = el('div', 'chat-composer-actions')
   composerActions.append(toolbar, send)
   composer.appendChild(composerActions)
-  // ORDER MATTERS: append composer FIRST, then insert the upload queue strip
-  // before it — insertBefore(ref) throws NotFoundError when ref is not yet a
-  // child of the parent (observed on every real render).
+  // Keep attachment progress inside the composer. As a sibling of the
+  // composer it became a narrow flex column and looked like there was no
+  // upload surface at all.
+  composer.insertBefore(queueStrip, input)
   composerRow.appendChild(composer)
-  composerRow.insertBefore(queueStrip, composer)
   dock.append(completionBox, composerRow)
   dock.hidden = false
 

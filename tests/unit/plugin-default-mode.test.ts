@@ -1,5 +1,6 @@
 /** DSH-visible project creation honors the plugin row's defaultMode. */
 import { describe, expect, it } from 'vitest'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { ResearchClient } from '@dsh-scholar/research-client'
 import { registerResearchTools, type ResearchToolContext } from '../../src/plugin/tools.js'
 import { registerResearchCommands, type CommandContext } from '../../src/plugin/commands.js'
@@ -28,6 +29,7 @@ describe('DSH plugin defaultMode', () => {
       client: {} as ResearchClient,
       cache: { get: async () => undefined, set: async () => undefined },
       unattended: false,
+      operatorPrincipal: 'dsh:test-operator',
     } as CommandContext)
 
     expect(commands.has('export')).toBe(false)
@@ -50,6 +52,7 @@ describe('DSH plugin defaultMode', () => {
       roles: { set() {} },
       modelFor: () => undefined,
       defaultMode: 'full-auto',
+      operatorPrincipal: 'dsh:test-operator',
     } as unknown as ResearchToolContext
 
     registerResearchTools({ tools: { register: tool => registered.push(tool as never) } }, toolContext)
@@ -84,6 +87,7 @@ describe('DSH plugin defaultMode', () => {
       cache: { get: async () => undefined, set: async () => undefined },
       unattended: false,
       defaultMode: 'full-auto',
+      operatorPrincipal: 'dsh:test-operator',
     } as CommandContext)
     await commands.get('new')?.handler({
       agent: { id: 'pi' },
@@ -91,5 +95,42 @@ describe('DSH plugin defaultMode', () => {
     })
 
     expect(createdMode).toBe('full-auto')
+  })
+
+  it('creates a name-only project from DSH rawInput with its separator whitespace', async () => {
+    let created: { session_id: string; name: string; idempotency_key: string } | undefined
+    const client = {
+      createProjectForDshSession: async (input: { session_id: string; name: string; idempotency_key: string }) => {
+        created = input
+        return {
+          project: { project_id: 'rsp_name_only', name: input.name, status: 'DRAFT', brief_status: 'collecting' },
+          intake: {}, budget: {}, membership: [], link: {},
+        }
+      },
+    } as unknown as ResearchClient
+    const commands = new Map<string, { handler(invocation: { agent: { id: string }; rawInput: string }): Promise<unknown> }>()
+    const ctx = {
+      commands: { register: (definition: { name: string; handler(invocation: { agent: { id: string }; rawInput: string }): Promise<unknown> }) => commands.set(definition.name, definition) },
+    }
+
+    registerResearchCommands(ctx as never, {
+      client,
+      cache: { get: async () => undefined, set: async () => undefined },
+      unattended: false,
+      operatorPrincipal: 'dsh:test-operator',
+    } as CommandContext)
+    const parsed = parseCommand('/new demo')
+    expect(parsed).toEqual({ name: 'new', rawInput: ' demo' })
+    const result = await commands.get('new')?.handler({
+      agent: { id: 'pi' },
+      rawInput: parsed!.rawInput,
+    })
+
+    expect(result).toMatchObject({ kind: 'success' })
+    expect(created).toMatchObject({
+      session_id: 'pi',
+      name: 'demo',
+      idempotency_key: expect.stringMatching(/^dsh-create:/),
+    })
   })
 })

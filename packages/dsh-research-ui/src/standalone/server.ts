@@ -8,8 +8,9 @@
  * loopback bearer token (design §15.2/§15.3).
  *
  * Usage:
- *   node lib/standalone/server.js [--port 18610] [--kernel-port 17413]
- *     [--data-dir <dir>] [--token <secret>] [--host 127.0.0.1]
+ *   node lib/standalone/server.js [--port 18610] [--kernel-port 7412]
+ *     [--data-dir <dir>] [--kernel-data-dir <dir>]
+ *     [--token <secret>] [--host 127.0.0.1]
  *
  * On first start a token is generated and persisted under the data dir
  * (`standalone-token`); the browser asks for it once and keeps it
@@ -70,7 +71,7 @@ export function surveyWriteRoleAllowed(role: string | null): boolean {
 }
 
 const DEFAULT_PORT = 18610
-const DEFAULT_KERNEL_PORT = 17413
+const DEFAULT_KERNEL_PORT = 7412
 
 /**
  * GOV-01/ONBOARD-01 (hardening §5 P1): explicit capability ROUTE TABLE for
@@ -274,6 +275,9 @@ interface StandaloneOptions {
   host: string
   port: number
   kernelPort: number
+  /** Authoritative Kernel storage, shared with the DSH plugin instance. */
+  kernelDataDir: string
+  /** Standalone BFF-only state (browser token, session and model choice). */
   dataDir: string
   token: string | null
   /** API-01: loopback operator identity. When set, the BFF enforces project
@@ -736,6 +740,8 @@ export function loadOptions(argv: string[]): StandaloneOptions {
     throw new Error('--no-token requires an explicit loopback --host (127.0.0.0/8, ::1, or localhost)')
   }
   const dataDir = (values['standalone.data_dir'] as string | undefined) ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh-scholar-standalone'), 'research-ui-standalone')
+  const kernelDataDir = (values['standalone.kernel_data_dir'] as string | undefined)
+    ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'research-kernel')
   let token: string | null = null
   if (values['standalone.no_token'] !== true) {
     const tokenFile = join(dataDir, 'standalone-token')
@@ -761,6 +767,7 @@ export function loadOptions(argv: string[]): StandaloneOptions {
     host,
     port: (values['standalone.port'] as number | undefined) ?? DEFAULT_PORT,
     kernelPort: (values['standalone.kernel_port'] as number | undefined) ?? DEFAULT_KERNEL_PORT,
+    kernelDataDir,
     dataDir,
     token,
     principal: ((values['standalone.principal'] as string | undefined) ?? null) as string | null,
@@ -778,6 +785,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     'standalone.host': options.host,
     'standalone.port': options.port,
     'standalone.kernel_port': options.kernelPort,
+    'standalone.kernel_data_dir': options.kernelDataDir,
     'standalone.data_dir': options.dataDir,
     'standalone.token': options.token ?? '',
     'standalone.no_token': options.token === null,
@@ -790,7 +798,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   const sidecar = new UiKernelSidecar({
     host: '127.0.0.1',
     port: options.kernelPort,
-    dataDir: options.dataDir,
+    dataDir: options.kernelDataDir,
     log: line => console.error(line),
   })
   try {
@@ -799,6 +807,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     await sidecar.stop()
     throw error
   }
+  // One credential-derived Human Principal is shared by every DSH session
+  // and this BFF. An explicit principal remains an operator override; the
+  // normal path cannot drift because both adapters read the same Kernel dir.
+  options.principal ??= sidecar.operatorPrincipal
   const endpoint = sidecar.endpoint
   // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity.
   // The BFF is a service process holding the 0600 dataDir token; it attaches

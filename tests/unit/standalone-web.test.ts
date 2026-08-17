@@ -16,20 +16,23 @@ import {
 // @ts-expect-error re-export surface
 
 describe('standalone web application', () => {
-  it('loads options with defaults (port 18610, kernel 17413)', () => {
+  it('loads options with defaults (port 18610, shared kernel 7412)', () => {
     const dir = join(tmpdir(), `dsh-standalone-defaults-${Date.now()}`)
     const o = loadOptions(['--data-dir', dir])
     expect(o.port).toBe(18610)
-    expect(o.kernelPort).toBe(17413)
+    expect(o.kernelPort).toBe(7412)
+    expect(o.kernelDataDir).toContain('.dsh/research-kernel')
     expect(o.host).toBe('127.0.0.1')
     expect(o.frameAncestors).toContain('http://127.0.0.1:3080')
   })
 
-  it('loads explicit --port / --kernel-port / --data-dir', () => {
+  it('loads explicit --port / --kernel-port / --kernel-data-dir / --data-dir', () => {
     const dir = join(tmpdir(), 'dsh-standalone-opts-test')
-    const o = loadOptions(['--port', '19000', '--kernel-port', '19001', '--data-dir', dir, '--no-token'])
+    const kernelDir = join(tmpdir(), 'dsh-shared-kernel-opts-test')
+    const o = loadOptions(['--port', '19000', '--kernel-port', '19001', '--kernel-data-dir', kernelDir, '--data-dir', dir, '--no-token'])
     expect(o.port).toBe(19000)
     expect(o.kernelPort).toBe(19001)
+    expect(o.kernelDataDir).toBe(kernelDir)
     expect(o.dataDir).toBe(dir)
     expect(o.token).toBeNull()
   })
