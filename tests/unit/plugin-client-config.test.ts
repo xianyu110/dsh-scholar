@@ -35,9 +35,10 @@ describe('DSH research plugin browser configuration', () => {
     expect(slotInject).toHaveBeenCalledWith('settings.plugin.item', expect.any(Function))
     expect(register.mock.calls[0]?.[0]).toMatchObject({
       name: 'settings.plugin.item',
-      id: 'dsh-scholar',
-      order: 30,
+      key: 'research-plugin',
     })
+    expect(register.mock.calls[0]?.[0]).not.toHaveProperty('id')
+    expect(register.mock.calls[0]?.[0]).not.toHaveProperty('order')
     expect(slotInject).toHaveBeenCalledWith('conversation.view', expect.any(Function))
     expect(register.mock.calls[1]?.[0]).toMatchObject({
       name: 'conversation.view',

@@ -15,7 +15,7 @@ import {
   normalizeStandaloneUrl,
   type StandaloneShortcut,
 } from '../shared/standalone.js'
-import type { ResearchSettings } from '../shared/settings-rpc.js'
+import { SCHOLAR_SETTINGS_NAMESPACE, type ResearchSettings } from '../shared/settings-rpc.js'
 import {
   SCHOLAR_STAGE_IDS,
   normalizeDshSessionId,
@@ -881,8 +881,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(LOCALE_NAMESPACE, { zh, en }), 'dsh-scholar: configuration dictionaries')
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: 'dsh-scholar',
-    order: 30,
+    key: SCHOLAR_SETTINGS_NAMESPACE,
     locale: LOCALE_NAMESPACE,
     inject: (): ResearchCardFace => ({
       hooks: { researchSettings: scope },
