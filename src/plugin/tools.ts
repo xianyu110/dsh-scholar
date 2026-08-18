@@ -12,6 +12,7 @@ import { KernelApiError, type ResearchClient } from '@dsh-scholar/research-clien
 import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { selectSkillPacks, selectedSkillNames } from './skills.js'
 import { runNativeScholarTurn, type NativeGrillAnswer, type NativeGrillQuestionPrompt } from './native-chat.js'
+import { applyWorkspacePatch } from './workspace-patch.js'
 import {
   PANEL_KINDS,
   type PanelKind,
@@ -95,32 +96,6 @@ function nativeQuestionAnswer(
   if (answer.selected.includes(prompt.unknownLabel)) return { disposition: 'unknown' }
   if (answer.selected.length > 0) return { disposition: 'answered', value: answer.selected.join(', ') }
   return { disposition: 'skipped' }
-}
-
-/**
- * Build a one-version deprecation alias for a canonical tool
- * (reconstruction-contracts.md §17): the alias keeps the old user-facing
- * name registered — never "unknown tool" — but its catalog description marks
- * it DEPRECATED with the canonical name and every response carries
- * deprecation metadata. Execution proxies to the canonical implementation so
- * behavior (and ACL, see acl.ts `TOOL_ALIASES`) stays identical.
- */
-export function deprecatedAlias(canonical: ResearchToolDef, alias: string): ResearchToolDef {
-  return {
-    name: alias,
-    description: `DEPRECATED — use \`${canonical.name}\` instead (canonical name, reconstruction-contracts.md §17). Same parameters and behavior; responses carry deprecation metadata.`,
-    parameters: canonical.parameters,
-    output: canonical.output,
-    execute: async (args, ctx_, sessionId, exec) => {
-      const result = await canonical.execute(args, ctx_, sessionId, exec)
-      return {
-        ...result,
-        deprecated: true,
-        canonical: canonical.name,
-        notice: `tool ${alias} is deprecated; use ${canonical.name} instead`,
-      }
-    },
-  }
 }
 
 /**
@@ -914,65 +889,43 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
 
   ctx.tools.register(researchTool({
     name: 'workspace_snapshot',
-    description: 'Snapshot the project workspace. archive=true (default, §11.3 SCH-EXEC-002): the Kernel archives the ACTUAL file contents of the project workspace (workspace_id + root-relative path, P0-4 SNAPSHOT-01/API-01) into a content-addressed code artifact (+ manifest artifact); jobs bound to it are materialized by the Runner from CAS — never from live host paths. root_relative_path defaults to "" (the whole workspace). archive=false: legacy manifest (file list + hashes only, no content) — deprecated host-dir walk, path is required there.',
+    description: 'Snapshot actual project workspace contents through the Kernel WorkspaceStore. The tool accepts only a registered workspace_id and root-relative path; host paths are never readable.',
     parameters: {
       project_id: OPT_STRING,
       workspace_id: { type: 'string', required: true },
       root_relative_path: { type: 'string' },
       description: OPT_STRING,
-      archive: { type: 'boolean' },
-      // Deprecated (P0-4): host `path` is refused for archive=true and only
-      // honored by the legacy archive=false manifest walk.
-      path: { type: 'string' },
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
-      if (args.archive !== false) {
-        // §11.3: real content archive (kernel-side walk, workspace-bound +
-        // escape/symlink/secret protected). P0-4: only workspace_id +
-        // root_relative_path are accepted; host `path` is deprecated.
-        if (args.path !== undefined) {
-          throw new Error('workspace_snapshot archive=true no longer accepts a host `path` (P0-4 SNAPSHOT-01/API-01): use workspace_id + root_relative_path; the deprecated shape is refused with 422 by the API')
-        }
-        const snapshot = await client.snapshotCodeArchive(projectId, args.workspace_id, args.root_relative_path ?? '', args.description ?? '')
-        return {
-          ok: true,
-          snapshot: {
-            snapshot_id: snapshot.snapshot_id,
-            project_id: snapshot.project_id,
-            workspace_id: args.workspace_id,
-            root_relative_path: args.root_relative_path ?? '',
-            archive_artifact_id: snapshot.archive_artifact_id,
-            manifest_artifact_id: snapshot.manifest_artifact_id,
-            files: snapshot.files,
-            total_bytes: snapshot.total_bytes,
-            sha256: snapshot.sha256,
-            description: snapshot.description,
-            note: 'code snapshot archived with actual content — Runner materializes it from CAS (v2 §11.3)',
-          },
-        }
+      const snapshot = await client.snapshotCodeArchive(projectId, args.workspace_id, args.root_relative_path ?? '', args.description ?? '')
+      return {
+        ok: true,
+        snapshot: {
+          snapshot_id: snapshot.snapshot_id,
+          project_id: snapshot.project_id,
+          workspace_id: args.workspace_id,
+          root_relative_path: args.root_relative_path ?? '',
+          archive_artifact_id: snapshot.archive_artifact_id,
+          manifest_artifact_id: snapshot.manifest_artifact_id,
+          files: snapshot.files,
+          total_bytes: snapshot.total_bytes,
+          sha256: snapshot.sha256,
+          description: snapshot.description,
+          note: 'code snapshot archived with actual content — Runner materializes it from CAS (v2 §11.3)',
+        },
       }
-      // Deprecated legacy branch (archive=false): host-dir manifest walk.
-      if (args.path === undefined) throw new Error('workspace_snapshot archive=false (legacy manifest) requires the deprecated `path` parameter')
-      const snapshot = await snapshotWorkspace(args.path, args.description ?? '', projectId)
-      const artifact = await client.registerArtifact({
-        project_id: projectId,
-        kind: 'code',
-        content_base64: Buffer.from(JSON.stringify(snapshot.manifest, null, 2)).toString('base64'),
-        metadata: { kind: 'workspace-snapshot', files: snapshot.files, root: args.path },
-      })
-      return { ok: true, snapshot: { ...snapshot, artifact_id: artifact.artifact_id } }
     },
   }, toolCtx))
 
   ctx.tools.register(researchTool({
     name: 'patch_apply',
-    description: 'Apply a unified diff patch inside the project workspace (path traversal rejected), then register a fresh workspace snapshot. Only the workspace is writable; patches never touch host paths outside it.',
+    description: 'Apply one text-file unified diff through the project-scoped Kernel Workspace interface with version/ETag CAS, then register a fresh immutable snapshot. Host paths are never accepted.',
     parameters: {
       project_id: OPT_STRING,
-      workspace: { type: 'string', required: true },
+      workspace_id: { type: 'string', required: true },
       patch: { type: 'string', required: true },
       description: OPT_STRING,
     },
@@ -980,15 +933,14 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     execute: async (args, ctx_, sessionId) => {
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
-      const applied = await applyPatchToWorkspace(args.workspace, args.patch)
-      const snapshot = await snapshotWorkspace(args.workspace, args.description ?? `patch: ${applied.filesChanged} file(s) changed`, projectId)
-      const artifact = await client.registerArtifact({
-        project_id: projectId,
-        kind: 'code',
-        content_base64: Buffer.from(JSON.stringify(snapshot.manifest, null, 2)).toString('base64'),
-        metadata: { kind: 'workspace-snapshot', files: snapshot.files, root: args.workspace, patch: args.patch.slice(0, 500) },
-      })
-      return { ok: true, applied: { files_changed: applied.filesChanged }, snapshot: { ...snapshot, artifact_id: artifact.artifact_id } }
+      const applied = await applyWorkspacePatch(client, projectId, args.workspace_id, args.patch)
+      const snapshot = await client.snapshotCodeArchive(
+        projectId,
+        args.workspace_id,
+        '',
+        args.description ?? `patch ${applied.operation}: ${applied.path}`,
+      )
+      return { ok: true, applied: { ...applied, files_changed: 1 }, snapshot }
     },
   }, toolCtx))
 
@@ -1301,9 +1253,6 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }
   ctx.tools.register(researchTool(claimVerifyDef, toolCtx))
-  // §17: one-version deprecation alias — old name stays callable, never
-  // "unknown tool"; responses and catalog carry deprecation metadata.
-  ctx.tools.register(researchTool(deprecatedAlias(claimVerifyDef, 'claim_verify'), toolCtx))
 
   const analysisRequestDef: ResearchToolDef = {
     name: 'analysis_request',
@@ -1322,8 +1271,6 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }
   ctx.tools.register(researchTool(analysisRequestDef, toolCtx))
-  // §17: one-version deprecation alias (see claim_verify above).
-  ctx.tools.register(researchTool(deprecatedAlias(analysisRequestDef, 'analysis_build'), toolCtx))
 
   // ── manuscript (Writer / Reviewer) ───────────────────────────────────────
 
@@ -1370,83 +1317,4 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
     },
   }
   ctx.tools.register(researchTool(releaseBundleRequestDef, toolCtx))
-  // §17: one-version deprecation alias (see claim_verify above).
-  ctx.tools.register(researchTool(deprecatedAlias(releaseBundleRequestDef, 'release_bundle'), toolCtx))
-}
-
-
-// ── workspace snapshot / patch helpers (design §4.6) ───────────────────────
-
-import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
-import { createHash } from 'node:crypto'
-import { dirname, join, isAbsolute, relative, resolve } from 'node:path'
-
-/** Walk a directory and hash every file; rejects absolute/escaping paths. */
-export function snapshotWorkspace(root: string, description: string, projectId: string): { manifest: Record<string, unknown>; files: number } {
-  const absRoot = resolve(root)
-  const manifest: Record<string, string> = {}
-  let files = 0
-  const walk = (dir: string): void => {
-    let entries: string[]
-    try {
-      entries = readdirSync(dir)
-    } catch {
-      throw new Error(`workspace directory not readable: ${dir}`)
-    }
-    for (const entry of entries) {
-      const full = join(dir, entry)
-      let info
-      try {
-        info = statSync(full)
-      } catch {
-        continue
-      }
-      if (info.isDirectory()) {
-        walk(full)
-      } else if (info.isFile()) {
-        const rel = relative(absRoot, full)
-        if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`path escapes workspace: ${full}`)
-        const hash = createHash('sha256').update(readFileSync(full)).digest('hex')
-        manifest[rel] = `sha256:${hash}`
-        files++
-      }
-    }
-  }
-  walk(absRoot)
-  return {
-    manifest: { root: absRoot, description, project_id: projectId, files: manifest, generated_at: new Date().toISOString() },
-    files,
-  }
-}
-
-/** Apply a unified diff (git-style) inside the workspace; returns files changed. */
-export function applyPatchToWorkspace(root: string, patch: string): { filesChanged: number } {
-  const absRoot = resolve(root)
-  let filesChanged = 0
-  const hunks = patch.split(/^diff --git /m).filter(Boolean)
-  if (hunks.length === 0) throw new Error('patch contains no `diff --git` hunks (git-style unified diff required)')
-  for (const hunk of hunks) {
-    const pathMatch = /^a\/(.+?) b\/(.+?)\n/m.exec(hunk)
-    const filePath = pathMatch?.[2] ?? pathMatch?.[1]
-    if (filePath === undefined) throw new Error('patch hunk missing file path')
-    const target = resolve(absRoot, filePath)
-    if (!target.startsWith(absRoot)) throw new Error(`patch path escapes workspace: ${filePath}`)
-    // Collect + and - lines inside @@ hunks.
-    const plus: string[] = []
-    let inHunk = false
-    for (const line of hunk.split('\n')) {
-      if (/^@@/.test(line)) { inHunk = true; continue }
-      if (!inHunk) continue
-      if (/^(diff --git|index |--- |\+\+\+ )/.test(line)) { inHunk = false; continue }
-      if (line.startsWith('+') && !line.startsWith('+++')) plus.push(line.slice(1))
-      else if (line.startsWith('-') && !line.startsWith('---')) continue
-      else plus.push(line)
-    }
-    if (plus.length === 0) continue // deletion-only hunk: leave as-is (no content change tracked)
-    mkdirSync(dirname(target), { recursive: true })
-    writeFileSync(target, plus.join('\n') + '\n')
-    filesChanged++
-  }
-  if (filesChanged === 0) throw new Error('patch applied no file changes')
-  return { filesChanged }
 }

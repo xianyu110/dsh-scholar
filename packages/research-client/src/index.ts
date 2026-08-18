@@ -10,6 +10,7 @@ import type {
   GrillAnswerInput, GrillAnswerView, HumanPrincipal, IdeaCard, IntakeArtifact, IntakeProjection, IntakeSession,
   JobRecord, KernelEvent, ObservedPhase, PaperRef, PaperReproductionSpec, PhaseProposal, ProjectDeletionReceipt,
   ReproductionAttempt, ReproductionReportInput, ReproducibilityReport, ResearchProject, RunnerKey, SessionLink,
+  WorkspaceNode,
 } from '@dsh-scholar/research-schemas'
 
 export class KernelUnavailableError extends Error {
@@ -579,6 +580,33 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${projectId}/code-snapshots`, { workspace_id: workspaceId, root_relative_path: rootRelativePath, description })
   }
 
+  /** Read one project-scoped text node through the authoritative Workspace interface. */
+  readWorkspaceNode(projectId: string, workspaceId: string, path: string): Promise<WorkspaceNode> {
+    return this.request('GET', `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/nodes?path=${encodeURIComponent(path)}`)
+  }
+
+  /** CAS-write one text node; version 0 means create-if-absent. */
+  writeWorkspaceNode(
+    projectId: string,
+    workspaceId: string,
+    input: { path: string; content: string; expected_version?: number; expected_etag?: string },
+  ): Promise<WorkspaceNode> {
+    return this.request('POST', `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/nodes`, input)
+  }
+
+  /** CAS-delete one text node from a project-scoped workspace. */
+  deleteWorkspaceNode(
+    projectId: string,
+    workspaceId: string,
+    path: string,
+    expected?: { version?: number; etag?: string },
+  ): Promise<{ ok: true }> {
+    const query = new URLSearchParams({ path })
+    if (expected?.version !== undefined) query.set('expected_version', String(expected.version))
+    if (expected?.etag !== undefined) query.set('expected_etag', expected.etag)
+    return this.request('DELETE', `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/nodes?${query.toString()}`)
+  }
+
   // ── jobs ─────────────────────────────────────────────────────────────────
 
   submitJob(input: {
@@ -693,6 +721,18 @@ export class ResearchClient {
     config_hash: string
   }> {
     return this.request('GET', `/v1/runner-targets/${encodeURIComponent(targetId)}`)
+  }
+
+  heartbeatRunnerTarget(
+    targetId: string,
+    input: { expected_revision: number; health: 'online' | 'offline' },
+  ): Promise<{
+    target_id: string
+    health: 'unknown' | 'online' | 'offline'
+    last_seen_at: string | null
+    revision: number
+  }> {
+    return this.request('POST', `/v1/runner-targets/${encodeURIComponent(targetId)}/heartbeat`, input)
   }
 
   recoverExpiredLeases(): Promise<{ recovered: number }> {

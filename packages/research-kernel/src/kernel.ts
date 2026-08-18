@@ -45,7 +45,8 @@ import { mkdirMode } from './fs-modes.js'
 import { openDatabase, type GateRow, type JobRow, type ProjectRow, type RunnerKeyRow } from './store.js'
 import { openPtySessionStore, NullPtyAdapter, PtyError, type PtyAdapter, type PtyAppendResult, type PtyControlResult, type PtySessionStore } from './pty-session.js'
 import { normalizeWorkspacePath, openWorkspaceStore, WorkspaceError, type WorkspaceExpected, type WorkspaceStore } from './workspace-store.js'
-import { TexWorkspaceFacade, texInfoToWorkspaceInfo } from './tex-facade.js'
+import { TexWorkspaceFacade } from './tex-facade.js'
+import { WorkspaceModule } from './workspace-module.js'
 import { computePairedAnalysis } from '@dsh-scholar/analysis-worker'
 import { nextActionProjection, legacyNextActionStrings, type NextActionJob } from './next-action.js'
 import { getLockedDigest, IMAGES_LOCK } from './images-lock.js'
@@ -70,6 +71,7 @@ import {
 } from './provider.js'
 import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
 import { RunnerTargetRegistry } from './runner-target-registry.js'
+import { assessRunnerEnvironment } from './runner-environment-readiness.js'
 import { dshOperatorPrincipal } from './dsh-principal.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
@@ -830,6 +832,8 @@ export class ResearchKernel {
    * (tex-facade.ts). The existing TeX routes keep calling `tex` directly.
    */
   readonly texFacade: TexWorkspaceFacade
+  /** Unified generic/TeX workspace implementation behind a small interface. */
+  readonly workspaceModule: WorkspaceModule
   /**
    * TRAJ-01/SUBAGENT-01 (trajectory-subagents.md): standalone safe
    * trajectory projection + subagent topology store — read-only outbox
@@ -953,6 +957,7 @@ export class ResearchKernel {
       this.workspaces.scanWorkspaceIntegrity()
     }
     this.texFacade = new TexWorkspaceFacade(this.tex)
+    this.workspaceModule = new WorkspaceModule(this.db, this.workspaces, this.texFacade, projectId => { this.getProject(projectId) })
     // TRAJ-01/SUBAGENT-01: the trajectory/topology store shares THIS
     // connection (single-writer SQLite) and emits its outbox events through
     // the kernel's canonical emit (per-aggregate monotonic event_seq).
@@ -1250,7 +1255,7 @@ export class ResearchKernel {
     }
     // Project defaults must already be executable: target/profile are both
     // resolved before persistence, and kind/state mismatches fail closed.
-    const projectProfileRef = execution.runner_profile_id ?? execution.runner_profile
+    const projectProfileRef = execution.runner_profile_id
     const projectProfileId = resolveRunnerProfileId(projectProfileRef)
     const projectProfile = projectProfileId === null ? null : getRunnerProfile(projectProfileId)
     if (projectProfile === null || !projectProfile.enabled) {
@@ -3902,6 +3907,9 @@ export class ResearchKernel {
   updateRunnerTarget(targetId: string, input: RunnerTargetUpdateInput): RunnerTargetDescriptor {
     return this.runnerTargets.update(targetId, input)
   }
+  observeRunnerTarget(targetId: string, input: { expected_revision: number; health: 'online' | 'offline' }): RunnerTargetDescriptor {
+    return this.runnerTargets.observe(targetId, input)
+  }
 
   /** Configure the active project's default execution target with revision
    * CAS. The compatible built-in profile follows the target kind so changing
@@ -3924,7 +3932,7 @@ export class ResearchKernel {
       throw new KernelError(409, target.draining ? 'runner_target_draining' : 'runner_target_disabled',
         `runner target ${target.target_id} is not accepting new jobs`)
     }
-    const currentProfileId = resolveRunnerProfileId(project.execution.runner_profile_id ?? project.execution.runner_profile)
+    const currentProfileId = resolveRunnerProfileId(project.execution.runner_profile_id)
     const currentProfile = currentProfileId === null ? null : getRunnerProfile(currentProfileId)
     const profileId = target.kind === 'local-process'
       ? RUNNER_PROFILE_IDS.isolatedSubprocess
@@ -3935,16 +3943,10 @@ export class ResearchKernel {
     if (profile === null || !profile.enabled) {
       throw new KernelError(422, 'runner_profile_unknown', `runner profile '${profileId}' is unavailable`)
     }
-    const legacyProfile = profileId === RUNNER_PROFILE_IDS.isolatedSubprocess
-      ? 'isolated-subprocess'
-      : profileId === RUNNER_PROFILE_IDS.localDockerGpu
-        ? 'local-docker-gpu'
-        : 'local-docker-cpu'
     const execution = ExecutionConfig.parse({
       ...project.execution,
       runner_target_id: target.target_id,
       runner_profile_id: profile.profile_id,
-      runner_profile: legacyProfile,
     })
     const now = nowIso()
     const history = [...project.history, `runner target -> ${target.target_id} (profile ${profile.profile_id})`]
@@ -5337,18 +5339,28 @@ export class ResearchKernel {
     // profile 的 config_hash 与 image digest 一起固定进 Job payload，runner
     // 按注册表复算校验。
     const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
-    // job 级 > project 级 > v1 enum（最后一个恒非空：ExecutionConfig 有默认值）
-    const profileRef = input.runner_profile_id ?? project.execution.runner_profile_id ?? project.execution.runner_profile
+    // job override > project default; both are registered opaque ids.
+    const profileRef = input.runner_profile_id ?? project.execution.runner_profile_id
     const resolvedProfileId = resolveRunnerProfileId(profileRef)
     const runnerProfile = resolvedProfileId !== null ? getRunnerProfile(resolvedProfileId) : null
     if (runnerProfile === null) {
       throw new KernelError(422, 'runner_profile_unknown',
-        `runner profile '${profileRef ?? project.execution.runner_profile}' is not a registered opaque profile id (domain-model.md §9.1); jobs reference only registered RunnerProfile ids, never docker flags/endpoints`)
+        `runner profile '${profileRef}' is not a registered opaque profile id (domain-model.md §9.1); jobs reference only registered RunnerProfile ids, never docker flags/endpoints`)
     }
     const targetRef = input.runner_target_id ?? project.execution.runner_target_id
     const runnerTarget = this.listRunnerTargets().find(target => target.target_id === targetRef)
     if (runnerTarget === undefined) {
       throw new KernelError(422, 'runner_target_unknown', `runner target '${targetRef}' is not registered`)
+    }
+    const runnerAssessment = assessRunnerEnvironment(runnerProfile, runnerTarget, ref => this.secretRefAvailable(ref))
+    if (runnerAssessment.hardFailures.includes('target_offline')) {
+      throw new KernelError(409, 'runner_target_offline', `runner target ${runnerTarget.target_id} is offline`)
+    }
+    if (runnerAssessment.hardFailures.includes('target_unprobed')) {
+      throw new KernelError(409, 'runner_target_unprobed', `remote runner target ${runnerTarget.target_id} has no fresh authenticated heartbeat`)
+    }
+    if (runnerAssessment.hardFailures.includes('target_capability_mismatch')) {
+      throw new KernelError(422, 'runner_target_capability_mismatch', `runner target ${runnerTarget.target_id} cannot satisfy its configured compute mode`)
     }
     if (!runnerTarget.enabled || runnerTarget.draining) {
       throw new KernelError(409, runnerTarget.draining ? 'runner_target_draining' : 'runner_target_disabled',
@@ -7090,184 +7102,72 @@ export class ResearchKernel {
 
   // ── generic Workspace WORK-01 (api-contracts.md §17) ────────────────────
 
-  /**
-   * Resolve a workspace id across the generic store and the TeX facade
-   * (a `manuscript` workspace may be backed by either). Throws 404-shaped
-   * errors when neither knows the id.
-   */
   resolveWorkspace(workspaceId: string): import('@dsh-scholar/research-schemas').WorkspaceInfo {
-    try {
-      return this.workspaces.get(workspaceId)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-    }
-    try {
-      return this.texFacade.get(workspaceId)
-    } catch {
-      throw new WorkspaceError('workspace_not_found', `workspace ${workspaceId} not found`)
-    }
+    return this.workspaceModule.resolve(workspaceId)
   }
 
   workspaceEnsure(projectId: string, kind: import('@dsh-scholar/research-schemas').WorkspaceKind, name: string): import('@dsh-scholar/research-schemas').WorkspaceInfo {
-    this.getProject(projectId)
-    return this.workspaces.ensure(projectId, kind, name)
+    return this.workspaceModule.ensure(projectId, kind, name)
   }
 
   workspaceGet(workspaceId: string): import('@dsh-scholar/research-schemas').WorkspaceInfo {
-    return this.resolveWorkspace(workspaceId)
+    return this.workspaceModule.get(workspaceId)
   }
 
   workspaceTree(workspaceId: string): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[] } {
-    try {
-      return this.workspaces.tree(workspaceId)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.tree(workspaceId)
-    }
+    return this.workspaceModule.tree(workspaceId)
   }
 
   workspaceRead(workspaceId: string, path: string): import('@dsh-scholar/research-schemas').WorkspaceNode | null {
-    try {
-      // Resolve the backend first. `WorkspaceStore.read()` intentionally
-      // returns null for a missing FILE, so calling it directly cannot
-      // distinguish a missing generic workspace from a missing node and
-      // would skip the manuscript/TeX facade fallback.
-      this.workspaces.get(workspaceId)
-      return this.workspaces.read(workspaceId, path)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.read(workspaceId, path)
-    }
+    return this.workspaceModule.read(workspaceId, path)
   }
 
   workspaceWrite(workspaceId: string, path: string, content: string, expected?: WorkspaceExpected): import('@dsh-scholar/research-schemas').WorkspaceNode {
-    try {
-      return this.workspaces.write(workspaceId, path, content, expected)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.write(workspaceId, path, content, expected)
-    }
+    return this.workspaceModule.write(workspaceId, path, content, expected)
   }
 
-  /** Binary write — bytes go to the artifact CAS (server-computed sha256).
-   * The generic store owns binary nodes; the TeX facade rejects them
-   * (text-only, workspace_binary_read_only). */
   workspaceWriteBinary(workspaceId: string, path: string, bytes: Uint8Array, media: string, expected?: WorkspaceExpected): import('@dsh-scholar/research-schemas').WorkspaceNode {
-    try {
-      return this.workspaces.writeBinary(workspaceId, path, bytes, media, expected)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.writeBinary(workspaceId, path, bytes, media, expected)
-    }
+    return this.workspaceModule.writeBinary(workspaceId, path, bytes, media, expected)
   }
 
   workspaceDelete(workspaceId: string, path: string, expected?: WorkspaceExpected): void {
-    try {
-      this.workspaces.deleteNode(workspaceId, path, expected)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      this.texFacade.deleteNode(workspaceId, path, expected)
-    }
+    this.workspaceModule.delete(workspaceId, path, expected)
   }
 
   workspaceMove(workspaceId: string, fromPath: string, toPath: string, expected?: WorkspaceExpected): import('@dsh-scholar/research-schemas').WorkspaceNode {
-    try {
-      return this.workspaces.moveNode(workspaceId, fromPath, toPath, expected)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.moveNode(workspaceId, fromPath, toPath, expected)
-    }
+    return this.workspaceModule.move(workspaceId, fromPath, toPath, expected)
   }
 
   workspaceHistory(workspaceId: string): import('@dsh-scholar/research-schemas').WorkspaceRevision[] {
-    try {
-      return this.workspaces.history(workspaceId)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.history(workspaceId)
-    }
+    return this.workspaceModule.history(workspaceId)
   }
 
-  /** Binary node bytes (artifact CAS); null for text/missing nodes. */
   workspaceBlob(workspaceId: string, path: string): Buffer | null {
-    try {
-      this.workspaces.get(workspaceId)
-      return this.workspaces.blob(workspaceId, path)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.blob(workspaceId, path)
-    }
+    return this.workspaceModule.blob(workspaceId, path)
   }
 
-  /**
-   * Every workspace of a project (api-contracts.md §17 list): the generic
-   * code/scratch workspaces of the disk-backed store plus the `manuscript`
-   * facade workspaces (one per TeX document).
-   */
   workspaceList(projectId: string): import('@dsh-scholar/research-schemas').WorkspaceInfo[] {
-    this.getProject(projectId)
-    const generic = this.workspaces.listByProject(projectId)
-    const docs = this.db.prepare('SELECT * FROM tex_documents WHERE project_id = ? ORDER BY created_at')
-      .all(projectId) as unknown as Array<{
-        document_id: string; project_id: string; root_file: string; revision: number; created_at: string; updated_at: string
-      }>
-    return [...generic, ...docs.map(d => texInfoToWorkspaceInfo(d, d.root_file))]
+    return this.workspaceModule.list(projectId)
   }
 
-  /** 404-shaped ownership guard for project-scoped workspace routes: a
-   * workspace that does not belong to the path project is indistinguishable
-   * from a missing one (no cross-project enumeration). */
   assertWorkspaceInProject(workspaceId: string, projectId: string): void {
-    const info = this.resolveWorkspace(workspaceId)
-    if (info.project_id !== projectId) {
-      throw new WorkspaceError('workspace_not_found', `workspace ${workspaceId} not found`)
-    }
+    this.workspaceModule.assertInProject(workspaceId, projectId)
   }
 
-  /** Watch feed: nodes changed after a workspace revision (generic store:
-   * op-ledger projection; TeX facade: conservative full tree). */
   workspaceListSince(workspaceId: string, sinceRevision: number): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[]; deleted: string[] } {
-    try {
-      return this.workspaces.listSince(workspaceId, sinceRevision)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.listSince(workspaceId, sinceRevision)
-    }
+    return this.workspaceModule.listSince(workspaceId, sinceRevision)
   }
 
-  /** PATH search (prefix/glob). */
   workspaceSearch(workspaceId: string, query: { prefix?: string; glob?: string }): { info: import('@dsh-scholar/research-schemas').WorkspaceInfo; nodes: import('@dsh-scholar/research-schemas').WorkspaceNode[] } {
-    try {
-      return this.workspaces.search(workspaceId, query)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.search(workspaceId, query)
-    }
+    return this.workspaceModule.search(workspaceId, query)
   }
 
-  /** CONTENT search (api-contracts.md §17): linear text scan over the
-   * generic store, with the manuscript facade as the fallback for
-   * `manuscript` workspaces — same bounded semantics on both backends
-   * (text nodes only, per-file/per-result/size caps, no full-text index). */
   workspaceSearchContent(workspaceId: string, query: import('./workspace-store.js').WorkspaceContentSearchQuery): import('./workspace-store.js').WorkspaceContentSearchResult {
-    try {
-      return this.workspaces.searchContent(workspaceId, query)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.searchContent(workspaceId, query)
-    }
+    return this.workspaceModule.searchContent(workspaceId, query)
   }
 
-  /** Rollback read at a stored per-path version (generic store: history
-   * bytes; TeX facade: current version only). */
   workspaceReadVersion(workspaceId: string, path: string, version: number): import('@dsh-scholar/research-schemas').WorkspaceNode | null {
-    try {
-      this.workspaces.get(workspaceId)
-      return this.workspaces.readVersion(workspaceId, path, version)
-    } catch (error) {
-      if (!(error instanceof WorkspaceError) || error.code !== 'workspace_not_found') throw error
-      return this.texFacade.readVersion(workspaceId, path, version)
-    }
+    return this.workspaceModule.readVersion(workspaceId, path, version)
   }
 
   /**
@@ -7280,7 +7180,7 @@ export class ResearchKernel {
    * report per scanned workspace (all when `workspaceId` is omitted).
    */
   scanWorkspaceIntegrity(workspaceId?: string): import('./workspace-store.js').WorkspaceIntegrityReport[] {
-    return this.workspaces.scanWorkspaceIntegrity(workspaceId)
+    return this.workspaceModule.scanIntegrity(workspaceId)
   }
 
   // ── evidence & claims (design §4.7) ──────────────────────────────────────
@@ -8641,13 +8541,12 @@ export class ResearchKernel {
       created_at: j.created_at,
     }))
     const codeSnapshots = this.listCodeSnapshots(projectId)
-    const profileId = resolveRunnerProfileId(project.execution.runner_profile_id ?? project.execution.runner_profile)
+    const profileId = resolveRunnerProfileId(project.execution.runner_profile_id)
     const target = this.listRunnerTargets().find(candidate => candidate.target_id === project.execution.runner_target_id)
-    const runnerEnvironmentReady = profileId !== null
-      && getRunnerProfile(profileId) !== null
+    const profile = profileId === null ? null : getRunnerProfile(profileId)
+    const runnerEnvironmentReady = profile !== null
       && target !== undefined
-      && target.enabled
-      && !target.draining
+      && assessRunnerEnvironment(profile, target, ref => this.secretRefAvailable(ref)).observedReady
     const nextActionsV2 = nextActionProjection({
       project,
       gates: pendingGates,

@@ -710,6 +710,11 @@ const providerDeleteSchema = z.object({
   expected_revision: z.number().int().positive(),
 }).strict()
 
+const runnerTargetHeartbeatSchema = z.object({
+  expected_revision: z.number().int().positive(),
+  health: z.enum(['online', 'offline']),
+}).strict()
+
 /**
  * GOV-01 fail-closed pattern for intake Human actions: a request without an
  * authenticated `principal.principal_id` is 422 principal_required BEFORE
@@ -754,6 +759,7 @@ const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string 
   { method: 'POST', re: /^\/v1\/recover\/leases$/, label: 'recover/leases' },
   { method: 'POST', re: /^\/v1\/runner-targets$/, label: 'runner-targets/create' },
   { method: 'PATCH', re: /^\/v1\/runner-targets\/[^/]+$/, label: 'runner-targets/update' },
+  { method: 'POST', re: /^\/v1\/runner-targets\/[^/]+\/heartbeat$/, label: 'runner-targets/heartbeat' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/verified$/, label: 'evidence/verified' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/evidence\/[^/]+\/accept$/, label: 'evidence/accept' },
   { method: 'POST', re: /^\/v1\/projects\/[^/]+\/contracts\/[^/]+\/approve$/, label: 'contracts/approve' },
@@ -1442,6 +1448,11 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               if (!requireGlobalConfigRole(kernel, req, res, 'runner target update')) return
               const input = RunnerTargetUpdateInput.parse(body)
               ok(res, kernel.runnerTargetView(kernel.updateRunnerTarget(id, input)))
+              return
+            }
+            if (method === 'POST' && sub === 'heartbeat') {
+              const input = runnerTargetHeartbeatSchema.parse(body)
+              ok(res, kernel.runnerTargetView(kernel.observeRunnerTarget(id, input)))
               return
             }
           }
@@ -3375,7 +3386,7 @@ async function handleV2(ctx: {
     const project = kernel.getProject(id)
     const capabilities = {
       editor: true,
-      runner_profile: project.execution.runner_profile,
+      runner_profile_id: project.execution.runner_profile_id,
       gates: ['scope', 'idea', 'contract', 'release'],
       roles: members.map(m => m.role),
       membership: principal === undefined ? null : members.find(m => m.principal_id === principal)?.role ?? null,

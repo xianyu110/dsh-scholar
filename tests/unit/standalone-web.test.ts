@@ -65,7 +65,14 @@ describe('standalone web application', () => {
     expect(o.kernelPort).toBe(7412)
     expect(o.kernelDataDir).toContain('.dsh/research-kernel')
     expect(o.host).toBe('127.0.0.1')
+    expect(o.principal).toBeNull()
     expect(o.frameAncestors).toContain('http://127.0.0.1:3080')
+  })
+
+  it('uses only an explicitly configured standalone principal', () => {
+    const dir = join(tmpdir(), `dsh-standalone-principal-${Date.now()}`)
+    expect(loadOptions(['--data-dir', dir, '--token', 'token-only']).principal).toBeNull()
+    expect(loadOptions(['--data-dir', dir, '--token', 'token-with-principal', '--principal', 'ops-1']).principal).toBe('ops-1')
   })
 
   it('loads explicit --port / --kernel-port / --kernel-data-dir / --data-dir', () => {

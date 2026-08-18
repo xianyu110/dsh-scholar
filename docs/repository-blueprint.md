@@ -118,6 +118,9 @@ Kernel 不依赖 DSH、UI、Runner 或 Connector。browser client 不导入 Node
 ### research-kernel
 
 - kernel.ts：深模块外部接口；
+- workspace-module.ts：Workspace/TeX 双 backend 的 project-scoped 解析、CAS 读写、搜索、历史与 snapshot 协调；Kernel 仅保留一行级 façade；
+- runner-environment-readiness.ts：projection 与 submit 共用的 profile/target/SecretRef/heartbeat/capability readiness；
+- sidecar-lifecycle.ts：插件与 standalone 共用的 sidecar 启停、身份握手、token、endpoint ownership；两端只保留默认目录/日志 adapter；
 - store/schema.ts、store/migrations.ts、store/queries/*；
 - transactions/*：Gate、complete、budget、Workspace/TeX save/build、Adoption、Config patch；
 - server/router.ts、server/json.ts、server/artifact.ts、server/sse.ts；
@@ -134,7 +137,7 @@ Kernel 不依赖 DSH、UI、Runner 或 Connector。browser client 不导入 Node
 - standalone/server.ts、standalone/security.ts、standalone/sidecar.ts、standalone/bootstrap.ts；
 - client.tsdown.config.ts。
 
-不得再次形成单个 7,000+ 行 client 文件；页面模块只通过共享 state/interface 交互。
+不得再次形成单个 7,000+ 行 client 文件；页面模块只通过共享 state/interface 交互。ResearchKernel 新增 Workspace、Runner、sidecar 等领域行为时必须先落入对应深模块，Kernel class 只协调事务与稳定外部接口；禁止在 plugin/standalone 复制生命周期实现。
 
 ## 5. 根脚本
 

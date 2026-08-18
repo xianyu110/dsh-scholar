@@ -146,9 +146,9 @@ describe('CONFIG-01 dynamic Settings — schema/effective → field model', () =
     const kernelPort = fieldByKey(sections, 'kernel.port')
     expect(kernelPort.presentInEffective).toBe(true)
     expect(settingsFieldDisplay(kernelPort)).toEqual({ kind: 'value', value: 7412 })
-    // nullable project key with a null default → none
+    // required opaque project profile has a safe default.
     const profileId = fieldByKey(sections, 'execution.runner_profile_id')
-    expect(settingsFieldDisplay(profileId)).toEqual({ kind: 'none', value: null })
+    expect(settingsFieldDisplay(profileId)).toEqual({ kind: 'value', value: 'profile_local_docker_cpu_v1' })
   })
 
   it('secret fields NEVER render a value — only the set-but-hidden mask kind', () => {

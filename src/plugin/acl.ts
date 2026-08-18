@@ -25,20 +25,7 @@ export const RESEARCH_ROLES: readonly ResearchRole[] = [
   'operator', 'statistician', 'writer', 'reviewer', 'auditor',
 ]
 
-/**
- * §17 one-version deprecation aliases: old user-facing names resolve to their
- * canonical counterparts. They stay registered (never "unknown tool") and
- * stay ACL-enforced, but role surfaces are defined on canonical names only.
- */
-export const TOOL_ALIASES = {
-  claim_verify: 'claim_verify_request',
-  analysis_build: 'analysis_request',
-  release_bundle: 'release_bundle_request',
-} as const
-
-export type ResearchToolAlias = keyof typeof TOOL_ALIASES
-
-/** Research tool names (the plugin's own surface): canonical + aliases. */
+/** Canonical research tool names. Obsolete aliases are intentionally absent. */
 export const RESEARCH_TOOLS = [
   // Bounded native-DSH conversation façade. Public to every DSH role, but it
   // only resolves the calling session and never grants a low-level capability.
@@ -80,14 +67,9 @@ export const RESEARCH_TOOLS = [
   'research_intake_scan',
   'research_intake_answers',
   'research_intake_propose',
-  // §17 deprecation aliases (still registered, still ACL-enforced).
-  ...Object.keys(TOOL_ALIASES),
 ] as const
 
-/**
- * Tool surface per role (design §4.1 table) — canonical names only; aliases
- * resolve through {@link TOOL_ALIASES} in `RoleRegistry.allows`.
- */
+/** Tool surface per role (design §4.1 table) — canonical names only. */
 export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
   none: ['dsh_scholar'],
   director: ['research_project', 'research_phase', 'research_gate_request', 'research_budget', 'research_status', 'research_panel', 'release_bundle_request'],
@@ -154,9 +136,8 @@ export class RoleRegistry {
     return this.roles.get(sessionId) ?? DEFAULT_ROLE
   }
 
-  /** Whether the role may call the tool (deprecation aliases resolve to their canonical name). */
+  /** Whether the role may call one canonical tool. */
   allows(role: ResearchRole, toolName: string): boolean {
-    const canonical: string = TOOL_ALIASES[toolName as ResearchToolAlias] ?? toolName
-    return canonical === 'dsh_scholar' || ROLE_TOOLS[role].includes(canonical)
+    return toolName === 'dsh_scholar' || ROLE_TOOLS[role].includes(toolName)
   }
 }

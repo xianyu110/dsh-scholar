@@ -418,7 +418,7 @@ function paintOpenForm(body: HTMLElement, st: PtyPanelState, projection: Project
   // pinned profile/target (opaque ids resolved server-side).
   const pinnedRow = el('div', 'row')
   pinnedRow.style.cssText = 'align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap'
-  const profile = projection.project?.execution?.runner_profile ?? 'local'
+  const profile = projection.project?.execution?.runner_profile_id ?? 'unconfigured'
   const target = 'local'
   const profileChip = el('span', 'artifact-kind', `${t('pty', 'pty.form.profile')}: ${profile}`)
   const targetChip = el('span', 'artifact-kind', `${t('pty', 'pty.form.target')}: ${target}`)

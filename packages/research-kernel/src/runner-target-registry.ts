@@ -169,4 +169,22 @@ export class RunnerTargetRegistry {
     }
     return target
   }
+
+  /** Record an authenticated runner observation without changing config revision. */
+  observe(targetId: string, input: { expected_revision: number; health: 'online' | 'offline' }): RunnerTarget {
+    const current = this.get(targetId)
+    if (input.expected_revision !== current.revision) {
+      throw new KernelError(409, 'runner_target_revision_conflict',
+        `runner target ${targetId} revision ${current.revision} does not match observed revision ${input.expected_revision}`)
+    }
+    const now = nowIso()
+    const result = this.db.prepare(
+      'UPDATE runner_targets SET health=?,last_seen_at=?,updated_at=? WHERE target_id=? AND revision=?',
+    ).run(input.health, now, now, targetId, current.revision)
+    if (Number(result.changes) !== 1) {
+      throw new KernelError(409, 'runner_target_revision_conflict',
+        `runner target ${targetId} changed during health observation`)
+    }
+    return this.get(targetId)
+  }
 }

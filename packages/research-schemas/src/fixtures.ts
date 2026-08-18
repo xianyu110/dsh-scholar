@@ -41,8 +41,7 @@ export function fixtureProject(overrides: Partial<ResearchProject> = {}): Resear
       max_parallel_jobs: 4,
     },
     execution: {
-      runner_profile: 'local-docker-cpu',
-      runner_profile_id: null,
+      runner_profile_id: 'profile_local_docker_cpu_v1',
       runner_target_id: 'target_local_docker_v1',
       network_policy: 'allowlist',
       artifact_store: 'local-cas',

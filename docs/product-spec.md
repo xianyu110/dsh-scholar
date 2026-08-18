@@ -112,6 +112,7 @@ Run Terminal 是正式 Job 的只读、可恢复账本。Interactive Terminal �
 
 - 项目可有 code、manuscript、scratch 等版本化 Workspace，文件树和路径均为项目根相对形式；
 - VS Code 式 Explorer、已打开标签页、全局搜索、行号、语法高亮、查找替换、撤销重做、快捷键、Problems 和集成 Terminal；
+- Workspace 内容搜索必须调用 project-scoped Kernel search 并显示 path/line/snippet；搜索与编辑输入期间不得重建控件或抢走焦点。`patch_apply` 只接受 `workspace_id` 与单文件文本 unified diff，并以 version/etag CAS 写回；禁止宿主路径、多文件、二进制与 rename/copy patch；
 - 文本与二进制文件可直接查看；可编辑类型由 media type 和策略决定，未知/大文件安全降级为只读或下载；
 - manuscript TeX facade 与 generic Workspace API 必须是同一文件权威的两种视图：list/tree/read/version/blob/write/move/delete/search/watch 任一 generic 操作都必须先解析 workspace backend，不能因“generic store 未命中”把已存在的 TeX 文件误报 404；公共节点大小字段缺失或非法时 UI 安全显示 `0 B`，不得出现 `NaN undefined`；
 - create/read/write/move/delete/upload/watch/search/snapshot 共用 Revision/ETag/CAS，冲突提供 base/current/local，禁止静默覆盖；
@@ -221,6 +222,8 @@ Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 g
 - `CONTRACT_APPROVED` 且尚无 baseline Job 时，Runs 不能显示通用空白态。它必须显示一项由权威 `baseline_reproduce` NextAction 投影出的“基线运行准备任务”，列明缺少的代码快照、可执行命令或实验环境，并提供进入项目 Chat/Workspace/Settings 的明确入口；
 - 用户在 Chat 中可以自然语言要求“准备/启动基线实验”。系统必须结合当前 approved Contract 逐项引导补齐代码、命令和 Runner 配置；参数不完整时零 Job 写入，不能退化成仅返回 `No jobs` 或要求用户猜 JSON；
 - 参数完整后，baseline Job 提交与 `CONTRACT_APPROVED → BASELINE_REPRO` 必须是同一个 Kernel 原子操作，并绑定 approved Contract、不可变 CodeSnapshot、固定镜像/Runner target、输出契约、提交人和幂等键。失败时 Project 与 Jobs 均不产生半写；
+- Contract 的 `baseline_run` 是自然语言实验约束，不是 argv，也不能消除 `baseline_command` 缺口。UI/Agent 不得猜测 `python train.py` 等命令；只有用户或受信任工具提交的非空结构化 argv 才算命令已备；
+- Runner 环境只有在 profile/target enabled、非 draining、kind/capability 匹配、SecretRef 可用且远端有未过期的认证 heartbeat 时才算 ready；unknown/offline/stale 必须保留 `runner_environment` 缺口且禁止远端提交，不得自动回退本机；
 - Runs 的计数只统计真实持久化 Job。准备任务要明确标为“待准备”，不混入 queued/running/succeeded 统计；真实 Job 创建后准备任务消失并由 Job 卡片接管。
 
 ### 5.15 运维预算页面按需启用

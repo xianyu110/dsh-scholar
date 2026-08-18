@@ -618,5 +618,5 @@ export function scratchCacheDir(): string {
 }
 
 export { KernelSidecar, resolveDshHome, RoleRegistry, type ResearchRole }
-export { applyPatchToWorkspace, snapshotWorkspace } from './tools.js'
+export { applyWorkspacePatch, type WorkspacePatchClient, type WorkspacePatchResult } from './workspace-patch.js'
 export { selectSkillPacks, selectedSkillNames, resolveSkillRoot, resolveSkillDirs, SKILL_GROUPS, type SkillSelection } from './skills.js'

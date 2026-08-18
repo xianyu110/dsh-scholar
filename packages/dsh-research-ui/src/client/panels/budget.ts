@@ -39,7 +39,7 @@ export function openBudgetDetailModal(root: ShadowRoot, p: Projection): void {
   row(t('budget', 'budget.parallelJobs'), String(c?.max_parallel_jobs ?? '—'))
   modal.appendChild(el('div', 'section-label', t('evidence', 'evidence.budget.execution')))
   if (exec !== undefined) {
-    row(t('budget', 'budget.runner'), String(exec.runner_profile ?? '—'))
+    row(t('budget', 'budget.runner'), String(exec.runner_profile_id ?? '—'))
     row(t('budget', 'budget.network'), String(exec.network_policy ?? '—'))
     row(t('budget', 'budget.artifacts'), String(exec.artifact_store ?? '—'))
   }
@@ -121,4 +121,3 @@ export function budgetRow(label: string, value: number, max: number | undefined,
   row.appendChild(val)
   return row
 }
-

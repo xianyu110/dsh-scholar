@@ -126,7 +126,7 @@ describe('full-auto job submit stays inside the fixture profile', () => {
     const kernel = freshKernel()
     const projectId = fullAutoProject(kernel)
     kernel.db.prepare('UPDATE projects SET execution = ? WHERE project_id = ?')
-      .run(JSON.stringify({ runner_profile: 'local-docker-cpu', network_policy: 'allowlist', artifact_store: 'local-cas', fixture_id: null }), projectId)
+      .run(JSON.stringify({ runner_profile_id: 'profile_local_docker_cpu_v1', network_policy: 'allowlist', artifact_store: 'local-cas', fixture_id: null }), projectId)
     expectKernelError(() => kernel.submitJob({
       project_id: projectId, idempotency_key: 'k1', kind: 'echo', command: [],
       payload: { message: 'x' },

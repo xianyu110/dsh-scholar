@@ -592,8 +592,9 @@ describe('v2 project adapter', () => {
       })
       const { project } = await created.json() as { project: { project_id: string } }
       const proj = await fetch(`${base}/v2/projects/${project.project_id}/projection`, { headers: { 'x-principal-id': 'ops-1' } })
-      const projection = await proj.json() as { capabilities: { editor: boolean; runner_profile: string; roles: string[]; membership: string } }
+      const projection = await proj.json() as { capabilities: { editor: boolean; runner_profile_id: string; roles: string[]; membership: string } }
       expect(projection.capabilities.editor).toBe(true)
+      expect(projection.capabilities.runner_profile_id).toBe('profile_local_docker_cpu_v1')
       expect(projection.capabilities.roles).toContain('pi')
       expect(projection.capabilities.membership).toBe('pi')
       // A non-member principal gets 404 (no enumeration).

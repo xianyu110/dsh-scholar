@@ -316,7 +316,9 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
     case 'CONTRACT_APPROVED':
       {
         const baselineGaps: string[] = []
-        if (contract?.baseline_run === undefined || contract.baseline_run.trim() === '') baselineGaps.push('baseline_command')
+        // `baseline_run` is scientific prose/identity, never executable argv.
+        // No command is persisted before the atomic startBaselineRun handoff.
+        baselineGaps.push('baseline_command')
         if ((contract?.code_snapshot === undefined || contract.code_snapshot.trim() === '') && (ctx.code_snapshots?.length ?? 0) === 0) {
           baselineGaps.push('code_snapshot')
         }

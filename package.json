@@ -54,6 +54,7 @@
     "@dsh-scholar/research-kernel": "workspace:^",
     "@dsh-scholar/research-schemas": "workspace:^",
     "@dsh-scholar/scholar-connectors": "workspace:^",
+    "diff": "^8.0.4",
     "zod": "^3.24.0"
   },
   "peerDependencies": {

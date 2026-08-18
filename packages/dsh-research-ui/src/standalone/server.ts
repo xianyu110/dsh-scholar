@@ -881,10 +881,11 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
     await sidecar.stop()
     throw error
   }
-  // One credential-derived Human Principal is shared by every DSH session
-  // and this BFF. An explicit principal remains an operator override; the
-  // normal path cannot drift because both adapters read the same Kernel dir.
-  options.principal ??= sidecar.operatorPrincipal
+  // Standalone Human identity is explicit. The Kernel sidecar also owns a
+  // credential-derived principal for trusted DSH-plugin calls, but borrowing
+  // it here would silently turn a token-only browser session into a Human PI.
+  // Token mode without --principal therefore stays fail-closed; --no-token is
+  // the deliberately unauthenticated loopback development mode.
   const endpoint = sidecar.endpoint
   // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity.
   // The BFF is a service process holding the 0600 dataDir token; it attaches

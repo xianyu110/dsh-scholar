@@ -690,7 +690,7 @@ export async function executeChatCommand(
         const template = `/reproduce ${JSON.stringify({
           contract_id: contractId,
           code_snapshot_id: snapshotId,
-          command: ['python', 'train.py'],
+          command: ['<executable>', '<arg>'],
           idempotency_key: `baseline-${contractId}`,
         })}`
         return t('shell', 'shell.chat.baseline.prepare', {

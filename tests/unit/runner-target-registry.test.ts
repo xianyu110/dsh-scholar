@@ -104,6 +104,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
       const created = kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
         ...remoteInput,
         target_id: 'lab-a',
+        capabilities: [...remoteInput.capabilities, 'nvidia'],
         runtime: {
           image_digest: 'registry.example/research@sha256:' + 'b'.repeat(64),
           compute: { mode: 'nvidia', devices: 'all' },
@@ -117,6 +118,10 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
       expect(kernel.runnerTargetView(created).connection?.known_hosts.available).toBe(true)
       expect(kernel.runnerTargetView(created).runtime?.compute).toEqual({ mode: 'nvidia', devices: 'all' })
       expect(() => kernel.updateRunnerTarget('lab-a', { expected_revision: 2, draining: true })).toThrowError(KernelError)
+      const observed = kernel.observeRunnerTarget('lab-a', { expected_revision: 1, health: 'online' })
+      expect(observed.health).toBe('online')
+      expect(observed.last_seen_at).not.toBeNull()
+      expect(() => kernel.observeRunnerTarget('lab-a', { expected_revision: 2, health: 'online' })).toThrowError(KernelError)
       const project = kernel.createProject({
         name: 'remote', workspace: '/w',
         brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
@@ -193,7 +198,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
       const localProcess = kernel.createProject({
         name: 'process', workspace: '/process',
         brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
-        execution: { runner_profile: 'isolated-subprocess', runner_target_id: 'target_local_process_v1' },
+        execution: { runner_profile_id: 'profile_isolated_subprocess_v1', runner_target_id: 'target_local_process_v1' },
       })
       const localDocker = kernel.createProject({
         name: 'docker', workspace: '/docker',
@@ -330,6 +335,36 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
         execution: { runner_target_id: 'target_local_process_v1', runner_profile_id: 'profile_isolated_subprocess_v1' },
       })
       expect((await patchTarget('pi-1', 'pi', project.revision)).status).toBe(409)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts revision-fenced runner heartbeat only through the service identity', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-target-heartbeat-'))
+    const kernel = new ResearchKernel({
+      dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas'), serviceToken: 'runner-service',
+    })
+    kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
+      target_id: 'heartbeat-local', display_name: 'Heartbeat local', kind: 'local-docker', capabilities: ['docker'],
+    }), 'operator')
+    const { server, url } = await startKernelServer({ kernel, port: 0 })
+    const heartbeat = (headers: Record<string, string>, expectedRevision = 1): Promise<Response> => fetch(
+      `${url}/v1/runner-targets/heartbeat-local/heartbeat`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ expected_revision: expectedRevision, health: 'online' }),
+      },
+    )
+    try {
+      expect((await heartbeat({})).status).toBe(403)
+      const observed = await heartbeat({ 'x-service-token': 'runner-service' })
+      expect(observed.status).toBe(200)
+      expect(await observed.json()).toMatchObject({
+        target_id: 'heartbeat-local', revision: 1, health: 'online',
+      })
+      expect((await heartbeat({ 'x-service-token': 'runner-service' }, 2)).status).toBe(409)
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
       kernel.close()

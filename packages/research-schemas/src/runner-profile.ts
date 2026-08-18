@@ -10,9 +10,8 @@
  *   capabilities 标签与 `config_hash`（profile 记录本身的 sha256 pin）。
  * - **opaque id 语义**：Job/UI 只引用 `profile_id`，绝不携带 docker flags、
  *   hostname、credential、Docker socket 或任意 endpoint；解析由本注册表
- *   完成（`resolveRunnerProfile`）。legacy v1 enum
- *   （`local-docker-cpu` / `local-docker-gpu` / `isolated-subprocess`）经
- *   `LEGACY_RUNNER_PROFILE_ENUM_TO_ID` 映射到同名本机 opaque id。
+ *   完成（`resolveRunnerProfile`）。旧枚举入口已移除，任何非注册 opaque
+ *   id 都会 fail closed。
  * - **内置注册表与 `configs/runner-profiles/images.lock.json` 对齐**：锁内
  *   node_fixture digest 是 local-docker CPU/GPU 两个 profile 的固定 image；
  *   锁文件读取失败时回退到与 research-kernel images-lock 相同的硬编码常量
@@ -85,13 +84,6 @@ export const RUNNER_PROFILE_IDS = {
   isolatedSubprocess: 'profile_isolated_subprocess_v1',
 } as const
 export type RunnerProfileId = (typeof RUNNER_PROFILE_IDS)[keyof typeof RUNNER_PROFILE_IDS]
-
-/** v1 enum → opaque id 映射（domain-model.md §2：v1 兼容字段，迁移后由 opaque id 取代）。 */
-export const LEGACY_RUNNER_PROFILE_ENUM_TO_ID: Readonly<Record<string, string>> = {
-  'local-docker-cpu': RUNNER_PROFILE_IDS.localDockerCpu,
-  'local-docker-gpu': RUNNER_PROFILE_IDS.localDockerGpu,
-  'isolated-subprocess': RUNNER_PROFILE_IDS.isolatedSubprocess,
-}
 
 /** 锁内镜像身份（与 research-kernel images-lock.ts 同源常量；锁文件缺失时回退）。 */
 export type LockedProfileImageKind = 'node_fixture' | 'texlive'
@@ -226,16 +218,10 @@ export function getRunnerProfile(profileId: string): RunnerProfile | null {
   return BUILTIN_RUNNER_PROFILES.find(p => p.profile_id === profileId) ?? null
 }
 
-/**
- * opaque id 优先精确解析，legacy v1 enum 回退映射；未登记 → null。
- * Job/UI 引用一律先过这里——解析是注册表的职责，调用方永远不拼 docker 参数。
- */
+/** 精确解析 opaque id；未登记 → null，不做旧枚举映射。 */
 export function resolveRunnerProfileId(ref: string): string | null {
   if (ref === '') return null
-  if (getRunnerProfile(ref) !== null) return ref
-  const mapped = LEGACY_RUNNER_PROFILE_ENUM_TO_ID[ref]
-  if (mapped !== undefined && getRunnerProfile(mapped) !== null) return mapped
-  return null
+  return getRunnerProfile(ref) === null ? null : ref
 }
 
 /** 未登记 profile 引用（调用方应 fail closed：kernel 422 / runner environment 失败）。 */
@@ -246,7 +232,7 @@ export class RunnerProfileUnknownError extends Error {
   }
 }
 
-/** 解析并返回注册记录；未知 id（含未知 enum）→ RunnerProfileUnknownError。 */
+/** 解析并返回注册记录；未知 opaque id → RunnerProfileUnknownError。 */
 export function resolveRunnerProfile(ref: string): RunnerProfile {
   const id = resolveRunnerProfileId(ref)
   if (id === null) {

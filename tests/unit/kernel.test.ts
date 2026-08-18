@@ -3391,7 +3391,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
       code_snapshot_id: code.artifact_id,
       image_digest: NODE_IMAGE_DIGEST,
     })
-    // 缺省从 v1 enum（local-docker-cpu）映射到同名本机 opaque profile
+    // Project 默认值本身就是注册的 opaque profile id。
     const cpu = getRunnerProfile(RUNNER_PROFILE_IDS.localDockerCpu)!
     expect(job.payload.runner_profile_id).toBe(cpu.profile_id)
     expect(job.payload.profile_config_hash).toBe(cpu.config_hash)
@@ -3402,14 +3402,14 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
     expect(reloaded.runner_profile_id).toBe(cpu.profile_id)
     expect(reloaded.profile_config_hash).toBe(cpu.config_hash)
     expect(reloaded.payload.profile_config_hash).toBe(cpu.config_hash)
-    // 非 secure kind（echo）不注入 pin（legacy 兼容：runner 跳过校验）
+    // 非 secure kind（echo）不需要正式运行环境 pin。
     const echo = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'profile-pin-echo', kind: 'echo', payload: { message: 'hi' } })
     expect(echo.payload.runner_profile_id).toBeUndefined()
     expect(echo.runner_profile_id).toBeNull()
     kernel.close()
   })
 
-  it('job 级 runner_profile_id 覆盖 project 级 / enum；project 级 id 被 submit 尊重', () => {
+  it('job 级 runner_profile_id 覆盖 project 级；project 级 id 被 submit 尊重', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
@@ -3425,7 +3425,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
     })
     expect(job.payload.runner_profile_id).toBe(gpu.profile_id)
     expect(job.payload.profile_config_hash).toBe(gpu.config_hash)
-    // project 级 runner_profile_id 优先于 enum
+    // 未提供 job override 时使用 project 级 runner_profile_id。
     const proj = kernel.createProject({
       name: 'p2', workspace: '/w2', brief: makeBrief(),
       execution: { runner_profile_id: RUNNER_PROFILE_IDS.localDockerGpu },
@@ -3477,7 +3477,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
       422, 'runner_profile_unknown',
     )
     expect(kernel.listProjectsPage(50, undefined).items.map(p => p.name)).not.toContain('bad')
-    // legacy enum 之外的裸字符串同样拒绝（opaque id 语义：Job 不携带任意 profile 引用）
+    // 任意未登记裸字符串同样拒绝。
     expectKernelError(
       () => kernel.submitJob({
         project_id: project.project_id,
@@ -3497,7 +3497,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
     const kernel = freshKernel()
     const project = kernel.createProject({
       name: 't', workspace: '/w', brief: makeBrief(),
-      execution: { runner_profile: 'isolated-subprocess', runner_target_id: 'target_local_process_v1' },
+      execution: { runner_profile_id: 'profile_isolated_subprocess_v1', runner_target_id: 'target_local_process_v1' },
     })
     const code = codeArtifact(kernel, project.project_id)
     for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
@@ -3567,7 +3567,7 @@ describe('INIT-GRILL-02 v2 name-only Init (init-grill-upload-models.md §1/§2)'
       // 默认 Budget 存在。
       expect(kernel.getBudget(out.project.project_id).model_cost_usd).toBe(0)
       // workspace/安全/runner 用服务端安全默认（无浏览器可控字段）。
-      expect(kernel.getProject(out.project.project_id).execution.runner_profile_id).toBeNull()
+      expect(kernel.getProject(out.project.project_id).execution.runner_profile_id).toBe('profile_local_docker_cpu_v1')
       kernel.close()
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
