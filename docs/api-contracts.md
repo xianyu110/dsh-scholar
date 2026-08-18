@@ -465,6 +465,10 @@ NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contr
 
 Contract 批准后的 baseline handoff 使用专用 `POST /v1/projects/{id}/baseline-runs`，不允许浏览器用“先 POST Job、再 POST transition”的两步写法。请求严格为 `{expected_revision,idempotency_key,contract_id,code_snapshot_id,command:string[],runner_target_id?,image_digest?,output_contract?}`；`command` 至少一个非空 argv，CodeSnapshot 必须属于 path project，Contract 必须已由 Human Gate 冻结且属于同项目。Kernel 以项目默认 Runner/Profile/target 为基础解析环境；显式 override 仍走同一 registered target 与 digest pin 校验。成功 `201` 返回 `{project,job}`，Job 为 queued 且 Project 为 `BASELINE_REPRO`；任何失败零半写。相同 project + idempotency key + 相同请求可重放，异请求必须 409。
 
+`ExperimentContract.baseline_run` 只保存科学约束/描述，绝不是 shell argv。它无论是否非空都不能满足 `baseline_command`；调用方不得从该字段猜命令。只有上述请求中的非空 `command:string[]` 通过 schema 与 Kernel 校验后，才建立 executable baseline。
+
+Remote Runner 通过 service-token 保护的 `POST /v1/runner-targets/{target_id}/heartbeat {expected_revision,health:'online'|'offline'}` 写入观测状态与 `last_seen_at`。配置 revision 不一致返回 409；配置修改把状态重置为 unknown。readiness 的远端 heartbeat TTL 固定 60 秒，超时、unknown/offline、SecretRef unavailable 或 capability mismatch 都不得投影 ready，也不得接受新远端 Job。
+
 `GET /v1/projects/{id}/code-snapshots` 只列出该项目的不可变快照摘要，供运行准备任务选择；不得返回宿主绝对路径或跨项目记录。`POST .../code-snapshots` 仍是从批准 Workspace 冻结实际内容的唯一创建路径。
 
 当 projection 为 `CONTRACT_APPROVED`、baseline Jobs 为空时，`next_actions_v2` 必须包含 `baseline_reproduce`，并通过 `required` 精确报告 `baseline_command`、`code_snapshot`、`runner_environment` 缺口。Runs UI 将其显示为 projected preparation task，但 `jobs.length` 与各 Job filter count 保持 0；不得用假 queued Job 填充列表。

@@ -357,7 +357,7 @@ Action 包含 action_id、project_id、phase、type、idempotency_key、status�
 
 每个 DSH Tool 直接映射一个 v2 client method。工具 parameters 从相应 Zod input 自动导出 JSON Schema，移除 Human-only、internal、principal 和 provenance override 字段；output 从响应 Schema 导出。tool-schema snapshot 测试覆盖所有注册名。
 
-兼容当前用户面采用名称 claim_verify、analysis_build、release_bundle；目标别名 claim_verify_request、analysis_request、release_bundle_request 可以新增一版 deprecation adapter，但文档、UI 和工具目录必须选择一组 canonical 名并保持一致。v2 canonical 选择后者，旧名保留一版并返回 deprecation metadata。
+工具目录只注册 canonical 名 `claim_verify_request`、`analysis_request`、`release_bundle_request`。已废弃的 `claim_verify`、`analysis_build`、`release_bundle` 不注册、不授权，也不提供兼容 adapter；调用方必须升级到 canonical 契约。
 
 Canonical Tool registry：
 
@@ -376,7 +376,7 @@ Canonical Tool registry：
 | research_panel | DSH subagents panel，输出仅 draft |
 | idea_create / idea_compare / novelty_audit | Idea create/list comparison/novelty route |
 | workspace_snapshot | code snapshot create；workspace 必须预登记 |
-| patch_apply | registered workspace patch action |
+| patch_apply | 对 project-scoped `workspace_id` 内单个文本节点应用 unified diff；Kernel read/write/delete + version/etag CAS，拒绝宿主路径、多文件、二进制、rename/copy |
 | baseline_prepare / test_run | Job submit with constrained kind |
 | baseline_verify | analysis request against Contract tolerance |
 | experiment_register | Contract draft create |

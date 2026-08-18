@@ -4,50 +4,74 @@
  * connector targets.
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyPatchToWorkspace, snapshotWorkspace } from '@dsh-scholar/research-plugin'
+import { applyWorkspacePatch, type WorkspacePatchClient } from '@dsh-scholar/research-plugin'
 import { openAlexPaper, crossrefPaper } from '@dsh-scholar/scholar-connectors'
 import { classifyFailure, extractMetrics } from '@dsh-scholar/runner-gateway'
-import { readFileSync } from 'node:fs'
+
+function patchClient(content = 'old\n'): {
+  client: WorkspacePatchClient
+  writes: Array<Record<string, unknown>>
+  deletes: Array<Record<string, unknown>>
+} {
+  const writes: Array<Record<string, unknown>> = []
+  const deletes: Array<Record<string, unknown>> = []
+  const current = {
+    path: 'a.txt', kind: 'file' as const, binary: false, media: 'text/plain', size: content.length,
+    version: 4, etag: '"4-0123456789ab"', hash: 'a'.repeat(64), content, blob_sha256: null,
+    created_at: '2026-08-19T00:00:00.000Z', updated_at: '2026-08-19T00:00:00.000Z',
+  }
+  return {
+    writes,
+    deletes,
+    client: {
+      readWorkspaceNode: async (_projectId, _workspaceId, path) => ({ ...current, path }),
+      writeWorkspaceNode: async (_projectId, _workspaceId, input) => {
+        writes.push(input)
+        return { ...current, path: input.path, content: input.content, version: 5, etag: '"5-fedcba987654"' }
+      },
+      deleteWorkspaceNode: async (_projectId, _workspaceId, path, expected) => {
+        deletes.push({ path, ...expected })
+        return { ok: true }
+      },
+    },
+  }
+}
 
 describe('path traversal (design §4.9)', () => {
-  it('patch_apply rejects paths escaping the workspace', () => {
-    const ws = mkdtempSync(join(tmpdir(), 'sec-ws-'))
-    writeFileSync(join(ws, 'a.txt'), 'old\n')
+  it('patch_apply rejects paths escaping the project-scoped workspace', async () => {
+    const { client, writes } = patchClient()
     const evil = 'diff --git a/../../etc/pwned b/../../etc/pwned\n--- a/../../etc/pwned\n+++ b/../../etc/pwned\n@@ -1 +1 @@\n-old\n+OWNED\n'
-    expect(() => applyPatchToWorkspace(ws, evil)).toThrow(/escapes workspace/)
-    // workspace content untouched
-    expect(readFileSync(join(ws, 'a.txt'), 'utf8')).toBe('old\n')
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', evil)).rejects.toThrow(/workspace-relative/)
+    expect(writes).toEqual([])
   })
 
-  it('patch_apply rejects absolute target paths', () => {
-    const ws = mkdtempSync(join(tmpdir(), 'sec-ws-'))
-    const evil = `diff --git a/${join(tmpdir(), 'abs')} b/${join(tmpdir(), 'abs')}\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n`
-    expect(() => applyPatchToWorkspace(ws, evil)).toThrow()
+  it('patch_apply rejects absolute target paths', async () => {
+    const { client, writes } = patchClient()
+    const absolute = join(tmpdir(), 'abs')
+    const evil = `--- ${absolute}\n+++ ${absolute}\n@@ -1 +1 @@\n-old\n+owned\n`
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', evil)).rejects.toThrow()
+    expect(writes).toEqual([])
   })
 
-  it('workspace_snapshot only walks the given root (no upward traversal)', () => {
-    const ws = mkdtempSync(join(tmpdir(), 'sec-snap-'))
-    mkdirSync(join(ws, 'sub'))
-    writeFileSync(join(ws, 'sub', 'f.py'), 'x=1')
-    writeFileSync(join(tmpdir(), 'sec-snap-outside.txt'), 'OUTSIDE')
-    const snap = snapshotWorkspace(ws, 'x', 'p1')
-    const files = snap.manifest.files as Record<string, string>
-    expect(Object.keys(files)).toEqual(['sub/f.py'])
-    expect(JSON.stringify(snap.manifest)).not.toContain('sec-snap-outside')
+  it('patch_apply rejects multi-file patches instead of partially mutating', async () => {
+    const { client, writes } = patchClient()
+    const multi = '--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n'
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', multi)).rejects.toThrow(/exactly one file/)
+    expect(writes).toEqual([])
   })
 
-  it('patch_apply applies a legit in-workspace diff and snapshots it', () => {
-    const ws = mkdtempSync(join(tmpdir(), 'sec-ws-'))
-    writeFileSync(join(ws, 'model.py'), 'x = 1\n')
-    const good = 'diff --git a/model.py b/model.py\n--- a/model.py\n+++ b/model.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n'
-    const { filesChanged } = applyPatchToWorkspace(ws, good)
-    expect(filesChanged).toBe(1)
-    expect(readFileSync(join(ws, 'model.py'), 'utf8')).toBe('x = 2\n\n')
-    const snap = snapshotWorkspace(ws, 'after patch', 'p1')
-    expect(snap.files).toBe(1)
+  it('patch_apply uses Kernel Workspace CAS for an in-workspace diff', async () => {
+    const { client, writes } = patchClient('x = 1\n')
+    const good = 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x = 1\n+x = 2\n'
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', good)).resolves.toEqual({
+      path: 'a.txt', operation: 'write', version: 5,
+    })
+    expect(writes).toEqual([{
+      path: 'a.txt', content: 'x = 2\n', expected_version: 4, expected_etag: '"4-0123456789ab"',
+    }])
   })
 })
 

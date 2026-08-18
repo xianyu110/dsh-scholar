@@ -33,11 +33,8 @@
  *    model is identical on the stream and the poll path). When the stream
  *    gives up (max reconnect attempts) the client falls back to listSince
  *    POLLING (a designed degradation — same payloads, same merge).
- *  - SEARCH: path filtering only — the server implements prefix/glob
- *    PATH search (workspace_search) and NO content search; the client
- *    model mirrors that honestly (substring path filter + search call
- *    descriptor), and the panel copy states content search is not
- *    implemented.
+ *  - SEARCH: path filtering plus project-scoped server content search. The
+ *    panel renders bounded line snippets and opens a result in the editor.
  *  - MULTI-TAB editor: WorkspaceTabState holds path/version/etag/content/
  *    savedContent per open tab. Dirty follows manuscript-dirty.ts
  *    `isEditorDirty` ('' is a real content value — clearing a non-empty
@@ -580,6 +577,12 @@ export interface WorkspaceSearchCall {
   body: { prefix?: string; glob?: string }
 }
 
+export interface WorkspaceContentSearchCall {
+  method: 'POST'
+  path: string
+  body: { mode: 'content'; q: string; case_sensitive?: boolean }
+}
+
 /** Server path-search descriptor (null while the query is blank). */
 export function workspaceSearchCall(projectId: string, workspaceId: string, query: string): WorkspaceSearchCall | null {
   const q = query.trim()
@@ -597,9 +600,24 @@ export function workspaceSearchCall(projectId: string, workspaceId: string, quer
   return { method: 'POST', path: `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/search`, body }
 }
 
-/** CLIENT-side path filter: case-insensitive substring on the full path
- *  (the search box applies this to the loaded tree; the server search is
- *  prefix/glob PATH matching — content search is not implemented). */
+/** Server content-search descriptor (null while the query is blank). */
+export function workspaceContentSearchCall(
+  projectId: string,
+  workspaceId: string,
+  query: string,
+  caseSensitive = false,
+): WorkspaceContentSearchCall | null {
+  const q = query.trim()
+  if (q === '') return null
+  return {
+    method: 'POST',
+    path: `/v1/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/search`,
+    body: { mode: 'content', q, ...(caseSensitive ? { case_sensitive: true } : {}) },
+  }
+}
+
+/** CLIENT-side path filter: case-insensitive substring on the loaded tree.
+ * Server content search is exposed separately by workspaceContentSearchCall. */
 export function filterWorkspacePaths(nodes: readonly WorkspaceNodeLite[], query: string): WorkspaceNodeLite[] {
   const q = query.trim().toLowerCase()
   if (q === '') return [...nodes]

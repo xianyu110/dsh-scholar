@@ -119,6 +119,8 @@ Run Terminal 可停靠到右侧或底部并继续接收同一 Run 的输出。�
 
 目标 UI 的 Workspace 像 VS Code：Explorer 打开 code/manuscript/scratch 文件，使用标签、搜索、Problems、查看图片/PDF/JSON、编辑文本、上传/移动/删除/历史并冻结 Snapshot。并发冲突会显示 base/current/local，不自动覆盖。**Workspace tree client 逻辑层已实现(2026-08-11,commit 98243ff)**：More →「工作区」面板(#tab=workspace 深链)——workspace 选择器与工具栏(新建文件/新建目录/上传(≤32 MiB multipart)/刷新/路径搜索框);左侧文件树按目录懒展开(implied 目录由文件路径投影、客户端创建的空目录为虚拟节点、文件行 hover 移动/删除);右侧多标签编辑区——每个 tab 持有 path/version/etag/content/savedContent,dirty 语义与 Manuscript 一致(清空读未保存、恢复已保存读干净),保存带 expected_version/etag CAS(409 冲突 → 横幅提示"重新加载",绝不静默覆盖),二进制节点只读显示 meta + 下载(原始字节 + media type),历史版本列表可回退(旧字节以当前 version/etag 守卫写回);树经 workspace watch SSE 流(`…/workspaces/{wid}/watch/stream?after_revision=`)实时增量刷新,流不可用时回退 listSince 每 5s 轮询(离开该 tab 自动停止)。搜索框为客户端路径过滤,尚未接线服务端查询;**服务端已实现路径搜索(prefix/glob)与内容搜索(commit 98243ff)**——POST search `{q, mode:'content'}` 线性文本扫描(文本节点/二进制跳过/每文件 20 匹配/50 文件上限/512 KiB 跳过/大小写可选/非法 UTF-8 容错,无全文索引,大数据集性能受限如实注明;客户端搜索框接入服务端路径/内容模式属后续轮)。剩余(浏览器层,Playwright 类环境不可用,记 NOT_RUN_MANUAL_PENDING):文件树渲染/拖拽上传/多标签视觉/窄屏/键盘 a11y 验收;Problems 面板与集成 PTY 入口。
 
+2026-08-19 更新：Workspace 搜索框已接服务端 content search，按 Enter/搜索按钮返回文件、行号和片段，同时用已提交查询过滤树路径。当前文本标签提供 literal 查找替换。输入过程只更新状态，不重建搜索框或编辑器 DOM，以保持焦点、选区和连续输入。内容搜索仍是有界线性扫描，不宣称全文索引。
+
 点击 Workspace Terminal 打开独立 PTY，选择受控 Runner profile、根相对 cwd 和 shell preset。Interactive Terminal 已使用 xterm-compatible emulator 接到真实 LocalPtyAdapter：聚焦后可输入/粘贴，支持 ANSI/VT/TUI、IME 与自动 fit/resize，输出按 server_seq 增量追加而不因刷新重复。PTY 不是正式 Run，输出不能成为 Evidence。服务端 session context/multi-PTY 绑定、Remote PTY、完整日志下载以及真实浏览器 `WEBTERM_OK`/Unicode/vim/top/Dock/窄屏验收仍分别受 PTY-SESSION-02 与人工队列约束。
 
 Workspace 与 Interactive Terminal 都可以独立停靠；Dock 不改变 Workspace 的 version/etag、编辑 tab 或 PTY 的 session/context。关闭 Dock 等同离开该页面：Workspace watch 会停止，PTY 服务端进程是否继续由 detach/close 与 lease 语义决定，不能用关闭面板代替显式关闭 PTY。
@@ -165,7 +167,7 @@ node workers/runner-gateway/lib/bin/runner.js \
 进入 Manuscript：
 
 1. 文件树选择 paper.tex、references.bib 或 figures；
-2. 编辑器为受控 textarea（显示脏状态；行号/高亮/查找替换属目标编辑器能力，尚未提供）；
+2. 编辑器为受控 textarea（显示脏状态；当前文件提供 literal 查找替换；行号/语法高亮仍属目标编辑器能力）；
 3. Ctrl/Cmd+S 保存；
 4. 如果其他页面已修改同一文件，会出现 version conflict——冲突横幅提示"重新加载"，系统不会静默覆盖（当前无 Copy local / Merge 三方合并交互）；
 5. History 可查看过去 revision。

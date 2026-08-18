@@ -4,9 +4,8 @@
 # handlers, headless tools and skill provider resolution.
 #
 #   1. Tool catalog == reconstruction-contracts.md §17 canonical registry
-#      (35 canonical names incl. dsh_scholar and the ONBOARD-01 prepare surface),
-#      legacy claim_verify/analysis_build/release_bundle registered as
-#      one-version deprecation aliases (never unknown tool).
+#      (35 canonical names incl. dsh_scholar and the ONBOARD-01 prepare surface);
+#      removed claim_verify/analysis_build/release_bundle names stay absent.
 #   2. No Human Decision / gate-decision tool exists; no intake adopt/accept
 #      tool exists (research-onboarding.md §2.1 — Agent has no accept); ACL
 #      denies unknown and unauthorized agents on every research write tool.
@@ -51,12 +50,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── §17: canonical catalog + deprecation aliases + ACL + headless tools ────
-say "canonical tool catalog / deprecation aliases / ACL / headless"
+# ── §17: canonical-only catalog + ACL + headless tools ────────────────────
+say "canonical-only tool catalog / ACL / headless"
 CATALOG=$(jnode - "$REPO" <<'EOF'
 const repo = process.argv[2]
 const { registerResearchTools } = await import(`${repo}/lib/plugin/tools.js`)
-const { RoleRegistry, RESEARCH_TOOLS, ROLE_TOOLS, TOOL_ALIASES, DEFAULT_ROLE } = await import(`${repo}/lib/plugin/acl.js`)
+const { RoleRegistry, RESEARCH_TOOLS, ROLE_TOOLS, DEFAULT_ROLE } = await import(`${repo}/lib/plugin/acl.js`)
 
 const CANONICAL = [
   'dsh_scholar',
@@ -97,13 +96,9 @@ const problems = []
 // 1. every §17 canonical name is registered
 for (const c of CANONICAL) if (!names.includes(c)) problems.push(`missing canonical tool ${c}`)
 
-// 2. legacy names registered as deprecation aliases with catalog metadata
-for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
-  const t = registered.find(x => x.name === alias)
-  if (t === undefined) { problems.push(`legacy alias ${alias} not registered (unknown tool risk)`); continue }
-  const desc = String(t.description ?? '')
-  if (!/deprecated/i.test(desc)) problems.push(`alias ${alias} description lacks DEPRECATED marker`)
-  if (!desc.includes(canonical)) problems.push(`alias ${alias} description lacks canonical name ${canonical}`)
+// 2. obsolete names are absent: callers must use the canonical contract.
+for (const obsolete of ['claim_verify', 'analysis_build', 'release_bundle']) {
+  if (names.includes(obsolete)) problems.push(`obsolete tool ${obsolete} must not be registered`)
 }
 
 // 3. no Human Decision / gate-decision tool exists
@@ -125,7 +120,7 @@ for (const n of intakeNames) {
   if (!/prepare-only/i.test(desc)) problems.push(`${n} description lacks PREPARE-ONLY marker`)
   if (!/PI|human/i.test(desc)) problems.push(`${n} description lacks the PI-adopts note`)
 }
-// 4. ACL surface: RESEARCH_TOOLS covers canonical + aliases; role surfaces canonical-only
+// 4. ACL surface is canonical-only.
 for (const n of names) if (!RESEARCH_TOOLS.includes(n)) problems.push(`RESEARCH_TOOLS missing ${n}`)
 for (const c of CANONICAL) if (!RESEARCH_TOOLS.includes(c)) problems.push(`RESEARCH_TOOLS missing canonical ${c}`)
 for (const role of Object.keys(ROLE_TOOLS)) {
@@ -151,23 +146,14 @@ for (const n of names) {
 }
 if (roles.get('some-unknown-session') !== 'none') problems.push('unknown session role must be none')
 if (roles.allows('writer', 'claim_verify_request')) problems.push('writer must not verify claims')
-if (roles.allows('writer', 'claim_verify')) problems.push('writer must not call claim_verify alias')
 if (!roles.allows('statistician', 'claim_verify_request')) problems.push('statistician must verify claims')
-if (!roles.allows('statistician', 'claim_verify')) problems.push('statistician must be allowed the claim_verify alias')
+if (roles.allows('statistician', 'claim_verify')) problems.push('obsolete claim_verify must be denied')
 if (roles.allows('reviewer', 'analysis_request')) problems.push('reviewer must not run analysis_request')
 
-// 6. headless: no httpServer anywhere — execute a tool through the kernel
-// client/cache and check the alias returns deprecation metadata
+// 6. headless: no httpServer anywhere — execute through kernel client/cache.
 const statusTool = registered.find(x => x.name === 'research_status')
 const headless = await statusTool.execute({}, { agent: { id: 'headless-session' }, signal: new AbortController().signal })
 if (headless.ok !== true) problems.push('headless research_status execution failed')
-
-const aliasTool = registered.find(x => x.name === 'claim_verify')
-const aliasResult = await aliasTool.execute(
-  { claim_id: 'claim_x', evidence_ids_json: '["ev_1"]' },
-  { agent: { id: 's' }, signal: new AbortController().signal })
-if (aliasResult.deprecated !== true) problems.push('claim_verify alias response lacks deprecated metadata')
-if (aliasResult.canonical !== 'claim_verify_request') problems.push('claim_verify alias response lacks canonical name')
 
 // 7. intake tools run headless (no httpServer): research_intake_begin
 //    resolves the session project and calls the stub beginIntake.
@@ -178,16 +164,14 @@ const intakeResult = await intakeBeginTool.execute(
 if (intakeResult.ok !== true) problems.push('headless research_intake_begin execution failed')
 if (intakeResult.intake?.intake_id !== 'intk_headless') problems.push('headless research_intake_begin did not reach the client beginIntake')
 
-console.log(JSON.stringify({ names, aliasCount: Object.keys(TOOL_ALIASES).length, problems }))
+console.log(JSON.stringify({ names, problems }))
 EOF
 )
 
 NAMES=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).names.join(',')))")
 PROBLEMS=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.join('|')))")
-ALIASN=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).aliasCount))")
-
 if [ -z "$PROBLEMS" ]; then
-  ok "all 35 §17 canonical tools registered, aliases + ACL consistent"
+  ok "all 35 §17 canonical tools registered; obsolete names absent; ACL consistent"
 else
   bad "catalog/ACL problems: $PROBLEMS"
 fi
@@ -199,11 +183,10 @@ for C in claim_verify_request analysis_request release_bundle_request research_p
 done
 for A in claim_verify analysis_build release_bundle; do
   case ",$NAMES," in
-    *",$A,"*) ok "deprecation alias $A still registered (not unknown tool)" ;;
-    *) bad "deprecation alias $A missing" ;;
+    *",$A,"*) bad "obsolete tool $A is still registered" ;;
+    *) ok "obsolete tool $A absent" ;;
   esac
 done
-[ "$ALIASN" = "3" ] && ok "exactly 3 one-version deprecation aliases" || bad "alias count $ALIASN"
 case ",$NAMES," in
   *",research_gate,"*|*",research_gate_decide,"*|*",gate_decide,"*) bad "gate-decision tool present in catalog" ;;
   *) ok "no gate-decision tool in catalog" ;;
@@ -226,11 +209,6 @@ if probe "$CATALOG" "!j.problems.some(p=>/headless/.test(p))"; then
   ok "research tools execute headless (no httpServer)"
 else
   bad "headless execution failed"
-fi
-if probe "$CATALOG" "!j.problems.some(p=>/deprecated metadata/.test(p))"; then
-  ok "legacy alias responses carry deprecation metadata + canonical name"
-else
-  bad "alias deprecation metadata missing"
 fi
 if probe "$CATALOG" "!j.problems.some(p=>/PREPARE-ONLY|intake tools|intake ACL|headless research_intake/.test(p))"; then
   ok "intake tools: prepare-only copy, ACL (none deny / scholar allow), headless begin all pass"
@@ -292,23 +270,20 @@ for (const tool of RESEARCH_TOOLS) {
   if (tool === 'dsh_scholar' ? outcome !== 'allow' : outcome !== 'deny') problems.push(`unknown agent ACL mismatch on ${tool}`)
 }
 // known role (director = the PI surface, docs/dsh-integration.md §4):
-// every tool in its surface is allowed; the alias is canonical-only.
+// every canonical tool in its surface is allowed.
 roles.set('pi-session', 'director')
 for (const tool of ROLE_TOOLS.director) {
   if (await run('pi-session', tool) !== 'allow') problems.push(`director denied on ${tool}`)
 }
-if (await run('pi-session', 'claim_verify') !== 'deny') problems.push('director must not get the claim_verify alias (canonical-only surface)')
-// statistician: claim_verify_request allowed (canonical + alias),
-// project creation denied.
+if (await run('pi-session', 'claim_verify') !== 'allow') problems.push('non-registered tools must pass through this plugin ACL')
+// statistician: claim_verify_request allowed; project creation denied.
 roles.set('stat-session', 'statistician')
 if (await run('stat-session', 'claim_verify_request') !== 'allow') problems.push('statistician denied claim_verify_request')
-if (await run('stat-session', 'claim_verify') !== 'allow') problems.push('statistician denied claim_verify alias')
 if (await run('stat-session', 'research_project') !== 'deny') problems.push('statistician must not create projects')
-// writer: manuscript_build allowed; research writes and the verify alias denied.
+// writer: manuscript_build allowed; research writes denied.
 roles.set('writer-session', 'writer')
 if (await run('writer-session', 'manuscript_build') !== 'allow') problems.push('writer denied manuscript_build')
 if (await run('writer-session', 'research_project') !== 'deny') problems.push('writer must not create projects')
-if (await run('writer-session', 'claim_verify') !== 'deny') problems.push('writer must not verify claims (alias)')
 // no agent id: tool-layer semantics — ACL never restricts agent-less calls.
 if (await run(undefined, 'research_project') !== 'allow') problems.push('agent-less call must pass through the ACL')
 if (await run(undefined, 'claim_verify_request') !== 'allow') problems.push('agent-less claim_verify_request must pass through')
@@ -367,11 +342,6 @@ else
   else
     bad "agent-less call restricted by ACL"
   fi
-  if probe "$DSH01" "!j.problems.some(p=>/alias/.test(p))"; then
-    ok "deprecation aliases stay ACL-enforced on canonical surfaces"
-  else
-    bad "alias ACL leak"
-  fi
   if probe "$DSH01" "!j.problems.some(p=>/dispose/.test(p))"; then
     ok "plugin disposer stops the kernel sidecar (register cleanup)"
   else
@@ -396,7 +366,7 @@ fi
 #     client (no module-level tool-context ref), roles and ACL listeners are
 #     per-instance (granting a role in B never leaks into A);
 #   - reload: cordis update() unloads (kills the old kernel, unregisters
-#     tools) then re-applies — no duplicate registration (still exactly 38
+#     tools) then re-applies — no duplicate registration (still exactly 35
 #     tools / 1 skill provider), data persists in the same dataDir;
 #   - dispose: sidecar kernel dead, endpoint.json removed, port released,
 #     tools/commands/skills/pre-execute listeners all gone, the other
@@ -426,6 +396,9 @@ const { tmpdir } = await import('node:os')
 const problems = []
 const tempDirs = []
 const trackedPids = []
+let handleA
+let handleB
+let handleA2
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
 const terminate = (pid) => { if (!alive(pid)) return; try { process.kill(pid, 'SIGKILL') } catch { /* gone */ } }
 const readEp = (dataDir) => JSON.parse(readFileSync(join(dataDir, 'runtime', 'endpoint.json'), 'utf8'))
@@ -440,6 +413,10 @@ async function makeHost(dataDir) {
   await root.plugin(SkillRegistry)
   await root.plugin(SettingsFile, { path: join(dataDir, 'settings.yaml'), watch: false })
   root.provide('subagents', { start: async () => { throw new Error('fixture has no subagent backend') } })
+  // userQuestions is a required Host dependency: Scholar deliberately reuses
+  // the native DSH question UI for Brief/Grill. A minimal host that omits it
+  // leaves the plugin fiber pending and cannot assert lifecycle behavior.
+  root.provide('userQuestions', { ask: async () => { throw new Error('fixture has no interactive question backend') } })
   return root
 }
 
@@ -461,8 +438,8 @@ try {
   const rootB = await makeHost(dirB)
 
   // ── apply A and B (async apply is awaited by cordis) ─────────────────────
-  const handleA = await rootA.plugin(pluginMod, cfgA)
-  const handleB = await rootB.plugin(pluginMod, cfgB)
+  handleA = await rootA.plugin(pluginMod, cfgA)
+  handleB = await rootB.plugin(pluginMod, cfgB)
 
   // ── port=0: endpoint is the REAL bound port, client usable ───────────────
   const epA = new URL(rootA.research.endpoint)
@@ -480,7 +457,7 @@ try {
 
   // ── tools / commands / skills registered exactly once ────────────────────
   const toolsA = rootA.tools.schemas().map(s => s.name)
-  if (toolsA.length !== 38) problems.push(`instance A tool count ${toolsA.length} != 38`)
+  if (toolsA.length !== 35) problems.push(`instance A tool count ${toolsA.length} != 35`)
   if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
   const expectedCommands = ['help','new','list','status','gates','jobs','claims','survey','ideas','reproduce','contract','run','evidence','write','review','release-bundle','release']
   const registeredCommands = rootA.commands.list({}).map(c => c.name).sort()
@@ -511,7 +488,7 @@ try {
   trackedPids.push(epFileA2.pid)
   if (alive(oldPid)) problems.push('reload must stop the old kernel (sidecar disposer)')
   if (epFileA2.pid === oldPid) problems.push('reload must spawn/reuse a fresh kernel instance')
-  if (rootA.tools.schemas().length !== 38) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 38, duplicate risk)`)
+  if (rootA.tools.schemas().length !== 35) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 35, duplicate risk)`)
   if ((await rootA.skills.list()).length !== 4) problems.push('reload leaked or lost research skills')
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('reload must keep kernel data (same dataDir)')
   if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 1) problems.push('reload must not duplicate the pre-execute listener')
@@ -519,6 +496,7 @@ try {
   // ── dispose: everything released, port freed, B unaffected ───────────────
   const lastEndpoint = rootA.research.endpoint
   await handleA.dispose()
+  handleA = undefined
   if (rootA.research !== undefined) problems.push('dispose must remove the research service')
   if (alive(epFileA2.pid)) problems.push('dispose must stop the kernel sidecar child')
   if (existsSync(join(dirA, 'runtime', 'endpoint.json'))) problems.push('dispose must remove the owned endpoint.json')
@@ -529,19 +507,28 @@ try {
   const healthAfter = await fetch(`${lastEndpoint}/v1/health`).then(r => r.ok).catch(() => false)
   if (healthAfter) problems.push('dispose must release the kernel port (health still answering)')
   // the sibling instance is untouched
-  if (rootB.tools.schemas().length !== 38) problems.push('disposing A must not affect B tools')
+  if (rootB.tools.schemas().length !== 35) problems.push('disposing A must not affect B tools')
   if (rootB.research === undefined) problems.push('disposing A must not affect B research service')
 
   // ── re-apply on the same root: usable again, still exactly once ──────────
-  const handleA2 = await rootA.plugin(pluginMod, cfgA)
+  handleA2 = await rootA.plugin(pluginMod, cfgA)
   const epFileA3 = readEp(dirA)
   trackedPids.push(epFileA3.pid)
-  if (rootA.tools.schemas().length !== 38) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 38`)
+  if (rootA.tools.schemas().length !== 35) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 35`)
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('re-apply must restore the client against the same dataDir')
   await handleA2.dispose()
+  handleA2 = undefined
+  await handleB.dispose()
+  handleB = undefined
 } catch (error) {
   problems.push(`fixture error: ${error instanceof Error ? error.message : String(error)}`)
 } finally {
+  // Always unload active plugin fibers before killing tracked children. This
+  // also closes the plugin-owned Chat agent bridge and prevents a successful
+  // lifecycle fixture from hanging the Node event loop.
+  for (const handle of [handleA2, handleA, handleB]) {
+    try { await handle?.dispose() } catch { /* diagnostic cleanup only */ }
+  }
   for (const pid of trackedPids) terminate(pid)
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
 }

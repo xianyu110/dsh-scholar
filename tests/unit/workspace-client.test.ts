@@ -23,8 +23,7 @@
  *                            server-side sha256, optional CAS guard) and
  *                            /blobs download (bytes + media type);
  *   search:                  client path substring filter + server
- *                            prefix/glob PATH search call (content search
- *                            honestly NOT implemented);
+ *                            prefix/glob path and content search calls;
  *   nav/i18n:                workspace is a reachable More tab with a stable
  *                            deep link; every workspace key exists in BOTH
  *                            zh and en — no missing-key reports.
@@ -53,7 +52,7 @@ import {
   updateWorkspaceTabContent, workspaceBasename, workspaceConflictKind,
   workspaceDirChildren, workspaceDirExists, workspaceDirVirtual,
   workspaceDirtyCount, workspaceHistoryView, workspaceKindText,
-  workspaceNodeAt, workspaceOpText, workspaceParentDir, workspaceSearchCall,
+  workspaceNodeAt, workspaceOpText, workspaceParentDir, workspaceContentSearchCall, workspaceSearchCall,
   workspaceTabDirty,
 } from '../../packages/dsh-research-ui/src/client/workspace-model'
 import { MockSseFetch, type SseScheduler } from '../../packages/dsh-research-ui/src/client/sse-client'
@@ -489,7 +488,7 @@ describe('WORK-01 binary upload/download model (multipart ≤ 32 MiB)', () => {
 
 /* ─────────────────────── search ─────────────────────── */
 
-describe('WORK-01 search: path filtering only (content search NOT implemented)', () => {
+describe('WORK-01 search: path and content search', () => {
   it('filterWorkspacePaths: case-insensitive substring on the full path', () => {
     const nodes = [node({ path: 'src/Main.ts' }), node({ path: 'src/lib/util.ts' }), node({ path: 'README.md' })]
     expect(filterWorkspacePaths(nodes, '').map(n => n.path)).toEqual(nodes.map(n => n.path))
@@ -507,6 +506,20 @@ describe('WORK-01 search: path filtering only (content search NOT implemented)',
     expect(glob?.body).toEqual({ prefix: 'src', glob: 'src/*.ts' })
     const pureGlob = workspaceSearchCall('rsp_demo', 'ws_main', '*.md')
     expect(pureGlob?.body).toEqual({ glob: '*.md' })
+  })
+
+  it('workspaceContentSearchCall: project-scoped content search, trimmed query and optional case sensitivity', () => {
+    expect(workspaceContentSearchCall('rsp_demo', 'ws_main', '  ')).toBeNull()
+    expect(workspaceContentSearchCall('rsp_demo', 'ws_main', '  training loop  ')).toEqual({
+      method: 'POST',
+      path: '/v1/projects/rsp_demo/workspaces/ws_main/search',
+      body: { mode: 'content', q: 'training loop' },
+    })
+    expect(workspaceContentSearchCall('rsp/a', 'ws main', 'Loss', true)).toEqual({
+      method: 'POST',
+      path: '/v1/projects/rsp%2Fa/workspaces/ws%20main/search',
+      body: { mode: 'content', q: 'Loss', case_sensitive: true },
+    })
   })
 
   it('watch polling cadence is a documented constant (SSE is a later round)', () => {

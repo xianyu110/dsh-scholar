@@ -135,7 +135,7 @@ ok "runner started (mode=docker, poll-ms=200)"
 
 echo "== project + contract (stop_conditions.min_completed_seeds=3, direction higher_is_better) =="
 BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m1"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":"fixture-repo","domain":"machine-learning"}'
-PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"analysis-spec\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"local-docker-cpu\"}}" | jfield '.project_id')
+PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"analysis-spec\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 ok "project $PROJ"
 

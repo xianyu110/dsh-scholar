@@ -53,7 +53,8 @@ KERNEL_PORT=$((WEB_PORT + 1))
 DATA="$WORK/data"
 TOKEN="accept-token-$(date +%s)"
 LOG="$WORK/server.log"
-node "$SERVER_BIN" --host 127.0.0.1 --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" --data-dir "$DATA" --token "$TOKEN" --principal ops-1 > "$LOG" 2>&1 &
+node "$SERVER_BIN" --host 127.0.0.1 --port "$WEB_PORT" --kernel-port "$KERNEL_PORT" \
+  --kernel-data-dir "$DATA" --data-dir "$DATA" --token "$TOKEN" --principal ops-1 > "$LOG" 2>&1 &
 SPID=$!
 
 ready=0
@@ -242,7 +243,7 @@ MEM_WEB=$((WEB_PORT + 700))
 MEM_KERNEL=$((WEB_PORT + 701))
 MEM_DATA="$WORK/memdata"
 node "$SERVER_BIN" --host 127.0.0.1 --port "$MEM_WEB" --kernel-port "$MEM_KERNEL" \
-  --data-dir "$MEM_DATA" --token "$TOKEN" --principal ops-1 > "$WORK/mem.log" 2>&1 &
+  --kernel-data-dir "$MEM_DATA" --data-dir "$MEM_DATA" --token "$TOKEN" --principal ops-1 > "$WORK/mem.log" 2>&1 &
 MEM_PID=$!
 memready=0
 for _ in $(seq 1 60); do
@@ -275,7 +276,7 @@ if [ "$memready" = 1 ]; then
 fi
 # A second BFF with a DIFFERENT principal must not see the project (404).
 node "$SERVER_BIN" --host 127.0.0.1 --port "$((MEM_WEB + 2))" --kernel-port "$MEM_KERNEL" \
-  --data-dir "$MEM_DATA" --token "$TOKEN" --principal other-user > "$WORK/mem2.log" 2>&1 &
+  --kernel-data-dir "$MEM_DATA" --data-dir "$MEM_DATA" --token "$TOKEN" --principal other-user > "$WORK/mem2.log" 2>&1 &
 MEM2_PID=$!
 for _ in $(seq 1 60); do
   if curl -sf -m 2 -X POST "http://127.0.0.1:$((MEM_WEB + 2))/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then break; fi
@@ -407,13 +408,13 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
   # reuse the same kernel sidecar (identity-verified, SIDE-01).
   VROLE_WEB=$((MEM_WEB + 3)); RROLE_WEB=$((MEM_WEB + 4)); AROLE_WEB=$((MEM_WEB + 5))
   node "$SERVER_BIN" --host 127.0.0.1 --port "$VROLE_WEB" --kernel-port "$MEM_KERNEL" \
-    --data-dir "$MEM_DATA" --token "$TOKEN" --principal viewer-1 > "$WORK/viewer.log" 2>&1 &
+    --kernel-data-dir "$MEM_DATA" --data-dir "$MEM_DATA" --token "$TOKEN" --principal viewer-1 > "$WORK/viewer.log" 2>&1 &
   VROLE_PID=$!
   node "$SERVER_BIN" --host 127.0.0.1 --port "$RROLE_WEB" --kernel-port "$MEM_KERNEL" \
-    --data-dir "$MEM_DATA" --token "$TOKEN" --principal researcher-1 > "$WORK/researcher.log" 2>&1 &
+    --kernel-data-dir "$MEM_DATA" --data-dir "$MEM_DATA" --token "$TOKEN" --principal researcher-1 > "$WORK/researcher.log" 2>&1 &
   RROLE_PID=$!
   node "$SERVER_BIN" --host 127.0.0.1 --port "$AROLE_WEB" --kernel-port "$MEM_KERNEL" \
-    --data-dir "$MEM_DATA" --token "$TOKEN" --principal auditor-1 > "$WORK/auditor.log" 2>&1 &
+    --kernel-data-dir "$MEM_DATA" --data-dir "$MEM_DATA" --token "$TOKEN" --principal auditor-1 > "$WORK/auditor.log" 2>&1 &
   AROLE_PID=$!
   for P in "$VROLE_WEB" "$RROLE_WEB" "$AROLE_WEB"; do
     for _ in $(seq 1 60); do
@@ -720,7 +721,7 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
   [ "$R" = "200" ] && ok "P0-2: p0-2-role member added" || fail "P0-2: add member p0-2-role -> $R"
   REV_WEB=$((MEM_WEB + 6))
   node "$SERVER_BIN" --host 127.0.0.1 --port "$REV_WEB" --kernel-port "$MEM_KERNEL" \
-    --data-dir "$MEM_DATA" --token "$TOKEN" --principal p0-2-role > "$WORK/revoke.log" 2>&1 &
+    --kernel-data-dir "$MEM_DATA" --data-dir "$MEM_DATA" --token "$TOKEN" --principal p0-2-role > "$WORK/revoke.log" 2>&1 &
   REV_PID=$!
   for _ in $(seq 1 60); do
     if curl -sf -m 2 -X POST "http://127.0.0.1:$REV_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then break; fi
@@ -840,7 +841,7 @@ BLOCKER=$!
 sleep 0.7
 FLOG="$WORK/fail.log"
 if node "$SERVER_BIN" --host 127.0.0.1 --port "$CONFLICT_PORT" --kernel-port "$((CONFLICT_PORT + 1))" \
-  --data-dir "$WORK/faildata" --token tok > "$FLOG" 2>&1; then
+  --kernel-data-dir "$WORK/faildata" --data-dir "$WORK/faildata" --token tok > "$FLOG" 2>&1; then
   fail "OPS: occupied port did NOT fail"
 else
   ok "OPS: occupied port exits non-zero"
@@ -859,7 +860,7 @@ kill "$BLOCKER" 2>/dev/null || true
 for BAD_HOST in 0.0.0.0 192.168.1.9 10.0.0.5 example.test; do
   NLOG="$WORK/notoken-$BAD_HOST.log"
   if node "$SERVER_BIN" --host "$BAD_HOST" --port "$((CONFLICT_PORT + 100))" --kernel-port "$((CONFLICT_PORT + 101))" \
-    --data-dir "$WORK/ntdata-$BAD_HOST" --no-token > "$NLOG" 2>&1; then
+    --kernel-data-dir "$WORK/ntdata-$BAD_HOST" --data-dir "$WORK/ntdata-$BAD_HOST" --no-token > "$NLOG" 2>&1; then
     fail "SEC: --no-token on $BAD_HOST accepted"
   else
     ok "SEC: --no-token on $BAD_HOST rejected before listen"
@@ -870,7 +871,7 @@ done
 # Loopback 127.0.0.0/8 outside 127.0.0.1 stays allowed with --no-token.
 NLOG="$WORK/notoken-lo.log"
 node "$SERVER_BIN" --host 127.0.0.2 --port "$((CONFLICT_PORT + 100))" --kernel-port "$((CONFLICT_PORT + 101))" \
-  --data-dir "$WORK/ntdata-lo" --no-token > "$NLOG" 2>&1 &
+  --kernel-data-dir "$WORK/ntdata-lo" --data-dir "$WORK/ntdata-lo" --no-token > "$NLOG" 2>&1 &
 NOTOKEN_PID=$!
 sleep 1
 if kill -0 "$NOTOKEN_PID" 2>/dev/null; then
@@ -886,6 +887,7 @@ kill "$NOTOKEN_PID" 2>/dev/null || true
 for BAD_HOST in 0.0.0.0 192.168.1.9 example.test; do
   SLOG="$WORK/script-nt-$BAD_HOST.log"
   if DSH_SCHOLAR_STANDALONE_PORT="$((CONFLICT_PORT + 110))" DSH_SCHOLAR_STANDALONE_KERNEL_PORT="$((CONFLICT_PORT + 111))" \
+      DSH_SCHOLAR_KERNEL_DATA="$WORK/script-ntdata-$BAD_HOST/kernel" \
       DSH_SCHOLAR_STANDALONE_DATA="$WORK/script-ntdata-$BAD_HOST" \
       bash "$REPO/scripts/start-standalone-ui.sh" --host "$BAD_HOST" --no-token > "$SLOG" 2>&1; then
     fail "SEC: script --no-token on $BAD_HOST accepted"
@@ -910,7 +912,7 @@ done
 SLOOP_WEB=$((CONFLICT_PORT + 120))
 SLOOP_KERNEL=$((CONFLICT_PORT + 121))
 SLOOP_DATA="$WORK/script-lo-data"
-if DSH_SCHOLAR_STANDALONE_DATA="$SLOOP_DATA" \
+if DSH_SCHOLAR_KERNEL_DATA="$SLOOP_DATA/kernel" DSH_SCHOLAR_STANDALONE_DATA="$SLOOP_DATA" \
     bash "$REPO/scripts/start-standalone-ui.sh" --host 127.0.0.1 --port "$SLOOP_WEB" --kernel-port "$SLOOP_KERNEL" \
     --data-dir "$SLOOP_DATA/research-ui-standalone" --no-token > "$WORK/script-lo.log" 2>&1; then
   ok "SEC: script --no-token on 127.0.0.1 exits 0 after readiness"
@@ -937,7 +939,7 @@ SECRET="secret-token-xyz-$(date +%s)"
 SWEB=$((CONFLICT_PORT + 130))
 SKERNEL=$((CONFLICT_PORT + 131))
 SDATA="$WORK/script-tok-data"
-if DSH_SCHOLAR_STANDALONE_DATA="$SDATA" \
+if DSH_SCHOLAR_KERNEL_DATA="$SDATA/kernel" DSH_SCHOLAR_STANDALONE_DATA="$SDATA" \
     bash "$REPO/scripts/start-standalone-ui.sh" --host 127.0.0.1 --port "$SWEB" --kernel-port "$SKERNEL" \
     --data-dir "$SDATA/research-ui-standalone" --token "$SECRET" > "$WORK/script-tok.log" 2>&1; then
   ok "SEC: script --token exits 0 after token-check readiness"
@@ -996,7 +998,7 @@ SPRINC_WEB=$((WEB_PORT + 900))
 SPRINC_KERNEL=$((WEB_PORT + 901))
 SPRINC_DATA="$WORK/sprinc-data"
 node "$SERVER_BIN" --host 127.0.0.1 --port "$SPRINC_WEB" --kernel-port "$SPRINC_KERNEL" \
-  --data-dir "$SPRINC_DATA" --token "$TOKEN" --principal sprinc-ops > "$WORK/sprinc.log" 2>&1 &
+  --kernel-data-dir "$SPRINC_DATA" --data-dir "$SPRINC_DATA" --token "$TOKEN" --principal sprinc-ops > "$WORK/sprinc.log" 2>&1 &
 SPRINC_PID=$!
 sprinc_ready=0
 for _ in $(seq 1 60); do
@@ -1088,7 +1090,7 @@ FC_WEB=$((WEB_PORT + 800))
 FC_KERNEL=$((WEB_PORT + 801))
 FC_DATA="$WORK/fc-data"
 node "$SERVER_BIN" --host 127.0.0.1 --port "$FC_WEB" --kernel-port "$FC_KERNEL" \
-  --data-dir "$FC_DATA" --token "$TOKEN" > "$WORK/fc.log" 2>&1 &
+  --kernel-data-dir "$FC_DATA" --data-dir "$FC_DATA" --token "$TOKEN" > "$WORK/fc.log" 2>&1 &
 FC_PID=$!
 fcready=0
 for _ in $(seq 1 60); do

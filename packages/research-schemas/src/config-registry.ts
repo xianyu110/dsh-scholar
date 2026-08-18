@@ -126,20 +126,12 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
 
   // ── project (ExecutionConfig + IntegrityConfig, design §6.2) ─────────────
   {
-    key: 'execution.runner_profile',
-    scope: 'project',
-    schema: z.enum(['local-docker-gpu', 'local-docker-cpu', 'isolated-subprocess']),
-    default: 'local-docker-cpu',
-    sources: ['http', 'ui', 'file'],
-    description: 'Execution profile of the project (v1 enum; superseded by execution.runner_profile_id).',
-  },
-  {
     key: 'execution.runner_profile_id',
     scope: 'project',
-    schema: z.string().nullable(),
-    default: null,
+    schema: z.string().min(1),
+    default: 'profile_local_docker_cpu_v1',
     sources: ['http', 'ui', 'file'],
-    description: 'Opaque registered RunnerProfile id (domain-model.md §2/§9.1): overrides execution.runner_profile when set; unknown ids are rejected 422 runner_profile_unknown at project create and job submit. Job references only this opaque id — docker flags/endpoints never travel in project/job data.',
+    description: 'Opaque registered RunnerProfile id. Unknown ids are rejected 422 runner_profile_unknown at project create and job submit; docker flags/endpoints never travel in project/job data.',
   },
   {
     key: 'execution.runner_target_id',

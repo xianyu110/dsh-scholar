@@ -66,7 +66,7 @@ Project 另有 `brief_status: collecting | confirmed`。v2 name-only Init 创建
 
 删除是独立于生命周期状态的 tombstone 轴，不新增 `DELETED` 状态。只有 `ARCHIVED` 项目可由 PI 删除；请求必须携带 `expected_revision`、精确项目名确认和非空 reason。成功时在同一 Kernel 事务写 `deleted_at/deleted_by/deletion_reason`、递增 revision 并追加 `project.deleted` Outbox。正常列表、读取、投影和全部项目写入必须把 tombstone 当作 404；相同 request id 的重放返回同一 DeletionReceipt。删除不能物理移除 Project、成员、Decision、Outbox、Artifact 引用或共享 Blob；这些记录由 retention/hold 与后续 purge/GC 协议处理。
 
-`runner_profile` 是 v1 兼容字段；迁移后由 `runner_profile_id` 取代并映射同名本机 profile。Project/Job 只能引用已登记的 opaque profile ID，不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
+Project/Job 只接受必填的 `runner_profile_id`，并且只能引用已登记的 opaque profile ID。旧 `runner_profile` 枚举已经删除，不映射、不迁移；未知或旧枚举值 fail closed。配置不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
 
 ## 3. 状态机
 
@@ -210,7 +210,7 @@ RunManifest 必须包含 run_id、project_id、job_id、contract 和版本、代
 
 ExperimentContract 与 PaperReproductionSpec 的 execution binding 只保存 `runner_profile_id`、`target_id`、environment revision/hash；默认可继承 Project，但在 submit 时必须解析并固化。本机 Docker 与远端 SSH Runner 都是 RunnerTarget adapter；SSH endpoint/credential 只存在服务端 Config/SecretRef。
 
-**现状注记（已实现，commit d960f34）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地——`research-schemas/src/runner-profile.ts` 定义 `RunnerProfile`（profile_id/display_name/runner_mode(local-docker|isolated-subprocess)/锁内 image digest/network_policy=none/limits/capabilities/config_hash + enabled，`.strict()` 拒绝 docker flags/hostname/credential/endpoint）与内置注册表（`profile_local_docker_cpu_v1`、`profile_local_docker_gpu_v1`（无 GPU 路径，CPU-only pin）、`profile_isolated_subprocess_v1`（trusted-smoke-fixture 专用））；注册表 image 与 `configs/runner-profiles/images.lock.json` 的 node_fixture digest 对齐；v1 enum 经 `LEGACY_RUNNER_PROFILE_ENUM_TO_ID` 映射同名本机 opaque id。ExecutionConfig 增可选 `runner_profile_id`（优先于 enum；未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`）。kernel submitJob 对 secure kinds 把解析出的 profile 的 `profile_id` + `config_hash` 注入 Job payload（`payload.runner_profile_id`/`payload.profile_config_hash`，与 image digest 同一 pin 语义）；runner executeJob 按注册表复算校验，未知 id 或 hash 不一致 → `failure_class=environment`（绝不执行），docker 参数（limits/network/opaque profile_id）取自 profile 记录且缺省值与既有容器基线字节级一致；RemoteFleetServer 的 plan 固定同一 profile pin（不一致 → retryable，不带病分发）。legacy jobs（无 pin）行为不变。证据：tests/unit/runner-profile.test.ts 11/11、kernel.test.ts 109/109、根 pnpm test 664/664。
+**现状注记（2026-08-19）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地。ExecutionConfig 只接受必填 `runner_profile_id`；旧 enum 与 alias 已删除，未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`。kernel submitJob 对 secure kinds 固定 profile/config hash，runner 执行前复算，未知 id 或 hash 不一致绝不执行。Runner 环境投影只有在 profile/target enabled、非 draining、kind 匹配、能力匹配，且远端全部 SecretRef 可解析并在 60 秒内有 service-authenticated heartbeat 时才是 ready；unknown/offline/stale 继续显示 `runner_environment` 缺口。配置变更会把 health 重置为 unknown。
 
 **2026-08-15 增量**：上述 `profile_local_docker_gpu_v1` 历史静态记录仍为 CPU-only，不再代表系统没有 GPU 路径。RunnerTarget `runtime_json` 已可固定自定义 digest 与 `{mode:'cpu'}` / `{mode:'nvidia',devices:'all'|数字列表}`；Job、ExecutionPlan、Docker 参数和签名 RunManifest 复用同一 compute pin，远端调度要求 toolkit 与实际设备 capability。真实 Docker/NVIDIA/第二 SSH 主机仍为 `NOT_RUN_MANUAL_PENDING`。
 

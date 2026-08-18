@@ -152,7 +152,7 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
 
     const contractApproved = nextActionProjection(ctx({ status: 'CONTRACT_APPROVED', contracts: [fixtureContract()] }))
     expect(contractApproved).toContainEqual(expect.objectContaining({
-      code: 'baseline_reproduce', state: 'ready', required: true,
+      code: 'baseline_reproduce', state: 'ready', required: ['baseline_command'],
     }))
 
     const contractNeedsExecutionInputs = nextActionProjection(ctx({

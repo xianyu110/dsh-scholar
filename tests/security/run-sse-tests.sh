@@ -182,7 +182,7 @@ start_bff() {
     BFF_DATA="$WORK/bff$attempt"
     BTOKEN="sse-test-token-$$-$attempt"
     nohup node "$SERVER_BIN" --host 127.0.0.1 --port "$bport" --kernel-port "$kport" \
-      --data-dir "$BFF_DATA" --token "$BTOKEN" --principal alice > "$WORK/bff.log" 2>&1 &
+      --kernel-data-dir "$BFF_DATA" --data-dir "$BFF_DATA" --token "$BTOKEN" --principal alice > "$WORK/bff.log" 2>&1 &
     BFF_PID=$!
     for _ in $(seq 1 100); do
       if ! kill -0 "$BFF_PID" 2>/dev/null; then break; fi

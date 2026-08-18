@@ -66,7 +66,7 @@ else
 fi
 
 BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"machine-learning"}'
-PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"local-docker-cpu\",\"network_policy\":\"none\",\"artifact_store\":\"local-cas\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\",\"network_policy\":\"none\",\"artifact_store\":\"local-cas\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 ok "project $PROJ on container profile"
 
 # v2 §12.2: formal jobs require a REAL registered code snapshot.
@@ -142,7 +142,7 @@ else
 fi
 
 echo "== kernel-submit-rejects-subprocess =="
-P2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-sub\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\",\"runner_target_id\":\"target_local_process_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+P2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"harden-sub\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_isolated_subprocess_v1\",\"runner_target_id\":\"target_local_process_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/projects/$P2/jobs" -H 'content-type: application/json' -d "{\"idempotency_key\":\"f1\",\"kind\":\"formal\",\"command\":[\"true\"],\"code_snapshot_id\":\"$CODE_ART\"}")
 [[ "$CODE" == "422" ]] && ok "kernel rejects formal job on isolated-subprocess profile (422)" || bad "expected 422 got $CODE"
 
@@ -219,7 +219,7 @@ for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT2/v1/health" > /dev/nul
 nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT2" --owner harden2 --poll-ms 150 --timeout-ms 30000 --heartbeat-ms 1500 --cancel-poll-ms 1000 > "$WORK/runner2.log" 2>&1 &
 RUNNER2_PID=$!
 sleep 0.5
-PROJ2=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects" -d "{\"name\":\"harden2\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile\":\"isolated-subprocess\",\"runner_target_id\":\"target_local_process_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+PROJ2=$(api -X POST "http://127.0.0.1:$PORT2/v1/projects" -d "{\"name\":\"harden2\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_isolated_subprocess_v1\",\"runner_target_id\":\"target_local_process_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 ok "durable-jobs project $PROJ2"
 
 # Long-running subprocess (node timeout 90s; the runner's 30s timeout would

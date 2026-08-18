@@ -341,3 +341,22 @@ SELFMOD-01 的当前边界保持不变：Cordis self-referential 工具已经以
 | P0 | SUBAGENT-STAGE-02：部分 | 当前根插件已有 Survey/Idea/Evidence/Writing/Review 的确定性 policy、DSH Host `ask` 审批（删除模型自报 confirmation）、ready NextAction/pending Gate/project/session 准入、one-shot spawn、最小 tool filter、child project scope、结构化 draft 输出、Promise.allSettled、running→terminal internal topology bridge、bounded update/dispose、进程内每 action 单 panel/幂等、fan-in stale 丢弃与输入/输出脱敏；`cancelled` 已进入 schema/UI，0024 可保留已有 history/followup，internal canonical route service-token、child ownership 和 terminal CAS 有负向测试。2026-08-15 最新自动证据：`research-panel.test.ts` 10/10、`trajectory.test.ts` 13/13、`migrations.test.ts` 18/18、全量 unit 94 files/1359 tests、docs 22/22、standalone HTTP 268/268、DSH plugin 55/55、全量 build/typecheck 通过。仍未完成 durable confirmation receipt、原子预算预留/四桶 token+cost 对账、durable idempotency、十阶段 policy、topology attempt/usage/duration 字段、完整 snapshot pins 和真实 DSH/model/browser 人工验收，因此默认关闭且不得宣称自动阶段并行完成。关闭条件：完成 acceptance-tests.md §8.3 全部自动场景，再以真实 DSH host/model 对取消、预算、拓扑、i18n/a11y 和 secret redaction 做人工验收。 |
 
 本需求的任何新增实现、缺陷或修复建议必须先同步 product-spec.md §5.10.1、trajectory-subagents.md §3.1、subagent-stage-execution.md、acceptance-tests.md §8.3 与本行，再修改代码。
+
+## 16. 2026-08-19 全仓 Review 修复约束
+
+本节是本轮 Standards + Spec review 的执行约束，覆盖并纠正上文历史记录中仍提到兼容 alias、v1 runner enum、客户端内容搜索未接线或 baseline 描述可消除命令缺口的段落。
+
+| ID | 状态 | 约束与实现 |
+|---|---|---|
+| REVIEW-PATCH-01 | 已实现未人工验收 | `patch_apply` 删除宿主 path/workspace 参数，只接受 project-scoped `workspace_id` + 单文件文本 unified diff；通过 ResearchClient 调 Kernel Workspace read/write/delete，写入带 version/etag CAS；拒绝 traversal、绝对路径、多文件、binary、rename/copy，成功后才冻结 CodeSnapshot。 |
+| REVIEW-LEGACY-01 | 已实现未人工验收 | 工具只注册 canonical 名；删除 claim_verify/analysis_build/release_bundle adapter。ExecutionConfig 只接受必填 opaque `runner_profile_id`；删除 runner_profile enum 与映射。测试与安全脚本不得重新引入兼容路径。 |
+| REVIEW-BASELINE-01 | 已实现未人工验收 | Contract `baseline_run` 永远是自然语言约束，不能满足 `baseline_command`。Chat 模板不得猜 `python train.py`；CONTRACT_APPROVED 在真实 argv 缺失时始终投影该缺口。 |
+| REVIEW-RUNNER-01 | 已实现未人工验收 | projection 与 submit 共用 readiness assessor。profile/target disabled、draining、offline/unknown、kind/capability mismatch、远端 SecretRef unavailable、60 秒 heartbeat 过期均不得 ready。service-token heartbeat 携 expected revision；配置更新重置 unknown。 |
+| REVIEW-AUTH-01 | 已实现未人工验收 | standalone 的 Human Principal 只来自显式 `--principal`；不得借用 Kernel sidecar 为可信 DSH plugin 派生的 operator principal。token 模式缺 principal 时除 unlock/CSRF/static/health 外全部 401 `principal_required`，且不得创建 `session.json` 或发生项目读写；`--no-token` 仅保留 loopback 开发语义。 |
+| REVIEW-WORKSPACE-01 | 已实现未人工验收 | Workspace 搜索框接 server content search 并展示 path/line/snippet；当前文本支持 literal find/replace；input 不触发 DOM 重建，保持焦点与选区。真实浏览器 IME/视觉仍 `NOT_RUN_MANUAL_PENDING`。 |
+| REVIEW-MODULE-01 | 已实现未人工验收 | 抽出 `WorkspaceModule`、runner readiness 与共享 `KernelSidecarLifecycle`；plugin/standalone sidecar 只保留环境 adapter。新增领域逻辑不得继续堆入 ResearchKernel 或复制 sidecar。standalone/launcher 自动测试必须显式使用位于临时目录的 `kernel_data_dir`，共享同一测试 Kernel 的多个 BFF 必须复用该目录；禁止隐式使用操作者的 `~/.dsh/research-kernel`，也禁止测试清理触碰非本测试创建的进程。 |
+| REVIEW-TEST-01 | 已实现 | 安全 fixture 必须忠实满足当前 Host 注入契约：Cordis 最小宿主显式提供必需的 `userQuestions` 服务；所有自带 sidecar 的 SSE/Workspace/Upload fixture 显式 pin 临时 `kernel_data_dir`。不得通过借用本机运行实例或让 plugin fiber 停在 pending 状态制造假阳性/假阴性。 |
+
+自动关闭证据（2026-08-19）：整仓 unit `97 files / 1414 tests`；`pnpm build` 全包与 plugin bundle 成功；docs verifier `22/22`；聚合安全套件 `19 scripts / 0 failed`，其中 hardening `59/59`、standalone HTTP `268/268`、SSE `67/67`、DSH plugin `52/52`。构建仍输出既有 `EMPTY_IMPORT_META` 与 tsdown `external` deprecation warning，均不影响 exit 0；真实 Docker/SSH/GPU/浏览器项目继续保持人工待验收。
+
+关闭证据要求：新定向单测、整仓 `pnpm test`、`pnpm build`、`pnpm verify:docs` 与 `pnpm test:security` 全绿；无真实 Docker/SSH/GPU/浏览器环境的场景继续按 `manual-acceptance.md` 标记，不把未执行人工项写成 PASS。

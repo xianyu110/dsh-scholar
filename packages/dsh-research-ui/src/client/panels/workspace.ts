@@ -29,13 +29,14 @@ import {
   moveNodeCall, openWorkspaceTab, placeholderWorkspaceTab, readVersionCall,
   reloadWorkspaceTab, rollbackFileCall, saveFileCall, selectWorkspacePath,
   tabFromTextNode, toggleWorkspaceDir, updateWorkspaceTabContent,
+  workspaceContentSearchCall,
   workspaceBasename, workspaceConflictKind, workspaceDirVirtual,
   workspaceHistoryView, workspaceKindText, workspaceNodeAt, workspaceTabDirty,
 } from '../workspace-model'
 import type { SseFetch } from '../sse-client'
 import type {
   WorkspaceInfoLite, WorkspaceNodeLite, WorkspaceRevisionLite,
-  WorkspaceTreePayload, WorkspaceListSincePayload,
+  WorkspaceTreePayload, WorkspaceListSincePayload, WorkspaceContentSearchResultLite,
 } from '../types'
 import type { WorkspaceTabState } from '../workspace-model'
 
@@ -50,6 +51,10 @@ interface WorkspacePanelState {
   history: WorkspaceRevisionLite[] | null
   historyPath: string
   searchQuery: string
+  appliedSearchQuery: string
+  searchStatus: 'idle' | 'loading' | 'ready' | 'error'
+  searchHits: WorkspaceContentSearchResultLite['hits']
+  searchTruncated: boolean
   inflight: boolean
   /** One-line notice rendered above the tree ('' = none). */
   notice: string
@@ -64,7 +69,8 @@ function ensureState(projectId: string): WorkspacePanelState {
     st = {
       workspaces: [], listStatus: 'idle', activeWorkspaceId: '',
       tree: initialWorkspaceTreeState(''), expanded: new Set(), tabs: [],
-      history: null, historyPath: '', searchQuery: '', inflight: false,
+      history: null, historyPath: '', searchQuery: '', appliedSearchQuery: '',
+      searchStatus: 'idle', searchHits: [], searchTruncated: false, inflight: false,
       notice: '', noticeError: false,
     }
     panelStates.set(projectId, st)
@@ -195,6 +201,36 @@ async function loadTree(body: HTMLElement, projectId: string, st: WorkspacePanel
   }
   st.tree = applyWorkspaceTree(st.tree, payload)
   if (st.historyPath !== '') await loadHistory(body, projectId, st, st.historyPath)
+  paintWorkspace(body, st, projectId)
+}
+
+async function runWorkspaceSearch(body: HTMLElement, projectId: string, st: WorkspacePanelState): Promise<void> {
+  const call = workspaceContentSearchCall(projectId, st.activeWorkspaceId, st.searchQuery)
+  st.appliedSearchQuery = st.searchQuery.trim()
+  if (call === null || st.activeWorkspaceId === '') {
+    st.searchStatus = 'idle'
+    st.searchHits = []
+    st.searchTruncated = false
+    paintWorkspace(body, st, projectId)
+    return
+  }
+  st.searchStatus = 'loading'
+  paintWorkspace(body, st, projectId)
+  const result = await apiResult<WorkspaceContentSearchResultLite>(call.path, {
+    method: call.method,
+    body: JSON.stringify(call.body),
+  })
+  if (result.ok) {
+    st.searchStatus = 'ready'
+    st.searchHits = Array.isArray(result.data.hits) ? result.data.hits : []
+    st.searchTruncated = result.data.truncated === true
+  } else {
+    st.searchStatus = 'error'
+    st.searchHits = []
+    st.searchTruncated = false
+    st.notice = `${result.error.code ?? 'workspace_search_failed'}: ${result.error.message ?? ''}`
+    st.noticeError = true
+  }
   paintWorkspace(body, st, projectId)
 }
 
@@ -576,6 +612,11 @@ function paintWorkspace(body: HTMLElement, st: WorkspacePanelState, projectId: s
       st.tabs = []
       st.history = null
       st.historyPath = ''
+      st.searchQuery = ''
+      st.appliedSearchQuery = ''
+      st.searchStatus = 'idle'
+      st.searchHits = []
+      st.searchTruncated = false
       void loadTree(body, projectId, st)
     }
     toolbar.appendChild(picker)
@@ -640,9 +681,16 @@ function paintWorkspace(body: HTMLElement, st: WorkspacePanelState, projectId: s
     search.value = st.searchQuery
     search.oninput = () => {
       st.searchQuery = search.value
-      paintWorkspace(body, st, projectId)
+    }
+    search.onkeydown = (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      void runWorkspaceSearch(body, projectId, st)
     }
     toolbar.appendChild(search)
+    const searchButton = el('button', 'hbtn', t('workspace', 'workspace.search.action'))
+    searchButton.onclick = () => { void runWorkspaceSearch(body, projectId, st) }
+    toolbar.appendChild(searchButton)
     panel.appendChild(toolbar)
 
     if (st.notice !== '') {
@@ -654,6 +702,30 @@ function paintWorkspace(body: HTMLElement, st: WorkspacePanelState, projectId: s
     const searchNote = el('div', 'muted', t('workspace', 'workspace.search.note'))
     searchNote.style.cssText = 'font-size:10px;margin-bottom:6px'
     panel.appendChild(searchNote)
+
+    if (st.searchStatus === 'loading') {
+      panel.appendChild(el('div', 'muted', t('workspace', 'workspace.search.loading')))
+    } else if (st.searchStatus === 'ready' && st.appliedSearchQuery !== '') {
+      const results = el('div')
+      results.style.cssText = 'border:1px solid var(--border-2);border-radius:8px;padding:6px 8px;margin-bottom:8px;max-height:180px;overflow:auto'
+      if (st.searchHits.length === 0) {
+        results.appendChild(el('div', 'empty', t('workspace', 'workspace.search.contentEmpty')))
+      } else {
+        for (const hit of st.searchHits) {
+          const file = el('button', 'hbtn', t('workspace', 'workspace.search.hit', { path: hit.path, count: String(hit.match_count) }))
+          file.style.cssText = 'display:block;width:100%;text-align:left;margin:2px 0'
+          file.onclick = () => { void openNodeTab(body, projectId, st, hit.path) }
+          results.appendChild(file)
+          for (const match of hit.matches) {
+            const snippet = el('div', 'mono', t('workspace', 'workspace.search.match', { line: String(match.line), snippet: match.snippet }))
+            snippet.style.cssText = 'font-size:10px;color:var(--text-3);padding-left:12px;white-space:pre-wrap'
+            results.appendChild(snippet)
+          }
+        }
+        if (st.searchTruncated) results.appendChild(el('div', 'muted', t('workspace', 'workspace.search.truncated')))
+      }
+      panel.appendChild(results)
+    }
 
     // ── tree + editor split ──
     const split = el('div', 'row')
@@ -693,8 +765,8 @@ function paintTree(box: HTMLElement, st: WorkspacePanelState, projectId: string,
     return
   }
   let rows = flattenWorkspaceTree(st.tree, st.expanded)
-  if (st.searchQuery.trim() !== '') {
-    const q = st.searchQuery.trim().toLowerCase()
+  if (st.appliedSearchQuery !== '') {
+    const q = st.appliedSearchQuery.toLowerCase()
     rows = rows.filter(row => row.path.toLowerCase().includes(q))
     if (rows.length === 0) {
       box.appendChild(el('div', 'empty', t('workspace', 'workspace.search.empty')))
@@ -875,7 +947,24 @@ function paintEditor(box: HTMLElement, st: WorkspacePanelState, projectId: strin
     const save = el('button', 'btn primary', t('workspace', 'workspace.editor.save'))
     save.disabled = !dirty
     save.onclick = () => { void saveActiveTab(body, projectId, st) }
-    head.appendChild(save)
+    const replace = el('button', 'hbtn', t('workspace', 'workspace.editor.replace'))
+    replace.onclick = () => {
+      const find = prompt(t('workspace', 'workspace.editor.findPrompt'))
+      if (find === null || find === '') return
+      const replacement = prompt(t('workspace', 'workspace.editor.replacePrompt'), '')
+      if (replacement === null) return
+      const next = tab.content.split(find).join(replacement)
+      if (next === tab.content) {
+        st.notice = t('workspace', 'workspace.editor.findEmpty')
+        st.noticeError = false
+      } else {
+        st.tabs = updateWorkspaceTabContent(st.tabs, tab.path, next)
+      }
+      paintWorkspace(body, st, projectId)
+    }
+    const actions = el('div', 'row')
+    actions.append(replace, save)
+    head.appendChild(actions)
     box.appendChild(head)
     const statusLine = el('div', 'muted', dirty
       ? t('workspace', 'workspace.editor.unsaved')
@@ -889,7 +978,10 @@ function paintEditor(box: HTMLElement, st: WorkspacePanelState, projectId: strin
     textarea.style.cssText = 'flex:1;min-height:360px;resize:vertical;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:12.5px/1.6 ui-monospace,Menlo,monospace;outline:none'
     textarea.oninput = () => {
       st.tabs = updateWorkspaceTabContent(st.tabs, tab.path, textarea.value)
-      paintWorkspace(body, st, projectId)
+      save.disabled = !workspaceTabDirty(activeWorkspaceTab(st.tabs) ?? tab)
+      statusLine.textContent = save.disabled
+        ? t('workspace', 'workspace.editor.saved', { version: String(tab.version) })
+        : t('workspace', 'workspace.editor.unsaved')
     }
     box.appendChild(textarea)
   }

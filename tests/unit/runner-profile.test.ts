@@ -1,7 +1,7 @@
 /**
  * RunnerProfile 注册表（domain-model.md §2/§9.1，审计 §4 #8）：
  * opaque profile id 解析、config_hash 稳定/变更敏感、未知 id 拒绝、
- * legacy enum → id 映射、isolated-subprocess 限制、与 images.lock 对齐。
+ * legacy enum 拒绝、isolated-subprocess 限制、与 images.lock 对齐。
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -12,7 +12,6 @@ import {
   getRunnerProfile,
   isContainerRunnerProfile,
   isLockedRunnerImage,
-  LEGACY_RUNNER_PROFILE_ENUM_TO_ID,
   resolveRunnerProfile,
   resolveRunnerProfileId,
   RUNNER_PROFILE_IDS,
@@ -58,14 +57,11 @@ describe('RunnerProfile 注册表 — opaque id 解析', () => {
     }
   })
 
-  it('legacy v1 enum → opaque id 映射（local-docker-cpu/gpu/isolated-subprocess）', () => {
-    expect(LEGACY_RUNNER_PROFILE_ENUM_TO_ID['local-docker-cpu']).toBe(RUNNER_PROFILE_IDS.localDockerCpu)
-    expect(LEGACY_RUNNER_PROFILE_ENUM_TO_ID['local-docker-gpu']).toBe(RUNNER_PROFILE_IDS.localDockerGpu)
-    expect(LEGACY_RUNNER_PROFILE_ENUM_TO_ID['isolated-subprocess']).toBe(RUNNER_PROFILE_IDS.isolatedSubprocess)
-    expect(resolveRunnerProfileId('local-docker-cpu')).toBe(RUNNER_PROFILE_IDS.localDockerCpu)
-    expect(resolveRunnerProfileId('local-docker-gpu')).toBe(RUNNER_PROFILE_IDS.localDockerGpu)
-    expect(resolveRunnerProfileId('isolated-subprocess')).toBe(RUNNER_PROFILE_IDS.isolatedSubprocess)
-    // opaque id 直接解析（同 id 幂等）
+  it('只接受 opaque id；已删除的 v1 enum fail closed', () => {
+    for (const obsolete of ['local-docker-cpu', 'local-docker-gpu', 'isolated-subprocess']) {
+      expect(resolveRunnerProfileId(obsolete)).toBeNull()
+      expect(() => resolveRunnerProfile(obsolete)).toThrow(RunnerProfileUnknownError)
+    }
     expect(resolveRunnerProfileId(RUNNER_PROFILE_IDS.localDockerCpu)).toBe(RUNNER_PROFILE_IDS.localDockerCpu)
   })
 

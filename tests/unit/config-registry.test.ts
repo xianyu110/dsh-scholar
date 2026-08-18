@@ -91,7 +91,7 @@ describe('config registry — key coverage', () => {
 describe('config registry — validateConfig', () => {
   it('merges defaults for the requested scopes', () => {
     const resolved = validateConfig({}, { scopes: ['project'] })
-    expect(resolved.effective['execution.runner_profile']).toBe('local-docker-cpu')
+    expect(resolved.effective['execution.runner_profile_id']).toBe('profile_local_docker_cpu_v1')
     expect(resolved.effective['execution.network_policy']).toBe('allowlist')
     expect(resolved.effective['execution.artifact_store']).toBe('local-cas')
     expect(resolved.effective['integrity.require_baseline_reproduction']).toBe(true)
@@ -103,11 +103,11 @@ describe('config registry — validateConfig', () => {
   })
 
   it('overrides win over defaults and are validated', () => {
-    const resolved = validateConfig({ 'execution.runner_profile': 'local-docker-gpu', 'runner.poll_ms': 3000 })
-    expect(resolved.effective['execution.runner_profile']).toBe('local-docker-gpu')
+    const resolved = validateConfig({ 'execution.runner_profile_id': 'profile_local_docker_gpu_v1', 'runner.poll_ms': 3000 })
+    expect(resolved.effective['execution.runner_profile_id']).toBe('profile_local_docker_gpu_v1')
     expect(resolved.effective['runner.poll_ms']).toBe(3000)
     expect(() => validateConfig({ 'runner.poll_ms': -5 })).toThrow(ConfigRegistryError)
-    expect(() => validateConfig({ 'execution.runner_profile': 'not-a-profile' })).toThrow(/invalid value/)
+    expect(() => validateConfig({ 'execution.runner_profile': 'local-docker-cpu' })).toThrow(/unknown config key/)
     expect(() => validateConfig({ 'kernel.port': 99999 })).toThrow(ConfigRegistryError)
   })
 
@@ -126,7 +126,7 @@ describe('config registry — validateConfig', () => {
 
   it('groups effective values by scope', () => {
     const resolved = validateConfig({}, { scopes: ['project', 'kernel'] })
-    expect(resolved.byScope.project['execution.runner_profile']).toBe('local-docker-cpu')
+    expect(resolved.byScope.project['execution.runner_profile_id']).toBe('profile_local_docker_cpu_v1')
     expect(resolved.byScope.kernel['kernel.port']).toBe(7412)
     expect(Object.keys(resolved.byScope)).toEqual(CONFIG_SCOPES)
   })
