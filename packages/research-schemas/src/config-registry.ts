@@ -128,10 +128,10 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
   {
     key: 'execution.runner_profile_id',
     scope: 'project',
-    schema: z.string().min(1),
-    default: 'profile_local_docker_cpu_v1',
+    schema: z.string().min(1).nullable(),
+    default: null,
     sources: ['http', 'ui', 'file'],
-    description: 'Opaque registered RunnerProfile id. Unknown ids are rejected 422 runner_profile_unknown at project create and job submit; docker flags/endpoints never travel in project/job data.',
+    description: 'Explicit opaque registered RunnerProfile id. null means an unconfigured DRAFT and is never resolved to a local runner implicitly; execution remains blocked until Settings saves a registered id.',
   },
   {
     key: 'execution.runner_target_id',
@@ -315,6 +315,17 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     env: 'DSH_SCHOLAR_SERVICE_TOKEN',
     sources: ['cli', 'env', 'file'],
     description: 'Service identity for internal kernel routes.',
+  },
+  {
+    key: 'runner.target_token',
+    scope: 'runner-profile',
+    schema: z.string(),
+    default: '',
+    secret: true,
+    cli: { flag: 'target-token' },
+    env: 'DSH_SCHOLAR_RUNNER_TARGET_TOKEN',
+    sources: ['cli', 'env', 'file'],
+    description: 'Target-scoped service identity for RunnerTarget heartbeat; independent from the shared internal-route token.',
   },
   // ── fleet 模式（FLEET-01，docs/remote-runner-wire.md §9 生产接线）─────────
   // runner 二进制三个互斥角色：本地 claim 循环（默认）、--fleet-server、
@@ -552,6 +563,17 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     cli: { flag: 'cas' },
     sources: ['cli', 'env', 'file'],
     description: 'CAS root for immutable artifacts.',
+  },
+  {
+    key: 'kernel.secret_root',
+    scope: 'kernel',
+    schema: z.string(),
+    default: '',
+    secret: true,
+    cli: { flag: 'secret-root' },
+    env: 'DSH_SCHOLAR_SECRET_ROOT',
+    sources: ['cli', 'env', 'file'],
+    description: 'Server-only SecretRef root for target identities, model credentials and SSH connection material; never returned in plaintext.',
   },
   {
     key: 'kernel.endpoint_file',

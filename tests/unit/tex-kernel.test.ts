@@ -15,10 +15,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, parseLatexDiagnostics, type LatexDiagnostic } from '@dsh-scholar/research-kernel'
 import type { TexSnapshotManifest } from '@dsh-scholar/runner-gateway'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-tex-kernel-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function makeBrief() {

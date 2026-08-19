@@ -216,9 +216,25 @@ PEXEC=$(node -e "console.log(JSON.stringify(require('$MANIFEST').project.executi
 PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"$PNAME-rerun\",\"workspace\":\"$PWORK\",\"brief\":$PBRIEF,\"mode\":\"$PMODE\",\"execution\":$PEXEC}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 echo "reproduce.sh: rerun project $PROJ created from bundle manifest"
 
+# Reconstruct the gate-controlled phase before re-registering the frozen
+# Contract. A clean-room replay must reach CONTRACT_APPROVED through the same
+# lifecycle as the original project; it must not fabricate BASELINE_REPRO with
+# a generic transition or submit a baseline through the ordinary Job API.
+G_SCOPE=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Clean-room scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "$BASE/v1/gates/$G_SCOPE/decisions" -d '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi"},"decision":"approved"}' > /dev/null
+for PHASE in SURVEYING IDEATING; do
+  REV=$(api "$BASE/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+  api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"$PHASE\",\"expected_revision\":$REV}" > /dev/null
+done
+G_IDEA=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Clean-room idea"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "$BASE/v1/gates/$G_IDEA/decisions" -d '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi"},"decision":"approved"}' > /dev/null
+REV=$(api "$BASE/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
+
 NC=$(node -e "console.log(require('$MANIFEST').contracts.length)")
 # old_contract_id=new_contract_id pairs for P0 contract rebinding below.
 CT_MAP=""
+PRIMARY_CT=""
 for i in $(seq 0 $((NC - 1))); do
   BODY=$(IDX="$i" MANIFEST="$MANIFEST" node -e 'const c=require(process.env.MANIFEST).contracts[Number(process.env.IDX)];const {idea_id,baseline_run,code_snapshot,data,methods,metrics,seeds,analysis,ablations,stop_conditions}=c;console.log(JSON.stringify({idea_id,baseline_run,code_snapshot,data,methods,metrics,seeds,analysis,ablations,stop_conditions}))')
   OLD=$(IDX="$i" MANIFEST="$MANIFEST" node -e 'console.log(require(process.env.MANIFEST).contracts[Number(process.env.IDX)].contract_id)')
@@ -227,7 +243,12 @@ for i in $(seq 0 $((NC - 1))); do
   # freeze each re-registered contract via the internal approval route.
   api -X POST "$BASE/v1/projects/$PROJ/contracts/$NEW/approve" -d '{"actor":"reproduce-sh"}' > /dev/null
   CT_MAP="$CT_MAP $OLD=$NEW"
+  [ -n "$PRIMARY_CT" ] || PRIMARY_CT="$NEW"
 done
+if [ -n "$PRIMARY_CT" ]; then
+  G_CONTRACT=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Clean-room Contract\",\"payload\":{\"contract_id\":\"$PRIMARY_CT\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+  api -X POST "$BASE/v1/gates/$G_CONTRACT/decisions" -d '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi"},"decision":"approved"}' > /dev/null
+fi
 echo "reproduce.sh: re-registered + frozen $NC contract(s)"
 
 # Re-register every bundle artifact into the fresh kernel's CAS so job
@@ -334,6 +355,20 @@ for KEY in $KEYS; do
     TENGINE=$(printf '%s' "$TEXREQ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).engine))")
     TEXIMG=$(printf '%s' "$TEXREQ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).image_digest))")
     api -X POST "$BASE/v1/documents/$TNEWDOC/builds" -d "{\"expected_document_revision\":$TREV,\"engine\":\"$TENGINE\",\"idempotency_key\":\"$KEY\",\"image_digest\":\"$TEXIMG\"}" > /dev/null
+  elif [ "$KIND" = "baseline" ]; then
+    REV=$(api "$BASE/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+    BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" CT_MAP="$CT_MAP" REV="$REV" node -e '
+      const m=require(process.env.MANIFEST)
+      const j=m.jobs.find(x=>x.idempotency_key===process.env.KEY)
+      const pairs=process.env.CT_MAP.trim().split(/\s+/).filter(Boolean).map(p=>p.split("="))
+      const oldRef=(j.run_manifest&&typeof j.run_manifest.contract_id==="string")?j.run_manifest.contract_id:j.contract_id
+      const pair=pairs.find(p=>p[0]===oldRef)
+      if(!pair) throw new Error("baseline contract mapping missing for "+process.env.KEY)
+      if(!j.code_snapshot_id) throw new Error("baseline code snapshot missing for "+process.env.KEY)
+      const imgs=(m.runtime&&m.runtime.images)||{}
+      const output=j.output_contract||(j.payload&&j.payload.output_contract)
+      console.log(JSON.stringify({expected_revision:Number(process.env.REV),idempotency_key:j.idempotency_key,contract_id:pair[1],code_snapshot_id:j.code_snapshot_id,command:j.command,image_digest:imgs.node_fixture,...(output?{output_contract:output}:{})}))')
+    api -X POST "$BASE/v1/projects/$PROJ/baseline-runs" -d "$BODY" > /dev/null
   else
     BODY=$(KEY="$KEY" MANIFEST="$MANIFEST" CT_MAP="$CT_MAP" node -e '
       const m=require(process.env.MANIFEST)

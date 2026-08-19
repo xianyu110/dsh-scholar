@@ -37,6 +37,9 @@ export interface KernelClientOptions {
   /** §4 P0 (API-01/EVID-01): shared internal-route service identity. DSH
    * create/link additionally requires the audience-bound dshPluginToken. */
   serviceToken?: string
+  /** Target-scoped heartbeat credential. It is sent only to the
+   * RunnerTarget heartbeat route, never to general Kernel requests. */
+  runnerTargetToken?: string
   /** DSH-CREATE-LINK-01: route-specific create/link credential; never sent
    * to Runner processes or used as a public bearer. */
   dshPluginToken?: string
@@ -72,6 +75,7 @@ export class ResearchClient {
   readonly endpoint: string
   private readonly token: string | undefined
   private readonly serviceToken: string | undefined
+  private readonly runnerTargetToken: string | undefined
   private readonly dshPluginToken: string | undefined
   private readonly timeoutMs: number
 
@@ -79,6 +83,7 @@ export class ResearchClient {
     this.endpoint = options.endpoint.replace(/\/+$/, '')
     this.token = options.token
     this.serviceToken = options.serviceToken
+    this.runnerTargetToken = options.runnerTargetToken
     this.dshPluginToken = options.dshPluginToken
     this.timeoutMs = options.timeoutMs ?? 15000
   }
@@ -627,6 +632,27 @@ export class ResearchClient {
     return this.request('POST', `/v1/projects/${input.project_id}/jobs`, input)
   }
 
+  /**
+   * Start a contract-bound baseline through the dedicated atomic endpoint.
+   * The first run advances CONTRACT_APPROVED to BASELINE_REPRO in the same
+   * transaction; additional matched-seed runs for that contract are created
+   * through this method as well and never through generic Job submission.
+   */
+  startBaselineRun(input: {
+    project_id: string
+    expected_revision: number
+    idempotency_key: string
+    contract_id: string
+    code_snapshot_id: string
+    command: string[]
+    runner_target_id?: string | null
+    image_digest?: string
+    output_contract?: { metrics: string; logs: string }
+  }): Promise<{ project: ResearchProject; job: JobRecord }> {
+    const { project_id: projectId, ...body } = input
+    return this.request('POST', `/v1/projects/${encodeURIComponent(projectId)}/baseline-runs`, body)
+  }
+
   getJob(jobId: string): Promise<JobRecord> {
     return this.request('GET', `/v1/jobs/${jobId}`)
   }
@@ -711,6 +737,13 @@ export class ResearchClient {
     enabled: boolean
     draining: boolean
     capabilities: string[]
+    service_identity?: {
+      scheme: 'file' | 'keyring' | 'vault'
+      name: string
+      version?: string
+      scope?: string
+      available: boolean
+    }
     connection?: {
       endpoint: { scheme: 'file' | 'keyring' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
       credential: { scheme: 'file' | 'keyring' | 'vault'; name: string; version?: string; scope?: string; available: boolean }
@@ -732,7 +765,12 @@ export class ResearchClient {
     last_seen_at: string | null
     revision: number
   }> {
-    return this.request('POST', `/v1/runner-targets/${encodeURIComponent(targetId)}/heartbeat`, input)
+    return this.request(
+      'POST',
+      `/v1/runner-targets/${encodeURIComponent(targetId)}/heartbeat`,
+      input,
+      this.runnerTargetToken === undefined ? {} : { 'x-runner-target-token': this.runnerTargetToken },
+    )
   }
 
   recoverExpiredLeases(): Promise<{ recovered: number }> {

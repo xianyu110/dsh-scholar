@@ -377,7 +377,8 @@ Canonical Tool registry：
 | idea_create / idea_compare / novelty_audit | Idea create/list comparison/novelty route |
 | workspace_snapshot | code snapshot create；workspace 必须预登记 |
 | patch_apply | 对 project-scoped `workspace_id` 内单个文本节点应用 unified diff；Kernel read/write/delete + version/etag CAS，拒绝宿主路径、多文件、二进制、rename/copy |
-| baseline_prepare / test_run | Job submit with constrained kind |
+| baseline_prepare | `POST /v1/projects/{id}/baseline-runs` 原子校验 approved Contract、CodeSnapshot、非空 argv、Runner target/profile、output contract、expected revision 与幂等键；首个运行同事务创建 queued Job 并推进 `CONTRACT_APPROVED → BASELINE_REPRO`，后续 matched-seed 运行绑定同一 Contract 且保持阶段/revision；禁止普通 Job submit |
+| test_run | Job submit with constrained `smoke` / `analysis` kind |
 | baseline_verify | analysis request against Contract tolerance |
 | experiment_register | Contract draft create |
 | experiment_submit / experiment_status / experiment_cancel | Job create/get/cancel request |

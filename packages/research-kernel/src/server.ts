@@ -258,6 +258,15 @@ const jobSchema = z.object({
   created_by_principal_id: z.string().nullable().optional(),
 })
 
+/** Baselines are contract-bound operations, never ordinary Jobs. All seeds
+ * use /baseline-runs so contract, snapshot, environment, revision and phase
+ * rules share the same atomic Kernel boundary. */
+function rejectBaselineOrdinarySubmit(kind: string): void {
+  if (kind !== 'baseline') return
+  throw new KernelError(422, 'baseline_handoff_required',
+    'baseline jobs must use POST /v1/projects/{id}/baseline-runs')
+}
+
 const baselineRunSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
   idempotency_key: z.string().min(1),
@@ -806,6 +815,18 @@ function requireDshPlugin(
 /** OBS-01: loopback source addresses (IPv4, IPv6, IPv4-mapped IPv6). */
 export function isLoopbackAddress(address: string | undefined | null): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
+/**
+ * RunnerTarget target-token headers are a loopback transport only. This
+ * decision deliberately accepts only the TCP peer address reported by Node;
+ * caller-controlled forwarding headers must never widen the trust boundary.
+ * A production mTLS terminator may authenticate the peer and forward from a
+ * loopback socket, but this plaintext Kernel listener never accepts the
+ * target-token wire directly from a non-loopback peer.
+ */
+export function runnerTargetTokenAccessAllowed(remoteAddress: string | undefined | null): boolean {
+  return isLoopbackAddress(remoteAddress)
 }
 
 /**
@@ -1451,6 +1472,20 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
               return
             }
             if (method === 'POST' && sub === 'heartbeat') {
+              if (!runnerTargetTokenAccessAllowed(req.socket.remoteAddress)) {
+                send(res, 403, { error: errorEnvelope('loopback_only', 'runner target token heartbeat is accepted only from a direct loopback peer; non-loopback deployments require a trusted mTLS terminator') })
+                return
+              }
+              // The shared internal service token only admits the caller to
+              // this route family. A second target-scoped credential proves
+              // which exact allowlisted target it may observe; URL ids and
+              // x-service-principal are never accepted as identity proof.
+              const targetToken = req.headers['x-runner-target-token']
+              if (typeof targetToken !== 'string' || targetToken === ''
+                || !kernel.runnerTargetIdentityAuthorized(id, targetToken)) {
+                send(res, 403, { error: errorEnvelope('runner_target_identity_required', 'runner target heartbeat requires the configured target-scoped service identity') })
+                return
+              }
               const input = runnerTargetHeartbeatSchema.parse(body)
               ok(res, kernel.runnerTargetView(kernel.observeRunnerTarget(id, input)))
               return
@@ -2007,6 +2042,7 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             }
             if (method === 'POST' && sub === 'jobs') {
               const input = jobSchema.parse(body)
+              rejectBaselineOrdinarySubmit(input.kind)
               // v2 shape (domain-model.md §9): durable submitter principal —
               // BFF-injected x-principal-id first, body override for internal
               // callers, NULL when neither is present.
@@ -3424,6 +3460,7 @@ async function handleV2(ctx: {
     // researcher; viewer/auditor are read-only (enforced above).
     memberOr404(id)
     const input = jobSchema.parse(body)
+    rejectBaselineOrdinarySubmit(input.kind)
     // v2 shape (domain-model.md §9): the durable submitter principal is the
     // BFF-injected x-principal-id (never client body trust); a body override
     // is honored for internal callers; absent both → NULL.

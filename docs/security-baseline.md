@@ -66,6 +66,8 @@ TeX source 同样不可信。latex-compile 必须 no-shell-escape、禁网、固
 
 Remote Runner 使用 mTLS service identity、target allowlist、签名 ExecutionPlan、lease generation/token 和 CAS hash。远端地址/证书/SSH bootstrap 只存在服务端 Config/Secret store；浏览器/Job 不得提交 endpoint 或 credential。网络分区、target offline 和 capability mismatch fail closed，不回退宿主 subprocess。
 
+RunnerTarget heartbeat 必须同时通过共享 internal `x-service-token` 门禁和该 target 独立的 service-identity SecretRef 凭证；URL target id、`x-service-principal`、`x-runner-target-id` 等调用方自报字段都不是身份。仅当 Node 观测到的真实 TCP peer 是 loopback（`127.0.0.1`、`::1` 或 IPv4-mapped loopback）时，开发 wire 才可使用 `x-runner-target-token`；`X-Forwarded-For` 等转发头不参与判定。Kernel 只能从 server-side `secretRoot` 内的普通非 symlink `0600` 文件读取该 target 的 token 并恒时比较，且 token 不进入浏览器投影、日志或通用 API 请求。非 loopback/生产部署必须由受信 mTLS 终止器使用 peer certificate 建立 service identity、映射到 target allowlist，再经 loopback 转发；当前 plaintext Kernel listener 直接拒绝所有非 loopback target-token heartbeat，不得把转发头、自报 header 或共享 token 当作 mTLS 替代。未配置、越界、symlink、非 `0600`、不可解析或与 target 不匹配的 identity 一律拒绝 heartbeat，原有 revision CAS、TTL/offline readiness 继续 fail closed。
+
 ## 6. 路径与文件
 
 - Workspace、Snapshot 和 TeX path 经过 decode、NUL 检查、POSIX 规范化和根内校验；

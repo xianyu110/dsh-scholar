@@ -254,7 +254,7 @@ done
 if [ "$memready" = 1 ]; then
   # ops-1 creates a project (creator PI seeded via the kernel API field).
   MP=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -X POST "http://127.0.0.1:$MEM_WEB/v1/projects" \
-    -d '{"name":"mem-rt","workspace":"/w/mem","mode":"gate-only","creator_principal_id":"ops-1","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    -d '{"name":"mem-rt","workspace":"/w/mem","mode":"gate-only","creator_principal_id":"ops-1","execution":{"runner_profile_id":"profile_local_docker_cpu_v1"},"brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
   [ -n "$MP" ] && ok "API-01: member-created project ($MP)" || fail "API-01: create"
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$MP")

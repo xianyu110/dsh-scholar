@@ -64,6 +64,22 @@ function makeBrief(overrides: Record<string, unknown> = {}) {
   }
 }
 
+/** Most Kernel tests exercise behavior after an execution environment has
+ * already been selected. Keep that prerequisite explicit in one helper so
+ * name-only/unconfigured behavior is tested only by the dedicated Init cases. */
+function createConfiguredProject(
+  kernel: ResearchKernel,
+  input: Parameters<ResearchKernel['createProject']>[0],
+) {
+  return kernel.createProject({
+    ...input,
+    execution: {
+      runner_profile_id: RUNNER_PROFILE_IDS.localDockerCpu,
+      ...(input.execution ?? {}),
+    },
+  })
+}
+
 /** Assert a KernelError with an exact HTTP status + error code. */
 /** P0: register + freeze an approved contract for secure-kind job tests. */
 function approvedContract(kernel: ResearchKernel, projectId: string): string {
@@ -78,7 +94,7 @@ function approvedContract(kernel: ResearchKernel, projectId: string): string {
 }
 
 function projectWithApprovedContract(kernel: ResearchKernel): { projectId: string; contractId: string; revision: number } {
-  const created = kernel.createProject({ name: 'baseline handoff', workspace: '/w', brief: makeBrief() })
+  const created = createConfiguredProject(kernel, { name: 'baseline handoff', workspace: '/w', brief: makeBrief() })
   const scope = kernel.createGate({ project_id: created.project_id, type: 'scope', title: 'scope' })
   let project = kernel.decideGate({ gate_id: scope.gate_id, actor: 'pi', decision: 'approved' }).project
   project = kernel.transition(project.project_id, 'SURVEYING', project.revision)
@@ -202,7 +218,7 @@ function makeManifest(kernel: ResearchKernel, job: { job_id: string; project_id:
 describe('project state machine', () => {
   it('creates DRAFT projects with revision 0 and links sessions', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), session_id: 's1' })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief(), session_id: 's1' })
     expect(project.status).toBe('DRAFT')
     expect(project.revision).toBe(0)
     expect(kernel.getProjectBySession('s1')?.project_id).toBe(project.project_id)
@@ -211,7 +227,7 @@ describe('project state machine', () => {
 
   it('transitions only with matching expected_revision (CAS)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' })
     // project is SCOPED now (gate-controlled entry)
@@ -225,7 +241,7 @@ describe('project state machine', () => {
 
   it('renames a project with audit history and revision bump', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'old-name', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'old-name', workspace: '/w', brief: makeBrief() })
     const renamed = kernel.renameProject(project.project_id, 'new-name')
     expect(renamed.name).toBe('new-name')
     expect(renamed.revision).toBe(1)
@@ -237,7 +253,7 @@ describe('project state machine', () => {
 
   it('archives and restores a project (data kept, audited)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const archived = kernel.archiveProject(project.project_id)
     expect(archived.status).toBe('ARCHIVED')
     expect(archived.history.at(-1)).toContain('ARCHIVED')
@@ -252,7 +268,7 @@ describe('project state machine', () => {
 
   it('reconstruction-contracts.md §4: archiving a project with active jobs is 409 jobs_running', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k1', kind: 'echo', command: [], payload: { message: 'x' } })
     try {
       kernel.archiveProject(project.project_id)
@@ -268,7 +284,7 @@ describe('project state machine', () => {
 
   it('PROJECT-DELETE-01: only an archived project can be tombstoned and normal reads become 404', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'Delete Me', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'Delete Me', workspace: '/w', brief: makeBrief() })
     expectKernelError(() => kernel.deleteProject({
       project_id: project.project_id,
       expected_revision: project.revision,
@@ -313,8 +329,8 @@ describe('project state machine', () => {
 
   it('PROJECT-DELETE-01: confirmation, revision and shared CAS references are protected', () => {
     const kernel = freshKernel()
-    const first = kernel.createProject({ name: 'First', workspace: '/w/1', brief: makeBrief() })
-    const second = kernel.createProject({ name: 'Second', workspace: '/w/2', brief: makeBrief() })
+    const first = createConfiguredProject(kernel, { name: 'First', workspace: '/w/1', brief: makeBrief() })
+    const second = createConfiguredProject(kernel, { name: 'Second', workspace: '/w/2', brief: makeBrief() })
     const bytes = Buffer.from([0, 255, 1, 2, 3, 128])
     const a = kernel.registerArtifact({ project_id: first.project_id, kind: 'data', content: bytes, metadata: {} })
     const b = kernel.registerArtifact({ project_id: second.project_id, kind: 'data', content: bytes, metadata: {} })
@@ -341,7 +357,7 @@ describe('project state machine', () => {
     const kernel = freshKernel()
     for (const domain of ['clinical', 'wet-lab', 'weapons', 'biosecurity', 'human-trials']) {
       try {
-        kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief({ domain }) })
+        createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief({ domain }) })
         throw new Error(`expected domain_unsupported for ${domain}`)
       } catch (error) {
         expect((error as { code?: string }).code).toBe('domain_unsupported')
@@ -350,27 +366,27 @@ describe('project state machine', () => {
     // Nothing was persisted for any of them.
     expect(kernel.listProjects()).toHaveLength(0)
     // The default pure-computation domain still works.
-    expect(kernel.createProject({ name: 'ok', workspace: '/w', brief: makeBrief() }).status).toBe('DRAFT')
+    expect(createConfiguredProject(kernel, { name: 'ok', workspace: '/w', brief: makeBrief() }).status).toBe('DRAFT')
     kernel.close()
   })
 
   it('v2 §6.2: generic transition cannot enter gate-controlled states', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     expect(() => kernel.transition(project.project_id, 'SCOPED', 0)).toThrow(/not allowed/)
     kernel.close()
   })
 
   it('rejects illegal transitions', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     expect(() => kernel.transition(project.project_id, 'RELEASED', 0)).toThrow(/not allowed/)
     kernel.close()
   })
 
   it('walks the golden path state sequence via gates + transitions', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const decide = (type: 'scope' | 'idea' | 'contract' | 'release'): ResearchProject => {
       const gate = kernel.createGate({ project_id: project.project_id, type, title: `${type} gate` })
       return kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', principal: { principal_id: 'u1' }, decision: 'approved' }).project
@@ -429,6 +445,43 @@ describe('Contract-approved baseline handoff', () => {
     expect(thrownKernelCode(() => kernel.startBaselineRun({ ...request, command: ['node', 'other.js'] })))
       .toBe('idempotency_conflict')
     expect(kernel.listJobs(setup.projectId)).toHaveLength(1)
+
+    const additional = kernel.startBaselineRun({
+      ...request,
+      expected_revision: started.project.revision,
+      idempotency_key: 'baseline-contract-v1-seed-2',
+      command: ['node', 'train.js', '--seed', '2'],
+    })
+    expect(additional.project).toMatchObject({
+      status: 'BASELINE_REPRO',
+      revision: started.project.revision,
+    })
+    expect(additional.job).toMatchObject({
+      kind: 'baseline',
+      contract_id: setup.contractId,
+      command: ['node', 'train.js', '--seed', '2'],
+    })
+    expect(kernel.listJobs(setup.projectId)).toHaveLength(2)
+
+    const foreignContract = kernel.registerContract({
+      project_id: setup.projectId,
+      idea_id: 'idea_other_baseline',
+      data: { dataset_id: 'fixture', version: 'v1' },
+      methods: { baseline: 'node other.js', treatment: 'node other.js --treatment' },
+      metrics: { primary: 'accuracy', secondary: [] },
+      seeds: [1],
+      analysis: {},
+      ablations: [],
+      stop_conditions: { max_gpu_hours: 1, min_completed_seeds: 1, stop_on_data_leakage: true },
+    })
+    kernel.approveContract(foreignContract.contract_id, 'dec_other_contract', 'test-pi')
+    expect(thrownKernelCode(() => kernel.startBaselineRun({
+      ...request,
+      expected_revision: started.project.revision,
+      idempotency_key: 'baseline-other-contract',
+      contract_id: foreignContract.contract_id,
+    }))).toBe('baseline_contract_mismatch')
+    expect(kernel.listJobs(setup.projectId)).toHaveLength(2)
     kernel.close()
   })
 
@@ -460,8 +513,8 @@ describe('Contract-approved baseline handoff', () => {
 describe('v2 §3.4 project isolation', () => {
   it('same idempotency_key in different projects yields independent jobs', () => {
     const kernel = freshKernel()
-    const a = kernel.createProject({ name: 'a', workspace: '/a', brief: makeBrief() })
-    const b = kernel.createProject({ name: 'b', workspace: '/b', brief: makeBrief() })
+    const a = createConfiguredProject(kernel, { name: 'a', workspace: '/a', brief: makeBrief() })
+    const b = createConfiguredProject(kernel, { name: 'b', workspace: '/b', brief: makeBrief() })
     const ja = kernel.submitJob({ project_id: a.project_id, idempotency_key: 'shared-key', kind: 'echo' })
     const jb = kernel.submitJob({ project_id: b.project_id, idempotency_key: 'shared-key', kind: 'echo' })
     expect(ja.job_id).not.toBe(jb.job_id)
@@ -475,7 +528,7 @@ describe('v2 §3.4 project isolation', () => {
 describe('gates and decisions', () => {
   it('scope gate approval moves DRAFT→SCOPED and records the decision', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), session_id: 's' })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief(), session_id: 's' })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope', session_id: 's' })
     const { gate: decided, decision, project: updated } = kernel.decideGate({
       gate_id: gate.gate_id, actor: 'human', decision: 'approved', reason: 'looks good', session_id: 's', event_id: 'evt_x',
@@ -492,7 +545,7 @@ describe('gates and decisions', () => {
 
   it('double decisions are rejected', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     kernel.decideGate({ gate_id: gate.gate_id, actor: 'a', decision: 'approved' })
     expect(() => kernel.decideGate({ gate_id: gate.gate_id, actor: 'b', decision: 'approved' }))
@@ -502,7 +555,7 @@ describe('gates and decisions', () => {
 
   it('budget overrun parks the project in BLOCKED_GATE with a policy event', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({
+    const project = createConfiguredProject(kernel, {
       name: 't', workspace: '/w', brief: makeBrief(),
       constraints: { max_model_cost_usd: 100, max_gpu_hours: 10, max_parallel_jobs: 2 },
     })
@@ -517,7 +570,7 @@ describe('gates and decisions', () => {
 describe('artifact CAS', () => {
   it('stores content-addressed blobs and dedupes', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const a1 = kernel.registerArtifact({ project_id: project.project_id, kind: 'log', content: 'hello world' })
     const a2 = kernel.registerArtifact({ project_id: project.project_id, kind: 'log', content: 'hello world' })
     expect(a1.artifact_id).toBe(a2.artifact_id) // content-addressed dedup
@@ -533,7 +586,7 @@ describe('artifact CAS', () => {
 describe('durable jobs', () => {
   it('submission is idempotent by idempotency_key', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const j1 = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k1', kind: 'echo' })
     const j2 = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k1', kind: 'echo' })
     expect(j1.job_id).toBe(j2.job_id)
@@ -542,7 +595,7 @@ describe('durable jobs', () => {
 
   it('leases: claim → heartbeat → complete with manifest hash verification', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k2', kind: 'smoke' })
     const claimed = kernel.claimJobs('runner-1', 60, 8)
     expect(claimed).toHaveLength(1)
@@ -560,7 +613,7 @@ describe('durable jobs', () => {
 
   it('expired leases recover to retryable and re-claim without duplication', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k3', kind: 'echo' })
     const claimed = kernel.claimJobs('runner-a', 1, 8)
     expect(claimed[0]?.status).toBe('running')
@@ -579,7 +632,7 @@ describe('durable jobs', () => {
 
   it('foreign lease owners cannot complete jobs', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'k4', kind: 'echo' })
     const [claimed] = kernel.claimJobs('runner-a', 60, 8)
     expect(() => kernel.completeJob({ job_id: claimed!.job_id, owner: 'intruder', ...fenceArgs(kernel, claimed!.job_id), status: 'succeeded' }))
@@ -591,7 +644,7 @@ describe('durable jobs', () => {
 describe('analysis pipeline (E5)', () => {
   it('aggregates multi-seed metrics into mean/CI/effect size with baseline', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     // §13.6 matched-seed design: five baseline runs + five formal runs with
     // the SAME seeds — the analysis engine pairs them by seed.
@@ -630,7 +683,7 @@ describe('analysis pipeline (E5)', () => {
 
   it('rejects analysis with no succeeded runs', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     expect(() => kernel.computeAnalysis(project.project_id)).toThrow(/no succeeded runs/)
     kernel.close()
   })
@@ -639,7 +692,7 @@ describe('analysis pipeline (E5)', () => {
 describe('§11.2 recovery & concurrency cases', () => {
   it('concurrent gate decisions: exactly one wins, the other is rejected (CAS race)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     // Two "browsers" decide simultaneously: the second UPDATE matches zero rows.
     const first = kernel.decideGate({ gate_id: gate.gate_id, actor: 'browser-a', decision: 'approved' })
@@ -653,14 +706,14 @@ describe('§11.2 recovery & concurrency cases', () => {
 
   it('session resume: a resumed DSH session links the SAME project; new projects never steal an old session mapping', async () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief(), session_id: 'session-old' })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief(), session_id: 'session-old' })
     // Resume = a fresh DSH session continues the project via explicit link.
     const link = kernel.linkSession('session-new', project.project_id)
     expect(link.project_id).toBe(project.project_id)
     expect(kernel.getProjectBySession('session-old')?.project_id).toBe(project.project_id)
     expect(kernel.getProjectBySession('session-new')?.project_id).toBe(project.project_id)
     // A brand-new project must NOT inherit the old session's mapping implicitly.
-    const other = kernel.createProject({ name: 'other', workspace: '/w2', brief: makeBrief() })
+    const other = createConfiguredProject(kernel, { name: 'other', workspace: '/w2', brief: makeBrief() })
     expect(kernel.getProjectBySession('session-old')?.project_id).toBe(project.project_id)
     expect(other.session_id).toBeNull()
     // Phase is not duplicated on resume: revision/status stay monotonic.
@@ -676,7 +729,7 @@ describe('§11.2 recovery & concurrency cases', () => {
     // research state hostage. Simulate: no session links at all, project still
     // fully queryable and transitionable.
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     kernel.decideGate({ gate_id: gate.gate_id, actor: 'human', decision: 'approved' })
     expect(kernel.getProject(project.project_id).status).toBe('SCOPED')
@@ -685,7 +738,7 @@ describe('§11.2 recovery & concurrency cases', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-kernel-reopen-'))
     const dbPath = join(dir, 'kernel.db')
     const k1 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas'), requireSignedManifest: false })
-    const p1 = k1.createProject({ name: 'x', workspace: '/w', brief: makeBrief() })
+    const p1 = createConfiguredProject(k1, { name: 'x', workspace: '/w', brief: makeBrief() })
     k1.close()
     const k2 = new ResearchKernel({ dbPath, casRoot: join(dir, 'cas'), requireSignedManifest: false })
     expect(k2.getProject(p1.project_id).status).toBe('DRAFT')
@@ -715,7 +768,7 @@ describe('claims and evidence', () => {
 
   it('verifyClaim: verified-but-not-accepted evidence is inconclusive; accepted evidence is supported when CIs exclude zero', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const { item } = verifiedEvidence(kernel, project.project_id, {
       primary_metric: 'f1', value: 0.9, baseline_value: 0.8, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
     })
@@ -736,7 +789,7 @@ describe('claims and evidence', () => {
 
   it('verifyClaim marks contradicted on negative effects (accepted evidence)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const { item } = verifiedEvidence(kernel, project.project_id, {
       primary_metric: 'f1', value: 0.7, baseline_value: 0.8, effect_size: -0.1, ci_low: -0.18, ci_high: -0.02, n_seeds: 5,
     })
@@ -750,7 +803,7 @@ describe('claims and evidence', () => {
 
   it('verifyClaim rejects missing evidence', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const claim = kernel.createClaim({ project_id: project.project_id, statement: 'x' })
     expect(() => kernel.verifyClaim({ claim_id: claim.claim_id, evidence_ids: ['nope'] })).toThrow(/no resolvable evidence/)
     kernel.close()
@@ -758,7 +811,7 @@ describe('claims and evidence', () => {
 
   it('acceptEvidence requires a non-empty service principal (403)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const { item } = verifiedEvidence(kernel, project.project_id, {
       primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
     })
@@ -770,7 +823,7 @@ describe('claims and evidence', () => {
 
   it('acceptEvidence rejects draft evidence with 409 provenance_not_verified', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ a: 1 }) })
     const draft = kernel.ingestEvidence({
       project_id: project.project_id, source_type: 'analysis', run_ids: [], artifact_refs: [artifact.artifact_id],
@@ -785,8 +838,8 @@ describe('claims and evidence', () => {
 
   it('acceptEvidence rejects cross-project accept with 422 evidence_foreign', () => {
     const kernel = freshKernel()
-    const a = kernel.createProject({ name: 'a', workspace: '/a', brief: makeBrief() })
-    const b = kernel.createProject({ name: 'b', workspace: '/b', brief: makeBrief() })
+    const a = createConfiguredProject(kernel, { name: 'a', workspace: '/a', brief: makeBrief() })
+    const b = createConfiguredProject(kernel, { name: 'b', workspace: '/b', brief: makeBrief() })
     const { item } = verifiedEvidence(kernel, a.project_id, {
       primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
     })
@@ -802,7 +855,7 @@ describe('claims and evidence', () => {
 
   it('acceptEvidence revalidates run_ids against succeeded project jobs (422 when a run is unknown)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ a: 1 }) })
     const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'run', run_ids: ['job_does_not_exist'], artifact_refs: [artifact.artifact_id],
@@ -816,7 +869,7 @@ describe('claims and evidence', () => {
 
   it('acceptEvidence revalidates artifact_refs against the project CAS (422 on missing artifact)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const item = kernel.ingestVerifiedEvidence({
       project_id: project.project_id, source_type: 'analysis', run_ids: [], artifact_refs: ['sha256:' + 'f'.repeat(64)],
       analysis_method: 'bootstrap_95', result: { primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5 },
@@ -829,7 +882,7 @@ describe('claims and evidence', () => {
 
   it('acceptEvidence records provenance=accepted + acceptance block and emits evidence.accepted to the outbox', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const { item } = verifiedEvidence(kernel, project.project_id, {
       primary_metric: 'f1', value: 0.9, effect_size: 0.1, ci_low: 0.02, ci_high: 0.18, n_seeds: 5,
     })
@@ -859,7 +912,7 @@ describe('claims and evidence', () => {
   it('public evidence route rejects a forged provenance_status=accepted body with 422 validation_error', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const { server, port } = await startKernelServer({ kernel, port: 0 })
     try {
       const body = {
@@ -943,7 +996,7 @@ describe('CONFIG-01 canonical Config Registry integration', () => {
   it('createProject enforces the registry security floor (automatic release forbidden)', () => {
     const kernel = freshKernel()
     try {
-      expect(() => kernel.createProject({
+      expect(() => createConfiguredProject(kernel, {
         name: 't', workspace: '/w', brief: makeBrief(), integrity: { allow_automatic_public_release: true },
       })).toThrow(/automatic public release/)
       // nothing was persisted
@@ -1004,7 +1057,7 @@ describe('CONFIG-01 canonical Config Registry integration', () => {
 describe('corpus + ideas + manuscript', () => {
   it('atomically creates ready IdeaCard drafts pinned to the frozen corpus and project revision', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'idea-batch', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'idea-batch', workspace: '/w', brief: makeBrief() })
     const scope = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     kernel.decideGate({ gate_id: scope.gate_id, actor: 'pi', decision: 'approved' })
     const corpus = fixtureCorpus(project.project_id)
@@ -1054,7 +1107,7 @@ describe('corpus + ideas + manuscript', () => {
 
   it('atomically audits the human-selected idea, enters IDEATING and creates its pending Gate', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'idea-select', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'idea-select', workspace: '/w', brief: makeBrief() })
     const scope = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     kernel.decideGate({ gate_id: scope.gate_id, actor: 'pi', decision: 'approved' })
     const corpus = fixtureCorpus(project.project_id)
@@ -1145,7 +1198,7 @@ describe('corpus + ideas + manuscript', () => {
     expect(kernel.getContract(contractPrepared.contract.contract_id).status).toBe('approved')
 
     const rollbackKernel = freshKernel()
-    const rollbackProject = rollbackKernel.createProject({ name: 'idea-select-rollback', workspace: '/w2', brief: makeBrief() })
+    const rollbackProject = createConfiguredProject(rollbackKernel, { name: 'idea-select-rollback', workspace: '/w2', brief: makeBrief() })
     const rollbackScope = rollbackKernel.createGate({ project_id: rollbackProject.project_id, type: 'scope', title: 'Scope' })
     rollbackKernel.decideGate({ gate_id: rollbackScope.gate_id, actor: 'pi', decision: 'approved' })
     const rollbackCorpus = fixtureCorpus(rollbackProject.project_id)
@@ -1178,8 +1231,8 @@ describe('corpus + ideas + manuscript', () => {
 
   it('CAS-fences an automatic corpus snapshot by project revision', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'cas-survey', workspace: '/w', brief: makeBrief(), session_id: 'session_a' })
-    const other = kernel.createProject({ name: 'other', workspace: '/other', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'cas-survey', workspace: '/w', brief: makeBrief(), session_id: 'session_a' })
+    const other = createConfiguredProject(kernel, { name: 'other', workspace: '/other', brief: makeBrief() })
     const corpus = fixtureCorpus(project.project_id)
     expect(() => kernel.snapshotCorpus({
       project_id: project.project_id,
@@ -1212,7 +1265,7 @@ describe('corpus + ideas + manuscript', () => {
 
   it('snapshots corpus and builds deterministic manuscripts from the ledger', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const corpus = fixtureCorpus(project.project_id)
     const snapshot = kernel.snapshotCorpus({
       project_id: project.project_id, queries: corpus.queries, papers: corpus.papers,
@@ -1256,7 +1309,7 @@ describe('corpus + ideas + manuscript', () => {
 describe('§12.6 lease fencing (SCH-JOB-001)', () => {
   it('claim returns lease_owner/lease_generation/lease_token; generation bumps on re-claim', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f1', kind: 'smoke' })
     const [first] = kernel.claimJobs('runner-1', 1, 8)
     expect(first?.lease_owner).toBe('runner-1')
@@ -1274,7 +1327,7 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
 
   it('stale-runner-fencing-token-rejected: old generation/token cannot complete the job', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f2', kind: 'smoke' })
     const [claim1] = kernel.claimJobs('runner-1', 1, 8)
     expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
@@ -1302,7 +1355,7 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
 
   it('stale heartbeat is rejected with 409 lease_stale; current token renews', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f3', kind: 'smoke' })
     const [claim1] = kernel.claimJobs('runner-1', 1, 8)
     expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
@@ -1318,7 +1371,7 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
 
   it('P0: heartbeat/complete without generation/token are rejected (fail-closed)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'f4', kind: 'smoke' })
     kernel.claimJobs('runner-1', 60, 8)
     expectKernelError(() => kernel.heartbeatJob(job.job_id, 'runner-1'), 409, 'lease_stale')
@@ -1332,7 +1385,7 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
 
   it('STORE-06: claim persists only sha256(lease_token); the payload carries no plaintext token', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hash1', kind: 'smoke' })
     const [claimed] = kernel.claimJobs('runner-1', 60, 8)
     expect(claimed?.lease_token).toMatch(/^lt_/)
@@ -1352,7 +1405,7 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
 
   it('STORE-06: fencing compares sha256(token) against the hash column — old rows with an EMPTY hash still fence via the legacy payload token', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hash2', kind: 'smoke' })
     const [claimed] = kernel.claimJobs('runner-1', 60, 8)
     // Simulate a legacy row (claimed by the pre-0014 release): hash column
@@ -1371,7 +1424,7 @@ describe('§12.6 lease fencing (SCH-JOB-001)', () => {
 
   it('STORE-06: wrong tokens are rejected against the hash column (old and new generations)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hash3', kind: 'smoke' })
     const [claim1] = kernel.claimJobs('runner-1', 1, 8)
     expect(kernel.recoverExpiredLeases(Date.now() + 5000)).toBe(1)
@@ -1405,7 +1458,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
       casRoot: join(dir, 'cas'),
       requireSignedManifest: overrides.requireSignedManifest,
     })
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
     const code = codeArtifact(kernel, project.project_id)
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 's1', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), payload: {}, code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
@@ -1419,7 +1472,7 @@ describe('§12.7 manifest signature (SCH-MANIFEST-001)', () => {
 
   it('RUN-01: require_signed_manifest project rejects unsigned manifests', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({
+    const project = createConfiguredProject(kernel, {
       name: 't', workspace: '/w', brief: makeBrief(),
       integrity: { require_signed_manifest: true },
     })
@@ -1586,7 +1639,7 @@ describe('RUN-REMOTE-01 §5 两行：secure kinds run_id 全链 + required facts
   /** formal job + claim + 注册 Ed25519 key（与 signedJobSetup 同款 setup，脱离其 describe 作用域）。 */
   function secureSignedJob(): { kernel: ResearchKernel; job: import('@dsh-scholar/research-schemas').JobRecord & { run_id: string | null }; metrics: import('@dsh-scholar/research-schemas').ArtifactRecord } {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'sec-facts', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'sec-facts', workspace: '/w', brief: makeBrief() })
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
     const code = codeArtifact(kernel, project.project_id)
     const job = kernel.submitJob({
@@ -1626,7 +1679,7 @@ describe('RUN-REMOTE-01 §5 两行：secure kinds run_id 全链 + required facts
 
   it('secure kind manifest seed 与 job 固定 seed 不一致 → 422 manifest_seed_mismatch', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'seed-mismatch', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'seed-mismatch', workspace: '/w', brief: makeBrief() })
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 11 }] }) })
     const code = codeArtifact(kernel, project.project_id)
     const job = kernel.submitJob({
@@ -1656,7 +1709,7 @@ describe('RUN-REMOTE-01 §5 两行：secure kinds run_id 全链 + required facts
 
   it('非 secure kinds（analysis/smoke/echo）不受 facts 强制——缺 run_id/metrics 仍接受（legacy 兼容）', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'fixture-facts', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'fixture-facts', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'fx1', kind: 'analysis', payload: { metric: 'm' } })
     kernel.claimJobs('runner-1', 60, 8)
     const done = kernel.completeJob({
@@ -1671,7 +1724,7 @@ describe('RUN-REMOTE-01 §5 两行：secure kinds run_id 全链 + required facts
 describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
   it('archives ACTUAL file contents into a code artifact + manifest artifact', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     // P0-4: the archive root is a project workspace (workspace_id +
     // root_relative_path '' = the whole workspace), never a host path.
     const ws = seedWorkspace(kernel, project.project_id, {
@@ -1741,7 +1794,7 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
 
   it('rejects symlinks escaping the archived root (path escape protection)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const ws = seedWorkspace(kernel, project.project_id, { 'ok.js': 'fine' })
     const outside = mkdtempSync(join(tmpdir(), 'dsh-snap-outside-'))
     writeFileSync(join(outside, 'secret.txt'), 'secret')
@@ -1761,7 +1814,7 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
 
   it('rejects a missing root with 422 snapshot_root_missing', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const ws = seedWorkspace(kernel, project.project_id, {})
     // P0-4: the root is workspace-relative — a relative subdirectory that
     // does not exist is the new "missing root" case.
@@ -1776,7 +1829,7 @@ describe('§11.3 code snapshot archive (SCH-EXEC-002)', () => {
 describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
   it('formal-class jobs REQUIRE code_snapshot_id (422) and validate it', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     expectKernelError(
       () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'no-snap', kind: 'baseline', contract_id: approvedContract(kernel, project.project_id) }),
       422, 'code_snapshot_required',
@@ -1799,7 +1852,7 @@ describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
       422, 'code_snapshot_unknown',
     )
     // A snapshot from ANOTHER project is also unknown here.
-    const other = kernel.createProject({ name: 'o', workspace: '/o', brief: makeBrief() })
+    const other = createConfiguredProject(kernel, { name: 'o', workspace: '/o', brief: makeBrief() })
     const foreignCode = codeArtifact(kernel, other.project_id)
     expectKernelError(
       () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'foreign-snap', kind: 'formal', contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: foreignCode.artifact_id }),
@@ -1813,7 +1866,7 @@ describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
 
   it('persists code_snapshot_id column + image_digest/output_contract/data_artifact_ids payload', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     // P0 (acceptance-tests.md §4): data_artifact_ids must be registered in
     // the SAME project — register a real data artifact and bind it.
@@ -1851,7 +1904,7 @@ describe('§12.2 JobSpec binding (SCH-EXEC-002)', () => {
 describe('P0 image digest lock (acceptance-tests.md §4)', () => {
   it('rejects secure jobs with a missing image_digest (422 image_digest_required)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
       expectKernelError(
@@ -1869,7 +1922,7 @@ describe('P0 image digest lock (acceptance-tests.md §4)', () => {
 
   it('rejects tags, latest and foreign digests (422 image_digest_untrusted)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     // tag / latest / well-formed but NOT the locked entry — all must be 422.
     const untrusted = [
@@ -1890,7 +1943,7 @@ describe('P0 image digest lock (acceptance-tests.md §4)', () => {
 
   it('latex-compile injects the locked texlive digest and rejects explicit mismatches', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const doc = kernel.texEnsure(project.project_id)
     kernel.texWriteFile(doc.document_id, 'paper.tex', '\\begin{document}hi\\end{document}\n')
     const snap = kernel.texSnapshot(doc.document_id)
@@ -1912,7 +1965,7 @@ describe('P0 image digest lock (acceptance-tests.md §4)', () => {
 
   it('accepts the exact trusted lock digest (P0 success path)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     for (const kind of ['baseline', 'pilot', 'formal', 'reproduce'] as const) {
       const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: `ok-${kind}`, kind, contract_id: approvedContract(kernel, project.project_id), code_snapshot_id: code.artifact_id, image_digest: NODE_IMAGE_DIGEST })
@@ -1927,7 +1980,7 @@ describe('P0 image digest lock (acceptance-tests.md §4)', () => {
 describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
   it('unpackCodeSnapshot round-trips an archived snapshot and rejects tampering', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const ws = seedWorkspace(kernel, project.project_id, {
       'train.js': '#!/usr/bin/env node\nconsole.log("hi")\n',
       'lib/util.js': 'export const f = 1\n',
@@ -1961,7 +2014,7 @@ describe('§12.5 metrics file + code snapshot unpack (SCH-EXEC-002)', () => {
 
   it('computeAnalysis reads §12.5 fixed-schema metrics artifacts (name/value/unit)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     const fileSchema = (seed: number, value: number) => JSON.stringify({
       schema_version: 1, run_id: `run-${seed}`, contract_id: 'expc_x', seed,
@@ -1998,7 +2051,7 @@ describe('§4 data artifact binding (P0, acceptance-tests.md §4)', () => {
 
   it('accepts data_artifact_ids registered in the SAME project with a verifiable hash', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const data = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'dataset-v1\n' })
     const job = kernel.submitJob({
       project_id: project.project_id,
@@ -2022,7 +2075,7 @@ describe('§4 data artifact binding (P0, acceptance-tests.md §4)', () => {
 
   it('rejects an unregistered id with 422 data_artifact_missing (never queued)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const key = 'data-missing'
     expectKernelError(
       () => kernel.submitJob({ project_id: project.project_id, idempotency_key: key, kind: 'smoke', data_artifact_ids: ['sha256:' + 'c'.repeat(64)] }),
@@ -2034,8 +2087,8 @@ describe('§4 data artifact binding (P0, acceptance-tests.md §4)', () => {
 
   it('rejects an artifact of ANOTHER project with 422 data_artifact_foreign (never queued)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
-    const other = kernel.createProject({ name: 'o', workspace: '/o', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
+    const other = createConfiguredProject(kernel, { name: 'o', workspace: '/o', brief: makeBrief() })
     const foreign = kernel.registerArtifact({ project_id: other.project_id, kind: 'data', content: 'other-project-dataset' })
     const key = 'data-foreign'
     expectKernelError(
@@ -2048,7 +2101,7 @@ describe('§4 data artifact binding (P0, acceptance-tests.md §4)', () => {
 
   it('rejects a blob missing from CAS with 422 data_artifact_hash_unverifiable (never queued)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const data = kernel.registerArtifact({ project_id: project.project_id, kind: 'data', content: 'will-be-evicted' })
     // Simulate an orphaned artifact record (e.g. CAS GC went wrong): the
     // record exists but its blob cannot be re-verified.
@@ -2065,7 +2118,7 @@ describe('§4 data artifact binding (P0, acceptance-tests.md §4)', () => {
 
   it('empty/undefined data_artifact_ids skip validation entirely', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const undefinedIds = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'data-none', kind: 'smoke' })
     expect(undefinedIds.status).toBe('queued')
     const emptyIds = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'data-empty', kind: 'smoke', data_artifact_ids: [] })
@@ -2089,7 +2142,7 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
 
   it('rejects a single oversized file without buffering it (422 snapshot_too_large)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const ws = seedWorkspace(kernel, project.project_id, { 'big.js': 'x'.repeat(8) })
     const saved = ResearchKernel.SNAPSHOT_MAX_FILE_BYTES
     try {
@@ -2113,7 +2166,7 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
 
   it('rejects archives beyond max_files / max_total_bytes with measured values (422 snapshot_too_large)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const ws = seedWorkspace(kernel, project.project_id, { 'a.js': 'a', 'b.js': 'b', 'c.js': 'c' })
     const savedFiles = ResearchKernel.SNAPSHOT_MAX_FILES
     const savedTotal = ResearchKernel.SNAPSHOT_MAX_TOTAL_BYTES
@@ -2143,7 +2196,7 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
 
   it('never exposes the host path: archive/manifest/registry/snapshot use a display root', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const ws = seedWorkspace(kernel, project.project_id, { 'a.js': 'a' })
     const dir = kernel.workspaces.workspaceRoot(ws)
     const snap = kernel.snapshotCodeArchive(project.project_id, ws, '', 'leak test')
@@ -2173,7 +2226,7 @@ describe('§3/STORE-02 code snapshot limits + host-path hygiene', () => {
 describe('§16 outbox canonical envelope (EVENT-01)', () => {
   it('allocates per-aggregate monotonic event_seq and fills the envelope columns', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     // createProject already emitted project.created into the project bucket.
     const e1 = kernel.emit(project.project_id, 'project.transitioned', { project_id: project.project_id, revision: 1, from: 'DRAFT', to: 'SCOPED' })
     const e2 = kernel.emit(project.project_id, 'project.transitioned', { project_id: project.project_id, revision: 2 })
@@ -2220,7 +2273,7 @@ describe('§16 outbox canonical envelope (EVENT-01)', () => {
 
   it('passes request_id/session_id through from the payload when present', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const e = kernel.emit(project.project_id, 'evidence.accepted', { project_id: project.project_id, request_id: 'req_123', session_id: 'sess_9' })
     expect(e.request_id).toBe('req_123')
     expect(e.session_id).toBe('sess_9')
@@ -2232,7 +2285,7 @@ describe('§16 outbox canonical envelope (EVENT-01)', () => {
 
   it('emit inside an existing transaction reuses it (no nested BEGIN)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     // createProjectWithInitialGate runs createProject (which emits) inside a
     // withTransaction — this path must not throw "cannot start a transaction".
     const created = kernel.createProjectWithInitialGate({ name: 'txn', workspace: '/w', brief: makeBrief() })
@@ -2247,7 +2300,7 @@ describe('§16 outbox canonical envelope (EVENT-01)', () => {
 describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
   it('claim records a runs row; complete finalizes manifest/signature/finished_at', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'runs', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'runs', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'r1', kind: 'echo', payload: { message: 'x' } })
     const [claimed] = kernel.claimJobs('runner-1', 60, 8)
     expect(claimed).toBeDefined()
@@ -2278,7 +2331,7 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
 
   it('retry bumps attempt_no on the runs ledger', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'runs2', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'runs2', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'r2', kind: 'echo', payload: { message: 'x' } })
     kernel.claimJobs('runner-2', 1, 8)
     // expire + recover + re-claim (mirrors run-fencing flows)
@@ -2292,7 +2345,7 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
 
   it('kernel-level decideGate keeps actor-only compat; HTTP schema requires principal (covered in run-gate-tests.sh)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'gov', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'gov', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
     // Kernel-internal callers (orchestrator) may pass actor without a full
     // principal; the HTTP surface (decisionSchema) rejects those with 422
@@ -2303,7 +2356,7 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
 
   it('gate decision with principal persists tenant/auth_method/session (GOV-01 durable)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'gov2', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'gov2', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
     kernel.decideGate({
       gate_id: gate.gate_id, actor: 'web-user', decision: 'approved', reason: 'ok',
@@ -2318,7 +2371,7 @@ describe('RUN-01 runs ledger + GOV-01 principal + v2 roles', () => {
 describe('RUN-01 runs ledger: snapshot resolution + HTTP routes', () => {
   it('resolves snapshot_sha256 (sha256: artifact, code_snap_ registry, null for snapshot-less jobs)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'snap-runs', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'snap-runs', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     const contract = approvedContract(kernel, project.project_id)
     const formal = kernel.submitJob({
@@ -2351,7 +2404,7 @@ describe('RUN-01 runs ledger: snapshot resolution + HTTP routes', () => {
 
   it('complete with a signed manifest records signature_status=signed', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'sig-runs', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'sig-runs', workspace: '/w', brief: makeBrief() })
     const metrics = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: JSON.stringify({ metrics: [{ metric: 'm', value: 1, seed: 1 }] }) })
     const code = codeArtifact(kernel, project.project_id)
     const job = kernel.submitJob({
@@ -2375,7 +2428,7 @@ describe('RUN-01 runs ledger: snapshot resolution + HTTP routes', () => {
   it('GET /v1/projects/{id}/runs lists newest-first; GET /runs/{run_id} returns one (404 otherwise)', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'http-runs', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'http-runs', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'hr1', kind: 'echo', payload: { message: 'x' } })
     kernel.claimJobs('runner-1', 60, 8)
     const { server, port } = await startKernelServer({ kernel, port: 0 })
@@ -2405,7 +2458,7 @@ describe('GOV-01 principal fail-closed (HTTP gate decisions)', () => {
   it('rejects anonymous and actor-only decisions with 422 principal_required (nothing recorded)', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'gov-http', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'gov-http', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
     const { server, port } = await startKernelServer({ kernel, port: 0 })
     try {
@@ -2433,7 +2486,7 @@ describe('GOV-01 principal fail-closed (HTTP gate decisions)', () => {
   it('principal-bearing decision (with session_id, no actor) succeeds and re-reads durably', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'gov-http2', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'gov-http2', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'g' })
     const { server, port } = await startKernelServer({ kernel, port: 0 })
     try {
@@ -2459,7 +2512,7 @@ describe('GOV-01 principal fail-closed (HTTP gate decisions)', () => {
   it('internal contract approve route keeps actor-only semantics (orchestrator channel)', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'gov-approve', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'gov-approve', workspace: '/w', brief: makeBrief() })
     const contract = kernel.registerContract({
       project_id: project.project_id, idea_id: 'idea_x', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
       metrics: { primary: 'f1' }, seeds: [1], analysis: {}, ablations: [], stop_conditions: {},
@@ -2485,7 +2538,7 @@ describe('v2 x-principal-role capability checks (API-01)', () => {
   it('viewer/auditor read-only; researcher writes but no governance; operator/pi govern', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({
+    const project = createConfiguredProject(kernel, {
       name: 'roles', workspace: '/w', brief: makeBrief(), creator_principal_id: 'ops-1',
     } as never)
     const projectId = project.project_id
@@ -2570,7 +2623,7 @@ describe('v1 PI-only intake adopt / archive / unarchive (GOV-01/ONBOARD-01 §5 P
   it('kernel second layer: researcher/viewer 403 role_forbidden, non-member 404, missing principal 422, pi succeeds', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({
+    const project = createConfiguredProject(kernel, {
       name: 'p1', workspace: '/w', brief: makeBrief(), creator_principal_id: 'ops-1',
     } as never)
     const projectId = project.project_id
@@ -2626,7 +2679,7 @@ describe('v1 PI-only intake adopt / archive / unarchive (GOV-01/ONBOARD-01 §5 P
   it('PROJECT-DELETE-01: v1/v2 DELETE is archived-only, PI-only, confirmed and idempotent', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = freshKernel()
-    const project = kernel.createProject({
+    const project = createConfiguredProject(kernel, {
       name: 'Delete HTTP', workspace: '/w', brief: makeBrief(), creator_principal_id: 'pi-1',
     } as never)
     kernel.addProjectMember({ project_id: project.project_id, principal_id: 'operator-1', role: 'operator', actor: 'pi-1' })
@@ -2694,7 +2747,7 @@ describe('v1 PI-only intake adopt / archive / unarchive (GOV-01/ONBOARD-01 §5 P
       expect(replay.status).toBe(200)
       expect(await replay.json()).toEqual(receipt)
 
-      const v2Project = kernel.createProject({
+      const v2Project = createConfiguredProject(kernel, {
         name: 'Delete V2', workspace: '/w2', brief: makeBrief(), creator_principal_id: 'pi-1',
       } as never)
       const v2Archived = kernel.archiveProject(v2Project.project_id)
@@ -2734,7 +2787,7 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
 
   it('analysis uses the fixed 10,000 resamples and reports n_resamples', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'stat', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'stat', workspace: '/w', brief: makeBrief() })
     const codeSnap = kernel.registerArtifact({
       project_id: project.project_id, kind: 'code', content: Buffer.from('x=1'),
     }).artifact_id
@@ -2763,7 +2816,7 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
     // runs — computeAnalysis WITHOUT options.minimum_n must pass (the
     // contract value drives AnalysisPlan.minimum_n).
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'stat3', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'stat3', workspace: '/w', brief: makeBrief() })
     const codeSnap = kernel.registerArtifact({
       project_id: project.project_id, kind: 'code', content: Buffer.from('x=1'),
     }).artifact_id
@@ -2787,7 +2840,7 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
     // contract-derived minimum must be enforced (matched_seeds_required,
     // NOT the legacy fallback 1), proving the derivation really happened.
     const kernelB = freshKernel()
-    const projectB = kernelB.createProject({ name: 'stat3b', workspace: '/w', brief: makeBrief() })
+    const projectB = createConfiguredProject(kernelB, { name: 'stat3b', workspace: '/w', brief: makeBrief() })
     const codeSnapB = kernelB.registerArtifact({
       project_id: projectB.project_id, kind: 'code', content: Buffer.from('x=1'),
     }).artifact_id
@@ -2810,7 +2863,7 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
 
   it('caller cannot lower minimum_n below the contract minimum (422)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'stat2', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'stat2', workspace: '/w', brief: makeBrief() })
     const codeSnap = kernel.registerArtifact({
       project_id: project.project_id, kind: 'code', content: Buffer.from('x=1'),
     }).artifact_id
@@ -2838,7 +2891,7 @@ describe('STAT-01 fixed parameters (reconstruction-contracts.md §12)', () => {
 describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () => {
   it('succeeded completion without a run manifest is rejected 422 run_manifest_required (non-fixture kinds)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-manifest', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-manifest', workspace: '/w', brief: makeBrief() })
     // kind 'analysis' is NOT an echo/smoke fixture — a succeeded completion
     // without a RunManifest is a protocol violation.
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'p0-an1', kind: 'analysis' })
@@ -2862,7 +2915,7 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('echo fixture kinds keep completing without a manifest (in-process, §3.2 invariant 1)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-echo', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-echo', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'p0-e1', kind: 'echo' })
     kernel.claimJobs('runner-p0', 60, 8)
     const done = kernel.completeJob({ job_id: job.job_id, owner: 'runner-p0', ...fenceArgs(kernel, job.job_id), status: 'succeeded' })
@@ -2872,7 +2925,7 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('terminal frames with a wrong lease owner or token are rejected 409 lease_stale', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-term', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-term', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'p0-t1', kind: 'echo' })
     kernel.claimJobs('runner-p0', 60, 8)
     const frame = { seq: 1, frame_kind: 'chunk' as const, channel: 'stdout' as const, text: 'x', lease_generation: 1 }
@@ -2903,7 +2956,7 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('formal analysis rejects duplicate treatment seeds 422 duplicate_seed (no silent overwrite)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-stat', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-stat', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     const contract = approvedContract(kernel, project.project_id)
     const run = (key: string, kind: 'baseline' | 'formal', seed: number, value: number): void => {
@@ -2932,7 +2985,7 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('formal analysis rejects duplicate baseline seeds 422 duplicate_seed', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-stat-b', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-stat-b', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     const contract = approvedContract(kernel, project.project_id)
     const run = (key: string, kind: 'baseline' | 'formal', seed: number, value: number): void => {
@@ -2959,8 +3012,8 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('contract gate approving a FOREIGN project contract is rejected 422 contract_foreign (GOV-02)', () => {
     const kernel = freshKernel()
-    const projectA = kernel.createProject({ name: 'p0-gov-a', workspace: '/w', brief: makeBrief() })
-    const projectB = kernel.createProject({ name: 'p0-gov-b', workspace: '/w', brief: makeBrief() })
+    const projectA = createConfiguredProject(kernel, { name: 'p0-gov-a', workspace: '/w', brief: makeBrief() })
+    const projectB = createConfiguredProject(kernel, { name: 'p0-gov-b', workspace: '/w', brief: makeBrief() })
     const foreign = kernel.registerContract({
       project_id: projectB.project_id, idea_id: 'i',
       data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' },
@@ -2994,7 +3047,7 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('latex-compile with an engine outside the fixed whitelist is rejected 422 engine_invalid (TEX-02)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-tex', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-tex', workspace: '/w', brief: makeBrief() })
     const doc = kernel.texEnsure(project.project_id)
     kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}hi\\end{document}\n')
     const snap = kernel.texSnapshot(doc.document_id)
@@ -3021,7 +3074,7 @@ describe('P0 hardening round (§4: RUN-01/TERM-01/GOV-02/STAT-01/TEX-02)', () =>
 
   it('latex-compile snapshot paths with shell metacharacters or traversal are rejected 422 tex_path_invalid (TEX-02)', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'p0-tex-path', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'p0-tex-path', workspace: '/w', brief: makeBrief() })
     const doc = kernel.texEnsure(project.project_id)
     kernel.texWriteFile(doc.document_id, 'paper.tex', '\\documentclass{article}\n\\begin{document}hi\\end{document}\n')
     const snap = kernel.texSnapshot(doc.document_id)
@@ -3118,7 +3171,7 @@ describe('service token auth on internal routes (hardening §4 P0 API-01/EVID-01
 
   it('kernel methods are unaffected by a configured serviceToken (no client layer impact)', () => {
     const kernel = tokenKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const job = kernel.submitJob({ project_id: project.project_id, idempotency_key: 'svc-1', kind: 'echo', payload: { message: 'x' } })
     expect(job.status).toBe('queued')
     const claimed = kernel.claimJobs('svc-unit', 60, 8)
@@ -3137,7 +3190,7 @@ describe('service token auth on internal routes (hardening §4 P0 API-01/EVID-01
   it('server: every internal route rejects missing/bearer/wrong credentials with 403 service_token_required and accepts the correct x-service-token', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = tokenKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const artifact = kernel.registerArtifact({ project_id: project.project_id, kind: 'analysis', content: '{}' })
     const contract = kernel.registerContract({ project_id: project.project_id, idea_id: 'idea_svc', data: { dataset_id: 'd' }, methods: { baseline: 'b', treatment: 'a' }, metrics: { primary: 'm' } })
     const { publicKey } = generateKeyPairSync('ed25519')
@@ -3217,7 +3270,7 @@ describe('service token auth on internal routes (hardening §4 P0 API-01/EVID-01
     const { ResearchClient, KernelApiError } = await import('@dsh-scholar/research-client')
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = tokenKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'svc-c', kind: 'echo', payload: { message: 'x' } })
     const { server, port } = await startKernelServer({ kernel, port: 0 })
     const endpoint = `http://127.0.0.1:${port}`
@@ -3316,7 +3369,7 @@ describe('§5 P0-1 bearer enforcement on token-configured kernels (hardening API
   it('server: bearer and x-service-token are two independent layers — bearer never unlocks internal routes, x-service-token never substitutes for the bearer on public routes', async () => {
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = bearerKernel(SERVICE_TOKEN)
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     kernel.submitJob({ project_id: project.project_id, idempotency_key: 'bearer-1', kind: 'echo', payload: { message: 'x' } })
     const { server, port } = await startKernelServer({ kernel, port: 0, token: KERNEL_TOKEN })
     try {
@@ -3355,7 +3408,7 @@ describe('§5 P0-1 bearer enforcement on token-configured kernels (hardening API
     const { ResearchClient, KernelApiError } = await import('@dsh-scholar/research-client')
     const { startKernelServer } = await import('../../packages/research-kernel/lib/server.js')
     const kernel = bearerKernel(undefined)
-    kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const { server, port } = await startKernelServer({ kernel, port: 0, token: KERNEL_TOKEN })
     const endpoint = `http://127.0.0.1:${port}`
     try {
@@ -3379,9 +3432,22 @@ describe('§5 P0-1 bearer enforcement on token-configured kernels (hardening API
 })
 
 describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审计 §4 #8）', () => {
+  it('省略 runner_profile_id 持久化为显式 null，任何 Job 都 fail closed 且零落库', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({ name: 'unconfigured', workspace: '/w', brief: makeBrief() })
+    expect(project.execution.runner_profile_id).toBeNull()
+    expectKernelError(
+      () => kernel.submitJob({ project_id: project.project_id, idempotency_key: 'must-configure', kind: 'echo' }),
+      422,
+      'runner_profile_required',
+    )
+    expect(kernel.listJobs(project.project_id)).toHaveLength(0)
+    kernel.close()
+  })
+
   it('submitJob 对 secure kinds 注入 opaque runner_profile_id + profile_config_hash（与注册表一致，read-back 保留）', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     const job = kernel.submitJob({
       project_id: project.project_id,
@@ -3411,7 +3477,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
 
   it('job 级 runner_profile_id 覆盖 project 级；project 级 id 被 submit 尊重', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     const gpu = getRunnerProfile(RUNNER_PROFILE_IDS.localDockerGpu)!
     const job = kernel.submitJob({
@@ -3426,7 +3492,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
     expect(job.payload.runner_profile_id).toBe(gpu.profile_id)
     expect(job.payload.profile_config_hash).toBe(gpu.config_hash)
     // 未提供 job override 时使用 project 级 runner_profile_id。
-    const proj = kernel.createProject({
+    const proj = createConfiguredProject(kernel, {
       name: 'p2', workspace: '/w2', brief: makeBrief(),
       execution: { runner_profile_id: RUNNER_PROFILE_IDS.localDockerGpu },
     })
@@ -3457,7 +3523,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
 
   it('未知 profile id → 422 runner_profile_unknown（job 级与 project 级均 fail closed，零落库）', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const code = codeArtifact(kernel, project.project_id)
     expectKernelError(
       () => kernel.submitJob({
@@ -3473,7 +3539,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
     )
     // createProject 拒绝未登记 id（零落库）
     expectKernelError(
-      () => kernel.createProject({ name: 'bad', workspace: '/w', brief: makeBrief(), execution: { runner_profile_id: 'profile_nonexistent_v1' } }),
+      () => createConfiguredProject(kernel, { name: 'bad', workspace: '/w', brief: makeBrief(), execution: { runner_profile_id: 'profile_nonexistent_v1' } }),
       422, 'runner_profile_unknown',
     )
     expect(kernel.listProjectsPage(50, undefined).items.map(p => p.name)).not.toContain('bad')
@@ -3495,7 +3561,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
 
   it('isolated-subprocess 限制：secure kinds 经 profile 解析后 422 container_execution_required', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({
+    const project = createConfiguredProject(kernel, {
       name: 't', workspace: '/w', brief: makeBrief(),
       execution: { runner_profile_id: 'profile_isolated_subprocess_v1', runner_target_id: 'target_local_process_v1' },
     })
@@ -3519,7 +3585,7 @@ describe('opaque RunnerProfile 注册表固定（domain-model.md §2/§9.1，审
 
   it('latex-compile 同样固定 project profile pin（texlive digest 不变）', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 't', workspace: '/w', brief: makeBrief() })
     const doc = kernel.texEnsure(project.project_id)
     kernel.texWriteFile(doc.document_id, 'paper.tex', '\\begin{document}hi\\end{document}\n')
     const snap = kernel.texSnapshot(doc.document_id)
@@ -3566,8 +3632,9 @@ describe('INIT-GRILL-02 v2 name-only Init (init-grill-upload-models.md §1/§2)'
       expect(kernel.listGates(out.project.project_id)).toHaveLength(0)
       // 默认 Budget 存在。
       expect(kernel.getBudget(out.project.project_id).model_cost_usd).toBe(0)
-      // workspace/安全/runner 用服务端安全默认（无浏览器可控字段）。
-      expect(kernel.getProject(out.project.project_id).execution.runner_profile_id).toBe('profile_local_docker_cpu_v1')
+      // name-only 创建持久化显式未配置状态，不能静默选本机 Docker。
+      expect(kernel.getProject(out.project.project_id).execution.runner_profile_id).toBeNull()
+      expect(kernel.projectProjection(out.project.project_id).next_actions_v2.every(action => action.code !== 'baseline_reproduce')).toBe(true)
       kernel.close()
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
@@ -3747,7 +3814,7 @@ describe('INIT-GRILL-02 v2 name-only Init (init-grill-upload-models.md §1/§2)'
 
   it('v1 完整创建仍是兼容 adapter（createProject 不因 name-only 流程消失）', () => {
     const kernel = freshKernel()
-    const project = kernel.createProject({ name: 'v1 legacy', workspace: '/w', brief: makeBrief() })
+    const project = createConfiguredProject(kernel, { name: 'v1 legacy', workspace: '/w', brief: makeBrief() })
     expect(project.brief_status).toBe('confirmed')
     expect(kernel.listGates(project.project_id)).toHaveLength(0)
     kernel.close()

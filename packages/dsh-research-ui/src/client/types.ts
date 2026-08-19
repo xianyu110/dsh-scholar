@@ -122,7 +122,7 @@ export interface Projection {
     project_id?: string; name?: string; status?: string; revision?: number; brief_status?: 'collecting' | 'confirmed'
     brief?: { problem?: string; primary_metrics?: string[] }
     constraints?: { max_model_cost_usd?: number; max_gpu_hours?: number; max_parallel_jobs?: number; datasets?: string; external_model_upload?: string }
-    execution?: { runner_profile_id?: string; runner_target_id?: string; network_policy?: string; artifact_store?: string }
+    execution?: { runner_profile_id?: string | null; runner_target_id?: string; network_policy?: string; artifact_store?: string }
     integrity?: { require_baseline_reproduction?: boolean; require_experiment_contract?: boolean; require_claim_evidence_links?: boolean; require_clean_room_rerun?: boolean; allow_automatic_public_release?: boolean }
     history?: string[]
   }
@@ -199,6 +199,7 @@ export interface RunnerTargetSafeViewLite {
   draining: boolean
   capabilities: string[]
   runtime?: RunnerTargetRuntimeLite
+  service_identity?: SecretRefViewLite
   connection?: { endpoint: SecretRefViewLite; credential: SecretRefViewLite; known_hosts: SecretRefViewLite }
   health: 'unknown' | 'online' | 'offline'
   last_seen_at: string | null
@@ -212,7 +213,7 @@ export interface ProjectExecutionSettingsLite {
   revision: number
   execution: {
     runner_target_id: string
-    runner_profile_id: string
+    runner_profile_id: string | null
   }
 }
 

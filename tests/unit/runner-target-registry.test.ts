@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { KernelError, ResearchKernel, startKernelServer } from '@dsh-scholar/research-kernel'
+import { KernelError, ResearchKernel, runnerTargetTokenAccessAllowed, startKernelServer } from '@dsh-scholar/research-kernel'
+import { KernelApiError, ResearchClient } from '@dsh-scholar/research-client'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 import {
   RunnerTargetCreateInput,
   RunnerTargetDescriptor,
@@ -18,6 +20,7 @@ const remoteInput = {
   enabled: true,
   draining: false,
   capabilities: ['linux', 'amd64', 'docker'],
+  service_identity: { scheme: 'file' as const, name: 'runner/lab-a-heartbeat.token', scope: 'instance' as const },
   connection: {
     endpoint: { scheme: 'file' as const, name: 'runner/lab-a-endpoint.json', scope: 'instance' as const },
     credential: { scheme: 'vault' as const, name: 'runner/lab-a-key', version: '3', scope: 'instance' as const },
@@ -26,22 +29,37 @@ const remoteInput = {
 }
 
 describe('EXEC-ENV-02 configurable runner targets', () => {
+  it('accepts the target-token wire only from the direct loopback peer', () => {
+    expect(runnerTargetTokenAccessAllowed('127.0.0.1')).toBe(true)
+    expect(runnerTargetTokenAccessAllowed('::1')).toBe(true)
+    expect(runnerTargetTokenAccessAllowed('::ffff:127.0.0.1')).toBe(true)
+    expect(runnerTargetTokenAccessAllowed('10.0.0.7')).toBe(false)
+    expect(runnerTargetTokenAccessAllowed('::ffff:10.0.0.7')).toBe(false)
+    expect(runnerTargetTokenAccessAllowed(undefined)).toBe(false)
+  })
+
   it('models local process, local Docker and remote SSH explicitly', () => {
     expect(RunnerTargetCreateInput.parse({
       target_id: 'target_local_process_v1', display_name: 'Local process', kind: 'local-process',
       enabled: true, draining: false, capabilities: ['trusted-smoke-fixture'],
+      service_identity: { scheme: 'file', name: 'runner/local-process.token' },
     }).kind).toBe('local-process')
     expect(RunnerTargetCreateInput.parse({
       target_id: 'target_local_docker_v1', display_name: 'Local Docker', kind: 'local-docker',
       enabled: true, draining: false, capabilities: ['docker'],
+      service_identity: { scheme: 'file', name: 'runner/local-docker.token' },
     }).kind).toBe('local-docker')
     expect(RunnerTargetCreateInput.parse(remoteInput).kind).toBe('remote-ssh')
+    expect(() => RunnerTargetCreateInput.parse({
+      target_id: 'identity-missing', display_name: 'Identity missing', kind: 'local-docker',
+    })).toThrow()
   })
 
   it('models digest-pinned CPU/NVIDIA Docker runtime without arbitrary flags', () => {
     const digest = 'registry.example/research@sha256:' + 'a'.repeat(64)
     expect(RunnerTargetCreateInput.parse({
       target_id: 'docker-cpu', display_name: 'Docker CPU', kind: 'local-docker',
+      service_identity: { scheme: 'file', name: 'runner/docker-cpu.token' },
       runtime: { image_digest: digest, compute: { mode: 'cpu' } },
     }).runtime).toEqual({ image_digest: digest, compute: { mode: 'cpu' } })
     expect(RunnerTargetCreateInput.parse({
@@ -56,11 +74,13 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
       { image_digest: digest, compute: { mode: 'cpu' }, flags: ['--privileged'] },
     ]) {
       expect(() => RunnerTargetCreateInput.parse({
-        target_id: 'bad-docker', display_name: 'Bad Docker', kind: 'local-docker', runtime,
+      target_id: 'bad-docker', display_name: 'Bad Docker', kind: 'local-docker', runtime,
+        service_identity: { scheme: 'file', name: 'runner/bad-docker.token' },
       })).toThrow()
     }
     expect(() => RunnerTargetCreateInput.parse({
       target_id: 'bad-local', display_name: 'Bad local', kind: 'local-process',
+      service_identity: { scheme: 'file', name: 'runner/bad-local.token' },
       runtime: { image_digest: digest, compute: { mode: 'cpu' } },
     })).toThrow()
   })
@@ -95,7 +115,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
     writeFileSync(join(secretRoot, 'runner/endpoint.json'), '{"host":"lab.example","port":22,"user":"runner"}')
     writeFileSync(join(secretRoot, 'runner/key'), 'test-key')
     writeFileSync(join(secretRoot, 'runner/known_hosts'), 'lab.example ssh-ed25519 test')
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas'), secretRoot })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas'), secretRoot })
     try {
       expect(kernel.listRunnerTargets().map(target => target.target_id)).toEqual([
         'target_local_docker_v1',
@@ -144,7 +164,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
 
   it('CAS-configures the current project default target and preserves Job override precedence', () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-project-target-'))
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
     try {
       const project = kernel.createProject({
         name: 'target selection', workspace: '/w',
@@ -193,7 +213,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
 
   it('claims only jobs compatible with the runner target kind', () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-target-claim-'))
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
     try {
       const localProcess = kernel.createProject({
         name: 'process', workspace: '/process',
@@ -216,7 +236,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
 
   it('claims an exact target id and does not let stale candidates consume the claim limit', () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-target-exact-'))
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
     try {
       for (const targetId of ['docker-a', 'docker-b']) {
         kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
@@ -224,6 +244,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
           display_name: targetId,
           kind: 'local-docker',
           capabilities: ['docker'],
+          service_identity: { scheme: 'file', name: `runner/${targetId}.token` },
         }), 'operator-1')
       }
       const projectA = kernel.createProject({
@@ -257,7 +278,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
 
   it('fails closed when project target state or target/profile kind is invalid', () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-target-project-validation-'))
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
     const create = (execution: Record<string, unknown>) => kernel.createProject({
       name: 'invalid target', workspace: '/invalid',
       brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
@@ -277,7 +298,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
 
   it('exposes redacted CRUD over HTTP and restricts writes to PI/operator', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-target-http-'))
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
     const project = kernel.createProject({
       name: 'target administrators', workspace: '/w', creator_principal_id: 'pi',
       brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
@@ -286,7 +307,10 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
     const { server, url } = await startKernelServer({ kernel, port: 0 })
     try {
       expect((await fetch(`${url}/v1/runner-targets`)).status).toBe(200)
-      const body = { target_id: 'http-local', display_name: 'HTTP local', kind: 'local-process' }
+      const body = {
+        target_id: 'http-local', display_name: 'HTTP local', kind: 'local-process',
+        service_identity: { scheme: 'file', name: 'runner/http-local.token' },
+      }
       const denied = await fetch(`${url}/v1/runner-targets`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-principal-id': 'outsider', 'x-principal-role': 'operator' }, body: JSON.stringify(body),
       })
@@ -311,7 +335,7 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
 
   it('exposes a PI/operator-only project target configuration route', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-project-target-http-'))
-    const kernel = new ResearchKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
+    const kernel = new ConfiguredTestKernel({ dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas') })
     const project = kernel.createProject({
       name: 'HTTP selection', workspace: '/w',
       brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
@@ -342,29 +366,103 @@ describe('EXEC-ENV-02 configurable runner targets', () => {
     }
   })
 
-  it('accepts revision-fenced runner heartbeat only through the service identity', async () => {
+  it('binds revision-fenced heartbeats to the target-scoped service identity', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-target-heartbeat-'))
-    const kernel = new ResearchKernel({
-      dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas'), serviceToken: 'runner-service',
+    const secretRoot = join(root, 'secrets')
+    mkdirSync(join(secretRoot, 'runner'), { recursive: true })
+    const tokenA = 'target-a-identity-token-0000000001'
+    const tokenB = 'target-b-identity-token-0000000002'
+    writeFileSync(join(secretRoot, 'runner/a.token'), tokenA, { mode: 0o600 })
+    writeFileSync(join(secretRoot, 'runner/b.token'), tokenB, { mode: 0o600 })
+    const kernel = new ConfiguredTestKernel({
+      dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas'), secretRoot, serviceToken: 'runner-service',
     })
     kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
-      target_id: 'heartbeat-local', display_name: 'Heartbeat local', kind: 'local-docker', capabilities: ['docker'],
+      target_id: 'heartbeat-a', display_name: 'Heartbeat A', kind: 'local-docker', capabilities: ['docker'],
+      service_identity: { scheme: 'file', name: 'runner/a.token' },
+    }), 'operator')
+    kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
+      target_id: 'heartbeat-b', display_name: 'Heartbeat B', kind: 'local-docker', capabilities: ['docker'],
+      service_identity: { scheme: 'file', name: 'runner/b.token' },
     }), 'operator')
     const { server, url } = await startKernelServer({ kernel, port: 0 })
-    const heartbeat = (headers: Record<string, string>, expectedRevision = 1): Promise<Response> => fetch(
-      `${url}/v1/runner-targets/heartbeat-local/heartbeat`, {
+    const heartbeat = (targetId: string, headers: Record<string, string>, expectedRevision = 1): Promise<Response> => fetch(
+      `${url}/v1/runner-targets/${targetId}/heartbeat`, {
         method: 'POST', headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify({ expected_revision: expectedRevision, health: 'online' }),
       },
     )
     try {
-      expect((await heartbeat({})).status).toBe(403)
-      const observed = await heartbeat({ 'x-service-token': 'runner-service' })
+      expect((await heartbeat('heartbeat-a', {})).status).toBe(403)
+      expect((await heartbeat('heartbeat-a', { 'x-service-token': 'runner-service' })).status).toBe(403)
+      expect((await heartbeat('heartbeat-a', {
+        'x-service-token': 'runner-service', 'x-runner-target-token': 'wrong-target-token-00000000000000',
+      })).status).toBe(403)
+      // A valid credential for target A cannot observe target B, regardless
+      // of any self-reported principal/target-like header.
+      expect((await heartbeat('heartbeat-b', {
+        'x-service-token': 'runner-service', 'x-runner-target-token': tokenA,
+        'x-service-principal': 'heartbeat-b', 'x-runner-target-id': 'heartbeat-b',
+      })).status).toBe(403)
+      const observed = await heartbeat('heartbeat-a', {
+        'x-service-token': 'runner-service', 'x-runner-target-token': tokenA,
+      })
       expect(observed.status).toBe(200)
       expect(await observed.json()).toMatchObject({
-        target_id: 'heartbeat-local', revision: 1, health: 'online',
+        target_id: 'heartbeat-a', revision: 1, health: 'online',
       })
-      expect((await heartbeat({ 'x-service-token': 'runner-service' }, 2)).status).toBe(409)
+      expect((await heartbeat('heartbeat-a', {
+        'x-service-token': 'runner-service', 'x-runner-target-token': tokenA,
+      }, 2)).status).toBe(409)
+      const clientA = new ResearchClient({
+        endpoint: url, serviceToken: 'runner-service', runnerTargetToken: tokenA,
+      })
+      await expect(clientA.heartbeatRunnerTarget('heartbeat-a', {
+        expected_revision: 1, health: 'offline',
+      })).resolves.toMatchObject({ target_id: 'heartbeat-a', health: 'offline' })
+      await expect(clientA.heartbeatRunnerTarget('heartbeat-b', {
+        expected_revision: 1, health: 'online',
+      })).rejects.toMatchObject<Partial<KernelApiError>>({ status: 403, code: 'runner_target_identity_required' })
+      expect(JSON.stringify(kernel.runnerTargetView(kernel.getRunnerTarget('heartbeat-a')))).not.toContain(tokenA)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      kernel.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects service-identity files that are symlinks, outside secretRoot, or not 0600', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-target-identity-file-'))
+    const secretRoot = join(root, 'secrets')
+    mkdirSync(join(secretRoot, 'runner'), { recursive: true })
+    const token = 'target-file-identity-token-00000001'
+    const loose = join(secretRoot, 'runner/loose.token')
+    writeFileSync(loose, token, { mode: 0o600 })
+    chmodSync(loose, 0o644)
+    writeFileSync(join(root, 'outside.token'), token, { mode: 0o600 })
+    symlinkSync(join(root, 'outside.token'), join(secretRoot, 'runner/link.token'))
+    const kernel = new ConfiguredTestKernel({
+      dbPath: join(root, 'kernel.db'), casRoot: join(root, 'cas'), secretRoot, serviceToken: 'runner-service',
+    })
+    for (const [targetId, name] of [['loose', 'runner/loose.token'], ['link', 'runner/link.token']] as const) {
+      kernel.registerRunnerTarget(RunnerTargetCreateInput.parse({
+        target_id: targetId, display_name: targetId, kind: 'local-docker',
+        service_identity: { scheme: 'file', name },
+      }), 'operator')
+    }
+    const { server, url } = await startKernelServer({ kernel, port: 0 })
+    try {
+      for (const targetId of ['loose', 'link']) {
+        const response = await fetch(`${url}/v1/runner-targets/${targetId}/heartbeat`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json', 'x-service-token': 'runner-service', 'x-runner-target-token': token,
+          },
+          body: JSON.stringify({ expected_revision: 1, health: 'online' }),
+        })
+        expect(response.status).toBe(403)
+        expect((await response.json()) as unknown).toMatchObject({ error: { code: 'runner_target_identity_required' } })
+      }
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
       kernel.close()

@@ -412,7 +412,7 @@ Run Terminal `/jobs/{id}/terminal` 保持只读且永远不接受 input。PTY �
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/v1/runner-targets`、`/bff/research/runner-targets` | 可见 target kind/health/capability/config hash 与 SecretRef availability，不返回 endpoint/credential 值 |
-| POST `/v1/runner-targets`；PATCH `/v1/runner-targets/{id}` | PI/Operator 登记、drain、disable；BFF 与 Kernel 都从权威项目成员表实时求得 PI/Operator，忽略调用方自报 role，不能把任意登录 principal 升格；生产 Kernel 同时要求 service token；revision CAS；`remote-ssh` 必须提供 endpoint/credential/known_hosts 三个 SecretRef |
+| POST `/v1/runner-targets`；PATCH `/v1/runner-targets/{id}` | PI/Operator 登记、drain、disable；BFF 与 Kernel 都从权威项目成员表实时求得 PI/Operator，忽略调用方自报 role，不能把任意登录 principal 升格；生产 Kernel 同时要求 service token；revision CAS；所有新 target 必须提供独立 `service_identity` SecretRef，`remote-ssh` 另须提供 endpoint/credential/known_hosts 三个 SecretRef |
 | PATCH | `/v2/projects/{id}/execution` | PI/Operator 以 `{expected_revision, runner_target_id}` CAS 保存项目默认 Target；服务端按 Target kind 同步兼容的内置 RunnerProfile，未知/禁用/排空目标拒绝 |
 | GET/POST/PATCH | `/bff/research/runner-profiles` | profile、资源/网络/image policy；revision CAS |
 | GET | `/bff/research/config/schema` | canonical schema/UI metadata |
@@ -463,11 +463,11 @@ Standalone v1 adapter 兼容面（当前 Scholar UI 使用）包括 `/v1/project
 
 NextAction 由 Kernel 从 project status、pending gates、jobs、budget、contracts、ideas、evidence、claims 确定性生成（`nextActionProjection` 纯函数，无 DB、无副作用、不抛错）。状态、reason、required 缺口、revision、capability 和 target route 都由 Kernel 产生；UI 只负责翻译 label、解析白名单交互与路由，不能直接执行未声明 mutation。未知/未来状态退化 `code='unknown'` 的只读动作（state=blocked、required=['state_mapping']），UI 不得为 unknown 构造 mutation。`required` 是前置条件，`required_by` 才是执行者。Intake/Grill 阶段动作在 ONBOARD-01 落地后由同一投影扩展。
 
-Contract 批准后的 baseline handoff 使用专用 `POST /v1/projects/{id}/baseline-runs`，不允许浏览器用“先 POST Job、再 POST transition”的两步写法。请求严格为 `{expected_revision,idempotency_key,contract_id,code_snapshot_id,command:string[],runner_target_id?,image_digest?,output_contract?}`；`command` 至少一个非空 argv，CodeSnapshot 必须属于 path project，Contract 必须已由 Human Gate 冻结且属于同项目。Kernel 以项目默认 Runner/Profile/target 为基础解析环境；显式 override 仍走同一 registered target 与 digest pin 校验。成功 `201` 返回 `{project,job}`，Job 为 queued 且 Project 为 `BASELINE_REPRO`；任何失败零半写。相同 project + idempotency key + 相同请求可重放，异请求必须 409。
+Contract 批准后的 baseline handoff 使用专用 `POST /v1/projects/{id}/baseline-runs`，普通 `POST .../jobs` 不接受 `kind=baseline`，也不允许浏览器用“先 POST Job、再 POST transition”的两步写法。请求严格为 `{expected_revision,idempotency_key,contract_id,code_snapshot_id,command:string[],runner_target_id?,image_digest?,output_contract?}`；`command` 至少一个非空 argv，CodeSnapshot 必须属于 path project，Contract 必须已由 Human Gate 冻结且属于同项目。Kernel 以项目默认 Runner/Profile/target 为基础解析环境；显式 override 仍走同一 registered target 与 digest pin 校验。首次调用从 `CONTRACT_APPROVED` 原子创建 queued Job 并推进到 `BASELINE_REPRO`；matched-seed 追加运行仍调用同一端点，只能绑定首个 baseline 的同一 approved Contract，并保持阶段/revision 不变。成功 `201` 返回 `{project,job}`；任何失败零半写。相同 project + idempotency key + 相同请求可重放，异请求必须 409。
 
 `ExperimentContract.baseline_run` 只保存科学约束/描述，绝不是 shell argv。它无论是否非空都不能满足 `baseline_command`；调用方不得从该字段猜命令。只有上述请求中的非空 `command:string[]` 通过 schema 与 Kernel 校验后，才建立 executable baseline。
 
-Remote Runner 通过 service-token 保护的 `POST /v1/runner-targets/{target_id}/heartbeat {expected_revision,health:'online'|'offline'}` 写入观测状态与 `last_seen_at`。配置 revision 不一致返回 409；配置修改把状态重置为 unknown。readiness 的远端 heartbeat TTL 固定 60 秒，超时、unknown/offline、SecretRef unavailable 或 capability mismatch 都不得投影 ready，也不得接受新远端 Job。
+Remote Runner 通过双重身份保护的 `POST /v1/runner-targets/{target_id}/heartbeat {expected_revision,health:'online'|'offline'}` 写入观测状态与 `last_seen_at`：共享 `x-service-token` 仅允许进入 internal route；另一个只发送到本端点的 `x-runner-target-token` 必须与 URL target 在 Registry 中绑定的 `service_identity` SecretRef 恒时匹配。一个 target 的 token 不能更新另一个 target，自报 principal/target header 不参与身份判定。该 target-token wire 只接受 Node `req.socket.remoteAddress` 为 loopback 的直接连接，`X-Forwarded-For` 等调用方可控转发头不能放宽限制；非 loopback/生产必须由受信 mTLS 终止器把证书 peer identity 映射到同一 target allowlist，并经 loopback 转发，当前 plaintext Kernel listener 对非 loopback 直接请求返回 403 `loopback_only`。配置 revision 不一致返回 409；配置修改把状态重置为 unknown。readiness 的远端 heartbeat TTL 固定 60 秒，超时、unknown/offline、service identity/连接 SecretRef unavailable 或 capability mismatch 都不得投影 ready，也不得接受新远端 Job。
 
 `GET /v1/projects/{id}/code-snapshots` 只列出该项目的不可变快照摘要，供运行准备任务选择；不得返回宿主绝对路径或跨项目记录。`POST .../code-snapshots` 仍是从批准 Workspace 冻结实际内容的唯一创建路径。
 

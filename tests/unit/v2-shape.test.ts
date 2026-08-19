@@ -12,12 +12,13 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
 import { CorpusSnapshot, Passage, IdeaCard, BudgetRecord, ArtifactKind } from '@dsh-scholar/research-schemas'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-v2-shape-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function makeBrief(overrides: Record<string, unknown> = {}) {
@@ -347,6 +348,14 @@ describe('HTTP surface (server routes stay in sync)', () => {
       })
       const bareJob = await bare.json() as { created_by_principal_id: string | null }
       expect(bareJob.created_by_principal_id).toBeNull()
+      // Baselines are never ordinary jobs: every seed uses the dedicated
+      // contract/snapshot/environment-bound endpoint.
+      const baseline = await fetch(`${base}/v1/projects/${project.project_id}/jobs`, {
+        method: 'POST', headers, body: JSON.stringify({ idempotency_key: 'http-baseline', kind: 'baseline' }),
+      })
+      expect(baseline.status).toBe(422)
+      expect((await baseline.json() as { error: { code: string } }).error.code).toBe('baseline_handoff_required')
+      expect(kernel.listJobs(project.project_id)).toHaveLength(2)
       // Budget route: storage_bytes accepted and accumulated.
       const budgetRes = await fetch(`${base}/v1/projects/${project.project_id}/budget`, {
         method: 'POST', headers, body: JSON.stringify({ storage_bytes: 2048 }),

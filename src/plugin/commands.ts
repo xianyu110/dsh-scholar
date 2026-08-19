@@ -140,9 +140,17 @@ export function registerResearchCommands(ctx: Context, commandCtx: CommandContex
                 domain: String(brief?.domain ?? 'machine-learning'),
               },
               mode: requestedMode,
-              ...(brief?.fixture_id !== undefined && brief.fixture_id !== ''
-                ? { execution: { fixture_id: String(brief.fixture_id) } }
-                : {}),
+              execution: {
+                runner_profile_id: brief?.runner_profile_id !== undefined && brief.runner_profile_id !== ''
+                  ? String(brief.runner_profile_id)
+                  : null,
+                ...(brief?.runner_target_id !== undefined && brief.runner_target_id !== ''
+                  ? { runner_target_id: String(brief.runner_target_id) }
+                  : {}),
+                ...(brief?.fixture_id !== undefined && brief.fixture_id !== ''
+                  ? { fixture_id: String(brief.fixture_id) }
+                  : {}),
+              },
               session_id: sessionId,
               creator_principal_id: commandCtx.operatorPrincipal,
             })

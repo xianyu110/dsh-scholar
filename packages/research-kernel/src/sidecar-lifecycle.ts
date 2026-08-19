@@ -76,6 +76,43 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function readTokenFile(file: string, label: string): string {
+  const stat = lstatSync(file)
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`${label} path must be a regular file: ${file}`)
+  }
+  const token = readFileSync(file, 'utf8').trim()
+  chmodSync(file, 0o600)
+  if (token === '') throw new Error(`${label} file must not be empty: ${file}`)
+  return token
+}
+
+/**
+ * Create or read one authoritative 0600 token file. `wx` keeps creation
+ * atomic; after losing the race we re-run the regular-file/symlink checks
+ * before trusting the winner.
+ */
+function ensureTokenFile(dataDir: string, fileName: string, label: string, seed?: string): string {
+  const file = join(dataDir, fileName)
+  try {
+    return readTokenFile(file, label)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+
+  mkdirSync(dataDir, { recursive: true })
+  const token = seed ?? randomBytes(16).toString('hex')
+  if (token.trim() === '') throw new Error(`${label} seed must not be empty`)
+  try {
+    writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
+    chmodSync(file, 0o600)
+    return token
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    return readTokenFile(file, label)
+  }
+}
+
 export class KernelSidecarLifecycle {
   private child: ChildProcess | null = null
   /** pid of the kernel this sidecar spawned (survives child exit, for file ownership). */
@@ -116,46 +153,10 @@ export class KernelSidecarLifecycle {
    * option seeds the file on first creation (the file stays authoritative).
    */
   get kernelToken(): string {
-    return this.ensureKernelToken()
-  }
-
-  private ensureKernelToken(): string {
-    if (this.kernelTokenValue !== undefined) return this.kernelTokenValue
-    const file = join(this.dataDir, KERNEL_TOKEN_FILE)
-    let existing = false
-    try {
-      const stat = lstatSync(file)
-      if (stat.isSymbolicLink() || !stat.isFile()) {
-        throw new Error(`kernel token path must be a regular file: ${file}`)
-      }
-      existing = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (this.kernelTokenValue === undefined) {
+      this.kernelTokenValue = ensureTokenFile(this.dataDir, KERNEL_TOKEN_FILE, 'kernel token', this.token)
     }
-    let token = ''
-    if (existing) {
-      token = readFileSync(file, 'utf8').trim()
-      chmodSync(file, 0o600)
-    }
-    if (token === '') {
-      mkdirSync(this.dataDir, { recursive: true })
-      token = this.token ?? randomBytes(16).toString('hex')
-      try {
-        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
-      } catch {
-        // Lost a race with a concurrent sidecar on the same dataDir — the
-        // existing file is authoritative (both spawn the same kernel token).
-        token = readFileSync(file, 'utf8').trim()
-      }
-      chmodSync(file, 0o600)
-    }
-    if (token === '') {
-      // Fail-closed: an empty token would lock the whole public API behind
-      // an unusable credential.
-      throw new Error(`kernel token file must not be empty: ${file}`)
-    }
-    this.kernelTokenValue = token
-    return token
+    return this.kernelTokenValue
   }
 
   /**
@@ -166,75 +167,18 @@ export class KernelSidecarLifecycle {
    * token is only ever passed via env, never argv.
    */
   get serviceToken(): string {
-    return this.ensureServiceToken()
-  }
-
-  private ensureServiceToken(): string {
-    if (this.serviceTokenValue !== undefined) return this.serviceTokenValue
-    const file = join(this.dataDir, SERVICE_TOKEN_FILE)
-    let existing = false
-    try {
-      const stat = lstatSync(file)
-      if (stat.isSymbolicLink() || !stat.isFile()) {
-        throw new Error(`service token path must be a regular file: ${file}`)
-      }
-      existing = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (this.serviceTokenValue === undefined) {
+      this.serviceTokenValue = ensureTokenFile(this.dataDir, SERVICE_TOKEN_FILE, 'service token')
     }
-    let token = ''
-    if (existing) {
-      token = readFileSync(file, 'utf8').trim()
-      chmodSync(file, 0o600)
-    }
-    if (token === '') {
-      mkdirSync(this.dataDir, { recursive: true })
-      token = randomBytes(16).toString('hex')
-      try {
-        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
-      } catch {
-        // Lost a race with a concurrent sidecar on the same dataDir — the
-        // existing file is authoritative (both spawn the same kernel token).
-        token = readFileSync(file, 'utf8').trim()
-      }
-      chmodSync(file, 0o600)
-    }
-    if (token === '') {
-      // Fail-closed: an empty token would lock every internal route behind
-      // an unusable credential.
-      throw new Error(`service token file must not be empty: ${file}`)
-    }
-    this.serviceTokenValue = token
-    return token
+    return this.serviceTokenValue
   }
 
   /** Route-specific credential that is never passed to Runner processes. */
   get dshPluginToken(): string {
-    if (this.dshPluginTokenValue !== undefined) return this.dshPluginTokenValue
-    const file = join(this.dataDir, DSH_PLUGIN_TOKEN_FILE)
-    let existing = false
-    try {
-      const stat = lstatSync(file)
-      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`DSH plugin token path must be a regular file: ${file}`)
-      existing = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (this.dshPluginTokenValue === undefined) {
+      this.dshPluginTokenValue = ensureTokenFile(this.dataDir, DSH_PLUGIN_TOKEN_FILE, 'DSH plugin token')
     }
-    let token = existing ? readFileSync(file, 'utf8').trim() : ''
-    if (existing) chmodSync(file, 0o600)
-    if (token === '') {
-      mkdirSync(this.dataDir, { recursive: true })
-      token = randomBytes(16).toString('hex')
-      try {
-        writeFileSync(file, token, { mode: 0o600, flag: 'wx' })
-      } catch {
-        token = readFileSync(file, 'utf8').trim()
-      }
-      chmodSync(file, 0o600)
-    }
-    if (token === '') throw new Error(`DSH plugin token file must not be empty: ${file}`)
-    this.dshPluginTokenValue = token
-    return token
+    return this.dshPluginTokenValue
   }
 
   /** Stable local Human Principal shared with the standalone BFF. */
@@ -445,6 +389,9 @@ export class KernelSidecarLifecycle {
     const bin = this.resolveKernelBin()
     const dbPath = join(this.dataDir, DB_FILE_NAME)
     const casRoot = join(this.dataDir, 'cas')
+    const secretRoot = join(this.dataDir, 'secrets')
+    mkdirSync(secretRoot, { recursive: true, mode: 0o700 })
+    chmodSync(secretRoot, 0o700)
     const args = [
       bin, '--db', dbPath, '--cas', casRoot, '--host', this.host, '--port', String(this.port),
       '--endpoint-file', this.endpointFilePath(),
@@ -461,6 +408,8 @@ export class KernelSidecarLifecycle {
     // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity
     // travels via env only (0600 file, never argv / process listings).
     childEnv.DSH_SCHOLAR_SERVICE_TOKEN = this.serviceToken
+    delete childEnv.DSH_SCHOLAR_SECRET_ROOT
+    childEnv.DSH_SCHOLAR_SECRET_ROOT = secretRoot
     delete childEnv.DSH_SCHOLAR_DSH_PLUGIN_TOKEN
     childEnv.DSH_SCHOLAR_DSH_PLUGIN_TOKEN = this.dshPluginToken
     const child = spawn(process.execPath, args, {

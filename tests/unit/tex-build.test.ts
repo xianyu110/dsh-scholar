@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { ResearchKernel, startKernelServer } from '@dsh-scholar/research-kernel'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 import {
   materializeTexWorkspace, parseLatexDiagnostics, buildLatexRunScript,
   type TexSnapshotManifest,
@@ -18,7 +19,7 @@ import {
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-texbuild-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function fenceArgs(kernel: ResearchKernel, jobId: string): { lease_generation: number | null; lease_token: string | null } {

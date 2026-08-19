@@ -39,6 +39,7 @@ interface RunnerTargetRow {
   draining: number
   capabilities_json: string
   connection_json: string | null
+  service_identity_json?: string | null
   runtime_json?: string | null
   health: RunnerTarget['health']
   last_seen_at: string | null
@@ -59,6 +60,9 @@ function fromRow(row: RunnerTargetRow): RunnerTarget {
     draining: row.draining === 1,
     capabilities: JSON.parse(row.capabilities_json) as unknown,
     connection: row.connection_json === null ? undefined : JSON.parse(row.connection_json) as unknown,
+    service_identity: row.service_identity_json === undefined || row.service_identity_json === null
+      ? undefined
+      : JSON.parse(row.service_identity_json) as unknown,
     runtime: row.runtime_json === undefined || row.runtime_json === null ? undefined : JSON.parse(row.runtime_json) as unknown,
     health: row.health,
     last_seen_at: row.last_seen_at,
@@ -74,6 +78,10 @@ function validateRefs(target: RunnerTarget): void {
   validateSecretRefInput(target.connection.endpoint)
   validateSecretRefInput(target.connection.credential)
   validateSecretRefInput(target.connection.known_hosts)
+}
+
+function validateIdentityRef(target: RunnerTarget): void {
+  if (target.service_identity !== undefined) validateSecretRefInput(target.service_identity)
 }
 
 export function seedBuiltinRunnerTargets(db: DatabaseSync): void {
@@ -95,6 +103,8 @@ export class RunnerTargetRegistry {
   constructor(
     private readonly db: DatabaseSync,
     private readonly secretAvailable: (ref: SecretRef) => boolean,
+    private readonly identityAvailable: (ref: SecretRef) => boolean,
+    private readonly identityMatches: (ref: SecretRef, provided: string) => boolean,
   ) {}
 
   list(): RunnerTarget[] {
@@ -109,7 +119,7 @@ export class RunnerTargetRegistry {
   }
 
   view(target: RunnerTarget): ReturnType<typeof runnerTargetSafeView> {
-    return runnerTargetSafeView(target, this.secretAvailable)
+    return runnerTargetSafeView(target, this.secretAvailable, this.identityAvailable)
   }
 
   create(input: RunnerTargetCreateInput, createdBy: string): RunnerTarget {
@@ -119,13 +129,15 @@ export class RunnerTargetRegistry {
     const now = nowIso()
     const target = RunnerTargetDescriptor.parse({ ...input, health: 'unknown', last_seen_at: null, revision: 1, created_by: createdBy, created_at: now, updated_at: now })
     validateRefs(target)
+    validateIdentityRef(target)
     this.db.prepare(
       `INSERT INTO runner_targets
-        (target_id,display_name,kind,enabled,draining,capabilities_json,connection_json,runtime_json,health,last_seen_at,revision,created_by,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (target_id,display_name,kind,enabled,draining,capabilities_json,connection_json,service_identity_json,runtime_json,health,last_seen_at,revision,created_by,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       target.target_id, target.display_name, target.kind, target.enabled ? 1 : 0, target.draining ? 1 : 0,
       JSON.stringify(target.capabilities), target.connection === undefined ? null : JSON.stringify(target.connection),
+      JSON.stringify(target.service_identity),
       target.runtime === undefined ? null : JSON.stringify(target.runtime),
       target.health, target.last_seen_at, target.revision, target.created_by, target.created_at, target.updated_at,
     )
@@ -146,6 +158,7 @@ export class RunnerTargetRegistry {
       draining: input.draining ?? current.draining,
       capabilities: input.capabilities ?? current.capabilities,
       connection: input.connection === null ? undefined : (input.connection ?? current.connection),
+      service_identity: input.service_identity === null ? undefined : (input.service_identity ?? current.service_identity),
       runtime: input.runtime === null ? undefined : (input.runtime ?? current.runtime),
       revision: current.revision + 1,
       updated_at: nowIso(),
@@ -154,12 +167,14 @@ export class RunnerTargetRegistry {
       last_seen_at: null,
     })
     validateRefs(target)
+    validateIdentityRef(target)
     const result = this.db.prepare(
-      `UPDATE runner_targets SET display_name=?,kind=?,enabled=?,draining=?,capabilities_json=?,connection_json=?,runtime_json=?,
+      `UPDATE runner_targets SET display_name=?,kind=?,enabled=?,draining=?,capabilities_json=?,connection_json=?,service_identity_json=?,runtime_json=?,
        health=?,last_seen_at=?,revision=?,updated_at=? WHERE target_id=? AND revision=?`,
     ).run(
       target.display_name, target.kind, target.enabled ? 1 : 0, target.draining ? 1 : 0,
       JSON.stringify(target.capabilities), target.connection === undefined ? null : JSON.stringify(target.connection),
+      target.service_identity === undefined ? null : JSON.stringify(target.service_identity),
       target.runtime === undefined ? null : JSON.stringify(target.runtime),
       target.health, target.last_seen_at, target.revision, target.updated_at, targetId, current.revision,
     )
@@ -168,6 +183,14 @@ export class RunnerTargetRegistry {
         `runner target ${targetId} changed during revision ${current.revision} update`)
     }
     return target
+  }
+
+  /** A heartbeat may mutate only the target whose server-side identity ref
+   * matches the presented target token. Target ids and principals supplied by
+   * the caller are never treated as proof. */
+  identityAuthorized(targetId: string, provided: string): boolean {
+    const identity = this.get(targetId).service_identity
+    return identity !== undefined && this.identityMatches(identity, provided)
   }
 
   /** Record an authenticated runner observation without changing config revision. */

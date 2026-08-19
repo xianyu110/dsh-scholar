@@ -39,6 +39,11 @@ export const RunnerTargetCreateInput = z.object({
   enabled: z.boolean().default(true),
   draining: z.boolean().default(false),
   capabilities: z.array(z.string().min(1).max(120)).max(128).default([]),
+  /** Target-scoped service identity. The referenced secret is resolved only
+   * by the Kernel and proves that a heartbeat caller is allowed to observe
+   * this exact target; it is independent from the shared internal-route
+   * service token. */
+  service_identity: SecretRef,
   runtime: DockerRuntime.optional(),
   connection: RunnerTargetConnection.optional(),
 }).strict().superRefine((value, ctx) => {
@@ -53,6 +58,7 @@ export const RunnerTargetUpdateInput = z.object({
   enabled: z.boolean().optional(),
   draining: z.boolean().optional(),
   capabilities: z.array(z.string().min(1).max(120)).max(128).optional(),
+  service_identity: SecretRef.nullable().optional(),
   runtime: DockerRuntime.nullable().optional(),
   connection: RunnerTargetConnection.nullable().optional(),
 }).strict()
@@ -65,6 +71,9 @@ export const RunnerTargetDescriptor = z.object({
   enabled: z.boolean(),
   draining: z.boolean(),
   capabilities: z.array(z.string()),
+  /** Optional only for rows created before target-bound identities existed.
+   * Such targets are deliberately unable to heartbeat until configured. */
+  service_identity: SecretRef.optional(),
   runtime: DockerRuntime.optional(),
   connection: RunnerTargetConnection.optional(),
   health: z.enum(['unknown', 'online', 'offline']).default('unknown'),
@@ -95,14 +104,16 @@ export function runnerTargetConfigHash(target: RunnerTargetDescriptor): string {
     enabled: target.enabled,
     draining: target.draining,
     capabilities: target.capabilities,
+    service_identity: target.service_identity,
     connection: target.connection,
     ...(target.runtime === undefined ? {} : { runtime: target.runtime }),
     revision: target.revision,
   })).digest('hex')}`
 }
 
-export type RunnerTargetSafeView = Omit<RunnerTargetDescriptor, 'connection'> & {
+export type RunnerTargetSafeView = Omit<RunnerTargetDescriptor, 'connection' | 'service_identity'> & {
   config_hash: string
+  service_identity?: z.infer<typeof SecretRef> & { available: boolean }
   connection?: {
     endpoint: z.infer<typeof SecretRef> & { available: boolean }
     credential: z.infer<typeof SecretRef> & { available: boolean }
@@ -113,24 +124,31 @@ export type RunnerTargetSafeView = Omit<RunnerTargetDescriptor, 'connection'> & 
 export function runnerTargetSafeView(
   target: RunnerTargetDescriptor,
   available: (ref: z.infer<typeof SecretRef>) => boolean,
+  identityAvailable: (ref: z.infer<typeof SecretRef>) => boolean = available,
 ): RunnerTargetSafeView {
   const connection = target.connection === undefined ? undefined : {
     endpoint: { ...target.connection.endpoint, available: available(target.connection.endpoint) },
     credential: { ...target.connection.credential, available: available(target.connection.credential) },
     known_hosts: { ...target.connection.known_hosts, available: available(target.connection.known_hosts) },
   }
-  return { ...target, connection, config_hash: runnerTargetConfigHash(target) }
+  const serviceIdentity = target.service_identity === undefined ? undefined : {
+    ...target.service_identity,
+    available: identityAvailable(target.service_identity),
+  }
+  return { ...target, service_identity: serviceIdentity, connection, config_hash: runnerTargetConfigHash(target) }
 }
 
 export const BUILTIN_RUNNER_TARGETS: readonly RunnerTargetDescriptor[] = [
   RunnerTargetDescriptor.parse({
     target_id: 'target_local_process_v1', display_name: 'Local process (trusted dev/smoke only)', kind: 'local-process',
-    enabled: true, draining: false, capabilities: ['trusted-smoke-fixture-only'], revision: 1,
+    enabled: true, draining: false, capabilities: ['trusted-smoke-fixture-only'],
+    service_identity: { scheme: 'file', name: 'runner-targets/target_local_process_v1.token', scope: 'instance' }, revision: 1,
     created_by: 'builtin', created_at: '1970-01-01T00:00:00.000Z', updated_at: '1970-01-01T00:00:00.000Z',
   }),
   RunnerTargetDescriptor.parse({
     target_id: 'target_local_docker_v1', display_name: 'Local Docker', kind: 'local-docker',
-    enabled: true, draining: false, capabilities: ['linux', 'docker', 'cpu'], revision: 1,
+    enabled: true, draining: false, capabilities: ['linux', 'docker', 'cpu'],
+    service_identity: { scheme: 'file', name: 'runner-targets/target_local_docker_v1.token', scope: 'instance' }, revision: 1,
     created_by: 'builtin', created_at: '1970-01-01T00:00:00.000Z', updated_at: '1970-01-01T00:00:00.000Z',
   }),
 ]

@@ -106,8 +106,13 @@ export type BudgetConstraints = z.infer<typeof BudgetConstraints>
 
 /** Execution profile of a project (design §6.2). */
 export const ExecutionConfig = z.object({
-  /** Registered opaque RunnerProfile id; old enum aliases are rejected. */
-  runner_profile_id: z.string().min(1).default('profile_local_docker_cpu_v1'),
+  /**
+   * Registered opaque RunnerProfile id. `null` is the explicit unconfigured
+   * state used while a name-only DRAFT is still collecting its Brief; it is
+   * never resolved to a local runner implicitly and every execution path
+   * rejects it until Settings records a real profile.
+   */
+  runner_profile_id: z.string().min(1).nullable(),
   /** Opaque configurable RunnerTarget id; endpoint/credentials never appear here. */
   runner_target_id: z.string().min(1).default('target_local_docker_v1'),
   network_policy: z.enum(['allowlist', 'none']).default('allowlist'),
@@ -161,7 +166,7 @@ export const ResearchProject = z.object({
   brief_status: z.enum(['collecting', 'confirmed']).optional(),
   brief: ResearchBrief,
   constraints: BudgetConstraints.default({}),
-  execution: ExecutionConfig.default({}),
+  execution: ExecutionConfig,
   integrity: IntegrityConfig.default({}),
   session_id: z.string().nullable().default(null),
   dsh_workspace_id: z.string().nullable().default(null),

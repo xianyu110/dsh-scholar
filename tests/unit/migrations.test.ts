@@ -51,14 +51,15 @@ describe('explicit migrations', () => {
 
   it('bumps a fresh database to SCHEMA_VERSION with all steps recorded', () => {
     const db = openDatabase(':memory:')
-    expect(SCHEMA_VERSION).toBe(22)
+    expect(SCHEMA_VERSION).toBe(23)
     const meta = Object.fromEntries((db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>).map(r => [r.key, r.value]))
-    expect(meta.schema_version).toBe('22')
+    expect(meta.schema_version).toBe('23')
     expect(meta.database_id).toBeTruthy()
     expect(meta.created_at).toBeTruthy()
     const applied = db.prepare('SELECT id, checksum, report_json FROM schema_migrations ORDER BY id').all() as Array<{ id: string; checksum: string; report_json: string }>
-    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash', '0016_v2_shape_alignment', '0017_v1_legacy_marks', '0018_workspace_recovery_quarantine', '0019_project_deletion_tombstone', '0020_project_brief_status', '0021_provider_chunked_upload', '0022_reproduction_contracts', '0023_runner_target_registry', '0024_topology_cancelled_state', '0025_runner_target_runtime'])
+    expect(applied.map(r => r.id)).toEqual(['0001_schema_v2_initial', '0002_import_legacy_v1', '0003_terminal_tex_i18n_capabilities', '0004_artifact_media_type', '0005_code_snapshots', '0006_project_members', '0007_project_idempotency_keys', '0008_outbox_envelope', '0009_runs_snapshot_nullable', '0010_preview_builds', '0011_pty_workspace', '0012_intake', '0013_trajectory_topology', '0014_lease_token_hash', '0016_v2_shape_alignment', '0017_v1_legacy_marks', '0018_workspace_recovery_quarantine', '0019_project_deletion_tombstone', '0020_project_brief_status', '0021_provider_chunked_upload', '0022_reproduction_contracts', '0023_runner_target_registry', '0024_topology_cancelled_state', '0025_runner_target_runtime', '0026_runner_target_service_identity'])
     expect(tableInfo(db, 'runner_targets').map(column => column.name)).toContain('runtime_json')
+    expect(tableInfo(db, 'runner_targets').map(column => column.name)).toContain('service_identity_json')
     for (const row of applied) expect(row.checksum).toMatch(/^[0-9a-f]{64}$/)
     // 0002 on a fresh DB: nothing to import (row counters still reported).
     expect(JSON.parse(applied[1]!.report_json)).toEqual({ rows: { manuscripts_converted: 0 } })
@@ -119,7 +120,7 @@ describe('explicit migrations', () => {
     const after = (db2.prepare('SELECT id FROM schema_migrations ORDER BY id').all() as Array<{ id: string }>).map(r => r.id)
     expect(after).toEqual(before)
     const version = (db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value
-    expect(version).toBe('22')
+    expect(version).toBe('23')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -177,7 +178,26 @@ describe('explicit migrations', () => {
       .toEqual([{ runtime_json: null }, { runtime_json: null }])
     expect(db.prepare(`SELECT target_id, kind, revision, capabilities_json, connection_json
       FROM runner_targets ORDER BY target_id`).all()).toEqual(before)
-    expect((db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('22')
+    expect((db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('23')
+    db.close()
+  })
+
+  it('0026 adds target-scoped service identities and configures only built-in targets', () => {
+    const db = openDatabase(':memory:')
+    db.exec('ALTER TABLE runner_targets DROP COLUMN service_identity_json')
+    db.prepare("DELETE FROM schema_migrations WHERE id = '0026_runner_target_service_identity'").run()
+    db.prepare("UPDATE meta SET value = '22' WHERE key = 'schema_version'").run()
+
+    runMigrations(db)
+    const identities = db.prepare(`SELECT target_id, service_identity_json FROM runner_targets ORDER BY target_id`).all() as Array<{
+      target_id: string
+      service_identity_json: string | null
+    }>
+    expect(identities.map(row => ({ target_id: row.target_id, identity: JSON.parse(row.service_identity_json ?? 'null') }))).toEqual([
+      { target_id: 'target_local_docker_v1', identity: { scheme: 'file', name: 'runner-targets/target_local_docker_v1.token', scope: 'instance' } },
+      { target_id: 'target_local_process_v1', identity: { scheme: 'file', name: 'runner-targets/target_local_process_v1.token', scope: 'instance' } },
+    ])
+    expect((db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('23')
     db.close()
   })
 
@@ -220,7 +240,7 @@ describe('explicit migrations', () => {
     const path = tmpDbPath()
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('22')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('23')
     // Projects preserved.
     const projects = db.prepare('SELECT project_id, name FROM projects ORDER BY project_id').all() as Array<{ project_id: string; name: string }>
     expect(projects).toEqual([{ project_id: 'p_legacy1', name: 'Legacy Study' }, { project_id: 'p_legacy2', name: 'Legacy Study B' }])
@@ -269,8 +289,8 @@ describe('explicit migrations', () => {
     // Re-open: still idempotent and consistent.
     db.close()
     const db2 = openDatabase(path)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(24)
-    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('22')
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(25)
+    expect((db2.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('23')
     db2.close()
     rmSync(path, { recursive: false, force: true })
   })
@@ -295,7 +315,7 @@ describe('explicit migrations', () => {
     db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run()
     runMigrations(db)
     // Version bumped; outbox columns re-added by the new migration.
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('22')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('23')
     const cols = tableInfo(db, 'events').map(c => c.name)
     for (const c of outboxCols) expect(cols).toContain(c)
     // Existing rows get default envelope values + a stable backfilled seq.
@@ -424,7 +444,7 @@ describe('explicit migrations', () => {
     const casDir = mkdtempSync(join(tmpdir(), 'dsh-mig-cas-'))
     copyFileSync(FIXTURE, path)
     const db = openDatabase(path, undefined, casDir)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('22')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('23')
     // STORE-08 rule: the canonical body binds the up source AND the helpers
     // it executes — editing either changes the recorded checksum.
     const m17 = MIGRATIONS.find(x => x.id === '0017_v1_legacy_marks')
@@ -470,7 +490,7 @@ describe('explicit migrations', () => {
     // Re-open: idempotent — same marks, no duplicate artifacts, version stable.
     db.close()
     const db2 = openDatabase(path, undefined, casDir)
-    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(24)
+    expect((db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n).toBe(25)
     const echo2 = db2.prepare('SELECT synthetic_fixture, signature_status, legacy_log_artifact FROM jobs WHERE job_id = ?').get('job_echo1') as { synthetic_fixture: number; signature_status: string | null; legacy_log_artifact: string | null }
     expect(echo2.synthetic_fixture).toBe(1)
     expect(echo2.signature_status).toBeNull()
@@ -560,7 +580,7 @@ describe('explicit migrations', () => {
     db.exec("DELETE FROM schema_migrations WHERE id = '0018_workspace_recovery_quarantine'")
     db.prepare("UPDATE meta SET value = '15' WHERE key = 'schema_version'").run()
     runMigrations(db)
-    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('22')
+    expect((db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }).value).toBe('23')
     const q = db.prepare('SELECT quarantine FROM workspaces WHERE workspace_id = ?').get('ws_q1') as { quarantine: string | null }
     expect(q.quarantine).toContain('a.txt')
     // The report row counts the quarantined marker (idempotent).

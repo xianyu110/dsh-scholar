@@ -88,14 +88,26 @@ ok "runner started (docker mode)"
 
 say "project + contract"
 BRIEF='{"problem":"release-bundle evaluation","scope":"smoke","questions":[],"primary_metrics":["m1"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"machine-learning"}'
-PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"release-bundle-eval\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
+PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"release-bundle-eval\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 [[ "$PROJ" == rsp_* ]] && ok "project $PROJ" || bad "project id '$PROJ'"
+# Follow the real gate-controlled lifecycle instead of freezing a Contract on
+# an unrelated DRAFT. This leaves the fixture at CONTRACT_PENDING before the
+# contract below is registered and approved by its Human Gate.
+G_SCOPE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Release eval scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/gates/$G_SCOPE/decisions" -d '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi"},"decision":"approved"}' > /dev/null
+for PHASE in SURVEYING IDEATING; do
+  REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+  api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"$PHASE\",\"expected_revision\":$REV}" > /dev/null
+done
+G_IDEA=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Release eval idea"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/gates/$G_IDEA/decisions" -d '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi"},"decision":"approved"}' > /dev/null
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
 # Contract — feeds data/dataset-manifest.json and the manuscript methods section.
 CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_release_bundle","data":{"dataset_id":"synth-smoke-v1","version":"1.0.0","split":"official","preprocessing_hash":"sha256:eval"},"methods":{"baseline":"no-treatment","treatment":"smoke-treatment"},"metrics":{"primary":"m1","secondary":["n_samples"]},"seeds":[1,2],"analysis":{"effect_size":"cohens_d","interval":"bootstrap-95","multiple_testing":"none"},"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":2,"stop_on_data_leakage":true}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 [[ "$CONTRACT" == expc_* ]] && ok "contract $CONTRACT registered" || bad "contract id '$CONTRACT'"
-# P0 (acceptance-tests.md §4): baseline jobs must bind an APPROVED contract —
-# freeze via the internal approval route (evals/orchestrator path).
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts/$CONTRACT/approve" -d '{"actor":"release-eval"}' > /dev/null
+G_CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Release eval Contract\",\"payload\":{\"contract_id\":\"$CONTRACT\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
+api -X POST "http://127.0.0.1:$PORT/v1/gates/$G_CONTRACT/decisions" -d '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi"},"decision":"approved"}' > /dev/null
 ok "contract $CONTRACT frozen (approval recorded)"
 
 say "baseline jobs (kind=baseline, seeds 1/2, matched-seed design §13.6)"
@@ -111,10 +123,12 @@ SNAP=$(code_snapshot_api "$PORT" "$PROJ" "$REL_WS" "" "release-bundle fixture" |
 mfile() { # <value> <seed> — emits the in-container `node -e` script body
   node -e 'console.log(JSON.stringify(`const fs=require("fs");const m={schema_version:1,run_id:process.env.DSH_RUN_ID,contract_id:process.env.DSH_CONTRACT_ID,seed:'"$2"',metrics:[{name:"m1",value:'"$1"',unit:""}]};fs.writeFileSync("/outputs/metrics.json",JSON.stringify(m))`))'
 }
-B11=$(KEY="rel-base-1" CT="$CONTRACT" SNAP="$SNAP" INNER="$(mfile 0.450 1)" node -e 'console.log(JSON.stringify({idempotency_key:process.env.KEY,kind:"baseline",contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],payload:{},output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))')
-B12=$(KEY="rel-base-2" CT="$CONTRACT" SNAP="$SNAP" INNER="$(mfile 0.550 2)" node -e 'console.log(JSON.stringify({idempotency_key:process.env.KEY,kind:"baseline",contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],payload:{},output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))')
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$B11" > /dev/null
-api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/jobs" -d "$B12" > /dev/null
+REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
+B11=$(KEY="rel-base-1" CT="$CONTRACT" SNAP="$SNAP" REV="$REV" INNER="$(mfile 0.450 1)" node -e 'console.log(JSON.stringify({expected_revision:Number(process.env.REV),idempotency_key:process.env.KEY,contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))')
+BASE1=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/baseline-runs" -d "$B11")
+REV=$(printf '%s' "$BASE1" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project.revision))")
+B12=$(KEY="rel-base-2" CT="$CONTRACT" SNAP="$SNAP" REV="$REV" INNER="$(mfile 0.550 2)" node -e 'console.log(JSON.stringify({expected_revision:Number(process.env.REV),idempotency_key:process.env.KEY,contract_id:process.env.CT,code_snapshot_id:process.env.SNAP,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",command:["sh","-c","node -e "+process.env.INNER],output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"}}))')
+api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/baseline-runs" -d "$B12" > /dev/null
 say "2 smoke jobs (kind=smoke + payload.script emitting metrics JSON lines)"
 submit_smoke() { # <idempotency-key> <m1-value> <seed>
   KEY="$1" VAL="$2" SEED="$3" PORT="$PORT" PROJ="$PROJ" node -e '

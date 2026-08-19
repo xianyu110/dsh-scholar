@@ -34,7 +34,7 @@ export {
 } from './archive-scan.js'
 export { IMAGES_LOCK, getLockedDigest, validateImageDigest, type ImagesLock, type LockedImageKind, type SecureJobKind } from './images-lock.js'
 export { parseLatexDiagnostics, type LatexDiagnostic } from './tex-diagnostics.js'
-export { startKernelServer, type KernelServerOptions } from './server.js'
+export { startKernelServer, runnerTargetTokenAccessAllowed, type KernelServerOptions } from './server.js'
 export { ArtifactCas, type CasInventoryEntry } from './cas.js'
 export { MetricsStore, HISTOGRAM_BUCKETS, type MetricsSnapshot, type CounterView, type HistogramView, type HistogramBucket, type MetricTags } from './metrics.js'
 export { openDatabase, SCHEMA_VERSION } from './store.js'
