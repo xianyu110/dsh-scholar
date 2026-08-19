@@ -14,12 +14,13 @@ import {
   toBase32Lower, setIdRandomSource,
 } from '@dsh-scholar/research-schemas'
 import { ResearchKernel } from '@dsh-scholar/research-kernel'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 const BASE32_RE = /^[a-z2-7]+$/
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-ids-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
 }
 
 describe('business ID format (reconstruction-contracts.md §2)', () => {

@@ -18,11 +18,11 @@ describe('config registry — key coverage', () => {
     for (const key of Object.keys(ExecutionConfig.shape)) expect(keys.has(`execution.${key}`)).toBe(true)
     for (const key of Object.keys(IntegrityConfig.shape)) expect(keys.has(`integrity.${key}`)).toBe(true)
     // kernel CLI (port/host/token/service-token/db/cas/endpoint-file).
-    for (const key of ['kernel.host', 'kernel.port', 'kernel.token', 'kernel.service_token', 'kernel.db', 'kernel.cas', 'kernel.endpoint_file']) {
+    for (const key of ['kernel.host', 'kernel.port', 'kernel.token', 'kernel.service_token', 'kernel.db', 'kernel.cas', 'kernel.secret_root', 'kernel.endpoint_file']) {
       expect(keys.has(key)).toBe(true)
     }
     // runner CLI (poll/heartbeat/timeout/cancel/owner/mode/kernel/key-file/token/service-token).
-    for (const key of ['runner.poll_ms', 'runner.heartbeat_ms', 'runner.timeout_ms', 'runner.cancel_poll_ms', 'runner.owner', 'runner.mode', 'runner.kernel', 'runner.key_file', 'runner.token', 'runner.service_token']) {
+    for (const key of ['runner.poll_ms', 'runner.heartbeat_ms', 'runner.timeout_ms', 'runner.cancel_poll_ms', 'runner.owner', 'runner.mode', 'runner.kernel', 'runner.key_file', 'runner.token', 'runner.service_token', 'runner.target_token']) {
       expect(keys.has(key)).toBe(true)
     }
     // orchestrator CLI (kernel/db/poll-ms/once/dry-run).
@@ -41,7 +41,9 @@ describe('config registry — key coverage', () => {
     const envs = new Map(CONFIG_REGISTRY.filter(def => def.env !== undefined).map(def => [def.key, def.env]))
     expect(envs.get('kernel.token')).toBe('DSH_SCHOLAR_KERNEL_TOKEN')
     expect(envs.get('kernel.service_token')).toBe('DSH_SCHOLAR_SERVICE_TOKEN')
+    expect(envs.get('kernel.secret_root')).toBe('DSH_SCHOLAR_SECRET_ROOT')
     expect(envs.get('runner.service_token')).toBe('DSH_SCHOLAR_SERVICE_TOKEN')
+    expect(envs.get('runner.target_token')).toBe('DSH_SCHOLAR_RUNNER_TARGET_TOKEN')
     expect(envs.get('kernel.endpoint_file')).toBe('DSH_SCHOLAR_KERNEL_ENDPOINT_FILE')
     expect(envs.get('global.images_lock.path')).toBe('DSH_IMAGES_LOCK')
     expect(envs.get('standalone.host')).toBe('DSH_SCHOLAR_STANDALONE_HOST')
@@ -91,7 +93,7 @@ describe('config registry — key coverage', () => {
 describe('config registry — validateConfig', () => {
   it('merges defaults for the requested scopes', () => {
     const resolved = validateConfig({}, { scopes: ['project'] })
-    expect(resolved.effective['execution.runner_profile_id']).toBe('profile_local_docker_cpu_v1')
+    expect(resolved.effective['execution.runner_profile_id']).toBeNull()
     expect(resolved.effective['execution.network_policy']).toBe('allowlist')
     expect(resolved.effective['execution.artifact_store']).toBe('local-cas')
     expect(resolved.effective['integrity.require_baseline_reproduction']).toBe(true)
@@ -126,14 +128,15 @@ describe('config registry — validateConfig', () => {
 
   it('groups effective values by scope', () => {
     const resolved = validateConfig({}, { scopes: ['project', 'kernel'] })
-    expect(resolved.byScope.project['execution.runner_profile_id']).toBe('profile_local_docker_cpu_v1')
+    expect(resolved.byScope.project['execution.runner_profile_id']).toBeNull()
     expect(resolved.byScope.kernel['kernel.port']).toBe(7412)
     expect(Object.keys(resolved.byScope)).toEqual(CONFIG_SCOPES)
   })
 
   it('zod schemas of project keys agree with ExecutionConfig/IntegrityConfig defaults', () => {
     const resolved = validateConfig({}, { scopes: ['project'] })
-    const execution = ExecutionConfig.parse({})
+    expect(ExecutionConfig.safeParse({}).success).toBe(false)
+    const execution = ExecutionConfig.parse({ runner_profile_id: null })
     const integrity = IntegrityConfig.parse({})
     for (const [key, value] of Object.entries(execution)) {
       expect(resolved.effective[`execution.${key}`]).toEqual(value)
@@ -147,7 +150,7 @@ describe('config registry — validateConfig', () => {
 describe('config registry — parseCli (binary CLI parsing)', () => {
   it('kernel: every registry flag maps to its canonical key with typed values', () => {
     const parsed = parseCli(['--db', '/tmp/k.db', '--cas', '/tmp/cas', '--port', '7413', '--host', '0.0.0.0',
-      '--token', 't1', '--service-token', 's1', '--endpoint-file', '/tmp/ep.json'], 'kernel')
+      '--token', 't1', '--service-token', 's1', '--secret-root', '/tmp/secrets', '--endpoint-file', '/tmp/ep.json'], 'kernel')
     expect(parsed).toEqual({
       'kernel.db': '/tmp/k.db',
       'kernel.cas': '/tmp/cas',
@@ -155,6 +158,7 @@ describe('config registry — parseCli (binary CLI parsing)', () => {
       'kernel.host': '0.0.0.0',
       'kernel.token': 't1',
       'kernel.service_token': 's1',
+      'kernel.secret_root': '/tmp/secrets',
       'kernel.endpoint_file': '/tmp/ep.json',
     })
     // absent flags are NOT merged with defaults — the caller's
@@ -167,7 +171,7 @@ describe('config registry — parseCli (binary CLI parsing)', () => {
   it('runner: every registry flag maps to its canonical key', () => {
     expect(parseCli(['--kernel', 'http://127.0.0.1:9999', '--mode', 'docker', '--poll-ms', '150',
       '--timeout-ms', '30000', '--heartbeat-ms', '1500', '--cancel-poll-ms', '1000', '--owner', 'x',
-      '--key-file', '/tmp/k.pem', '--token', 'rt', '--service-token', 'rs'], 'runner-profile')).toEqual({
+      '--key-file', '/tmp/k.pem', '--token', 'rt', '--service-token', 'rs', '--target-token', 'target-rs'], 'runner-profile')).toEqual({
       'runner.kernel': 'http://127.0.0.1:9999',
       'runner.mode': 'docker',
       'runner.poll_ms': 150,
@@ -178,6 +182,7 @@ describe('config registry — parseCli (binary CLI parsing)', () => {
       'runner.key_file': '/tmp/k.pem',
       'runner.token': 'rt',
       'runner.service_token': 'rs',
+      'runner.target_token': 'target-rs',
     })
   })
 
@@ -294,8 +299,10 @@ describe('config registry — secrets and pin hash', () => {
     expect(changed.pinHash).not.toBe(resolved.pinHash)
     // defaults for secret keys are redacted too
     expect(validateConfig({}).redacted['kernel.token']).toBe('<redacted>')
+    expect(validateConfig({}).redacted['kernel.secret_root']).toBe('<redacted>')
     expect(validateConfig({}).redacted['standalone.token']).toBe('<redacted>')
     expect(validateConfig({}).redacted['runner.service_token']).toBe('<redacted>')
+    expect(validateConfig({}).redacted['runner.target_token']).toBe('<redacted>')
   })
 
   it('pin hash is stable and sensitive to any change', () => {

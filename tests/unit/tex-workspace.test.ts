@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { TexError, openTexWorkspace } from '../../packages/research-kernel/lib/tex-workspace.js'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
@@ -17,7 +18,7 @@ function sha256(text: string): string {
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-tex-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
 }
 
 function makeBrief() {

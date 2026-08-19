@@ -25,9 +25,9 @@ Registry 是生成权威：JSON Schema、默认值 template、CLI 帮助文本�
 | `global` | 全局基础（images.lock 路径与两个固定 digest） | `global.images_lock.*` |
 | `project` | 项目执行与完整性配置（design §6.2） | `execution.*`、`integrity.*`（ExecutionConfig + IntegrityConfig 全字段） |
 | `job` | 每 Job 策略（timeout、log retention） | 预留：目前由 runner-profile 与 Job payload 派生，无键 |
-| `runner-profile` | Runner 网关 CLI 与容器安全面 | `runner.*`（kernel endpoint/mode/poll/heartbeat/timeout/cancel/owner/key-file/token/service-token/network/privileged/docker_socket） |
+| `runner-profile` | Runner 网关 CLI 与容器安全面 | `runner.*`（kernel endpoint/mode/poll/heartbeat/timeout/cancel/owner/key-file/token/service-token/target-token/network/privileged/docker_socket） |
 | `orchestrator` | Durable Research Orchestrator CLI（design §8） | `orchestrator.*`（kernel/db/poll_ms/once/dry_run） |
-| `kernel` | Research Kernel 守护进程 | `kernel.*`（host/port/token/service-token/db/cas/endpoint-file/require_signed_manifest） |
+| `kernel` | Research Kernel 守护进程 | `kernel.*`（host/port/token/service-token/db/cas/secret-root/endpoint-file/require_signed_manifest） |
 | `standalone` | standalone BFF | `standalone.*`（host/port/kernel_port/data_dir/token/principal/frame_ancestors/no_token） |
 
 env 别名在键上声明（生成 JSON Schema 的 `x-dsh-env` 注解与 template 注释带出）：
@@ -40,7 +40,7 @@ data_dir 缺省基目录）、`DSH_SCHOLAR_STANDALONE_{HOST,PORT,KERNEL_PORT,DAT
 
 `validateConfig(input, { scopes?, imagesLock? })` 对给定对象执行：
 
-1. **合并默认**：以注册表默认值为底，输入覆盖之（仅限请求的 scope 集合）；
+1. **合并默认**：以注册表默认值为底，输入覆盖之（仅限请求的 scope 集合）。`execution.runner_profile_id` 的安全默认是显式 `null`，只表示 DRAFT 未配置，不是本机 Docker alias；
 2. **拒绝未知键**：不在注册表（或 scope 集合）内的 dotted key → `unknown_config_key`；
 3. **值校验**：每个值过对应 Zod schema，失败 → `validation_error`；
 4. **security floor 违规拒绝** → `security_floor_violation`：

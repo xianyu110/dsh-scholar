@@ -36,12 +36,10 @@ constraints:
   max_gpu_hours: 120
   max_parallel_jobs: 4
 execution:
-  runner_profile_id: local-docker-cpu
-  target_fallback: none
-  runner_network_policy: none
-  connector_network_policy: scholar-allowlist
+  runner_profile_id: null # name-only DRAFT 的显式未配置状态
+  runner_target_id: target_local_docker_v1
+  network_policy: allowlist
   artifact_store: local-cas
-  config_revision: 1
 integrity:
   require_baseline_reproduction: true
   require_experiment_contract: true
@@ -66,7 +64,7 @@ Project 另有 `brief_status: collecting | confirmed`。v2 name-only Init 创建
 
 删除是独立于生命周期状态的 tombstone 轴，不新增 `DELETED` 状态。只有 `ARCHIVED` 项目可由 PI 删除；请求必须携带 `expected_revision`、精确项目名确认和非空 reason。成功时在同一 Kernel 事务写 `deleted_at/deleted_by/deletion_reason`、递增 revision 并追加 `project.deleted` Outbox。正常列表、读取、投影和全部项目写入必须把 tombstone 当作 404；相同 request id 的重放返回同一 DeletionReceipt。删除不能物理移除 Project、成员、Decision、Outbox、Artifact 引用或共享 Blob；这些记录由 retention/hold 与后续 purge/GC 协议处理。
 
-Project/Job 只接受必填的 `runner_profile_id`，并且只能引用已登记的 opaque profile ID。旧 `runner_profile` 枚举已经删除，不映射、不迁移；未知或旧枚举值 fail closed。配置不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
+Project 持久化的 ExecutionConfig 必须显式包含 `runner_profile_id`。name-only `DRAFT/collecting` 使用 `null` 表示“尚未配置”，不能将缺省或 `null` 解析成本机 Docker。任何 Job 执行前都必须解析出已登记的 opaque profile ID；否则以 `runner_profile_required` fail closed 且零落库。旧 `runner_profile` 枚举已经删除，不映射、不迁移；未知或旧枚举值 fail closed。配置不能携带 hostname、SSH command、credential、Docker socket、远端宿主路径或任意 endpoint。下层配置只能收紧资源/网络/交互策略，不能放宽 instance/team policy。
 
 ## 3. 状态机
 
@@ -204,13 +202,13 @@ RunManifest 必须包含 run_id、project_id、job_id、contract 和版本、代
 
 ### 9.1 RunnerTarget 与 RunnerProfile
 
-`RunnerTarget` 表示一台本机或受控远端执行目标：target_id、kind(`local-process|local-docker|remote-ssh`)、capabilities、health、enabled/draining、revision/config hash、SecretRef availability、created_at、updated_at。`remote-ssh` 是服务端 bootstrap/transport adapter，连接只由 endpoint/credential/known_hosts SecretRef 解析；安全投影不能包含 hostname、私钥、token、ProxyCommand 或任意启动 argv。`local-process` 仅允许 trusted development/smoke，正式 kind 一律拒绝。
+`RunnerTarget` 表示一台本机或受控远端执行目标：target_id、kind(`local-process|local-docker|remote-ssh`)、capabilities、health、enabled/draining、revision/config hash、target-scoped `service_identity` SecretRef、SecretRef availability、created_at、updated_at。`service_identity` 把 heartbeat 调用身份服务端绑定到单一 target；共享 internal token、自报 target/principal 都不能替代。`remote-ssh` 是服务端 bootstrap/transport adapter，连接只由 endpoint/credential/known_hosts SecretRef 解析；安全投影不能包含 hostname、私钥、token、ProxyCommand 或任意启动 argv。`local-process` 仅允许 trusted development/smoke，正式 kind 一律拒绝。
 
 `RunnerProfile` 包含 runner_profile_id、target_id、image allowlist/digest、类型化 compute（CPU 或 NVIDIA `all`/设备列表）、network policy、resource limits、artifact transport、interaction policy、config_revision/config_sha256 和 enabled/draining 状态。用户选择的镜像必须由 PI/Operator 写入 RunnerTarget Registry，并在保存时解析为完整 digest；该权威 Registry 是可配置实验镜像的 allowlist。GPU 请求和实际设备与 profile 一起进入 environment pin；preflight 当前只作为 spawn gate，详细报告持久化仍是待实现项。Job submit 固定 profile/config/environment hash；target 变更不会修改已存在 attempt。无 capability、离线或 draining 目标拒绝新 claim；除显式创建新 attempt 外，不得自动从远端回退本机。
 
 ExperimentContract 与 PaperReproductionSpec 的 execution binding 只保存 `runner_profile_id`、`target_id`、environment revision/hash；默认可继承 Project，但在 submit 时必须解析并固化。本机 Docker 与远端 SSH Runner 都是 RunnerTarget adapter；SSH endpoint/credential 只存在服务端 Config/SecretRef。
 
-**现状注记（2026-08-19）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地。ExecutionConfig 只接受必填 `runner_profile_id`；旧 enum 与 alias 已删除，未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`。kernel submitJob 对 secure kinds 固定 profile/config hash，runner 执行前复算，未知 id 或 hash 不一致绝不执行。Runner 环境投影只有在 profile/target enabled、非 draining、kind 匹配、能力匹配，且远端全部 SecretRef 可解析并在 60 秒内有 service-authenticated heartbeat 时才是 ready；unknown/offline/stale 继续显示 `runner_environment` 缺口。配置变更会把 health 重置为 unknown。
+**现状注记（2026-08-19）**：opaque profile 注册表与 Job 固定 profile/config hash 已落地。ExecutionConfig 的 `runner_profile_id` 是必须存在的键；仅 name-only `DRAFT/collecting` 允许值为 `null`，并持续投影 `runner_environment` 缺口。旧 enum 与 alias 已删除，未知 id 在 createProject 与 submitJob 均 422 `runner_profile_unknown`，未配置 Job 以 422 `runner_profile_required` 拒绝。kernel submitJob 对 secure kinds 固定 profile/config hash，runner 执行前复算，未知 id 或 hash 不一致绝不执行。Runner 环境投影只有在 profile/target enabled、非 draining、kind 匹配、能力匹配，且远端全部 SecretRef 可解析并在 60 秒内有 service-authenticated heartbeat 时才是 ready；unknown/offline/stale 继续显示 `runner_environment` 缺口。配置变更会把 health 重置为 unknown。
 
 **2026-08-15 增量**：上述 `profile_local_docker_gpu_v1` 历史静态记录仍为 CPU-only，不再代表系统没有 GPU 路径。RunnerTarget `runtime_json` 已可固定自定义 digest 与 `{mode:'cpu'}` / `{mode:'nvidia',devices:'all'|数字列表}`；Job、ExecutionPlan、Docker 参数和签名 RunManifest 复用同一 compute pin，远端调度要求 toolkit 与实际设备 capability。真实 Docker/NVIDIA/第二 SSH 主机仍为 `NOT_RUN_MANUAL_PENDING`。
 
@@ -311,7 +309,7 @@ NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolve
 
 `CONTRACT_APPROVED` 的 `baseline_reproduce` 同时承担执行前交接投影：尚无 baseline Job 时，它是 Runs 中可见但不计入 Job 统计的准备任务。`required` 可以列出 `baseline_command`、`code_snapshot`、`runner_environment` 等缺口；动作保持可进入 Chat/Workspace/Settings，以便 Agent 与用户消解缺口，不能因缺口把整个项目变成无入口的全 blocked。准备任务不是 Job、Run 或 Evidence，不拥有伪造的运行状态。只有 `startBaselineRun` 成功后才创建 Job 并原子推进 `BASELINE_REPRO`。
 
-`startBaselineRun` 是 Contract→Execution 的唯一原子交接：输入固定 expected project revision、approved contract id、CodeSnapshot id、非空 argv、可选 Runner target/image override、output contract 和 project-scoped idempotency key；输出同时包含 queued Job 与推进后的 Project。Kernel 在同一事务验证合同归属/批准状态、代码快照归属、Runner/Profile/target、镜像 pin、预算与状态。任一校验或状态迁移失败均回滚 Job、Event 和 Project 更新；相同幂等键只返回原 Job，不创建第二次运行。
+`startBaselineRun` 是 Contract→Execution 以及 matched-seed baseline 追加运行的唯一入口：输入固定 expected project revision、approved contract id、CodeSnapshot id、非空 argv、可选 Runner target/image override、output contract 和 project-scoped idempotency key；输出同时包含 queued Job 与 Project。首次调用在同一事务创建 Job 并推进 `CONTRACT_APPROVED→BASELINE_REPRO`；后续调用仅可绑定首个 baseline 的同一 Contract，保持 Project 阶段/revision 不变。普通 Job API 不接受 baseline。Kernel 在同一事务验证合同归属/批准状态、代码快照归属、Runner/Profile/target、镜像 pin、预算与状态。任一校验或状态迁移失败均回滚 Job、Event 和 Project 更新；相同幂等键只返回原 Job，不创建第二次运行。
 
 SURVEYING 的 Idea 子流程按权威数据细分：没有 proposed IdeaCard 时为 Agent `idea_generate`；已有候选但尚未选择时为 Human `idea_select`，refs 列出候选 idea，不能再次误报“需要生成”。选择操作完成真实 counter-search NoveltyAudit 后，由 Kernel 原子写入 audit、推进到 IDEATING 并创建 payload 绑定所选 idea 的 pending Gate。IDEATING 只有在 pending Idea Gate 存在时才投影 `idea_gate_approve`；禁止 orchestrator 预先创建 payload-less Idea Gate。
 

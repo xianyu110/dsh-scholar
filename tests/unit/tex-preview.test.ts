@@ -19,13 +19,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, startKernelServer } from '@dsh-scholar/research-kernel'
 import type { TexSnapshotManifest } from '@dsh-scholar/runner-gateway'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 /** P0 (acceptance-tests.md §4): the exact texlive digest pinned by configs/runner-profiles/images.lock.json. */
 const TEXLIVE_IMAGE_DIGEST = 'texlive/texlive@sha256:8957c916b8160049f89c24d362a6d86c09d8a04095acde37e88404c4afed85b4'
 
 function freshKernel(opts: { previewDebounceMs?: number; previewAutoTrigger?: boolean } = {}): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-tex-preview-'))
-  return new ResearchKernel({
+  return new ConfiguredTestKernel({
     dbPath: join(dir, 'kernel.db'),
     casRoot: join(dir, 'cas'),
     requireSignedManifest: false,
@@ -153,13 +154,13 @@ describe('TEX-03 preview: debounce + build creation', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-tex-preview-restart-'))
     const dbPath = join(dir, 'kernel.db')
     const casRoot = join(dir, 'cas')
-    const kernelA = new ResearchKernel({ dbPath, casRoot, requireSignedManifest: false })
+    const kernelA = new ConfiguredTestKernel({ dbPath, casRoot, requireSignedManifest: false })
     const { document_id } = setupDoc(kernelA)
     // A long debounce: the request is still pending when the kernel dies.
     kernelA.texRequestPreview(document_id, { debounce_ms: 60_000 })
     kernelA.close()
     // The new kernel re-arms from the durable pending row.
-    const kernelB = new ResearchKernel({ dbPath, casRoot, requireSignedManifest: false })
+    const kernelB = new ConfiguredTestKernel({ dbPath, casRoot, requireSignedManifest: false })
     try {
       expect(kernelB.texPreviewStatus(document_id).pending?.document_id).toBe(document_id)
       const result = kernelB.texFlushPreview(document_id) as Extract<FlushResult, { action: 'created' }>

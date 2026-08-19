@@ -10,10 +10,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-terminal-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
 }
 
 function expectKernelError(fn: () => unknown, status: number, code: string): void {

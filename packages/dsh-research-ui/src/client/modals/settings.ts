@@ -574,6 +574,16 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         labeled('shell.settings.targets.compute', compute),
         deviceField,
       )
+      const serviceIdentity = secretRefEditor(
+        'shell.settings.targets.ref.serviceIdentity',
+        target?.service_identity,
+      )
+      const identityFields = el('div')
+      identityFields.style.cssText = 'display:grid;grid-template-columns:1fr;gap:6px'
+      identityFields.append(
+        el('span', 'muted', t('shell', 'shell.settings.targets.serviceIdentityHint')),
+        serviceIdentity.root,
+      )
       const endpoint = secretRefEditor('shell.settings.targets.ref.endpoint', target?.connection?.endpoint)
       const credential = secretRefEditor('shell.settings.targets.ref.credential', target?.connection?.credential)
       const knownHosts = secretRefEditor('shell.settings.targets.ref.knownHosts', target?.connection?.known_hosts)
@@ -620,6 +630,11 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
             : 'shell.settings.targets.runtimeDevicesInvalid'))
           return
         }
+        const serviceIdentityPayload = serviceIdentity.payload()
+        if (serviceIdentityPayload === null) {
+          setError(t('shell', 'shell.settings.targets.serviceIdentityInvalid'))
+          return
+        }
         const connection = targetKind === 'remote-ssh'
           ? { endpoint: endpoint.payload(), credential: credential.payload(), known_hosts: knownHosts.payload() }
           : undefined
@@ -634,6 +649,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
           enabled: enabled.checked,
           draining: draining.checked,
           capabilities: caps.value.split(',').map(value => value.trim()).filter(Boolean),
+          service_identity: serviceIdentityPayload,
           ...(runtimeResult.runtime !== undefined
             ? { runtime: runtimeResult.runtime }
             : { ...(target?.runtime !== undefined ? { runtime: null } : {}) }),
@@ -658,6 +674,7 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
         id,
         name,
         labeled('shell.settings.targets.location', kind),
+        identityFields,
         runtimeFields,
         remoteFields,
         labeled('shell.settings.targets.capabilities', caps),
@@ -689,6 +706,11 @@ export async function openSettingsModal(root: ShadowRoot | null | undefined): Pr
       if (target.connection !== undefined) {
         const available = [target.connection.endpoint, target.connection.credential, target.connection.known_hosts].every(ref => ref.available)
         meta.appendChild(document.createTextNode(` · ${t('shell', available ? 'shell.settings.targets.secretsAvailable' : 'shell.settings.targets.secretsUnavailable')}`))
+      }
+      if (target.service_identity !== undefined) {
+        meta.appendChild(document.createTextNode(` · ${t('shell', target.service_identity.available
+          ? 'shell.settings.targets.identityAvailable'
+          : 'shell.settings.targets.identityUnavailable')}`))
       }
       if (target.runtime !== undefined) {
         const computeLabel = target.runtime.compute.mode === 'cpu'

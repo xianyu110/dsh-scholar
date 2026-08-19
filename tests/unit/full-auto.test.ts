@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { FixtureProfile, getFixtureProfile } from '@dsh-scholar/research-schemas'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,7 +30,7 @@ function expectKernelError(fn: () => unknown, code: string): void {
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-fullauto-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas') })
 }
 
 function makeBrief() {

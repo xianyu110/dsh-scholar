@@ -16,10 +16,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 function freshKernel(): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-trajectory-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
+  return new ConfiguredTestKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
 }
 
 function expectKernelError(fn: () => unknown, status: number, code: string): void {
@@ -496,7 +497,7 @@ describe('trajectory/topology HTTP surface', () => {
 
   it('lets only the exact linked DSH parent service write observational lifecycle', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-topology-service-'))
-    const kernel = new ResearchKernel({
+    const kernel = new ConfiguredTestKernel({
       dbPath: join(dir, 'kernel.db'),
       casRoot: join(dir, 'cas'),
       requireSignedManifest: false,

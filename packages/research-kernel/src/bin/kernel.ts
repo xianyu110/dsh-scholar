@@ -49,6 +49,7 @@ try {
 
 const dbPath = (cli['kernel.db'] as string | undefined) ?? join(mkdtempSync(join(tmpdir(), 'research-kernel-')), 'kernel.db')
 const casRoot = (cli['kernel.cas'] as string | undefined) ?? join(process.cwd(), '.research-cas')
+const secretRoot = (cli['kernel.secret_root'] as string | undefined) ?? process.env.DSH_SCHOLAR_SECRET_ROOT ?? null
 const port = (cli['kernel.port'] as number | undefined) ?? 7412
 const host = (cli['kernel.host'] as string | undefined) ?? '127.0.0.1'
 // Sidecars pass the token out-of-band from argv so it is not exposed by
@@ -77,6 +78,7 @@ try {
     'kernel.service_token': serviceToken ?? '',
     'kernel.db': dbPath,
     'kernel.cas': casRoot,
+    'kernel.secret_root': secretRoot ?? '',
     'kernel.endpoint_file': endpointFile ?? '',
     'kernel.require_signed_manifest': true,
   }, { scopes: ['global', 'project', 'kernel'] })
@@ -108,6 +110,7 @@ if (backupOnStart) {
 const kernel = new ResearchKernel({
   dbPath,
   casRoot,
+  secretRoot,
   serviceToken,
   dshPluginToken,
   // OCR-CONFIG-01: the first built-in provider is MinerU's official Open API.

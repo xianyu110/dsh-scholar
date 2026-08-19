@@ -12,13 +12,14 @@ import { mkdtempSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResearchKernel, MetricsStore, HISTOGRAM_BUCKETS } from '@dsh-scholar/research-kernel'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 import { multiSourceSearch, NULL_CACHE, type ConnectorMetrics } from '@dsh-scholar/scholar-connectors'
 import { startKernelServer, handleInternalMetrics, metricsAccessAllowed, isLoopbackAddress } from '../../packages/research-kernel/lib/server.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 function freshKernel(options: { serviceToken?: string } = {}): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-metrics-test-'))
-  return new ResearchKernel({
+  return new ConfiguredTestKernel({
     dbPath: join(dir, 'kernel.db'),
     casRoot: join(dir, 'cas'),
     requireSignedManifest: false,

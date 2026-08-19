@@ -11,6 +11,8 @@
 #   run-manifest-tests.sh       manifest-missing-artifact-rejected
 #   run-formal-binding-tests.sh formal-job-contract-{required,unknown,foreign,not-approved,approved}
 #   run-fencing-tests.sh        heartbeat/terminal/complete lease fencing (409 lease_stale)
+#   run-runner-target-identity-tests.sh shared internal token + target-scoped
+#                               heartbeat identity; cross-target spoof denied
 #   run-hardening-tests.sh      host-execution/fake-experiment defenses + durable cancel
 #   run-release-bundle-tests.sh release-bundle self-containment + clean-room rerun
 #   run-analysis-consistency-tests.sh analysis repeat byte-determinism + artifact/
@@ -73,6 +75,7 @@ SCRIPTS=(
   run-manifest-tests.sh
   run-formal-binding-tests.sh
   run-fencing-tests.sh
+  run-runner-target-identity-tests.sh
   run-hardening-tests.sh
   run-release-bundle-tests.sh
   run-analysis-consistency-tests.sh

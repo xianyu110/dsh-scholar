@@ -360,3 +360,19 @@ SELFMOD-01 的当前边界保持不变：Cordis self-referential 工具已经以
 自动关闭证据（2026-08-19）：整仓 unit `97 files / 1414 tests`；`pnpm build` 全包与 plugin bundle 成功；docs verifier `22/22`；聚合安全套件 `19 scripts / 0 failed`，其中 hardening `59/59`、standalone HTTP `268/268`、SSE `67/67`、DSH plugin `52/52`。构建仍输出既有 `EMPTY_IMPORT_META` 与 tsdown `external` deprecation warning，均不影响 exit 0；真实 Docker/SSH/GPU/浏览器项目继续保持人工待验收。
 
 关闭证据要求：新定向单测、整仓 `pnpm test`、`pnpm build`、`pnpm verify:docs` 与 `pnpm test:security` 全绿；无真实 Docker/SSH/GPU/浏览器环境的场景继续按 `manual-acceptance.md` 标记，不把未执行人工项写成 PASS。
+
+## 17. 2026-08-19 全仓 Review 复审修复约束
+
+本节内化上一轮修复后的 Standards + Spec 复审结果。后续任何相关改动都必须保持这些边界，不得重新引入普通 Job 两步 baseline、隐式本机 Runner、共享心跳身份、非 Git patch parser 或重复 Token 文件实现。
+
+| ID | 状态 | 约束与实现 |
+|---|---|---|
+| REVIEW-PATCH-02 | 已实现未人工验收 | `patch_apply` 的语义边界必须是固定 argv/stdin 的 `git apply --check` 与 `git apply`。Git 只在内部创建、最终清理的私有临时目录工作，用户不能指定宿主路径；真实文件仍只经 project-scoped Workspace API 与 version/etag CAS 读写。拒绝绝对/遍历、多文件、binary、rename/copy、symlink、executable、gitlink、mode-only、非 UTF-8、超时和超限输出；不保留第二套 patch parser。 |
+| REVIEW-RUNNER-IDENTITY-02 | 已实现未人工验收 | 共享 `x-service-token` 只负责进入 internal route，RunnerTarget heartbeat 还必须使用与 URL target 服务端绑定的独立 `service_identity` SecretRef 凭据。loopback wire 的 `x-runner-target-token` 只发送到 heartbeat；Kernel 仅从 `secretRoot` 内普通、非 symlink、精确 `0600`、有界非空文件读取并恒时比较。跨 target token、自报 principal/target、缺失/越界/权限错误均 403。Kernel 明文入口只接受 socket 的直接 loopback peer，忽略 `X-Forwarded-For`；生产必须由 mTLS 终止器按 peer identity 映射 target allowlist，再从 loopback 转发。 |
+| REVIEW-BASELINE-02 | 已实现未人工验收 | canonical `baseline_prepare` 只能调用 ResearchClient `startBaselineRun` / `POST .../baseline-runs`，必须提交 expected revision、幂等键、approved Contract、CodeSnapshot、非空 argv，并可显式固定 target/image/output contract。普通 `/jobs kind=baseline` 在任何阶段都以 `baseline_handoff_required` 零写拒绝；所有 matched-seed baseline 复用专用端点。首次成功必须同一 Kernel 事务创建 queued Job 并推进 `CONTRACT_APPROVED → BASELINE_REPRO`；BASELINE_REPRO 中的后续 seed 只追加同 Contract Job、不重复 transition；失败零半写。 |
+| REVIEW-PROFILE-02 | 已实现未人工验收 | ExecutionConfig 必须显式携带 `runner_profile_id`。name-only `DRAFT/collecting` 只允许明确的 `null=尚未配置`，不能把省略/null 解析成本机 Docker；任何 Job 或 full-auto 项目在 null 时以 `runner_profile_required` fail closed。用户在 Settings 选择 target 时写入兼容的已登记 opaque profile；未知 ID 不映射、不迁移。 |
+| REVIEW-SIDECAR-TOKEN-02 | 已实现未人工验收 | Kernel bearer、internal service 与 DSH plugin 三个 Sidecar Token 共用同一 fail-closed 文件 helper：原子 `wx` 创建、并发失败后重新执行普通文件/非 symlink 校验、强制 `0600`、拒绝空值。各 Token 仍独立生成、独立缓存且用途隔离，后续权限/竞态修复只能修改这一处。 |
+
+自动关闭证据必须包含：Patch 定向安全测试与 Workspace blocking suite；baseline tool/client/Kernel 原子交接测试；未配置 Project/Job/full-auto 负向测试；跨 target heartbeat、SecretRef 路径/权限、migration、Settings i18n 测试；Sidecar 三类 Token 文件一致性测试；以及整仓 test/build/docs/security。未被当前自动套件覆盖的真实 SSH/GPU、生产 mTLS 部署与浏览器 Settings 观感继续列入人工验收，不得由 loopback 自动测试替代。
+
+自动关闭证据（2026-08-19）：整仓 unit `97 files / 1425 tests`，research-ui 两套 strict typecheck 与 `pnpm build` 全绿；docs verifier `22/22`；聚合安全套件 `20 scripts / 0 failed`，其中 hardening `59/59`、standalone HTTP `268/268`、Runner target identity `5/5`、Workspace `48/48`、release bundle `25/25`、analysis consistency `25/25`、analysis spec `29/29`、Terminal `11/11`、SSE `67/67`、DSH plugin `52/52`。发布、分析与 clean-room 路径已在本机真实 Docker 中执行；真实 SSH/GPU、生产 mTLS 部署与浏览器 Settings 观感仍为 `NOT_RUN_MANUAL_PENDING`。

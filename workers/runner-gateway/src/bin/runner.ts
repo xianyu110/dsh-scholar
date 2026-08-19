@@ -76,6 +76,7 @@ const cancelPollMs = (cli['runner.cancel_poll_ms'] as number | undefined) ?? 500
 const keyFile = cli['runner.key_file'] as string | undefined
 const owner = (cli['runner.owner'] as string | undefined) ?? `runner-${randomUUID().slice(0, 8)}`
 const serviceToken = (cli['runner.service_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
+const runnerTargetToken = (cli['runner.target_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_RUNNER_TARGET_TOKEN
 // §5 P0-1 (hardening API-01/SIDE-01): the runner's kernel bearer token.
 // Explicit --token wins; otherwise the process env is inherited — a runner
 // spawned by a sidecar-orchestrated host (plugin/BFF process tree) carries
@@ -97,7 +98,7 @@ try {
   process.exit(1)
 }
 
-const client = new ResearchClient({ endpoint, token, serviceToken })
+const client = new ResearchClient({ endpoint, token, serviceToken, runnerTargetToken })
 
 // ── FLEET-01: fleet 角色互斥判定（local 默认；fleet-server/agent 二选一，
 //    且与本地模式专属 flag --mode 互斥；校验失败 fail fast）。────────────
@@ -359,9 +360,24 @@ const localTargetId = configuredLocalTargetId !== undefined && configuredLocalTa
   ? configuredLocalTargetId
   : mode === 'docker' ? 'target_local_docker_v1' : 'target_local_process_v1'
 
+// The shared service token gates internal routes, while this independent
+// target token proves that this runner is allowlisted for localTargetId. A
+// missing target token never falls back to a caller-supplied id/principal;
+// the target remains unobserved and readiness expires fail closed.
+let nextTargetHeartbeatAt = 0
+async function heartbeatLocalTarget(): Promise<void> {
+  if (runnerTargetToken === undefined || runnerTargetToken === '' || Date.now() < nextTargetHeartbeatAt) return
+  const target = await client.getRunnerTarget(localTargetId)
+  await client.heartbeatRunnerTarget(localTargetId, { expected_revision: target.revision, health: 'online' })
+  nextTargetHeartbeatAt = Date.now() + Math.max(10_000, Math.min(heartbeatMs, 30_000))
+}
+
 // Register the public key once at startup (design §12.7; skipped when the
 // kernel does not expose the endpoint yet).
 await registerRunnerKey(signingKey.keyId, publicKeyPem)
+await heartbeatLocalTarget().catch(error => {
+  console.error(`[runner-gateway] target heartbeat rejected for ${localTargetId}: ${(error as Error).message}`)
+})
 
 let stopping = false
 const shutdown = (): void => {
@@ -374,6 +390,10 @@ process.on('SIGTERM', shutdown)
 
 while (!stopping) {
   try {
+    await heartbeatLocalTarget().catch(error => {
+      console.error(`[runner-gateway] target heartbeat rejected for ${localTargetId}: ${(error as Error).message}`)
+      nextTargetHeartbeatAt = Date.now() + 10_000
+    })
     // Recover stale leases on every cycle (self-healing after crashes, §9.3).
     await client.recoverExpiredLeases().catch(() => undefined)
     const localTargetKind = mode === 'docker' ? 'local-docker' : 'local-process'

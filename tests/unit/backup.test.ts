@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, statSync, readFileSync, existsSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { ResearchKernel, createStartupBackup } from '@dsh-scholar/research-kernel'
+import { ConfiguredTestKernel } from './configured-test-kernel.js'
 
 function makeBrief() {
   return {
@@ -25,7 +26,7 @@ function freshKernelPaths(): { kernel: ResearchKernel; dir: string; dbPath: stri
   const dir = mkdtempSync(join(tmpdir(), 'dsh-backup-'))
   const dbPath = join(dir, 'kernel.db')
   const casRoot = join(dir, 'cas')
-  const kernel = new ResearchKernel({ dbPath, casRoot, requireSignedManifest: false })
+  const kernel = new ConfiguredTestKernel({ dbPath, casRoot, requireSignedManifest: false })
   return { kernel, dir, dbPath, casRoot }
 }
 

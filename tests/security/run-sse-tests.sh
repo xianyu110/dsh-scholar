@@ -207,7 +207,7 @@ BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resour
 # ── kernel direct ───────────────────────────────────────────────────────────
 start_kernel || { echo "kernel failed to start"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
-PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
+PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 
 J=$(api -X POST "$BASE/v1/projects/$PROJ/jobs" -d '{"idempotency_key":"sse-1","kind":"echo","payload":{"message":"sse"}}' | jfield '.job_id')
@@ -506,7 +506,7 @@ R=$(curl -s -o "$WORK/bwn3.json" -w '%{http_code}' -H "x-principal-id: $SWOWNER"
 
 say "Test 11: kernel-trajectory-stream — entry replay, lane filter, live append, keyset resume; auth"
 TJOWNER='sse-traj'
-TJP=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse-traj\",\"workspace\":\"/w\",\"creator_principal_id\":\"$TJOWNER\",\"brief\":$BRIEF}" | jfield '.project_id')
+TJP=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"sse-traj\",\"workspace\":\"/w\",\"creator_principal_id\":\"$TJOWNER\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$TJP" ]] || { echo "failed to create trajectory fixture"; exit 1; }
 (timeout 5 curl -sN --no-buffer -D "$WORK/ht1.txt" -o "$WORK/bt1.txt" \
   "$BASE/v1/projects/$TJP/trajectory/stream?after_seq=0&lane=research" -H "x-principal-id: $TJOWNER" > /dev/null 2>&1 || true) &
@@ -568,7 +568,7 @@ BAPI() { curl -sf -H "Authorization: Bearer $BTOKEN" -H 'content-type: applicati
 
 say "Test 5: bff-sse-proxy-body — terminal SSE through the standalone BFF proxy"
 BP=$(BAPI -X POST "$BFF/v1/projects" \
-  -d "{\"name\":\"sse-bff\",\"workspace\":\"/w\",\"creator_principal_id\":\"alice\",\"brief\":$BRIEF}" | jfield '.project_id')
+  -d "{\"name\":\"sse-bff\",\"workspace\":\"/w\",\"creator_principal_id\":\"alice\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 if [[ -n "$BP" ]]; then
   ok "project created via proxy (creator alice) -> $BP"
 else
@@ -632,7 +632,7 @@ say "Test 7: bff-sse-cross-project — non-member job terminal -> 404 before str
 # sidecar-spawned kernel demands it).
 BFFKTOKEN=$(tr -d '\n' < "$BFF_DATA/kernel-token" 2>/dev/null || true)
 FP=$(curl -sf -H 'content-type: application/json' -H "Authorization: Bearer $BFFKTOKEN" -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects" \
-  -d "{\"name\":\"sse-foreign-b\",\"workspace\":\"/w\",\"creator_principal_id\":\"bob\",\"brief\":$BRIEF}" | jfield '.project_id')
+  -d "{\"name\":\"sse-foreign-b\",\"workspace\":\"/w\",\"creator_principal_id\":\"bob\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 FJ=$(curl -sf -H 'content-type: application/json' -H "Authorization: Bearer $BFFKTOKEN" -X POST "http://127.0.0.1:$BFF_KPORT/v1/projects/$FP/jobs" \
   -d '{"idempotency_key":"sse-bff-foreign","kind":"echo","payload":{"message":"x"}}' | jfield '.job_id')
 if [[ -n "$FP" && -n "$FJ" ]]; then

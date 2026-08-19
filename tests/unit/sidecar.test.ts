@@ -22,7 +22,7 @@ import { describe, expect, it, afterEach } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -329,6 +329,28 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
     const envelope = await res.json().catch(() => ({})) as { error?: { code?: string } }
     return { status: res.status, code: envelope.error?.code ?? '' }
   }
+
+  it('all sidecar token files share the same fail-closed regular-file contract', () => {
+    const cases: Array<{ file: string; read: (sidecar: KernelSidecar) => string }> = [
+      { file: 'kernel-token', read: sidecar => sidecar.kernelToken },
+      { file: 'service-token', read: sidecar => sidecar.serviceToken },
+      { file: 'dsh-plugin-token', read: sidecar => sidecar.dshPluginToken },
+    ]
+    for (const [index, testCase] of cases.entries()) {
+      const symlinkDir = mkdtempSync(join(tmpdir(), `sidecar-token-symlink-${index}-`))
+      tempDirs.push(symlinkDir)
+      writeFileSync(join(symlinkDir, 'target'), 'must-not-be-read', { mode: 0o600 })
+      symlinkSync(join(symlinkDir, 'target'), join(symlinkDir, testCase.file))
+      const symlinkSidecar = new KernelSidecar({ dataDir: symlinkDir })
+      expect(() => testCase.read(symlinkSidecar)).toThrow(/must be a regular file/)
+
+      const emptyDir = mkdtempSync(join(tmpdir(), `sidecar-token-empty-${index}-`))
+      tempDirs.push(emptyDir)
+      writeFileSync(join(emptyDir, testCase.file), '', { mode: 0o600 })
+      const emptySidecar = new KernelSidecar({ dataDir: emptyDir })
+      expect(() => testCase.read(emptySidecar)).toThrow(/must not be empty/)
+    }
+  })
 
   it('KernelSidecar: creates a 0600 kernel-token file (random 32 hex), reuses it, injects it into the kernel, and the kernel enforces the bearer', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-kt-'))

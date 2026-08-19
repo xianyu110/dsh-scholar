@@ -13,9 +13,11 @@ import { classifyFailure, extractMetrics } from '@dsh-scholar/runner-gateway'
 
 function patchClient(content = 'old\n'): {
   client: WorkspacePatchClient
+  reads: Array<Record<string, unknown>>
   writes: Array<Record<string, unknown>>
   deletes: Array<Record<string, unknown>>
 } {
+  const reads: Array<Record<string, unknown>> = []
   const writes: Array<Record<string, unknown>> = []
   const deletes: Array<Record<string, unknown>> = []
   const current = {
@@ -24,10 +26,14 @@ function patchClient(content = 'old\n'): {
     created_at: '2026-08-19T00:00:00.000Z', updated_at: '2026-08-19T00:00:00.000Z',
   }
   return {
+    reads,
     writes,
     deletes,
     client: {
-      readWorkspaceNode: async (_projectId, _workspaceId, path) => ({ ...current, path }),
+      readWorkspaceNode: async (projectId, workspaceId, path) => {
+        reads.push({ projectId, workspaceId, path })
+        return { ...current, path }
+      },
       writeWorkspaceNode: async (_projectId, _workspaceId, input) => {
         writes.push(input)
         return { ...current, path: input.path, content: input.content, version: 5, etag: '"5-fedcba987654"' }
@@ -64,7 +70,7 @@ describe('path traversal (design §4.9)', () => {
   })
 
   it('patch_apply uses Kernel Workspace CAS for an in-workspace diff', async () => {
-    const { client, writes } = patchClient('x = 1\n')
+    const { client, reads, writes } = patchClient('x = 1\n')
     const good = 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x = 1\n+x = 2\n'
     await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', good)).resolves.toEqual({
       path: 'a.txt', operation: 'write', version: 5,
@@ -72,6 +78,64 @@ describe('path traversal (design §4.9)', () => {
     expect(writes).toEqual([{
       path: 'a.txt', content: 'x = 2\n', expected_version: 4, expected_etag: '"4-0123456789ab"',
     }])
+    expect(reads).toEqual([{ projectId: 'rsp_1', workspaceId: 'ws_main', path: 'a.txt' }])
+  })
+
+  it('patch_apply creates a text node through Workspace CAS without probing a host path', async () => {
+    const { client, reads, writes } = patchClient()
+    const create = 'diff --git a/nested/new.txt b/nested/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/nested/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n'
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', create)).resolves.toEqual({
+      path: 'nested/new.txt', operation: 'create', version: 5,
+    })
+    expect(reads).toEqual([])
+    expect(writes).toEqual([{
+      path: 'nested/new.txt', content: 'hello\nworld\n', expected_version: 0, expected_etag: undefined,
+    }])
+  })
+
+  it('patch_apply deletes through Workspace version and etag CAS', async () => {
+    const { client, writes, deletes } = patchClient('old\n')
+    const remove = 'diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', remove)).resolves.toEqual({
+      path: 'a.txt', operation: 'delete', version: null,
+    })
+    expect(writes).toEqual([])
+    expect(deletes).toEqual([{ path: 'a.txt', version: 4, etag: '"4-0123456789ab"' }])
+  })
+
+  it('patch_apply uses git apply --check and refuses mismatched context before Workspace mutation', async () => {
+    const { client, writes, deletes } = patchClient('actual\n')
+    const stale = 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-stale\n+new\n'
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', stale)).rejects.toThrow(/context does not match/)
+    expect(writes).toEqual([])
+    expect(deletes).toEqual([])
+  })
+
+  it('patch_apply rejects rename, copy and binary semantics parsed by git', async () => {
+    const rename = 'diff --git a/a.txt b/b.txt\nsimilarity index 100%\nrename from a.txt\nrename to b.txt\n'
+    const copy = 'diff --git a/a.txt b/b.txt\nsimilarity index 100%\ncopy from a.txt\ncopy to b.txt\n'
+    const binary = 'diff --git a/a.txt b/a.txt\nBinary files a/a.txt and b/a.txt differ\n'
+    for (const patch of [rename, copy]) {
+      const { client, reads, writes, deletes } = patchClient()
+      await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', patch)).rejects.toThrow(/rename\/copy|binary|hunk/)
+      expect(reads).toEqual([])
+      expect(writes).toEqual([])
+      expect(deletes).toEqual([])
+    }
+    const { client, reads, writes, deletes } = patchClient()
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', binary)).rejects.toThrow()
+    expect(reads).toEqual([])
+    expect(writes).toEqual([])
+    expect(deletes).toEqual([])
+  })
+
+  it('patch_apply rejects symlink mode without exposing it to the Workspace API', async () => {
+    const { client, reads, writes, deletes } = patchClient()
+    const symlink = 'diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+../../etc/passwd\n\\ No newline at end of file\n'
+    await expect(applyWorkspacePatch(client, 'rsp_1', 'ws_main', symlink)).rejects.toThrow(/regular non-executable/)
+    expect(reads).toEqual([])
+    expect(writes).toEqual([])
+    expect(deletes).toEqual([])
   })
 })
 

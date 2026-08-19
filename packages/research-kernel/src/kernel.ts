@@ -67,6 +67,7 @@ import { TrajectoryStore } from './trajectory.js'
 import { MetricsStore } from './metrics.js'
 import {
   validateSecretRefInput, validateProviderBaseUrl, providerConfigHash, providerRedacted,
+  serviceIdentityAvailable, serviceIdentityTokenMatches,
   secretRefAvailable, parseProviderModels, validateBuiltInProviderContract, type ProviderUrlAllowlist,
 } from './provider.js'
 import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
@@ -376,11 +377,10 @@ function projectFromRow(row: ProjectRow): ResearchProject {
     brief_status: row.brief_status === 'collecting' ? 'collecting' : 'confirmed',
     brief: jsonParse(row.brief, {} as ResearchProject['brief']),
     constraints: jsonParse(row.constraints, {} as ResearchProject['constraints']),
-    // Older databases legitimately contain `{}` or an ExecutionConfig from
-    // before runner_target_id existed. Parse through the canonical schema so
-    // newly introduced defaults are applied on read instead of making every
-    // legacy project fail its next job submission with runner_target_unknown.
-    execution: ExecutionConfig.parse(jsonParse(row.execution, {})),
+    // Stored execution state is canonical. Obsolete rows are not silently
+    // upgraded or mapped to a local Runner; malformed/missing configuration
+    // fails closed so an operator must configure the project explicitly.
+    execution: ExecutionConfig.parse(jsonParse(row.execution, null)),
     integrity: jsonParse(row.integrity, {} as ResearchProject['integrity']),
     session_id: row.session_id,
     dsh_workspace_id: row.dsh_workspace_id,
@@ -993,7 +993,12 @@ export class ResearchKernel {
     // MODEL-01: secret root for file-scheme SecretRef availability.
     this.secretRoot = options.secretRoot ?? null
     this.providerUrlAllowlist = options.providerUrlAllowlist ?? {}
-    this.runnerTargets = new RunnerTargetRegistry(this.db, ref => secretRefAvailable(ref, this.secretRoot))
+    this.runnerTargets = new RunnerTargetRegistry(
+      this.db,
+      ref => secretRefAvailable(ref, this.secretRoot),
+      ref => serviceIdentityAvailable(ref, this.secretRoot),
+      (ref, provided) => serviceIdentityTokenMatches(ref, this.secretRoot, provided),
+    )
     // CONFIG-01: pin the effective runtime config through the registry. The
     // registry validates the values (unknown keys / floor violations throw
     // here — fail fast at construction) and returns the one-way sha256 pin.
@@ -1226,7 +1231,10 @@ export class ResearchKernel {
     // security floor for programmatic callers (docker socket / privileged /
     // host network / images.lock pins). Throws ConfigRegistryError on
     // violation before anything is persisted.
-    const execution = ExecutionConfig.parse(input.execution ?? {})
+    // Name-only / omitted execution starts explicitly unconfigured. This is
+    // intentionally different from choosing the built-in local Docker
+    // profile: no execution path may treat null as a default runner.
+    const execution = ExecutionConfig.parse({ runner_profile_id: null, ...(input.execution ?? {}) })
     const integrity = IntegrityConfig.parse(input.integrity ?? {})
     // canonical registry keys are dotted: execution.* / integrity.*
     const projectConfig: Record<string, unknown> = {}
@@ -1253,12 +1261,17 @@ export class ResearchKernel {
       throw new KernelError(422, 'fixture_required',
         'full-auto projects require execution.fixture_id bound to a REGISTERED FixtureProfile (reconstruction-contracts.md §5); unknown fixture ids are rejected')
     }
-    // Project defaults must already be executable: target/profile are both
-    // resolved before persistence, and kind/state mismatches fail closed.
+    if (mode === 'full-auto' && execution.runner_profile_id === null) {
+      throw new KernelError(422, 'runner_profile_required',
+        'full-auto projects require an explicit registered execution.runner_profile_id; no local runner is selected implicitly')
+    }
+    // A name-only DRAFT may exist while its runner is unconfigured. Any
+    // non-null profile must already be a registered, compatible target; Job
+    // submission remains fail-closed for the explicit null state below.
     const projectProfileRef = execution.runner_profile_id
-    const projectProfileId = resolveRunnerProfileId(projectProfileRef)
+    const projectProfileId = projectProfileRef === null ? null : resolveRunnerProfileId(projectProfileRef)
     const projectProfile = projectProfileId === null ? null : getRunnerProfile(projectProfileId)
-    if (projectProfile === null || !projectProfile.enabled) {
+    if (projectProfileRef !== null && (projectProfile === null || !projectProfile.enabled)) {
       throw new KernelError(422, 'runner_profile_unknown',
         `execution runner profile ${projectProfileRef} is not an enabled registered opaque RunnerProfile id`)
     }
@@ -1271,10 +1284,10 @@ export class ResearchKernel {
       throw new KernelError(409, projectTarget.draining ? 'runner_target_draining' : 'runner_target_disabled',
         `runner target ${projectTarget.target_id} is not accepting new projects`)
     }
-    if (projectProfile.runner_mode === 'isolated-subprocess' && projectTarget.kind !== 'local-process') {
+    if (projectProfile?.runner_mode === 'isolated-subprocess' && projectTarget.kind !== 'local-process') {
       throw new KernelError(422, 'runner_target_profile_mismatch', 'isolated-subprocess profile requires a local-process target')
     }
-    if (projectProfile.runner_mode === 'local-docker' && projectTarget.kind === 'local-process') {
+    if (projectProfile?.runner_mode === 'local-docker' && projectTarget.kind === 'local-process') {
       throw new KernelError(422, 'runner_target_profile_mismatch', 'container profile cannot execute on a local-process target')
     }
     const project: ResearchProject = {
@@ -3907,6 +3920,9 @@ export class ResearchKernel {
   updateRunnerTarget(targetId: string, input: RunnerTargetUpdateInput): RunnerTargetDescriptor {
     return this.runnerTargets.update(targetId, input)
   }
+  runnerTargetIdentityAuthorized(targetId: string, provided: string): boolean {
+    return this.runnerTargets.identityAuthorized(targetId, provided)
+  }
   observeRunnerTarget(targetId: string, input: { expected_revision: number; health: 'online' | 'offline' }): RunnerTargetDescriptor {
     return this.runnerTargets.observe(targetId, input)
   }
@@ -3932,7 +3948,9 @@ export class ResearchKernel {
       throw new KernelError(409, target.draining ? 'runner_target_draining' : 'runner_target_disabled',
         `runner target ${target.target_id} is not accepting new jobs`)
     }
-    const currentProfileId = resolveRunnerProfileId(project.execution.runner_profile_id)
+    const currentProfileId = project.execution.runner_profile_id === null
+      ? null
+      : resolveRunnerProfileId(project.execution.runner_profile_id)
     const currentProfile = currentProfileId === null ? null : getRunnerProfile(currentProfileId)
     const profileId = target.kind === 'local-process'
       ? RUNNER_PROFILE_IDS.isolatedSubprocess
@@ -5303,8 +5321,9 @@ export class ResearchKernel {
     data_artifact_ids?: string[]
     image_digest?: string
     output_contract?: { metrics: string; logs: string }
-    // domain-model.md §9.1: opaque RunnerProfile id（缺省回退 project 级
-    // execution.runner_profile_id，再回退 v1 enum 映射）；未知 id 422。
+    // domain-model.md §9.1: an explicit job override wins over the
+    // project's explicit registered id. The unconfigured null state never
+    // falls back to a local profile.
     runner_profile_id?: string | null
     /** Job override of the project's opaque configurable target id. */
     runner_target_id?: string | null
@@ -5334,14 +5353,18 @@ export class ResearchKernel {
     // v2 §3.2 / §12.3: formal-class jobs require a container runner profile;
     // isolated-subprocess is rejected at submission time (kernel layer).
     // domain-model.md §2/§9.1: Job 只引用已登记的 opaque profile id ——
-    // 显式 runner_profile_id（job 级 > project 级）优先，缺省从 v1 enum
-    // 映射同名本机 profile；未知 id → 422（fail closed，零落库）。解析出的
+    // 显式 runner_profile_id（job 级 > project 级）优先；未配置/null 或未知 id
+    // → 422（fail closed，零落库）。解析出的
     // profile 的 config_hash 与 image digest 一起固定进 Job payload，runner
     // 按注册表复算校验。
     const SECURE_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce', 'latex-compile']
     // job override > project default; both are registered opaque ids.
     const profileRef = input.runner_profile_id ?? project.execution.runner_profile_id
-    const resolvedProfileId = resolveRunnerProfileId(profileRef)
+    if (profileRef === null) {
+      throw new KernelError(422, 'runner_profile_required',
+        `project ${project.project_id} has no configured RunnerProfile; select one in Settings or provide an explicit registered runner_profile_id`)
+    }
+    const resolvedProfileId = profileRef === null ? null : resolveRunnerProfileId(profileRef)
     const runnerProfile = resolvedProfileId !== null ? getRunnerProfile(resolvedProfileId) : null
     if (runnerProfile === null) {
       throw new KernelError(422, 'runner_profile_unknown',
@@ -5655,14 +5678,16 @@ export class ResearchKernel {
   }
 
   /**
-   * Atomic Contract → baseline execution handoff.
+   * Atomic Contract → baseline execution handoff and matched-seed append.
    *
    * A Contract Gate freezes scientific intent, not executable code. This is
    * therefore the only path that may create the first contract-bound
    * baseline Job and advance CONTRACT_APPROVED → BASELINE_REPRO. Validation,
    * Job/outbox writes and the phase transition share one SQLite transaction,
    * so callers can never observe a queued Job with the old phase (or the new
-   * phase without its Job).
+   * phase without its Job). Once in BASELINE_REPRO, the same endpoint may
+   * append another run for the active approved Contract without changing the
+   * Project revision; generic Job submission is never a baseline entrypoint.
    */
   startBaselineRun(input: {
     project_id: string
@@ -5705,8 +5730,24 @@ export class ResearchKernel {
       if (current.revision !== input.expected_revision) {
         throw new KernelError(409, 'revision_conflict', `expected revision ${input.expected_revision}, got ${current.revision}`)
       }
-      if (current.status !== 'CONTRACT_APPROVED') {
-        throw new KernelError(409, 'baseline_start_not_ready', `baseline start requires CONTRACT_APPROVED, got ${current.status}`)
+      if (current.status !== 'CONTRACT_APPROVED' && current.status !== 'BASELINE_REPRO') {
+        throw new KernelError(409, 'baseline_start_not_ready',
+          `baseline run requires CONTRACT_APPROVED or BASELINE_REPRO, got ${current.status}`)
+      }
+      if (current.status === 'BASELINE_REPRO') {
+        const firstBaseline = this.db.prepare(
+          `SELECT contract_id FROM jobs
+           WHERE project_id = ? AND kind = 'baseline'
+           ORDER BY created_at ASC, job_id ASC LIMIT 1`,
+        ).get(input.project_id) as { contract_id: string | null } | undefined
+        if (firstBaseline?.contract_id === undefined || firstBaseline.contract_id === null) {
+          throw new KernelError(409, 'baseline_start_not_ready',
+            'additional baseline runs require an existing contract-bound baseline Job')
+        }
+        if (firstBaseline.contract_id !== input.contract_id) {
+          throw new KernelError(422, 'baseline_contract_mismatch',
+            `additional baseline contract ${input.contract_id} does not match the active baseline contract ${firstBaseline.contract_id}`)
+        }
       }
 
       const targetId = input.runner_target_id ?? current.execution.runner_target_id
@@ -5735,12 +5776,14 @@ export class ResearchKernel {
         output_contract: outputContract,
         created_by_principal_id: input.created_by_principal_id ?? null,
       })
-      const project = this.transition(
-        input.project_id,
-        'BASELINE_REPRO',
-        current.revision,
-        `baseline job ${job.job_id} submitted from approved contract ${input.contract_id}`,
-      )
+      const project = current.status === 'CONTRACT_APPROVED'
+        ? this.transition(
+            input.project_id,
+            'BASELINE_REPRO',
+            current.revision,
+            `baseline job ${job.job_id} submitted from approved contract ${input.contract_id}`,
+          )
+        : current
       return { project, job }
     })
   }
@@ -8541,7 +8584,9 @@ export class ResearchKernel {
       created_at: j.created_at,
     }))
     const codeSnapshots = this.listCodeSnapshots(projectId)
-    const profileId = resolveRunnerProfileId(project.execution.runner_profile_id)
+    const profileId = project.execution.runner_profile_id === null
+      ? null
+      : resolveRunnerProfileId(project.execution.runner_profile_id)
     const target = this.listRunnerTargets().find(candidate => candidate.target_id === project.execution.runner_target_id)
     const profile = profileId === null ? null : getRunnerProfile(profileId)
     const runnerEnvironmentReady = profile !== null

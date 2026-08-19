@@ -65,8 +65,8 @@ BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resour
 start_kernel || { echo "kernel failed to start"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 
-PROJ_A=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"iso-a\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
-PROJ_B=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"iso-b\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
+PROJ_A=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"iso-a\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
+PROJ_B=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"iso-b\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$PROJ_A" && -n "$PROJ_B" ]] || { echo "failed to create projects"; exit 1; }
 
 # ── Test 1: cross-project-idempotency-isolated ─────────────────────────────

@@ -340,6 +340,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       // reconstruction-contracts.md §5: full-auto is fixture-only — bind a
       // REGISTERED FixtureProfile id (kernel rejects unknown/missing ids).
       fixture_id: OPT_STRING,
+      runner_profile_id: OPT_STRING,
+      runner_target_id: OPT_STRING,
       project_id: OPT_STRING,
     },
     output: {
@@ -372,9 +374,15 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
               domain: String(brief.domain ?? 'machine-learning'),
             },
             mode: args.mode ?? toolCtx.defaultMode,
-            ...(args.fixture_id !== undefined && args.fixture_id !== ''
-              ? { execution: { fixture_id: args.fixture_id } }
-              : {}),
+            execution: {
+              runner_profile_id: args.runner_profile_id ?? null,
+              ...(args.runner_target_id !== undefined && args.runner_target_id !== ''
+                ? { runner_target_id: args.runner_target_id }
+                : {}),
+              ...(args.fixture_id !== undefined && args.fixture_id !== ''
+                ? { fixture_id: args.fixture_id }
+                : {}),
+            },
             session_id: sessionId ?? null,
             creator_principal_id: toolCtx.operatorPrincipal,
           })
@@ -946,34 +954,48 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
 
   ctx.tools.register(researchTool({
     name: 'baseline_prepare',
-    description: 'Prepare and kick off a Baseline reproduction (design §4.6 step 1-2): records the repository reference, environment notes and reproduction tolerance, then submits a `baseline` runner job bound to a code snapshot (code_snapshot_id, §12.2). The RunManifest carries commit, hashes and metrics; deviation vs expected_metrics is returned for the reproduction gate.',
+    description: 'Atomically start an approved Contract baseline through the canonical baseline-runs endpoint. Requires the current Project revision, approved Contract, immutable CodeSnapshot, non-empty argv, idempotency key and configured Runner environment; the first run advances to BASELINE_REPRO, while additional matched-seed runs stay in that phase and must use the same Contract.',
     parameters: {
       project_id: OPT_STRING,
-      repo: { type: 'string', required: true },
-      commit: OPT_STRING,
-      command_json: OPT_STRING,
-      expected_metrics_json: OPT_STRING,
-      tolerance: { type: 'number' },
-      idempotency_key: OPT_STRING,
-      // §12.2 JobSpec binding (SCH-EXEC-002): required for baseline kind.
-      code_snapshot_id: OPT_STRING,
+      expected_revision: { type: 'integer', required: true },
+      idempotency_key: { type: 'string', required: true },
+      contract_id: { type: 'string', required: true },
+      code_snapshot_id: { type: 'string', required: true },
+      command_json: { type: 'string', required: true },
+      runner_target_id: OPT_STRING,
+      image_digest: OPT_STRING,
+      output_contract_json: OPT_STRING,
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
-      const command = args.command_json !== undefined ? JSON.parse(args.command_json) as unknown : []
-      if (!Array.isArray(command)) throw new Error('command_json must be a JSON array of strings')
-      const expected = args.expected_metrics_json !== undefined ? JSON.parse(args.expected_metrics_json) as unknown : {}
-      const job = await client.submitJob({
+      const command = JSON.parse(args.command_json) as unknown
+      if (!Array.isArray(command) || command.length === 0 || command.some(part => typeof part !== 'string' || part.trim() === '')) {
+        throw new Error('command_json must be a non-empty JSON array of non-empty strings')
+      }
+      const outputContract = args.output_contract_json === undefined
+        ? undefined
+        : parseJsonObject(args.output_contract_json, 'output_contract_json')
+      if (outputContract !== undefined
+        && (typeof outputContract.metrics !== 'string' || outputContract.metrics === ''
+          || typeof outputContract.logs !== 'string' || outputContract.logs === '')) {
+        throw new Error('output_contract_json must contain non-empty string fields `metrics` and `logs`')
+      }
+      const started = await client.startBaselineRun({
         project_id: projectId,
-        idempotency_key: args.idempotency_key ?? `baseline-prep-${Date.now()}`,
-        kind: 'baseline',
-        command,
-        code_snapshot_id: args.code_snapshot_id ?? null,
-        payload: { repo: args.repo, commit: args.commit ?? '', expected_metrics: expected, tolerance: args.tolerance ?? 0.05, message: 'baseline reproduction' },
+        expected_revision: args.expected_revision,
+        idempotency_key: args.idempotency_key,
+        contract_id: args.contract_id,
+        code_snapshot_id: args.code_snapshot_id,
+        command: command as string[],
+        ...(args.runner_target_id !== undefined ? { runner_target_id: args.runner_target_id } : {}),
+        ...(args.image_digest !== undefined ? { image_digest: args.image_digest } : {}),
+        ...(outputContract !== undefined
+          ? { output_contract: { metrics: outputContract.metrics as string, logs: outputContract.logs as string } }
+          : {}),
       })
-      return { ok: true, job, reproduction: { repo: args.repo, commit: args.commit ?? '', tolerance: args.tolerance ?? 0.05, expected_metrics: expected, note: 'reproduction passes when |metric - expected| / |expected| <= tolerance for every expected metric' } }
+      return { ok: true, project: started.project, job: started.job }
     },
   }, toolCtx))
 

@@ -63,6 +63,8 @@ describe('DSH plugin defaultMode', () => {
       name: 'fixture',
       brief_json: JSON.stringify(BRIEF),
       fixture_id: 'golden-path-v2',
+      runner_profile_id: 'profile_local_docker_cpu_v1',
+      runner_target_id: 'target_local_docker_v1',
     }, { agent: { id: 'pi' }, signal: new AbortController().signal })
 
     expect(createdMode).toBe('full-auto')
@@ -91,10 +93,71 @@ describe('DSH plugin defaultMode', () => {
     } as CommandContext)
     await commands.get('new')?.handler({
       agent: { id: 'pi' },
-      rawInput: `fixture ${JSON.stringify({ ...BRIEF, fixture_id: 'golden-path-v2' })}`,
+      rawInput: `fixture ${JSON.stringify({ ...BRIEF, fixture_id: 'golden-path-v2', runner_profile_id: 'profile_local_docker_cpu_v1', runner_target_id: 'target_local_docker_v1' })}`,
     })
 
     expect(createdMode).toBe('full-auto')
+  })
+
+  it('starts an approved baseline only through the atomic baseline-runs client method', async () => {
+    let request: Record<string, unknown> | undefined
+    let genericSubmits = 0
+    const client = {
+      startBaselineRun: async (input: Record<string, unknown>) => {
+        request = input
+        return {
+          project: { project_id: 'rsp_atomic', status: 'BASELINE_REPRO', revision: 8 },
+          job: { job_id: 'job_atomic', kind: 'baseline', status: 'queued' },
+        }
+      },
+      submitJob: async () => {
+        genericSubmits += 1
+        throw new Error('generic submit must not be used')
+      },
+    } as unknown as ResearchClient
+    const registered: Array<{
+      name: string
+      description: string
+      parameters?: { required?: string[] }
+      execute(args: Record<string, unknown>, exec: { agent?: { id: string }; signal: AbortSignal }): Promise<unknown>
+    }> = []
+    registerResearchTools({ tools: { register: tool => registered.push(tool as never) } }, {
+      client,
+      cache: { get: async () => undefined, set: async () => undefined },
+      ctx: {}, roles: { set() {} }, modelFor: () => undefined,
+      operatorPrincipal: 'dsh:test-operator',
+    } as unknown as ResearchToolContext)
+
+    const baseline = registered.find(tool => tool.name === 'baseline_prepare')
+    expect(baseline?.description).toContain('Atomically')
+    for (const key of ['expected_revision', 'idempotency_key', 'contract_id', 'code_snapshot_id', 'command_json']) {
+      expect(baseline?.parameters?.required).toContain(key)
+    }
+    const result = await baseline?.execute({
+      project_id: 'rsp_atomic',
+      expected_revision: 7,
+      idempotency_key: 'baseline:contract-1',
+      contract_id: 'contract-1',
+      code_snapshot_id: 'snap-1',
+      command_json: '["python","train.py"]',
+      runner_target_id: 'target-remote-1',
+      image_digest: `node@sha256:${'a'.repeat(64)}`,
+      output_contract_json: '{"metrics":"/outputs/metrics.json","logs":"/outputs/run.log"}',
+    }, { agent: { id: 'pi' }, signal: new AbortController().signal })
+
+    expect(genericSubmits).toBe(0)
+    expect(request).toEqual({
+      project_id: 'rsp_atomic',
+      expected_revision: 7,
+      idempotency_key: 'baseline:contract-1',
+      contract_id: 'contract-1',
+      code_snapshot_id: 'snap-1',
+      command: ['python', 'train.py'],
+      runner_target_id: 'target-remote-1',
+      image_digest: `node@sha256:${'a'.repeat(64)}`,
+      output_contract: { metrics: '/outputs/metrics.json', logs: '/outputs/run.log' },
+    })
+    expect(result).toMatchObject({ ok: true, job: { job_id: 'job_atomic' }, project: { status: 'BASELINE_REPRO' } })
   })
 
   it('creates a name-only project from DSH rawInput with its separator whitespace', async () => {

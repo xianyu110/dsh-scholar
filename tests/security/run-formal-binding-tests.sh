@@ -69,9 +69,9 @@ IMG='node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa3
 start_kernel || { echo "kernel failed to start"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 
-PROJ1=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"fb-p1\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
+PROJ1=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"fb-p1\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$PROJ1" ]] || { echo "failed to create project 1"; exit 1; }
-PROJ2=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"fb-p2\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
+PROJ2=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"fb-p2\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$PROJ2" ]] || { echo "failed to create project 2"; exit 1; }
 ok "projects $PROJ1 (binding target) + $PROJ2 (foreign source)"
 

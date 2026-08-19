@@ -22,9 +22,9 @@
  * @module @dsh-scholar/research-kernel/provider
  */
 
-import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import { KernelError } from './kernel.js'
 import {
   type ProviderDescriptor,
@@ -355,4 +355,42 @@ export function secretRefAvailable(ref: SecretRef, secretRoot: string | null): b
   }
   // keyring/vault：本实例无 resolver（如实记录）。
   return false
+}
+
+/** Resolve a target-scoped service-identity token without ever returning it
+ * to an adapter. Unlike the generic provider availability probe, identity
+ * material is accepted only from a regular, non-symlink 0600 file contained
+ * by the configured secret root. keyring/vault refs remain unavailable until
+ * a real server-side resolver is installed. */
+function readServiceIdentityToken(ref: SecretRef, secretRoot: string | null): string | null {
+  if (ref.scheme !== 'file' || secretRoot === null || secretRoot === '') return null
+  try {
+    const root = realpathSync(secretRoot)
+    const candidate = resolve(root, ref.name)
+    const lexical = relative(root, candidate)
+    if (lexical === '..' || lexical.startsWith(`..${sep}`) || lexical === '' || lexical.startsWith(sep)) return null
+    const info = lstatSync(candidate)
+    if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o777) !== 0o600 || info.size < 32 || info.size > 4096) return null
+    // realpath equality also rejects a symlink in any parent component.
+    if (realpathSync(candidate) !== candidate) return null
+    const value = readFileSync(candidate, 'utf8').trim()
+    if (Buffer.byteLength(value, 'utf8') < 32 || Buffer.byteLength(value, 'utf8') > 4096) return null
+    return value
+  } catch {
+    return null
+  }
+}
+
+export function serviceIdentityAvailable(ref: SecretRef, secretRoot: string | null): boolean {
+  return readServiceIdentityToken(ref, secretRoot) !== null
+}
+
+/** Constant-time target credential proof. Hashing both values fixes the
+ * comparison width without exposing the target token or its exact length. */
+export function serviceIdentityTokenMatches(ref: SecretRef, secretRoot: string | null, provided: string): boolean {
+  const expected = readServiceIdentityToken(ref, secretRoot)
+  if (expected === null || provided.length === 0 || provided.length > 4096) return false
+  const actualHash = createHash('sha256').update(provided).digest()
+  const expectedHash = createHash('sha256').update(expected).digest()
+  return timingSafeEqual(actualHash, expectedHash)
 }

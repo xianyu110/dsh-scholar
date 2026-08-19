@@ -127,8 +127,24 @@ PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"analysis-consistency\",\"
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 ok "project $PROJ"
 
+# Reach CONTRACT_PENDING through the real human-gated lifecycle. Baseline
+# execution below must enter through the atomic baseline-runs endpoint; the
+# fixture may not freeze a Contract on an unrelated DRAFT project.
+G_SCOPE=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Analysis consistency scope"}' | jfield '.gate_id')
+api -X POST "$BASE/v1/gates/$G_SCOPE/decisions" -d '{"actor":"analysis-consistency","principal":{"principal_id":"analysis-consistency-pi"},"decision":"approved"}' > /dev/null
+for PHASE in SURVEYING IDEATING; do
+  REV=$(api "$BASE/v1/projects/$PROJ" | jfield '.revision')
+  api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"$PHASE\",\"expected_revision\":$REV}" > /dev/null
+done
+G_IDEA=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Analysis consistency idea"}' | jfield '.gate_id')
+api -X POST "$BASE/v1/gates/$G_IDEA/decisions" -d '{"actor":"analysis-consistency","principal":{"principal_id":"analysis-consistency-pi"},"decision":"approved"}' > /dev/null
+REV=$(api "$BASE/v1/projects/$PROJ" | jfield '.revision')
+api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
+
 CT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_consistency","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"baseline-engine","treatment":"treatment-engine"},"metrics":{"primary":"m1","secondary":["n_samples","m2"],"direction":"higher_is_better"},"seeds":[1,2,3],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | jfield '.contract_id')
-APPROVE=$(api -X POST "$BASE/v1/projects/$PROJ/contracts/$CT/approve" -d '{"actor":"analysis-consistency-eval"}' | jfield '.status')
+G_CONTRACT=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Analysis consistency Contract\",\"payload\":{\"contract_id\":\"$CT\"}}" | jfield '.gate_id')
+api -X POST "$BASE/v1/gates/$G_CONTRACT/decisions" -d '{"actor":"analysis-consistency","principal":{"principal_id":"analysis-consistency-pi"},"decision":"approved"}' > /dev/null
+APPROVE=$(api "$BASE/v1/projects/$PROJ/contracts" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const c=JSON.parse(d).find(x=>x.contract_id==='$CT');console.log(c?.status??'')})")
 if [[ "$CT" == expc_* ]] && [[ "$APPROVE" == "approved" ]]; then
   ok "contract $CT registered + frozen (status=approved, metrics m1 primary / n_samples,m2 secondary, direction higher_is_better, seeds 1..3)"
 else
@@ -197,9 +213,17 @@ approx() { # <actual> <expected> — within 1e-9
 
 submit_job() { # <idempotency_key> <kind> <fixture-js> <seed> — real command job
   local key="$1" kind="$2" js="$3" seed="$4"
-  KEY="$key" KIND="$kind" SNAP="$CODE_ART" CT="$CT" SEED="$seed" JS="$js" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,contract_id:process.env.CT,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c","node /work/"+process.env.JS+" --seed "+process.env.SEED+" --data /work/data/seed-data.json --output /outputs/metrics.json --contract-id \"$DSH_CONTRACT_ID\""]}))' \
-    | api -X POST "$BASE/v1/projects/$PROJ/jobs" -d @- \
-    | jfield '.status'
+  if [ "$kind" = "baseline" ]; then
+    local revision
+    revision=$(api "$BASE/v1/projects/$PROJ" | jfield '.revision')
+    KEY="$key" SNAP="$CODE_ART" CT="$CT" SEED="$seed" JS="$js" REV="$revision" node -e 'process.stdout.write(JSON.stringify({expected_revision:Number(process.env.REV),idempotency_key:process.env.KEY,code_snapshot_id:process.env.SNAP,contract_id:process.env.CT,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c","node /work/"+process.env.JS+" --seed "+process.env.SEED+" --data /work/data/seed-data.json --output /outputs/metrics.json --contract-id \"$DSH_CONTRACT_ID\""]}))' \
+      | api -X POST "$BASE/v1/projects/$PROJ/baseline-runs" -d @- \
+      | jfield '.job.status'
+  else
+    KEY="$key" KIND="$kind" SNAP="$CODE_ART" CT="$CT" SEED="$seed" JS="$js" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,contract_id:process.env.CT,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c","node /work/"+process.env.JS+" --seed "+process.env.SEED+" --data /work/data/seed-data.json --output /outputs/metrics.json --contract-id \"$DSH_CONTRACT_ID\""]}))' \
+      | api -X POST "$BASE/v1/projects/$PROJ/jobs" -d @- \
+      | jfield '.status'
+  fi
 }
 
 echo "== baseline jobs (kind=baseline, baseline.js, seeds 1/2/3, real node in docker) =="

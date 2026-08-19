@@ -23,7 +23,7 @@ import { RUNNER_TARGET_DDL, seedBuiltinRunnerTargets } from './runner-target-reg
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 22
+export const SCHEMA_VERSION = 23
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -1230,6 +1230,26 @@ const runnerTargetRuntime = (db: DatabaseSync, report: MigrationReport): void =>
   ).get() as { n: number }).n)
 }
 
+/** 0026 — bind every RunnerTarget heartbeat to a target-scoped service
+ * identity. Existing custom targets remain unconfigured and therefore cannot
+ * heartbeat until an Operator installs a SecretRef; built-ins receive their
+ * fixed instance-secret paths. */
+const runnerTargetServiceIdentity = (db: DatabaseSync, report: MigrationReport): void => {
+  ensureColumn(db, 'runner_targets', 'service_identity_json', 'TEXT')
+  const builtins = [
+    { target_id: 'target_local_process_v1', service_identity: { scheme: 'file', name: 'runner-targets/target_local_process_v1.token', scope: 'instance' } },
+    { target_id: 'target_local_docker_v1', service_identity: { scheme: 'file', name: 'runner-targets/target_local_docker_v1.token', scope: 'instance' } },
+  ]
+  for (const target of builtins) {
+    db.prepare('UPDATE runner_targets SET service_identity_json=? WHERE target_id=? AND service_identity_json IS NULL')
+      .run(JSON.stringify(target.service_identity), target.target_id)
+  }
+  if (report.rows === undefined) report.rows = {}
+  report.rows.runner_targets_with_service_identity = Number((db.prepare(
+    'SELECT COUNT(*) AS n FROM runner_targets WHERE service_identity_json IS NOT NULL',
+  ).get() as { n: number }).n)
+}
+
 /**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
@@ -1381,6 +1401,12 @@ export const MIGRATIONS: Migration[] = [
     description: 'EXEC-ENV-03: digest-pinned Docker CPU/NVIDIA runtime configuration on runner targets',
     body: runnerTargetRuntime.toString(),
     up: runnerTargetRuntime,
+  },
+  {
+    id: '0026_runner_target_service_identity',
+    description: 'EXEC-ENV-04: target-scoped service identity SecretRef for authenticated RunnerTarget heartbeats',
+    body: runnerTargetServiceIdentity.toString(),
+    up: runnerTargetServiceIdentity,
   },
 ]
 
