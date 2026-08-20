@@ -26,6 +26,7 @@ set -eu
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js"
+export DSH_SCHOLAR_CANONICAL_JSON_MODULE="$REPO/packages/research-schemas/lib/canonical-json.js"
 WORK=$(mktemp -d)
 PORT=""
 KERNEL_PID=""
@@ -109,8 +110,11 @@ cat > "$WORK/sign-manifest.mjs" <<'EOF'
 // args: jobId projectId metricsArtifact privateKeyPath keyId leaseGeneration mode
 import { createHash, sign } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 const [jobId, projectId, metricsArtifact, keyPath, keyId, generation, mode] = process.argv.slice(2)
-const canonical = (m) => JSON.stringify(m, Object.keys(m).sort())
+// Reuse the exact production module. A top-level JSON.stringify replacer
+// silently drops nested Manifest fields and would sign different bytes.
+const { canonicalJsonDeep: canonical } = await import(pathToFileURL(process.env.DSH_SCHOLAR_CANONICAL_JSON_MODULE).href)
 const privateKey = readFileSync(keyPath, 'utf8')
 const manifest = {
   run_id: `run_shell_${Date.now()}`,

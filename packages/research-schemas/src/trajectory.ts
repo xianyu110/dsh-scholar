@@ -215,6 +215,16 @@ export const FollowupReceipt = z.object({
 })
 export type FollowupReceipt = z.infer<typeof FollowupReceipt>
 
+/** Durable, non-secret execution identity pinned by the trusted DSH panel
+ * producer. It contains no endpoint, credential or prompt. */
+export const ChildExecutionIdentity = z.object({
+  provider_ref: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/),
+  model_ref: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/),
+  family_ref: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/),
+  config_hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+}).strict()
+export type ChildExecutionIdentity = z.infer<typeof ChildExecutionIdentity>
+
 /** Registration payload for a spawned subagent (plugin research_panel →
  * kernel child_links, migration 0013). */
 export const ChildLinkInput = z.object({
@@ -227,5 +237,6 @@ export const ChildLinkInput = z.object({
   mode: ChildMode.optional(),
   role: z.string().nullable().optional(),
   state: ChildState.optional(),
+  execution_identity: ChildExecutionIdentity.optional(),
 })
 export type ChildLinkInput = z.infer<typeof ChildLinkInput>

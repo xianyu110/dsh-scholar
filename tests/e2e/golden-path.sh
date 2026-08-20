@@ -20,6 +20,8 @@ KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js"
 RUNNER_BIN="$REPO/workers/runner-gateway/lib/bin/runner.js"
 WORK=$(mktemp -d)
 PORT=$((18000 + $$ % 2000))
+SERVICE_TOKEN="golden-path-service-token"
+export DSH_SCHOLAR_SERVICE_TOKEN="$SERVICE_TOKEN"
 KERNEL_PID=""
 RUNNER_PID=""
 cleanup() {
@@ -48,7 +50,13 @@ fi
 nohup node "$RUNNER_BIN" --kernel "http://127.0.0.1:$PORT" --owner golden-runner --poll-ms 250 --mode docker > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
 
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" "$@"; }
+human_decide() {
+  local gate_id=$1
+  local body=$2
+  api -H 'x-service-principal: standalone-human-bff' \
+    -X POST "http://127.0.0.1:$PORT/internal/human-gates/$gate_id/decisions" -d "$body"
+}
 jqfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const v=JSON.parse(d);const p=process.argv[1].split('.');let x=v;for(const k of p)x=x[k];console.log(x??'')})" "$1"; }
 
 BRIEF='{"problem":"Does uncertainty weighting improve temporal localization under shift?","scope":"THUMOS14, supervised, no new data","questions":["Is the effect robust across seeds?"],"primary_metrics":["mAP@0.5"],"resources":"1 GPU, <=20 GPU-hours","risks":["Baseline may not reproduce"],"target_outputs":["conference-paper"],"target_venue":null,"baseline_repo":"https://github.com/example/baseline","domain":"machine-learning"}'
@@ -60,7 +68,7 @@ STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
 [[ "$STATUS" == "DRAFT" && -n "$GATE" ]] && ok "project $PROJ DRAFT with scope gate $GATE" || bad "project status $STATUS"
 
 say "2. Scope Gate approved by human → SCOPED"
-api -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE/decisions" -d '{"actor":"human-pi","decision":"approved","reason":"scope acceptable","session_id":"golden-session"}' > /dev/null
+human_decide "$GATE" '{"actor":"human-pi","principal":{"principal_id":"human-pi"},"decision":"approved","reason":"scope acceptable","session_id":"golden-session"}' > /dev/null
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
 [[ "$STATUS" == "SCOPED" ]] && ok "SCOPED after gate" || bad "expected SCOPED got $STATUS"
 
@@ -79,7 +87,7 @@ say "4. idea + novelty audit → Idea Gate"
 IDEA=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/ideas" -d '{"title":"Uncertainty-weighted proposals","hypothesis":"Uncertainty weighting improves mAP under shift","exact_delta":"Adds an uncertainty branch","falsification":{"observation":"No mAP improvement under shift"},"minimum_viable_experiment":{"dataset":"thumos14","baseline":"baseline_b","primary_metric":"mAP@0.5","estimated_gpu_hours":6},"scores":{"feasibility":4,"information_gain":5,"reproducibility":4,"cost":3}}' | jqfield idea_id)
 api -X POST "http://127.0.0.1:$PORT/v1/ideas/$IDEA/novelty" -d '{"queries":["uncertainty temporal localization"],"result":"no_direct_match_found","overlap_papers":[],"unresolved_risk":"medium"}' > /dev/null
 IGATE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Idea Gate","payload":{"idea_id":"'$IDEA'"}}' | jqfield gate_id)
-api -X POST "http://127.0.0.1:$PORT/v1/gates/$IGATE/decisions" -d '{"actor":"human-pi","decision":"approved"}' > /dev/null
+human_decide "$IGATE" '{"actor":"human-pi","principal":{"principal_id":"human-pi"},"decision":"approved"}' > /dev/null
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
 [[ "$STATUS" == "IDEA_APPROVED" ]] && ok "Idea Gate approved → IDEA_APPROVED" || bad "expected IDEA_APPROVED got $STATUS"
 
@@ -88,7 +96,7 @@ REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
 CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"'$IDEA'","data":{"dataset_id":"thumos14","version":"v2","split":"official"},"methods":{"baseline":"baseline_b","treatment":"method_a"},"metrics":{"primary":"mAP@0.5","secondary":["accuracy"]},"seeds":[11,23,47],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"ablations":["component_x"],"stop_conditions":{"max_gpu_hours":48,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | jqfield contract_id)
 CGATE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"contract","title":"Contract Gate","payload":{"contract_id":"'$CONTRACT'"}}' | jqfield gate_id)
-CDEC=$(api -X POST "http://127.0.0.1:$PORT/v1/gates/$CGATE/decisions" -d '{"actor":"human-pi","decision":"approved","diff":"v1"}' | jqfield decision.decision_id)
+CDEC=$(human_decide "$CGATE" '{"actor":"human-pi","principal":{"principal_id":"human-pi"},"decision":"approved","diff":"v1"}' | jqfield decision.decision_id)
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield status)
 [[ "$STATUS" == "CONTRACT_APPROVED" ]] && ok "contract $CONTRACT approved (decision $CDEC) → CONTRACT_APPROVED" || bad "expected CONTRACT_APPROVED got $STATUS"
 REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | jqfield revision)

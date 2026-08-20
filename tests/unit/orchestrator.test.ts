@@ -1,670 +1,664 @@
-/**
- * Durable Research Orchestrator tests (design §8.2–§8.5).
- *
- * - Pure rule tests: every Kernel status maps to the correct §8.3 action;
- *   gate idempotency; terminal states produce no automation; §8.4 retry cap.
- * - Engine tests against an embedded fake Kernel (node:http): dry-run mode,
- *   gate creation + idempotent re-polls, pending-gate reconciliation, failure
- *   policy, §8.5 crash recovery of stale `running` rows.
- * - Integration test against a REAL kernel process (spawned
- *   packages/research-kernel/lib/bin/kernel.js): DRAFT → scope gate created,
- *   action persisted, second Engine instance on the same store does not
- *   duplicate the gate; after approving the gate the next poll records the
- *   `survey-ready` note action.
- *
- * Tests run against the built package (lib/); run
- * `pnpm --filter @dsh-scholar/research-orchestrator run build` first.
- */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest'
+/** Fixture-only Durable Orchestrator acceptance seam (FULLAUTO-01). */
 import { createServer, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import type { AddressInfo } from 'node:net'
+import { describe, expect, it, vi } from 'vitest'
+import { fixtureProject, type Gate, type NextAction, type ResearchProject } from '@dsh-scholar/research-schemas'
 import {
   ActionStore,
   Engine,
-  decideActions,
-  planForStatus,
-  type Action,
-  type ActionLike,
-  type ActionStatus,
-  type ProjectStatus,
+  decideFullAutoPlans,
+  planFullAutoProjection,
+  type KernelProjection,
 } from '../../workers/research-orchestrator/lib/index.js'
 
-// ── helpers ─────────────────────────────────────────────────────────────────
+const FIXTURE = 'golden-path-v2'
+const PROFILE = 'profile_local_docker_cpu_v1'
+const TARGET = 'target_local_docker_v1'
+const AUTHORITY_HASH = `sha256:${'b'.repeat(64)}`
 
-function act(key: string, status: ActionStatus, attempt = 0, maxAttempts = 3): ActionLike {
-  return { idempotency_key: key, status, attempt, max_attempts: maxAttempts }
+function dbPath(): string {
+  return join(mkdtempSync(join(tmpdir(), 'dsh-full-auto-orch-')), 'actions.db')
 }
 
-function freshDbPath(): string {
-  return join(mkdtempSync(join(tmpdir(), 'orch-store-')), 'actions.db')
+function project(overrides: Partial<ResearchProject> = {}): ResearchProject {
+  return fixtureProject({
+    project_id: 'rsp_auto_1',
+    name: 'fixture auto',
+    mode: 'full-auto',
+    status: 'DRAFT',
+    revision: 3,
+    brief_status: 'confirmed',
+    execution: {
+      runner_profile_id: PROFILE,
+      runner_target_id: TARGET,
+      network_policy: 'allowlist',
+      artifact_store: 'local-cas',
+      fixture_id: FIXTURE,
+    },
+    ...overrides,
+  })
 }
 
-function makeBrief() {
+function gate(type: Gate['type'], id = `gate_${type}_1`, payload: Record<string, unknown> = {}): Gate {
   return {
-    problem: 'problem', scope: 'scope', questions: [], primary_metrics: ['m'],
-    resources: '', risks: [], target_outputs: ['paper'], target_venue: null,
-    baseline_repo: null, domain: 'ml',
+    gate_id: id,
+    project_id: 'rsp_auto_1',
+    type,
+    title: `${type} Gate`,
+    summary: '',
+    payload,
+    status: 'pending',
+    dsh_session_id: null,
+    dsh_event_id: null,
+    created_at: '2026-08-20T00:00:00.000Z',
+    decided_at: null,
   }
 }
 
-interface FakeKernelProject {
-  project_id: string
-  status: string
-  pending_gates?: Array<{ gate_id: string; type: string; title: string; status: string }>
-  /** INIT-GRILL-02: collecting name-only projects must never get an auto Gate. */
-  brief_status?: 'collecting' | 'confirmed'
+function action(input: Partial<NextAction> & Pick<NextAction, 'code'>): NextAction {
+  return {
+    id: `${input.code}:rsp_auto_1`,
+    code: input.code,
+    label: input.code,
+    reason: '',
+    required: true,
+    route: 'overview',
+    revision: 3,
+    state: 'ready',
+    blocking: true,
+    refs: [],
+    required_by: 'agent',
+    ...input,
+  }
 }
 
-interface FakeKernelHandle {
+function projection(input: {
+  project?: ResearchProject
+  gates?: Gate[]
+  actions?: NextAction[]
+} = {}): KernelProjection {
+  const p = input.project ?? project()
+  const actions = input.actions ?? []
+  return {
+    project: p,
+    pending_gates: input.gates ?? [],
+    jobs: [],
+    budget: { project_id: p.project_id, model_cost_usd: 0, gpu_hours: 0, api_requests: 0, storage_bytes: 0, updated_at: p.updated_at },
+    counts: { ideas: 0, contracts: 0, claims: 0, evidence: 0, artifacts: 0, corpus_snapshots: 0 },
+    next_actions: actions.map(item => item.label),
+    next_actions_v2: actions,
+  }
+}
+
+function surveyResult(query: string) {
+  const runAt = '2026-08-20T00:02:00.000Z'
+  return {
+    queries: [
+      { source: 'openalex' as const, query, run_at: runAt },
+      { source: 'crossref' as const, query, run_at: runAt },
+      { source: 'arxiv' as const, query, run_at: runAt },
+    ],
+    papers: [],
+    passages: [],
+    citation_edges: [],
+    source_status: 'complete' as const,
+  }
+}
+
+function pinnedSurveyPlan(plan: ReturnType<typeof planFullAutoProjection>[number]) {
+  if (plan?.kind !== 'action-execute') throw new Error('expected survey action plan')
+  return {
+    ...plan,
+    expected_authority_sha256: AUTHORITY_HASH,
+    idempotency_key: `${plan.idempotency_key}:${AUTHORITY_HASH}`,
+  }
+}
+
+interface FakeKernel {
   url: string
   close: () => Promise<void>
-  requests: Array<{ method: string; path: string; body: unknown; authorization: string | undefined }>
+  requests: Array<{ method: string; path: string; headers: Record<string, string | string[] | undefined>; body: unknown }>
+  state: { projection: KernelProjection; surveyAuthoritySha256: string }
 }
 
-/** Embedded fake Kernel: /v1/projects, /v1/projects/{id}/projection,
- * POST /v1/projects/{id}/gates (optionally failing), /v1/health. */
-function startFakeKernel(projects: FakeKernelProject[], failGates = false): Promise<FakeKernelHandle> {
-  return new Promise((resolve, reject) => {
-    const requests: FakeKernelHandle['requests'] = []
-    const server: Server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-      const parts = url.pathname.split('/').filter(Boolean)
-      const chunks: Buffer[] = []
-      for await (const chunk of req) chunks.push(chunk as Buffer)
-      const bodyText = Buffer.concat(chunks).toString('utf8')
-      const body = bodyText === '' ? null : JSON.parse(bodyText) as unknown
-      requests.push({ method: req.method ?? 'GET', path: url.pathname, body, authorization: req.headers.authorization })
-      const send = (status: number, payload: unknown): void => {
-        res.writeHead(status, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(payload))
+async function fakeKernel(initial: KernelProjection, options: { extraProjectionField?: boolean } = {}): Promise<FakeKernel> {
+  const state = { projection: initial, surveyAuthoritySha256: AUTHORITY_HASH }
+  const requests: FakeKernel['requests'] = []
+  const receipts = new Map<string, unknown>()
+  const surveyReceipts = new Map<string, unknown>()
+  const server: Server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(chunk as Buffer)
+    const raw = Buffer.concat(chunks).toString('utf8')
+    const body = raw === '' ? null : JSON.parse(raw)
+    requests.push({ method: req.method ?? 'GET', path: url.pathname, headers: req.headers, body })
+    const send = (status: number, value: unknown) => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(value))
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/projects') return send(200, [state.projection.project])
+    if (req.method === 'GET' && url.pathname.endsWith('/projection')) {
+      return send(200, options.extraProjectionField ? { ...state.projection, injected: true } : state.projection)
+    }
+    const match = url.pathname.match(/^\/internal\/projects\/([^/]+)\/full-auto-gates\/([^/]+)\/approve$/)
+    if (req.method === 'POST' && match !== null) {
+      if (req.headers['x-service-token'] !== 'service-token' || req.headers['x-service-principal'] !== 'research-orchestrator'
+        || req.headers['x-orchestrator-token'] !== 'orchestrator-token') {
+        return send(403, { error: { code: 'orchestrator_token_required', message: 'denied' } })
       }
-      if (parts[0] === 'v1' && parts[1] === 'health') return send(200, { ok: true })
-      if (parts[0] === 'v1' && parts[1] === 'projects' && parts.length === 2 && req.method === 'GET') {
-        return send(200, projects.map(p => ({ project_id: p.project_id, status: p.status })))
-      }
-      if (parts[0] === 'v1' && parts[1] === 'projects' && parts.length === 4 && parts[3] === 'projection' && req.method === 'GET') {
-        const project = projects.find(p => p.project_id === decodeURIComponent(parts[2] ?? ''))
-        if (project === undefined) return send(404, { error: { code: 'project_not_found', message: 'nope' } })
-        return send(200, { project: { project_id: project.project_id, status: project.status, brief_status: project.brief_status ?? 'confirmed' }, pending_gates: project.pending_gates ?? [] })
-      }
-      if (parts[0] === 'v1' && parts[1] === 'projects' && parts.length === 4 && parts[3] === 'gates' && req.method === 'POST') {
-        if (failGates) return send(500, { error: { code: 'internal', message: 'kernel boom' } })
-        return send(201, { gate_id: `gate_${requests.length}`, type: (body as { type?: string } | null)?.type ?? 'scope', status: 'pending' })
-      }
-      return send(404, { error: { code: 'not_found', message: `no route ${req.method} ${url.pathname}` } })
-    })
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address() as AddressInfo
-      resolve({
-        url: `http://127.0.0.1:${address.port}`,
-        close: () => new Promise(resolveClose => server.close(() => resolveClose(undefined))),
-        requests,
+      const gateId = decodeURIComponent(match[2]!)
+      const request = body as { expected_project_revision: number; idempotency_key: string }
+      const replay = receipts.get(request.idempotency_key)
+      if (replay !== undefined) return send(200, replay)
+      const pending = state.projection.pending_gates.find(item => item.gate_id === gateId)
+      if (pending === undefined) return send(409, { error: { code: 'gate_already_decided', message: 'gone' } })
+      const decidedGate = { ...pending, status: 'approved' as const, decided_at: '2026-08-20T00:01:00.000Z' }
+      const before = state.projection.project
+      const after = project({ ...before, status: pending.type === 'scope' ? 'SCOPED' : before.status, revision: before.revision + 1 })
+      state.projection = projection({
+        project: after,
+        gates: state.projection.pending_gates.filter(item => item.gate_id !== gateId),
+        actions: [action({ code: 'survey_run', revision: after.revision })],
       })
-    })
-  })
-}
-
-// ── §8.3 pure rules: planForStatus ──────────────────────────────────────────
-
-describe('planForStatus — §8.3 automatic-advance mapping', () => {
-  it('DRAFT → creates a Scope Gate request', () => {
-    const plan = planForStatus('DRAFT')
-    expect(plan).not.toBeNull()
-    expect(plan?.type).toBe('scope-gate')
-    expect(plan?.kind).toBe('gate')
-    expect(plan?.gate_type).toBe('scope')
-    expect(plan?.title).toBe('Scope Gate')
-  })
-
-  it('SCOPED → survey-ready note, blocked for the Scholar panel (no auto survey)', () => {
-    const plan = planForStatus('SCOPED')
-    expect(plan).not.toBeNull()
-    expect(plan?.type).toBe('survey-ready')
-    expect(plan?.idempotency_key).toBe('survey-ready')
-    expect(plan?.kind).toBe('note')
-    expect(plan?.note).toContain('Scholar 面板')
-  })
-
-  it('SURVEYING → no automatic action (model/human work)', () => {
-    expect(planForStatus('SURVEYING')).toBeNull()
-  })
-
-  it('IDEATING → no payload-less Idea Gate (selection transaction owns it)', () => {
-    expect(planForStatus('IDEATING')).toBeNull()
-  })
-
-  it('IDEA_APPROVED → no payload-less Contract Gate (draft transaction owns it)', () => {
-    expect(planForStatus('IDEA_APPROVED')).toBeNull()
-  })
-
-  it('CONTRACT_PENDING → no payload-less Contract Gate', () => {
-    expect(planForStatus('CONTRACT_PENDING')).toBeNull()
-  })
-
-  it('CONTRACT_APPROVED → baseline-ready note', () => {
-    const plan = planForStatus('CONTRACT_APPROVED')
-    expect(plan?.type).toBe('baseline-ready')
-    expect(plan?.kind).toBe('note')
-    expect(plan?.note).toContain('baseline')
-  })
-
-  it('BASELINE_REPRO → experiment-ready note', () => {
-    const plan = planForStatus('BASELINE_REPRO')
-    expect(plan?.type).toBe('experiment-ready')
-    expect(plan?.kind).toBe('note')
-  })
-
-  it('EXPERIMENTING → analysis-ready note (waits for formal runs)', () => {
-    const plan = planForStatus('EXPERIMENTING')
-    expect(plan?.type).toBe('analysis-ready')
-    expect(plan?.kind).toBe('note')
-  })
-
-  it('EVIDENCE_READY → manuscript-ready note', () => {
-    const plan = planForStatus('EVIDENCE_READY')
-    expect(plan?.type).toBe('manuscript-ready')
-    expect(plan?.kind).toBe('note')
-  })
-
-  it('WRITING → review-ready note', () => {
-    const plan = planForStatus('WRITING')
-    expect(plan?.type).toBe('review-ready')
-    expect(plan?.kind).toBe('note')
-  })
-
-  it('REVIEWING → Release Gate request', () => {
-    const plan = planForStatus('REVIEWING')
-    expect(plan?.type).toBe('release-gate')
-    expect(plan?.kind).toBe('gate')
-    expect(plan?.gate_type).toBe('release')
-  })
-
-  it('RELEASE_READY → release-pending-human note (release stays human)', () => {
-    const plan = planForStatus('RELEASE_READY')
-    expect(plan?.type).toBe('release-pending-human')
-    expect(plan?.kind).toBe('note')
-    expect(plan?.note).toContain('人工')
-  })
-
-  it.each<ProjectStatus>(['BLOCKED_GATE', 'FAILED', 'STOPPED', 'ARCHIVED', 'RELEASED'])(
-    '%s → observe only, no automation',
-    (status) => {
-      const plan = planForStatus(status)
-      expect(plan?.kind).toBe('observe')
-      expect(plan?.idempotency_key).toBe(`observe:${status}`)
-    },
-  )
-})
-
-// ── §8.3/§8.4 pure rules: decideActions (idempotency + retry) ───────────────
-
-describe('decideActions — idempotency and retry policy', () => {
-  it('does not plan a Scope Gate while a name-only project is collecting its Brief', () => {
-    expect(decideActions('DRAFT', [], 'collecting')).toEqual([])
-  })
-
-  it('fresh project: returns the planned action for its status', () => {
-    expect(decideActions('DRAFT', [])).toHaveLength(1)
-    expect(decideActions('DRAFT', [])[0]?.type).toBe('scope-gate')
-    expect(decideActions('SCOPED', [])[0]?.type).toBe('survey-ready')
-  })
-
-  it('gate idempotency: existing done/blocked action is never re-run', () => {
-    expect(decideActions('DRAFT', [act('scope-gate', 'done')])).toEqual([])
-    expect(decideActions('DRAFT', [act('scope-gate', 'blocked')])).toEqual([])
-  })
-
-  it('idempotency is key-scoped: an unrelated recorded action does not suppress the plan', () => {
-    const plans = decideActions('DRAFT', [act('observe:FAILED', 'done')])
-    expect(plans).toHaveLength(1)
-    expect(plans[0]?.type).toBe('scope-gate')
-  })
-
-  it('retry: queued/running actions are re-attempted while under the cap', () => {
-    expect(decideActions('DRAFT', [act('scope-gate', 'queued', 1, 3)])).toHaveLength(1)
-    expect(decideActions('DRAFT', [act('scope-gate', 'running', 1, 3)])).toHaveLength(1)
-  })
-
-  it('retry: failed actions are re-attempted while attempt < max_attempts', () => {
-    expect(decideActions('DRAFT', [act('scope-gate', 'failed', 2, 3)])).toHaveLength(1)
-  })
-
-  it('failure cap: failed at attempt >= max_attempts is never retried', () => {
-    expect(decideActions('DRAFT', [act('scope-gate', 'failed', 3, 3)])).toEqual([])
-    expect(decideActions('DRAFT', [act('scope-gate', 'failed', 2, 2)])).toEqual([])
-  })
-
-  it('terminal statuses: observe action is recorded once and then suppressed', () => {
-    expect(decideActions('FAILED', [])[0]?.kind).toBe('observe')
-    expect(decideActions('FAILED', [act('observe:FAILED', 'done')])).toEqual([])
-  })
-})
-
-// ── §8.2 ActionStore ────────────────────────────────────────────────────────
-
-describe('ActionStore — SQLite persistence (§8.2)', () => {
-  it('insert/get/update roundtrip', () => {
-    const store = new ActionStore({ dbPath: freshDbPath() })
-    const action = ActionStore.newAction({
-      project_id: 'rsp_1', phase: 'DRAFT', type: 'scope-gate', idempotency_key: 'scope-gate',
-    })
-    expect(store.insert(action)).toBe(true)
-    const loaded = store.get('rsp_1', 'scope-gate')
-    expect(loaded?.action_id).toBe(action.action_id)
-    expect(loaded?.status).toBe('queued')
-    expect(loaded?.max_attempts).toBe(3)
-    store.updateStatus(action.action_id, 'blocked', { attempt: 1, last_error: '等待人类' })
-    const updated = store.get('rsp_1', 'scope-gate')
-    expect(updated?.status).toBe('blocked')
-    expect(updated?.attempt).toBe(1)
-    expect(updated?.last_error).toBe('等待人类')
-    store.close()
-  })
-
-  it('UNIQUE(project_id, idempotency_key): same key in same project is a no-op, other projects are independent', () => {
-    const store = new ActionStore({ dbPath: freshDbPath() })
-    const a = ActionStore.newAction({ project_id: 'rsp_1', phase: 'DRAFT', type: 'scope-gate', idempotency_key: 'scope-gate' })
-    const dup = ActionStore.newAction({ project_id: 'rsp_1', phase: 'DRAFT', type: 'scope-gate', idempotency_key: 'scope-gate' })
-    const other = ActionStore.newAction({ project_id: 'rsp_2', phase: 'DRAFT', type: 'scope-gate', idempotency_key: 'scope-gate' })
-    expect(store.insert(a)).toBe(true)
-    expect(store.insert(dup)).toBe(false)
-    expect(store.insert(other)).toBe(true)
-    expect(store.listByProject('rsp_1')).toHaveLength(1)
-    expect(store.list()).toHaveLength(2)
-    store.close()
-  })
-
-  it('recover(): stale running rows become queued again (§8.5)', () => {
-    const store = new ActionStore({ dbPath: freshDbPath() })
-    const running = ActionStore.newAction({ project_id: 'rsp_1', phase: 'DRAFT', type: 'scope-gate', idempotency_key: 'scope-gate', status: 'running' })
-    const done = ActionStore.newAction({ project_id: 'rsp_1', phase: 'FAILED', type: 'observe', idempotency_key: 'observe:FAILED', status: 'done' })
-    store.insert(running)
-    store.insert(done)
-    expect(store.recover()).toBe(1)
-    expect(store.get('rsp_1', 'scope-gate')?.status).toBe('queued')
-    expect(store.get('rsp_1', 'observe:FAILED')?.status).toBe('done')
-    store.close()
-  })
-})
-
-// ── Engine against the embedded fake Kernel ─────────────────────────────────
-
-describe('Engine — poll loop over the fake Kernel', () => {
-  it('dryRun: computes the plan without Kernel writes and without persistence', async () => {
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath(), dryRun: true })
-      const result = await engine.pollOnce()
-      expect(result.planned).toBe(1)
-      expect(result.details[0]?.planned[0]?.type).toBe('scope-gate')
-      expect(fake.requests.filter(r => r.method === 'POST')).toHaveLength(0)
-      expect(engine.store.list()).toHaveLength(0)
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('INIT-GRILL-02: a collecting name-only project gets NO automatic Scope Gate (planned 0, zero gate writes)', async () => {
-    const fake = await startFakeKernel([{ project_id: 'rsp_collecting', status: 'DRAFT', brief_status: 'collecting' }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath() })
-      const result = await engine.pollOnce()
-      expect(result.planned).toBe(0)
-      expect(result.executed).toBe(0)
-      expect(fake.requests.filter(r => r.method === 'POST')).toHaveLength(0)
-      expect(engine.store.list()).toHaveLength(0)
-      // 即使再轮询也不会补 Gate（decideActions 对 collecting 恒定返回 []）。
-      const second = await engine.pollOnce()
-      expect(second.planned).toBe(0)
-      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(0)
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('creates the Gate, marks the action blocked, and is idempotent on the next poll', async () => {
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath() })
-      const first = await engine.pollOnce()
-      expect(first.executed).toBe(1)
-      const posts = fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))
-      expect(posts).toHaveLength(1)
-      expect((posts[0]?.body as { type?: string })?.type).toBe('scope')
-      const action = engine.store.get('rsp_a', 'scope-gate')
-      expect(action?.status).toBe('blocked')
-      expect(action?.attempt).toBe(1)
-
-      const second = await engine.pollOnce()
-      expect(second.planned).toBe(0)
-      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(1)
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('reconciles when a pending gate of the right type already exists in the Kernel', async () => {
-    const fake = await startFakeKernel([{
-      project_id: 'rsp_a', status: 'DRAFT',
-      pending_gates: [{ gate_id: 'gate_1', type: 'scope', title: 'Scope Gate', status: 'pending' }],
-    }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath() })
-      const result = await engine.pollOnce()
-      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(0)
-      expect(engine.store.get('rsp_a', 'scope-gate')?.status).toBe('done')
-      expect(result.errors).toEqual([])
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('§8.4 failure policy: retries on 500, then marks failed at the attempt cap and stops', async () => {
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }], true)
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath(), maxAttempts: 3 })
-      await engine.pollOnce()
-      let action = engine.store.get('rsp_a', 'scope-gate')
-      expect(action?.status).toBe('queued')
-      expect(action?.attempt).toBe(1)
-      expect(action?.last_error).toContain('kernel boom')
-
-      await engine.pollOnce()
-      action = engine.store.get('rsp_a', 'scope-gate')
-      expect(action?.attempt).toBe(2)
-      expect(action?.status).toBe('queued')
-
-      await engine.pollOnce()
-      action = engine.store.get('rsp_a', 'scope-gate')
-      expect(action?.attempt).toBe(3)
-      expect(action?.status).toBe('failed')
-
-      const fourth = await engine.pollOnce()
-      expect(fourth.planned).toBe(0)
-      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(3)
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('observe actions on terminal statuses are recorded done and never repeated', async () => {
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'FAILED' }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath: freshDbPath() })
-      const first = await engine.pollOnce()
-      expect(first.executed).toBe(1)
-      expect(engine.store.get('rsp_a', 'observe:FAILED')?.status).toBe('done')
-      const second = await engine.pollOnce()
-      expect(second.planned).toBe(0)
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('§8.5 crash recovery: a new Engine re-attempts actions a crashed process left running', async () => {
-    const dbPath = freshDbPath()
-    const store = new ActionStore({ dbPath })
-    store.insert(ActionStore.newAction({
-      project_id: 'rsp_a', phase: 'DRAFT', type: 'scope-gate', idempotency_key: 'scope-gate', status: 'running',
-    }))
-    store.close()
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath })
-      // constructor ran recover(): stale running → queued, so the poll retries
-      const result = await engine.pollOnce()
-      expect(result.planned).toBe(1)
-      expect(engine.store.get('rsp_a', 'scope-gate')?.status).toBe('blocked')
-      engine.close()
-    } finally {
-      await fake.close()
-    }
-  })
-})
-
-// ── §15 leader election (orchestrator_leases) ───────────────────────────────
-
-describe('orchestrator_leases leader election (§15)', () => {
-  it('claims grant the first owner, deny a live second owner, and allow takeover after expiry', async () => {
-    const store = new ActionStore({ dbPath: freshDbPath() })
-    // 1-second leases so the expiry path is testable without long waits.
-    const first = store.claimLease('rsp_a', 'orch-one', 1)
-    expect(first.granted).toBe(true)
-    expect(first.generation).toBe(1)
-    // Same owner renews (generation+1).
-    const renew = store.claimLease('rsp_a', 'orch-one', 1)
-    expect(renew.granted).toBe(true)
-    expect(renew.generation).toBe(2)
-    // A live second owner is denied.
-    const second = store.claimLease('rsp_a', 'orch-two', 1)
-    expect(second.granted).toBe(false)
-    expect(store.leaseHolder('rsp_a')?.owner).toBe('orch-one')
-    // Expiry (1s) allows takeover with a fresh generation.
-    await new Promise(resolve => setTimeout(resolve, 1100))
-    const takeover = store.claimLease('rsp_a', 'orch-two', 1)
-    expect(takeover.granted).toBe(true)
-    expect(takeover.generation).toBe(3)
-    expect(store.leaseHolder('rsp_a')?.owner).toBe('orch-two')
-    store.close()
-  })
-
-  it('refreshLease extends the expiry; releaseLease frees the project for another owner', async () => {
-    const store = new ActionStore({ dbPath: freshDbPath() })
-    store.claimLease('rsp_a', 'orch-one', 60)
-    const before = store.leaseHolder('rsp_a')
-    expect(before).not.toBeNull()
-    // A refresh from a non-owner is a no-op (false).
-    expect(store.refreshLease('rsp_a', 'orch-two', 60)).toBe(false)
-    // Owner refresh extends the expiry.
-    await new Promise(resolve => setTimeout(resolve, 50))
-    expect(store.refreshLease('rsp_a', 'orch-one', 60)).toBe(true)
-    const after = store.leaseHolder('rsp_a')
-    expect(after !== null && after.expires_at > (before?.expires_at ?? '')).toBe(true)
-    // Release frees the lease for the next owner.
-    store.releaseLease('rsp_a', 'orch-one')
-    expect(store.leaseHolder('rsp_a')).toBeNull()
-    const next = store.claimLease('rsp_a', 'orch-two', 60)
-    expect(next.granted).toBe(true)
-    store.close()
-  })
-
-  it('Engine skips a project held by another live owner, then takes over after release', async () => {
-    const dbPath = freshDbPath()
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
-    try {
-      const engineA = new Engine({ kernelUrl: fake.url, dbPath, owner: 'orch-a' })
-      const first = await engineA.pollOnce()
-      expect(first.planned).toBe(1)
-      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(1)
-      // A second instance (different owner, same store) must NOT double-advance.
-      const engineB = new Engine({ kernelUrl: fake.url, dbPath, owner: 'orch-b' })
-      const second = await engineB.pollOnce()
-      expect(second.planned).toBe(0)
-      expect(second.details[0]?.skipped.join(' ')).toContain('lease held by another orchestrator owner')
-      expect(fake.requests.filter(r => r.method === 'POST' && r.path.endsWith('/gates'))).toHaveLength(1)
-      // Graceful close releases the lease; B can now drive the project.
-      engineA.close()
-      const third = await engineB.pollOnce()
-      expect(third.planned).toBe(0) // action already blocked — no duplicate
-      expect(engineB.store.get('rsp_a', 'scope-gate')?.status).toBe('blocked')
-      engineB.close()
-    } finally {
-      await fake.close()
-    }
-  })
-
-  it('Engine sends Authorization Bearer from --token-file and fails fast on a missing file', async () => {
-    const dbPath = freshDbPath()
-    const tokenDir = mkdtempSync(join(tmpdir(), 'orch-token-'))
-    const tokenFile = join(tokenDir, 'kernel-token')
-    writeFileSync(tokenFile, 's3cret-token\n', { mode: 0o600 })
-    const fake = await startFakeKernel([{ project_id: 'rsp_a', status: 'DRAFT' }])
-    try {
-      const engine = new Engine({ kernelUrl: fake.url, dbPath, tokenFile })
-      await engine.pollOnce()
-      expect(fake.requests.length).toBeGreaterThan(0)
-      for (const req of fake.requests) {
-        expect(req.authorization).toBe('Bearer s3cret-token')
+      const response = {
+        gate: decidedGate,
+        project: after,
+        decision: { decision_id: 'dec_auto_1', gate_id: gateId, decision: 'approved' },
+        receipt: {
+          authority: 'full_auto_service', project_id: before.project_id,
+          project_revision: request.expected_project_revision, gate_id: gateId,
+          gate_type: pending.type, idempotency_key: request.idempotency_key,
+        },
       }
-      engine.close()
-    } finally {
-      await fake.close()
+      receipts.set(request.idempotency_key, response)
+      return send(200, response)
     }
-    expect(() => new Engine({ kernelUrl: 'http://127.0.0.1:1', dbPath: freshDbPath(), tokenFile: join(tokenDir, 'missing') })).toThrow(/does not exist/)
+    const surveyMatch = url.pathname.match(/^\/internal\/projects\/([^/]+)\/full-auto-actions\/survey-run$/)
+    const surveyAuthorityMatch = url.pathname.match(/^\/internal\/projects\/([^/]+)\/full-auto-actions\/survey-run\/authority$/)
+    if (req.method === 'POST' && surveyAuthorityMatch !== null) {
+      if (req.headers['x-service-token'] !== 'service-token' || req.headers['x-service-principal'] !== 'research-orchestrator'
+        || req.headers['x-orchestrator-token'] !== 'orchestrator-token') {
+        return send(403, { error: { code: 'orchestrator_token_required', message: 'denied' } })
+      }
+      const request = body as { expected_project_revision: number; action_id: string; action_revision: number }
+      const before = state.projection.project
+      const current = state.projection.next_actions_v2.find(item => item.id === request.action_id)
+      if (before.revision !== request.expected_project_revision || current?.code !== 'survey_run'
+        || current.revision !== request.action_revision) {
+        return send(409, { error: { code: 'full_auto_action_not_ready', message: 'stale survey pins' } })
+      }
+      return send(200, {
+        schema_version: 1,
+        authority: 'full_auto_service',
+        principal_id: 'service:research-orchestrator',
+        project_id: before.project_id,
+        project_revision: request.expected_project_revision,
+        action: { id: request.action_id, code: 'survey_run', revision: request.action_revision, object_sha256: AUTHORITY_HASH },
+        query: before.brief.problem,
+        query_sha256: AUTHORITY_HASH,
+        fixture: { fixture_id: FIXTURE, profile_sha256: AUTHORITY_HASH },
+        runner_profile: { profile_id: PROFILE, config_hash: 'profile-hash' },
+        runner_target: { target_id: TARGET, revision: 1, config_hash: 'target-hash' },
+        budget: { model_cost_usd: 0, gpu_hours: 0, api_requests: 0, storage_bytes: 0, object_sha256: AUTHORITY_HASH },
+        protocol_pin: null,
+        authority_sha256: state.surveyAuthoritySha256,
+      })
+    }
+    if (req.method === 'POST' && surveyMatch !== null) {
+      if (req.headers['x-service-token'] !== 'service-token' || req.headers['x-service-principal'] !== 'research-orchestrator'
+        || req.headers['x-orchestrator-token'] !== 'orchestrator-token') {
+        return send(403, { error: { code: 'orchestrator_token_required', message: 'denied' } })
+      }
+      const request = body as {
+        expected_project_revision: number
+        action_id: string
+        action_revision: number
+        expected_authority_sha256: string
+        idempotency_key: string
+        result?: ReturnType<typeof surveyResult>
+      }
+      const replay = surveyReceipts.get(request.idempotency_key)
+      if (replay !== undefined) return send(200, replay)
+      if (request.expected_authority_sha256 !== state.surveyAuthoritySha256) {
+        return send(409, { error: { code: 'full_auto_survey_authority_changed', message: 'authority pins changed' } })
+      }
+      if (request.result === undefined) {
+        return send(422, { error: { code: 'full_auto_survey_result_required', message: 'connector result required' } })
+      }
+      const before = state.projection.project
+      const current = state.projection.next_actions_v2.find(item => item.id === request.action_id)
+      if (before.revision !== request.expected_project_revision || current?.code !== 'survey_run'
+        || current.revision !== request.action_revision) {
+        return send(409, { error: { code: 'full_auto_action_not_ready', message: 'stale survey pins' } })
+      }
+      const snapshotId = 'corpus_snap_auto_1'
+      const hash = `sha256:${'a'.repeat(64)}`
+      const snapshot = {
+        snapshot_id: snapshotId,
+        project_id: before.project_id,
+        schema_version: 1,
+        source_status: request.result.source_status,
+        queries: request.result.queries,
+        papers: request.result.papers,
+        passages: request.result.passages,
+        citation_edges: request.result.citation_edges,
+        external_claims: [],
+        quality: { total_papers: request.result.papers.length, dedup_ratio: 0, coverage_note: '' },
+        created_at: '2026-08-20T00:03:00.000Z',
+        frozen: true,
+      }
+      const after = project({ ...before, status: 'SURVEYING', revision: before.revision + 1 })
+      state.projection = {
+        ...projection({ project: after, actions: [action({ code: 'idea_generate', revision: after.revision })] }),
+        counts: { ...state.projection.counts, corpus_snapshots: state.projection.counts.corpus_snapshots + 1 },
+      }
+      const response = {
+        snapshot,
+        project: after,
+        receipt: {
+          schema_version: 1,
+          authority: 'full_auto_service',
+          principal_id: 'service:research-orchestrator',
+          project_id: before.project_id,
+          project_revision: request.expected_project_revision,
+          action: { id: request.action_id, code: 'survey_run', revision: request.action_revision, object_sha256: hash },
+          query: before.brief.problem,
+          query_sha256: hash,
+          result_sha256: hash,
+          fixture: { fixture_id: FIXTURE, profile_sha256: hash },
+          runner_profile: { profile_id: PROFILE, config_hash: 'profile-hash' },
+          runner_target: { target_id: TARGET, revision: 1, config_hash: 'target-hash' },
+          budget: {
+            model_cost_usd: 0, gpu_hours: 0, api_requests: 0, storage_bytes: 0, object_sha256: hash,
+          },
+          protocol_pin: null,
+          authority_sha256: request.expected_authority_sha256,
+          snapshot_id: snapshotId,
+          idempotency_key: request.idempotency_key,
+          issued_at: '2026-08-20T00:03:00.000Z',
+        },
+      }
+      surveyReceipts.set(request.idempotency_key, response)
+      return send(200, response)
+    }
+    return send(404, { error: { code: 'not_found', message: url.pathname } })
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = server.address() as AddressInfo
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise(resolve => server.close(() => resolve())),
+    requests,
+    state,
+  }
+}
+
+describe('full-auto projection planner', () => {
+  it('does nothing for gate-only projects', () => {
+    expect(planFullAutoProjection(projection({ project: project({ mode: 'gate-only' }) }))).toEqual([])
+  })
+
+  it.each(['scope', 'idea', 'contract', 'budget'] as const)('plans exact %s Gate approval from the pending Gate', type => {
+    const plans = planFullAutoProjection(projection({ gates: [gate(type)] }))
+    expect(plans).toEqual([expect.objectContaining({
+      kind: 'gate-approve', gate_id: `gate_${type}_1`, gate_type: type,
+      expected_project_revision: 3,
+    })])
+  })
+
+  it('parks Release and Direction instead of calling an automatic decision path', () => {
+    expect(planFullAutoProjection(projection({ gates: [gate('release')] }))[0]).toMatchObject({
+      kind: 'park', park: { code: 'release_never_automatic', gate_id: 'gate_release_1' },
+    })
+    expect(planFullAutoProjection(projection({ gates: [gate('direction')] }))[0]).toMatchObject({
+      kind: 'park', park: { code: 'human_action_required', gate_id: 'gate_direction_1' },
+    })
+  })
+
+  it('parks Brief confirmation, missing parameters, Human actions and unsupported agent executors with typed reasons', () => {
+    expect(planFullAutoProjection(projection({ project: project({ brief_status: 'collecting' }) }))[0]).toMatchObject({ park: { code: 'brief_confirmation_required' } })
+    expect(planFullAutoProjection(projection({ actions: [action({ code: 'baseline_reproduce', required: ['baseline_command'] })] }))[0]).toMatchObject({ park: { code: 'parameters_incomplete' } })
+    expect(planFullAutoProjection(projection({ actions: [action({ code: 'intake_adopt', required_by: 'human' })] }))[0]).toMatchObject({ park: { code: 'human_action_required' } })
+    expect(planFullAutoProjection(projection({ actions: [action({ code: 'survey_run' })] }))[0]).toMatchObject({
+      kind: 'action-execute', action_code: 'survey_run', action_id: 'survey_run:rsp_auto_1',
+      expected_project_revision: 3,
+    })
+    expect(planFullAutoProjection(projection({ actions: [action({ code: 'survey_run', state: 'blocked', reason: 'protocol missing' })] }))[0])
+      .toMatchObject({ park: { code: 'action_not_ready', reason: expect.stringContaining('protocol missing') } })
+  })
+
+  it('does not re-plan a durable done/blocked row and retries only below the attempt cap', () => {
+    const p = projection({ gates: [gate('scope')] })
+    const plan = planFullAutoProjection(p)[0]!
+    expect(decideFullAutoPlans(p, [{ idempotency_key: plan.idempotency_key, status: 'done', attempt: 1, max_attempts: 3 }])).toEqual([])
+    expect(decideFullAutoPlans(p, [{ idempotency_key: plan.idempotency_key, status: 'blocked', attempt: 1, max_attempts: 3 }])).toEqual([])
+    expect(decideFullAutoPlans(p, [{ idempotency_key: plan.idempotency_key, status: 'failed', attempt: 2, max_attempts: 3 }])).toHaveLength(1)
+    expect(decideFullAutoPlans(p, [{ idempotency_key: plan.idempotency_key, status: 'failed', attempt: 3, max_attempts: 3 }])).toEqual([])
   })
 })
 
-// ── Integration: real Kernel process ────────────────────────────────────────
-
-const KERNEL_BIN = fileURLToPath(new URL('../../packages/research-kernel/lib/bin/kernel.js', import.meta.url))
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const probe = createServer()
-    probe.on('error', reject)
-    probe.listen(0, '127.0.0.1', () => {
-      const port = (probe.address() as AddressInfo).port
-      probe.close(() => resolve(port))
+describe('durable full-auto engine', () => {
+  it('uses bounded fresh replans to approve Scope, run the canonical survey, then park the unsupported next action', async () => {
+    const fake = await fakeKernel(projection({ gates: [gate('scope')] }))
+    const engine = new Engine({
+      kernelUrl: fake.url,
+      dbPath: dbPath(),
+      token: 'kernel-token',
+      serviceToken: 'service-token',
+      orchestratorToken: 'orchestrator-token',
+      owner: 'owner-a',
+      surveyExecutor: async query => surveyResult(query),
     })
-  })
-}
-
-async function waitForHealth(url: string, timeoutMs = 15000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${url}/v1/health`)
-      if (response.ok) return
-    } catch { /* not up yet */ }
-    await new Promise(resolve => setTimeout(resolve, 200))
-  }
-  throw new Error('kernel process did not become healthy in time')
-}
+      const first = await engine.pollOnce()
+      expect(first.details[0]?.executed).toEqual([
+        expect.objectContaining({ result: 'done', type: 'full-auto-gate:scope' }),
+        expect.objectContaining({ result: 'done', type: 'full-auto-action:survey_run' }),
+        expect.objectContaining({ result: 'blocked', type: 'park:idea_generate' }),
+      ])
+      const post = fake.requests.find(request => request.method === 'POST')!
+      expect(post.headers.authorization).toBe('Bearer kernel-token')
+      expect(post.headers['x-service-token']).toBe('service-token')
+      expect(post.headers['x-service-principal']).toBe('research-orchestrator')
+      expect(post.headers['x-orchestrator-token']).toBe('orchestrator-token')
+      expect(post.body).toMatchObject({ expected_project_revision: 3, idempotency_key: 'full-auto-gate:gate_scope_1:r3' })
+      expect(engine.store.listByProject('rsp_auto_1')).toEqual([
+        expect.objectContaining({ type: 'full-auto-gate:scope', status: 'done' }),
+        expect.objectContaining({ type: 'full-auto-action:survey_run', status: 'done' }),
+        expect.objectContaining({ type: 'park:idea_generate', status: 'blocked' }),
+      ])
 
-describe('integration — Engine against a real Kernel process', () => {
-  let kernel: ChildProcess | undefined
-  let kernelUrl: string
-  let tmpDir: string
-  let projectId: string
-  const kernelStderr: Buffer[] = []
+      const second = await engine.pollOnce()
+      expect(second.details[0]?.executed).toEqual([])
+      expect(fake.requests.filter(request => request.method === 'POST')).toHaveLength(3)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
 
-  beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'orch-it-'))
-    const port = await freePort()
-    kernelUrl = `http://127.0.0.1:${port}`
-    kernel = spawn(process.execPath, [
-      KERNEL_BIN, '--db', join(tmpDir, 'kernel.db'), '--cas', join(tmpDir, 'cas'), '--port', String(port),
-    ], { stdio: ['ignore', 'ignore', 'pipe'] })
-    kernel.stderr?.on('data', (chunk: Buffer) => kernelStderr.push(chunk))
-    kernel.on('exit', (code) => { kernel = undefined; void code })
-    await waitForHealth(kernelUrl)
-    const response = await fetch(`${kernelUrl}/v1/projects`, {
+  it('strictly rejects an unknown projection field and performs zero writes', async () => {
+    const fake = await fakeKernel(projection({ gates: [gate('scope')] }), { extraProjectionField: true })
+    const engine = new Engine({ kernelUrl: fake.url, dbPath: dbPath(), token: 'kernel-token', serviceToken: 'service-token', orchestratorToken: 'orchestrator-token' })
+    try {
+      const result = await engine.pollOnce()
+      expect(result.errors[0]).toContain('Unrecognized key')
+      expect(engine.store.list()).toHaveLength(0)
+      expect(fake.requests.some(request => request.method === 'POST')).toBe(false)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('recovers a running row from the same SQLite file and reconciles it through the idempotent Kernel endpoint', async () => {
+    const file = dbPath()
+    const p = projection({ gates: [gate('scope')] })
+    const plan = planFullAutoProjection(p)[0]!
+    const seed = new ActionStore({ dbPath: file })
+    seed.insert(ActionStore.newAction({
+      project_id: 'rsp_auto_1', phase: 'DRAFT', type: plan.type,
+      idempotency_key: plan.idempotency_key, status: 'running', attempt: 0,
+    }))
+    seed.close()
+    const fake = await fakeKernel(p)
+    const engine = new Engine({ kernelUrl: fake.url, dbPath: file, token: 'kernel-token', serviceToken: 'service-token', orchestratorToken: 'orchestrator-token' })
+    try {
+      expect(engine.store.get('rsp_auto_1', plan.idempotency_key)?.status).toBe('queued')
+      await engine.pollOnce()
+      expect(engine.store.get('rsp_auto_1', plan.idempotency_key)?.status).toBe('done')
+      expect(fake.requests.filter(request => request.method === 'POST')).toHaveLength(1)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('replays a committed Kernel receipt after a crash between the Kernel write and ActionStore completion', async () => {
+    const file = dbPath()
+    const p = projection({ gates: [gate('scope')] })
+    const plan = planFullAutoProjection(p)[0]!
+    const fake = await fakeKernel(p)
+    const first = await fetch(`${fake.url}/internal/projects/rsp_auto_1/full-auto-gates/gate_scope_1/approve`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'orchestrator-it', workspace: '/tmp/orch', brief: makeBrief() }),
+      headers: {
+        'content-type': 'application/json', authorization: 'Bearer kernel-token',
+        'x-service-token': 'service-token', 'x-service-principal': 'research-orchestrator',
+        'x-orchestrator-token': 'orchestrator-token',
+      },
+      body: JSON.stringify({ expected_project_revision: 3, idempotency_key: plan.idempotency_key }),
     })
-    expect(response.status).toBe(201)
-    const project = await response.json() as { project_id: string }
-    projectId = project.project_id
+    expect(first.status).toBe(200)
+    const seed = new ActionStore({ dbPath: file })
+    seed.insert(ActionStore.newAction({
+      project_id: 'rsp_auto_1', phase: 'DRAFT', type: plan.type,
+      idempotency_key: plan.idempotency_key, status: 'running', attempt: 1,
+    }))
+    seed.close()
+
+    const engine = new Engine({ kernelUrl: fake.url, dbPath: file, token: 'kernel-token', serviceToken: 'service-token', orchestratorToken: 'orchestrator-token' })
+    try {
+      const result = await engine.pollOnce()
+      expect(result.details[0]?.executed).toContainEqual(expect.objectContaining({
+        type: 'full-auto-gate:scope', result: 'done',
+      }))
+      expect(engine.store.get('rsp_auto_1', plan.idempotency_key)).toMatchObject({ status: 'done' })
+      expect(fake.requests.filter(request => request.method === 'POST')).toHaveLength(2)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
   })
 
-  afterAll(() => {
-    if (kernel !== undefined) kernel.kill('SIGTERM')
-    rmSync(tmpDir, { recursive: true, force: true })
-  })
-
-  async function listGates(): Promise<Array<{ gate_id: string; type: string; status: string }>> {
-    const response = await fetch(`${kernelUrl}/v1/projects/${projectId}/gates`)
-    return response.json() as Promise<Array<{ gate_id: string; type: string; status: string }>>
-  }
-
-  async function approveGate(gateId: string): Promise<void> {
-    const response = await fetch(`${kernelUrl}/v1/gates/${gateId}/decisions`, {
+  it('reopens a crashed survey Action and reconciles the committed corpus receipt without rerunning connectors', async () => {
+    const file = dbPath()
+    const scoped = projection({
+      project: project({ status: 'SCOPED', revision: 3 }),
+      actions: [action({ code: 'survey_run', revision: 3 })],
+    })
+    const plan = pinnedSurveyPlan(planFullAutoProjection(scoped)[0]!)
+    const fake = await fakeKernel(scoped)
+    const committed = await fetch(`${fake.url}/internal/projects/rsp_auto_1/full-auto-actions/survey-run`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json', authorization: 'Bearer kernel-token',
+        'x-service-token': 'service-token', 'x-service-principal': 'research-orchestrator',
+        'x-orchestrator-token': 'orchestrator-token',
+      },
       body: JSON.stringify({
-        actor: 'human',
-        principal: { principal_id: 'orch-human', auth_method: 'dsh-session' },
-        decision: 'approved',
+        expected_project_revision: 3,
+        action_id: 'survey_run:rsp_auto_1',
+        action_revision: 3,
+        expected_authority_sha256: plan.expected_authority_sha256,
+        idempotency_key: plan.idempotency_key,
+        result: surveyResult(scoped.project.brief.problem),
       }),
     })
-    expect(response.ok).toBe(true)
-  }
-
-  it('DRAFT: first poll creates exactly one Scope Gate and persists a blocked action', async () => {
-    const dbPath = join(tmpDir, 'orch-actions.db')
-    const engine = new Engine({ kernelUrl, dbPath })
-    const result = await engine.pollOnce()
-    expect(result.projects).toBe(1)
-    expect(result.planned).toBe(1)
-    expect(result.errors).toEqual([])
-
-    const gates = await listGates()
-    expect(gates).toHaveLength(1)
-    expect(gates[0]?.type).toBe('scope')
-    expect(gates[0]?.status).toBe('pending')
-
-    const action = engine.store.get(projectId, 'scope-gate')
-    expect(action?.type).toBe('scope-gate')
-    expect(action?.status).toBe('blocked')
-    expect(action?.phase).toBe('DRAFT')
-    engine.close()
-  })
-
-  it('§8.5: a second Engine instance on the same store does not duplicate the gate', async () => {
-    const dbPath = join(tmpDir, 'orch-actions.db')
-    const engine = new Engine({ kernelUrl, dbPath })
-    const result = await engine.pollOnce()
-    expect(result.planned).toBe(0)
-    expect(await listGates()).toHaveLength(1)
-    engine.close()
-  })
-
-  it('after human approval, the next poll records survey-ready (blocked, waits for the Scholar panel)', async () => {
-    const dbPath = join(tmpDir, 'orch-actions.db')
-    const engine = new Engine({ kernelUrl, dbPath })
-    const gates = await listGates()
-    await approveGate(gates[0]!.gate_id)
-
-    const projection = await (await fetch(`${kernelUrl}/v1/projects/${projectId}/projection`)).json() as { project: { status: string } }
-    expect(projection.project.status).toBe('SCOPED')
-
-    const result = await engine.pollOnce()
-    expect(result.planned).toBe(1)
-    const action = engine.store.get(projectId, 'survey-ready')
-    expect(action?.status).toBe('blocked')
-    expect(action?.last_error).toContain('Scholar 面板')
-    // SCOPED must not create any additional gate
-    expect(await listGates()).toHaveLength(1)
-    engine.close()
-  })
-
-  it('terminal project (FAILED): only an observe action is recorded', async () => {
-    const dbPath = join(tmpDir, 'orch-actions.db')
-    const engine = new Engine({ kernelUrl, dbPath })
-    const project = await (await fetch(`${kernelUrl}/v1/projects/${projectId}`)).json() as { revision: number }
-    const transition = await fetch(`${kernelUrl}/v1/projects/${projectId}/transitions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ to: 'FAILED', expected_revision: project.revision, reason: 'it-test' }),
+    expect(committed.status).toBe(200)
+    const seed = new ActionStore({ dbPath: file })
+    seed.insert(ActionStore.newAction({
+      project_id: 'rsp_auto_1', phase: 'SCOPED', type: plan.type,
+      idempotency_key: plan.idempotency_key, status: 'running', attempt: 1,
+    }))
+    seed.close()
+    const connector = vi.fn(async (query: string) => surveyResult(query))
+    const engine = new Engine({
+      kernelUrl: fake.url, dbPath: file, token: 'kernel-token', serviceToken: 'service-token',
+      orchestratorToken: 'orchestrator-token', surveyExecutor: connector,
     })
-    expect(transition.ok).toBe(true)
-    const result = await engine.pollOnce()
-    expect(result.planned).toBe(1)
-    expect(engine.store.get(projectId, 'observe:FAILED')?.status).toBe('done')
-    expect(engine.store.get(projectId, 'survey-ready')?.status).toBe('blocked') // history preserved
-    engine.close()
+    try {
+      const result = await engine.pollOnce()
+      expect(result.details[0]?.executed).toContainEqual(expect.objectContaining({
+        type: 'full-auto-action:survey_run', result: 'done',
+      }))
+      expect(engine.store.get('rsp_auto_1', plan.idempotency_key)).toMatchObject({ status: 'done' })
+      expect(connector).not.toHaveBeenCalled()
+      expect(fake.state.projection.counts.corpus_snapshots).toBe(1)
+      expect(fake.requests.filter(request => request.path.endsWith('/full-auto-actions/survey-run'))).toHaveLength(2)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('parks a stale survey pin after connector I/O and performs zero corpus mutation', async () => {
+    const scoped = projection({
+      project: project({ status: 'SCOPED', revision: 3 }),
+      actions: [action({ code: 'survey_run', revision: 3 })],
+    })
+    const fake = await fakeKernel(scoped)
+    const engine = new Engine({
+      kernelUrl: fake.url,
+      dbPath: dbPath(),
+      token: 'kernel-token',
+      serviceToken: 'service-token',
+      orchestratorToken: 'orchestrator-token',
+      surveyExecutor: async query => {
+        const changed = project({ ...fake.state.projection.project, status: 'SCOPED', revision: 4 })
+        fake.state.projection = projection({ project: changed, actions: [action({ code: 'survey_run', revision: 4 })] })
+        return surveyResult(query)
+      },
+    })
+    try {
+      const result = await engine.pollOnce()
+      expect(result.details[0]?.parked).toContainEqual(expect.objectContaining({ code: 'stale_projection' }))
+      expect(engine.store.listByProject('rsp_auto_1')).toEqual([
+        expect.objectContaining({ type: 'full-auto-action:survey_run', status: 'blocked' }),
+      ])
+      expect(fake.requests.some(request => request.path.endsWith('/full-auto-actions/survey-run'))).toBe(false)
+      expect(fake.state.projection.counts.corpus_snapshots).toBe(0)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('pins the pre-connector authority hash and parks runner/budget/protocol drift at the Kernel CAS', async () => {
+    const scoped = projection({
+      project: project({ status: 'SCOPED', revision: 3 }),
+      actions: [action({ code: 'survey_run', revision: 3 })],
+    })
+    const fake = await fakeKernel(scoped)
+    const engine = new Engine({
+      kernelUrl: fake.url,
+      dbPath: dbPath(),
+      token: 'kernel-token',
+      serviceToken: 'service-token',
+      orchestratorToken: 'orchestrator-token',
+      surveyExecutor: async query => {
+        fake.state.surveyAuthoritySha256 = `sha256:${'c'.repeat(64)}`
+        return surveyResult(query)
+      },
+    })
+    try {
+      const result = await engine.pollOnce()
+      expect(result.details[0]?.parked).toContainEqual(expect.objectContaining({
+        code: 'stale_projection',
+        reason: expect.stringContaining('full_auto_survey_authority_changed'),
+      }))
+      expect(engine.store.listByProject('rsp_auto_1')).toEqual([
+        expect.objectContaining({
+          type: 'full-auto-action:survey_run',
+          status: 'blocked',
+          idempotency_key: expect.stringContaining(AUTHORITY_HASH),
+        }),
+      ])
+      const mutation = fake.requests.find(request => request.path.endsWith('/full-auto-actions/survey-run'))
+      expect(mutation?.body).toMatchObject({ expected_authority_sha256: AUTHORITY_HASH })
+      expect(fake.state.projection.counts.corpus_snapshots).toBe(0)
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('parks typed Release policy durably without any Kernel mutation', async () => {
+    const fake = await fakeKernel(projection({ gates: [gate('release')] }))
+    const file = dbPath()
+    const engine = new Engine({ kernelUrl: fake.url, dbPath: file, token: 'kernel-token', serviceToken: 'service-token', orchestratorToken: 'orchestrator-token' })
+    try {
+      const result = await engine.pollOnce()
+      expect(result.details[0]?.parked).toEqual([expect.objectContaining({ code: 'release_never_automatic' })])
+      expect(fake.requests.some(request => request.method === 'POST')).toBe(false)
+      const saved = engine.store.listByProject('rsp_auto_1')[0]!
+      expect(saved.status).toBe('blocked')
+      expect(JSON.parse(saved.last_error ?? '{}')).toMatchObject({ code: 'release_never_automatic' })
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('parks a missing service credential instead of retrying or falling back', async () => {
+    const fake = await fakeKernel(projection({ gates: [gate('scope')] }))
+    const engine = new Engine({ kernelUrl: fake.url, dbPath: dbPath(), token: 'kernel-token', orchestratorToken: 'orchestrator-token' })
+    try {
+      const result = await engine.pollOnce()
+      expect(result.details[0]?.parked).toEqual([expect.objectContaining({ code: 'service_token_required' })])
+      expect(fake.requests.some(request => request.method === 'POST')).toBe(false)
+      expect(engine.store.listByProject('rsp_auto_1')[0]).toMatchObject({ status: 'blocked', attempt: 1 })
+    } finally {
+      engine.close()
+      await fake.close()
+    }
+  })
+
+  it('parks missing or wrong managed-orchestrator credentials without leaking them', async () => {
+    const missingFake = await fakeKernel(projection({ gates: [gate('scope')] }))
+    const missing = new Engine({
+      kernelUrl: missingFake.url, dbPath: dbPath(), token: 'kernel-token', serviceToken: 'service-token',
+    })
+    try {
+      const result = await missing.pollOnce()
+      expect(result.details[0]?.parked).toEqual([expect.objectContaining({ code: 'orchestrator_token_required' })])
+      expect(missingFake.requests.some(request => request.method === 'POST')).toBe(false)
+    } finally {
+      missing.close()
+      await missingFake.close()
+    }
+
+    const wrongFake = await fakeKernel(projection({ gates: [gate('scope')] }))
+    const logs: string[] = []
+    const wrongSecret = 'wrong-orchestrator-secret'
+    const wrong = new Engine({
+      kernelUrl: wrongFake.url, dbPath: dbPath(), token: 'kernel-token', serviceToken: 'service-token',
+      orchestratorToken: wrongSecret,
+    }, line => logs.push(line))
+    try {
+      const result = await wrong.pollOnce()
+      expect(result.details[0]?.parked).toEqual([expect.objectContaining({ code: 'orchestrator_token_required' })])
+      expect(wrongFake.requests.filter(request => request.method === 'POST')).toHaveLength(1)
+      expect(wrongFake.state.projection.pending_gates).toHaveLength(1)
+      expect(logs.join('\n')).not.toContain(wrongSecret)
+    } finally {
+      wrong.close()
+      await wrongFake.close()
+    }
+  })
+
+  it('one live lease owner drives a project and close releases it for takeover', async () => {
+    const fake = await fakeKernel(projection({ gates: [gate('scope')] }))
+    const file = dbPath()
+    const first = new Engine({ kernelUrl: fake.url, dbPath: file, token: 'kernel-token', serviceToken: 'service-token', orchestratorToken: 'orchestrator-token', owner: 'first' })
+    const second = new Engine({ kernelUrl: fake.url, dbPath: file, token: 'kernel-token', serviceToken: 'service-token', orchestratorToken: 'orchestrator-token', owner: 'second' })
+    try {
+      await first.pollOnce()
+      const skipped = await second.pollOnce()
+      expect(skipped.details[0]?.skipped[0]).toContain('lease held')
+      first.close()
+      const takeover = await second.pollOnce()
+      expect(takeover.details[0]?.skipped).toEqual([])
+    } finally {
+      try { first.close() } catch { /* already closed */ }
+      second.close()
+      await fake.close()
+    }
   })
 })

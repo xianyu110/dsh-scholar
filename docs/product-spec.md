@@ -28,7 +28,15 @@ DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研�
 
 ### 3.2 full-auto
 
-只允许 fixture-only 配置。可用于 CI、演示和确定性 Golden Path，不得接触真实凭据、私有数据或公开发布入口。界面必须持续显示 fixture 标识。
+只允许 fixture-only 配置。可用于 CI、演示和确定性 Golden Path，不得接触真实凭据、私有数据或公开发布入口。界面必须持续显示 fixture 标识，并明确写作“自动审批（Fixture-only，Release 保持人工）”；`defaultMode` 保存后须显示“重启生效”，不能让保存态伪装成当前运行态。
+
+`full-auto` 的权威含义首先是由 Durable Orchestrator 自动批准精确 allowlist 内的 `scope|idea|contract|budget` Gate；普通 Agent 动作只有在登记 canonical executor 后才可能自动执行，当前唯一登记的 executor 是 `survey_run`。它不是 Human Principal，也不得调用/复用 Human BFF：Orchestrator 只能携 Kernel bearer、独立 service token、固定 `research-orchestrator` service identity 和幂等键调用专用 internal endpoint；Kernel 必须在一个事务内重新读取 Project、pending Gate、Gate payload、project revision、registered FixtureProfile、explicit RunnerProfile/Target 与 target object。Idea/Contract Gate 在创建时必须把 target id、version 与 canonical sha256 一并固定进 Gate payload，审批时与当前权威对象逐项复核；不能只凭可复用 id 自动批准。Kernel 据此派生 `full_auto_service` authority receipt，并原子写 Decision、receipt/audit、Gate、Project transition 和 Outbox。receipt 至少固定 project/gate/type、payload hash、expected/current project revision、target id/version/hash、fixture id/profile hash、runner profile id/config hash、runner target id/revision/config hash和请求幂等键。任一 pin、payload、project、revision、profile、target 或权限不匹配必须零写 fail closed；相同 key+相同请求重放返回同一 receipt，不同请求稳定冲突。
+
+自动 Gate allowlist 固定为 Scope、Idea、Contract 和 Budget；Idea 必须绑定同项目、已完成 novelty audit 且版本精确的 IdeaCard，Contract 必须绑定同项目、版本精确的 draft Contract，Budget 只能使用 Gate payload 内由 Kernel 生成的 resume target。Release 永不自动批准，因为所有 FixtureProfile 强制 `automatic_release=false`；Direction、Brief confirm、Intake adoption、Evidence acceptance、Assurance acceptance、Knowledge activation 与任何未列出的治理动作也保持人工。Agent action 只有同时满足权威 `next_actions_v2` 中 `state=ready`、`required_by=agent`、`required=true`、显式 executor allowlist 与完整参数时才可执行；预算、Protocol、Runner、Secret 或参数缺口必须 park。unsupported/缺 executor 必须记录 typed gap，不得伪造成功、猜参数、自动降级或自动 Release。
+
+`survey_run` 的查询只能从权威、完整的 `Brief.problem` 取得，不能由 Agent 猜测或覆盖；插件托管既有多源 connector/cache。Connector I/O 前，Orchestrator 必须通过同一 service-only surface 取得严格的只读 authority context；其 hash 固定 project/NextAction id+revision+hash、Brief query+hash、fixture/profile、Runner profile/target、budget 与 latest frozen Protocol，并进入 durable Action idempotency key。Mutation endpoint 只接收该 expected authority hash 和严格结构化且仍不可信的检索结果；Kernel 在同一事务中重新推导 context，hash 不同即零写 `full_auto_survey_authority_changed`，相同才把 result hash 一并写入冻结 Corpus Snapshot、authority receipt event、Project transition 和 Outbox。检索期间任一 pin 变化必须零语料写并 typed park；提交后崩溃重启必须从 receipt 恢复，不得重复调用 connector。
+
+Durable Orchestrator 是唯一自动推进状态机：继续复用 project lease 和 append-only Action store，以 project/action/gate/revision/pins 构造幂等键，Kernel write 前先落 `running`，崩溃后恢复并与 Kernel receipt/projection 对账。每个成功的 Gate/action 后必须重读权威 projection，并在单项目单轮最多 8 步的有界循环内继续；因此 Scope 自动审批可立即进入 `survey_run`，再按新的 NextAction 前进或以 typed unsupported/gap park，不能依赖旧 projection、无限自旋或伪造后续成功。插件只在 Kernel identity/health 校验通过后启动它，并在插件 dispose 时停止、释放 lease 和关闭 store；Settings 必须显示 worker 当前运行状态、fixture-only 边界、待重启状态与最近 park 原因。只有名称的 `/new <name>` 始终创建 `gate-only DRAFT/collecting` 并进入 Grill；只有显式提供 registered fixture、explicit runner profile/target 和完整 Brief 的创建才可继承 `defaultMode=full-auto`，不得因默认值制造必然失败的半配置项目。
 
 ## 4. 端到端用户旅程
 
@@ -46,6 +54,8 @@ DSH Scholar 面向需要可追溯、可恢复、可人工治理的纯计算研�
 12. Clean-room Verifier 重跑关键结果并重建 PDF；PI 最终决定 Release Gate。
 
 每一步由权威 `NextAction` 卡说明“现在做什么、为什么、由谁做、被什么阻断”，一项主 CTA 进入目标页面。Agent 运行时，用户可打开 Trajectory 查看消息/工具轨迹和 subagent 父子拓扑，并进入有权限的 child 查看详情。
+
+Direction 是 Methodology overlay，不是新的 Project phase。fresh Direction proposal 如需治理，Overview/Approvals 必须显示 Human `direction_gate_review`，并只关联 strict payload 精确绑定 proposal+synthesis+direction 的专用 pending Direction Gate。adoption 后展示 Kernel 派生的五向 continuation：deepen 继续已批准边界内研究，broaden/pivot 打开既有 Intake continuation proposal，conclude 准备收束证据/写作，pause 交给 Human 复核；Kernel 在每次投影/重启时仍以 durable Decision + Gate 重验需治理 adoption 的 exact receipt，不能只信 adoption 内的 ref。浏览器和 DSH 只显示 Kernel 返回的 compact recommendation，不按 direction 文本自行推断或执行；continuation 永不直接改 Scope、Contract、Project 或自动 Gate。
 
 ## 5. 核心能力
 
@@ -75,6 +85,8 @@ Chat composer 内首次输入 `/` 必须立即显示命令补全并连续得到 
 
 Chat composer 必须同时接受自由自然语言与一级 slash command。显式 `/...` 是确定性高级入口；普通文本在 active Init Grill 时仍只回答当前唯一问题，其他阶段进入 project-scoped natural turn，由意图路由器结合 Kernel `next_actions_v2` 选择只读查询、可安全执行的 Agent 动作或阶段感知对话，不能把 prose 当成未知命令。开放讨论通过当前 DSH `llm` service 回答，但模型只产文本，不能直接写 Kernel；DSH 插件与 standalone 间只能使用不暴露给浏览器的 authenticated loopback bridge，模型不可用时保留确定性阶段引导。用户明确说“继续/推进/执行下一步”时，只能执行当前投影中 `state=ready`、`required=true`、`required_by=agent` 且不需要额外参数的 canonical Agent 动作；当前包括 `/write`、`/review`、`/release-bundle`，而 survey 仅在用户同时给出 query 且 `survey_run` ready 时执行。`/ideas` 只读；“生成几个 idea”或 `/ideas generate <1-5>` 仅在 `idea_generate/ready/agent` 且存在最新非空 frozen corpus 时执行，模型只返回严格 `IdeaDraft`，Kernel 用 project revision CAS、corpus provenance 和单事务整批写入；任一草稿无效或竞争均零写，且不选择 winner 或批准 Idea Gate。实验、复现和其他缺参数动作返回可编辑 slash 建议，不得猜参数。active Grill 的下一题由权威 projection 作为 transcript 末尾的 assistant question 显示；提交回答后 transcript 保存普通 user/assistant 回合，下一题就地推进，不能再显示一套独立 Brief 输入框、重复下一题或抢夺 composer 焦点。自然语言路由不得根据状态 label 猜 mutation：未知/歧义/blocked/权限不足时只解释并给出候选；Gate Decision、Brief confirm、Intake adoption、Release 决定等 Human-only 动作永远不能由模型代做。任何自动触发结果都必须回显解析出的动作、参数、执行状态和最新权威 NextAction；显式 slash 与自然语言必须进入同一 canonical operation/权限/审计语义。`/new <name> [<brief-json>]` 的唯一必填参数是非空 `name`；省略 `brief-json` 必须创建 name-only `DRAFT/collecting` 项目并进入 Grill Me，不能要求用户先构造 Brief。命令 adapter 必须按 DSH Command Registry 的真实 `rawInput` 契约处理命令名后的保留分隔空白。
 
+`SURVEYING` 本身不证明语料可供 Idea 生成。Kernel 只有在同项目存在 `frozen=true`、`source_status=complete` 且至少含一篇 Paper 的 Corpus Snapshot 时，才可把 `idea_generate` 投影为 ready 并固定该 snapshot ref；否则 `idea_generate` 必须以 `frozen_nonempty_corpus_snapshot` 明确 blocked，同时给出 ready 的 `survey_run` 修复动作。UI、Chat 与 full-auto 都只能消费该权威状态，禁止因阶段标签或曾经存在空/未完成快照而本地放宽。
+
 IdeaCard 生成成功后不得继续投影为 `idea_generate`。只要 SURVEYING 项目已有 proposed 候选，NextAction 必须切换为 Human `idea_select`，在 Overview 每张候选上提供“选择并审计”入口，同时支持 `/ideas select <idea_id>`。该操作必须先用 Scholar connectors 对所选候选执行真实 counter-search，失败时零写；随后由 Kernel 在单事务中校验 project/idea revision、候选归属与 frozen corpus，保存 NoveltyAudit、执行 `SURVEYING→IDEATING` 并创建唯一 pending Idea Gate（payload 固定所选 `idea_id`）。不得自动挑选候选、不得创建 payload-less 正常 Idea Gate、不得自动批准 Gate；成功后的 NextAction 才能是 Human `idea_gate_approve`。
 
 Idea Gate 批准必须在同一事务把 payload 指向的 IdeaCard 冻结为 `approved`，不能只推进 Project。随后流程固定为 `IDEA_APPROVED → contract_register → CONTRACT_PENDING → Human Contract Gate → CONTRACT_APPROVED → baseline_reproduce`：`contract_register` 必须是可执行动作，按钮、自然语言“继续”和 `/contract draft` 共用一个 BFF；它从唯一 approved IdeaCard 的 minimum viable experiment 形成可审计合同草案，由 Kernel 以 project/idea revision CAS 单事务登记 Contract、进入 `CONTRACT_PENDING` 并创建 payload 绑定 contract_id 的 pending Contract Gate。Gate 拒绝或要求修改后必须重新给出 `contract_register`，不得让项目只剩 blocked 动作；Orchestrator 禁止创建 payload-less Contract Gate。任一非终态、无 pending Human Gate 时至少存在一个 `state=ready` 的权威 NextAction，动作不得依赖只能在后续阶段创建的对象。
@@ -83,7 +95,9 @@ DSH 本体 Chat 必须注册单一受控入口工具 `dsh_scholar`。DSH Agent �
 
 DSH 会话中的 `dsh Scholar` 页签必须是 Host 原生、面向当前 session 的紧凑视图，不得 iframe 或压缩显示完整 standalone 工作台。已关联时只显示当前项目、revision、完整研究阶段、主要下一步 label/reason、待审批数与运行统计，并提供“在新页面打开完整 Scholar”；未关联时必须在页签内直接列出当前稳定 DSH 操作员可见的项目供显式绑定，也可只填写项目名创建 name-only 项目并在同一事务绑定。归档项目可显示但不可绑定；绑定同一 pair 可幂等重试，任何改绑、悬空 link、竞争 link 或跨操作员项目都必须 fail closed，不能静默 relink。读取 workspace 后要再次核对 session link；link 在读取期间变化时重试或 fail closed，不得把旧项目投影标成当前 session。
 
-trusted-host `/dsh-scholar-view` 只承载字段严格校验的 `session-workspace`、`session-bind` 与 `session-create`；配置和 standalone Token 仍在独立 loopback-only channel。wire 响应使用字段 allowlist，任意层级额外字段（包括 `token`/SecretRef）一律拒绝，不能把原对象带入 React state。响应必须精确匹配当前 `session_id`，切换会话立即取消旧读取和写入、清空 busy 状态并重新加载，迟到或 session 不匹配的响应 fail closed；可见态至多每 4 秒一个串行读取。阶段标题与可见状态文字不能只靠颜色区分，`current` 与 `blocked` 阶段都使用 `aria-current=step`，状态、错误、空态和 aria 全部支持中英文。DSH 页签与 standalone 必须复用同一个 Kernel endpoint/dataDir 和稳定操作员身份，因此双方显示同一批有权限项目；standalone BFF dataDir 只允许保存浏览器 Token、操作员 session 和显示配置，禁止包含第二个 `kernel.db`。
+trusted-host `/dsh-scholar-view` 只承载请求字段严格校验的 `session-workspace`、`session-bind` 与 `session-create`；配置和 standalone Token 仍在独立 loopback-only channel。响应进入 React state 前必须经过共享 runtime normalizer：`session_id`、linked `project_id`、revision 与所有已知字段类型 fail closed；独立升级新增的普通字段忽略且不复制。旧服务端缺失或返回 null 的 Knowledge/Manuscript/Runs/Topology 块分别归一为 inactive/null/zero 安全默认；单个非 null 畸形可选块只丢弃该块、记录 `unavailable_blocks` 并在 UI 显示“不可用”，不能拖垮十阶段时间线。任何 `token`、Secret、payload 或 content 字段都不能进入归一化投影；workspace/project 身份层出现敏感字段直接拒绝。响应必须精确匹配当前 `session_id`，切换会话立即取消旧读取和写入、清空 busy 状态并重新加载，迟到或 session 不匹配的响应 fail closed；可见态至多每 4 秒一个串行读取。阶段标题与可见状态文字不能只靠颜色区分，`current` 与 `blocked` 阶段都使用 `aria-current=step`，状态、错误、空态和 aria 全部支持中英文。DSH 页签与 standalone 必须复用同一个 Kernel endpoint/dataDir 和稳定操作员身份，因此双方显示同一批有权限项目；standalone BFF dataDir 只允许保存浏览器 Token、操作员 session 和显示配置，禁止包含第二个 `kernel.db`。
+
+升级不得通过更换默认 `kernel_data_dir`、启动空数据库或退役旧目录，让已有项目、Workspace、Artifact、TeX、Intake、Gate、Run、Assurance/Methodology/Writing/rollout ledger 或会话关联从产品界面消失。数据目录/存储拓扑发生变化时，升级必须在切换权威 endpoint 前由 Operator 显式离线执行可审计、可重复运行的导入；正常 sidecar 启动不得扫描环境变量或退役目录、复制旧库、修补旧 migration checksum。导入顺序固定为：先备份目标 DB/CAS inventory，再对源库做只读 snapshot 并在副本上迁移；随后在一个 DB transaction 中校验完整 product-table inventory、按 parent-first 顺序 merge 并执行 FK 检查；只有 DB 成功后才能复制 CAS/Workspace/PTY，全部成功后才能写 receipt。DB 冲突必须零文件副作用；文件冲突不得写 receipt，并须允许修正后幂等重试。migration checksum 漂移必须 fail closed，低版本 receipt 不能替代完整重接管。失败必须保留旧库可恢复且不得启动空工作台；禁止长期双读、静默 fallback 或直接覆盖已有目标库。完成导入后只保留一个当前 Kernel 作为运行时权威，旧目录进入带 inventory/导入回执的只读保留期。
 
 每次 assistant 回答结尾都应给出与当前阶段相符的一项下一步引导，但不得自动跳页或覆盖用户正在编辑的草稿。Chat transcript 在底部时随新消息继续贴底；用户向上查看历史时，新消息、8 秒投影刷新、locale 切换和 Dock 重绘必须保持当前滚动锚点并显示“跳到最新”，不得反复回到顶部或强制拉到底部。滚动/follow 状态按 project + session + surface 隔离，切换回来恢复各自位置。
 
@@ -145,6 +159,7 @@ Manuscript 的 builds/preview-builds 轮询必须分别 single-flight，并以 g
 - 默认 target 是本机 Docker；可登记受控远端 Runner machine 或 scheduler target；
 - UI/Job 只引用不透明 `runner_profile_id`，不能提交 hostname、SSH command、credential、Docker socket 或宿主路径；
 - Kernel 保持队列、lease、Run、Artifact、Manifest、预算和审计权威；远端 Runner 只物化 CAS 输入、隔离执行并回传事实；
+- Runner 签名、Kernel 验签与 terminal observation 必须共用递归 canonical JSON：每层 object key 排序、array 保序、无空白；`resources`、`environment`、`outputs`、`lease` 等任一嵌套事实变化都必须改变 payload/observation hash，旧观察不得继续分类；
 - target capability、health、draining、latency 和资源可见；无能力或离线时 fail closed，不静默回退到本机或 subprocess；
 - 远端控制和 Artifact 传输使用 mTLS/短期 service identity、断点续传、hash、generation/token fencing。
 
@@ -294,3 +309,39 @@ Settings 首次进入时所有 section 默认折叠，按 Essentials、Execution
 ## 9. 发布策略
 
 Security Alpha 阶段只能私有导出。重新使用“全自动科研系统”定位，必须同时具备真实文献检索、真实 Baseline、Human-approved Contract、隔离 Formal Runs、确定性 Evidence、可编辑并可编译的 TeX 稿件、clean-room 重跑和 Human Release Gate。
+
+## 10. 方法论与知识层
+
+DSH Scholar 必须把研究方法作为受 Kernel 治理的辅助层，而不是第二套编排器。首批能力按 [methodology-knowledge-layer.md](methodology-knowledge-layer.md) 分阶段实现：Assurance 三轴、Protocol-before-run、受限两层循环、Research Synthesis、双通道知识 Registry，以及 Reverse Outline/Claim–Evidence 写作检查。
+
+用户必须始终能区分“任务执行状态”“审查 verdict”“审查是否被接受”。审查 Job exit 0 不等于内容 PASS，模型 PASS 不等于 accepted，accepted 也不等于 Human Release Gate 已批准。输入变化后旧审查必须明确 stale，mandatory Audit 缺漏必须 blocking，不能显示为 N/A。
+
+Assurance 执行只能显式调用已注册 producer。首批 `writing` 与 `claim-evidence` producer 生成真实 immutable findings Artifact；后者仅在权威 Claim 集为空时记录 `NOT_APPLICABLE`，并固定稿件 Artifact 与 canonical Claim→accepted-Evidence 集合 hash。未执行或不存在 producer 必须继续表现为 missing/blocking，不能用 N/A 掩盖；新增 Claim/接受证据变化会让旧 N/A stale。该执行层不能自动审批 Assurance、Gate 或 Release，也不能修改 TeX。
+
+外部研究仓库当前只允许方法语义的独立重写。第三方原文、模板、代码、示例、论文段落、品牌资产和远程 Pack 不进入产品；任何后续 vendor 必须作为独立需求重新完成许可、来源、NOTICE、SBOM、安全和验收决策。
+
+截至本轮实现审计，strict Schema、四个纯 Module、`AssuranceStore` / `MethodologyStore`、migration `0028_methodology_knowledge_layer`、typed HTTP/Client、durable membership/PI/Operator AuthZ、可重建 Research Graph、standalone compact read projection、DSH session-bound compact summary/methodology tools 与 Protocol 驱动的 Job pre-write admission 已存在；实际表为 `assurance_events`、`methodology_project_events`、`methodology_registry_events`，Graph 不是另一份权威存储。formal/confirmatory Job 会读取 frozen Protocol 并复核权威 Contract/Code/Data/Environment/Runner/预算 pins 后才写入；Direction adoption 会复核当前 Project/NextAction revision，并沿 durable approved Decision→专用 `direction` Gate→strict proposal/synthesis/direction payload 与 Human PI/operator membership 构造 verified receipt，成功只追加 immutable Adoption。
+
+有状态方法论协调不得堆叠在 `ResearchKernel` 或 HTTP handler。当前 Knowledge activation/delivery、Synthesis admission/telemetry、Writing methodology/Assurance 已分别进入三个具体 Coordinator；Kernel 公共方法只是兼容 wire 的稳定 façade，并以窄事务/投影/Store/Artifact/Topology/telemetry ports 注入能力。Synthesis 必须继续消费唯一的 `run-outcome-lifecycle` 与 `synthesis-admission`，科学分类不得出现第二套 evaluator；full-auto 继续只由 `full-auto.ts` 授权。该拆分不能改变任何 AuthZ、CAS、append-only、零写、Gate、Release 或 canonical TeX 边界。
+
+Runner completion 当前只自动持久化 execution-only 未分类观察，并精确固定 run/attempt/lease/manifest/Protocol；它绝不自动猜 scientific outcome/run validity。未分类观察投影 `run_outcome_classify`，PI/researcher 权限下的 Human/Agent 显式分类后，Kernel 原子记录 outcome、分类 principal 与确定性 synthesis request；trigger 只投影 `synthesis_record`，不生成内容或推进 phase/Gate/Release。infrastructure failure 不产生 NegativeFinding，exploratory positive 只产生 proposal；重放、旧 attempt、崩溃恢复和 full-auto park 有自动证据。
+
+真实本机 Docker formal positive fixture 已自动验证 signed Manifest `run_id` 对应的 pending observation、scientific-only classification、evidence_candidate 与幂等 replay；安全脚本在非 2xx 时必须显示 HTTP status/body，不能只暴露 curl exit 22。
+
+这仍不构成完整用户能力：deterministic producer/findings Artifact、StageSubagent semantic seam、三份 Scholar-owned immutable native Pack、exact-context delivery、Chat/Assurance reviewer 注入与 append-only deactivate/revoke suppression 已存在，但生产 DSH Host/model 的实际可用性和人工交互仍待验收；远端 SSH/GPU、生产 Docker 科学分类/NegativeFinding、真实 reviewer/model、自动 Release、项目激活 UI 与人工浏览器/ARIA/TeX 验收尚未闭环。External Knowledge 永远只投递 `content=null` 的不可信 metadata，第三方正文没有进入 instructions。standalone Overview/Manuscript/Topology 和 DSH Host 原生 Scholar panel 当前都只显示 session/project-scoped 摘要；compact Assurance 已复用 verifier 解析当前可用 input hashes（包含 N/A 的 Claim–Evidence 集合 pin），Writing stale 已按 live TeX 与 Claim–Evidence hash 复算，但这些投影仍不替代 submission、Gate 或 canonical TeX 权威写入。此前八个无 runtime consumer 的 `methodology.*` / `knowledge_registry.*` 配置键已删除并明确延后，不能写成 schema-live；remote 禁止由 local-only Package Schema、resolver 与许可政策执行。
+
+三份外部研究仓库在当前产品中统一保持 `METHOD_ONLY`。Registry 中出现 package record 或 evaluation 也不构成复制、vendor、分发或执行授权；当前 schema 只接受本地 immutable source，remote Pack 仍禁止，任何第三方正文/模板/代码进入产品必须先完成逐文件许可、归属、NOTICE/SBOM 与安全审批。自动化状态只按 [acceptance-tests.md](acceptance-tests.md) §25 的分层证据记录；真实 reviewer/model、Docker/SSH/GPU、浏览器/i18n/焦点与 TeX 全流程在人工执行前一律为 `NOT_RUN_MANUAL_PENDING`。
+
+### 10.1 方法论 rollout 与产品可见性
+
+Phase 8 采用一个持久化、可恢复的 rollout policy，而不是恢复未消费的 Settings 占位键。默认 `internal-fixture`；Operator 只能追加新全局 revision，项目 PI 必须显式把项目 re-pin 到当前 policy，Knowledge Activation 和 Assurance execution 必须保存 exact revision/hash consumption receipt。`opt-in-dev` 与 `opt-in-user` 只表达部署/用户采用范围，不提高任何角色或自动审批权限。
+
+项目 compact 摘要应显示当前 mode、policy/project pin revision 与脱敏方法论 aggregate，帮助用户判断功能是否在该项目启用和运行；不得显示 actor、policy hash、项目/会话/包 identity、路径、prompt、正文或凭据。方法论 counters/histograms 是进程级运行观测，不替代 append-only Audit、Gate、Artifact、Run 或 Project ledger。真实浏览器对该摘要的可读性仍为 `NOT_RUN_MANUAL_PENDING`。
+
+### 10.2 Assurance / Knowledge 权威输入边界
+
+用户或模型不能直接写 Assurance verdict、reviewer independence、provider/topology 事实；所有 Audit 必须来自注册 producer，semantic reviewer identity 必须由 Kernel 从 durable StageSubagent execution identity 与 topology 派生。public API 只允许 deterministic producer，DSH semantic 执行必须是 Host-confirmed exact session。缺 reviewer identity、空/未完成 reviewer panel 或 provider unavailable 不得降级为 caller 声明，也不得落一条 BLOCKED Audit；产品只显示 typed execution diagnostic，Artifact、Audit、rollout consumption 保持零新增。合法 partial/complete panel 仍按真实 durable children 生成 provisional Audit。
+
+Knowledge 激活表单/工具只收 package identity 与 CAS，不展示或提交 session、phase、principal 和 capability 数组。当前 session-project link、Project phase、NextAction、PI membership、project policy 与 capability intersection 全部由 Kernel 当前投影派生；跨项目、未链接、stale 或 forged authority 必须零写。这个边界同时适用于 standalone BFF、typed Client 与 DSH Host，不允许为某个入口增加兼容旁路。
+
+内置 Knowledge Pack reconcile 只属于受管 DSH plugin 启动流程。internal route 必须同时验证共享 service token、固定 `dsh-plugin` audience 与独立 plugin token；共享 token、浏览器 bearer 或自报 audience 均不能单独改写全局 Registry。typed Client 只能从 server-side 构造配置发送专用 token，不能从 principal 参数或请求 body 接受它。

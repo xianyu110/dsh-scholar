@@ -6,11 +6,21 @@
  */
 
 import type {
-  AdoptionReceipt, ArtifactRecord, Claim, CorpusSnapshot, Decision, EvidenceItem, ExperimentContract, Gate,
+  AdoptionReceipt, ArtifactRecord, AssuranceAudit, AssuranceSemanticReviewReceipt, ChildExecutionIdentity, Claim, CorpusSnapshot, Decision, DirectionAdoption, DirectionProposal,
+  EvidenceItem, ExperimentContract, Gate,
   GrillAnswerInput, GrillAnswerView, HumanPrincipal, IdeaCard, IntakeArtifact, IntakeProjection, IntakeSession,
-  JobRecord, KernelEvent, ObservedPhase, PaperRef, PaperReproductionSpec, PhaseProposal, ProjectDeletionReceipt,
-  ReproductionAttempt, ReproductionReportInput, ReproducibilityReport, ResearchProject, RunnerKey, SessionLink,
-  WorkspaceNode,
+  JobRecord, KernelEvent, KnowledgeActivationIntent, KnowledgeActivationRequest, KnowledgeCapability, KnowledgePackageEvaluation, KnowledgePackageRecord, ObservedPhase,
+  PaperRef, PaperReproductionSpec, PhaseProposal, ProjectDeletionReceipt, ProtocolRevision,
+  FrozenProtocolPin, JobSpecBound, ResearchIntent,
+  ReproductionAttempt, ReproductionReportInput, ReproducibilityReport, ResearchProject, ResearchSynthesis,
+  ReviewFinding, ReverseOutline, RunnerKey, SessionLink, WorkspaceNode,
+  NegativeFinding, ResearchClaimProposal, ResearchRunOutcome, ResearchRunOutcomeWrite, RunOutcomeObservation, SynthesisRecordRequest,
+  MethodTriad, MethodTriadDiagnostic, MethodTriadWrite,
+  SectionGuideActivation, SectionGuideActivationWrite,
+  WritingReviewerPanelAggregate, WritingReviewerPanelWrite,
+  WritingPatchProposal, WritingPatchProposalWrite, WritingPatchApplication, WritingPatchApplyInput,
+  WritingAssuranceAuditKind,
+  MethodologyRolloutMode, MethodologyRolloutPolicy, ProjectMethodologyRolloutPin,
 } from '@dsh-scholar/research-schemas'
 
 export class KernelUnavailableError extends Error {
@@ -35,13 +45,13 @@ export interface KernelClientOptions {
   endpoint: string
   token?: string
   /** §4 P0 (API-01/EVID-01): shared internal-route service identity. DSH
-   * create/link additionally requires the audience-bound dshPluginToken. */
+   * internal mutations additionally require the audience-bound token below. */
   serviceToken?: string
   /** Target-scoped heartbeat credential. It is sent only to the
    * RunnerTarget heartbeat route, never to general Kernel requests. */
   runnerTargetToken?: string
-  /** DSH-CREATE-LINK-01: route-specific create/link credential; never sent
-   * to Runner processes or used as a public bearer. */
+  /** DSH internal-route credential for create/link, Knowledge/Assurance and
+   * native Pack reconcile; never sent to Runner processes or public routes. */
   dshPluginToken?: string
   /** Timeout for each request, ms. */
   timeoutMs?: number
@@ -69,6 +79,260 @@ export interface ProjectGrillProjection {
   }>
   brief_preview: ResearchProject['brief']
   ready_to_confirm: boolean
+}
+
+export interface MethodologyRecordView<T> {
+  project_id: string
+  stream_revision: number
+  recorded_revision: number
+  record: T
+}
+
+export interface MethodologyRecordList<T> {
+  project_id: string
+  stream_revision: number
+  records: Array<MethodologyRecordView<T>>
+}
+
+export interface MethodologyRegistryRecordView<T> {
+  registry_revision: number
+  recorded_revision: number
+  record: T
+}
+
+export interface MethodologyRegistryRecordList<T> {
+  registry_revision: number
+  records: Array<MethodologyRegistryRecordView<T>>
+}
+
+export interface AssuranceAuditView {
+  project_id: string
+  revision: number
+  recorded_revision: number
+  acceptance_revision: number | null
+  accepted_by: string | null
+  accepted_at: string | null
+  audit: AssuranceAudit
+}
+
+export interface AssuranceAuditList {
+  project_id: string
+  revision: number
+  audits: AssuranceAuditView[]
+}
+
+export interface StoredKnowledgeActivation {
+  activation_id: string
+  project_id: string
+  registry_revision: number
+  request: KnowledgeActivationRequest
+  resolution: Record<string, unknown>
+  activated_at: string
+}
+
+export interface StoredKnowledgeDeactivation {
+  deactivation_id: string
+  project_id: string
+  session_id: string
+  activation_id: string
+  reason: 'user-requested' | 'superseded' | 'no-longer-needed'
+  deactivated_at: string
+}
+
+export interface KnowledgeDeliverySnapshot {
+  context: {
+    project_id: string
+    session_id: string
+    phase: string
+    next_action_revision: number
+    surface: 'scholar-chat' | 'assurance-reviewer'
+  }
+  deliveries: Array<{
+    activation_id: string
+    package_name: string
+    package_version: string
+    manifest_sha256: string
+    payload_sha256: string
+    trust: 'trusted-native-instruction' | 'untrusted-external-reference'
+    effective_capabilities: KnowledgeCapability[]
+    content: null | {
+      schema_version: 1
+      purpose: string
+      surfaces: Array<'scholar-chat' | 'assurance-reviewer'>
+      instructions: string[]
+      prohibitions: string[]
+    }
+  }>
+  suppressed: Array<{ activation_id: string; reason_codes: KnowledgeDeliverySuppressionReason[] }>
+}
+
+export type KnowledgeDeliverySuppressionReason =
+  | 'activation_not_explicit' | 'package_not_found' | 'package_identity_mismatch'
+  | 'evaluation_not_found' | 'evaluation_conflict' | 'package_rejected' | 'package_revoked'
+  | 'license_not_activatable' | 'instruction_source_not_trusted' | 'channel_verdict_mismatch'
+  | 'supply_chain_equivocation' | 'no_effective_capabilities'
+  | 'wrong_project' | 'wrong_session' | 'stale_phase' | 'stale_next_action'
+  | 'deactivated' | 'native_pack_missing' | 'native_integrity_failed' | 'surface_not_allowed'
+
+export interface MethodologyCompactProjection {
+  project_id: string
+  revision: number
+  assurance: { level: 'draft' | 'submission'; ready: boolean; reason_codes: string[] } | null
+  protocol: { current_id: string; revision: number; status: 'draft' | 'frozen'; intent: ResearchIntent } | null
+  synthesis: { current_id: string; fresh: boolean; stale_reasons: string[] } | null
+  knowledge: {
+    active_count: number
+    package_names: string[]
+    suppressed_count: number
+    status: 'delivery-ready' | 'suppressed' | 'inactive'
+  }
+  writing: { outline_id: string; blocking_count: number; stale: boolean | null; reason_codes: string[] } | null
+  manuscript: {
+    revision: number
+    method_triad: { triad_id: string; status: 'ready' | 'diagnostic_gap'; gap_codes: string[] } | null
+    section_guide: { activation_id: string; section: string; state: 'active' | 'diagnostic_gap'; missing_inputs: string[] } | null
+    reviewer_panel: {
+      aggregate_id: string
+      state: 'complete' | 'partial' | 'missing'
+      complete_roles: string[]
+      missing_roles: string[]
+    } | null
+    patches: {
+      proposal_count: number
+      application_count: number
+      latest_proposal_id: string | null
+      latest_application_id: string | null
+    }
+  }
+  runs: {
+    revision: number
+    count: number
+    negative_finding_count: number
+    claim_proposal_count: number
+    latest_run_ref: string | null
+  }
+  topology: {
+    assurance_audit_count: number
+    latest_audit_id: string | null
+    research_node_count: number
+    research_edge_count: number
+  }
+  next_recommendation: { code: string; label_key: string } | null
+  rollout: {
+    mode: MethodologyRolloutMode
+    policy_revision: number
+    project_pin_revision: number
+    telemetry: {
+      counters: Array<{ key: string; tags: Record<string, string>; value: number }>
+      histograms: Array<{
+        key: string; tags: Record<string, string>; count: number; sum: number; min: number | null; max: number | null
+      }>
+    }
+  }
+}
+
+export interface ResearchGraphProjection {
+  project_id: string
+  nodes: Array<{
+    id: string
+    kind: 'protocol' | 'synthesis' | 'direction' | 'adoption' | 'artifact' | 'claim' | 'contract'
+      | 'corpus-snapshot' | 'decision' | 'evidence' | 'run' | 'negative-finding' | 'claim-proposal'
+      | 'code' | 'data' | 'environment'
+    ref: string
+    revision: number | null
+    sha256: string | null
+  }>
+  edges: Array<{
+    id: string
+    from: string
+    to: string
+    kind: 'pins' | 'input_to' | 'supports_statement_in' | 'inferred_for' | 'proposes' | 'classifies_as' | 'decides'
+    provenance: 'explicit' | 'inferred'
+  }>
+}
+
+export interface DirectionList {
+  project_id: string
+  stream_revision: number
+  proposals: MethodologyRecordList<DirectionProposal>
+  adoptions: MethodologyRecordList<DirectionAdoption>
+}
+
+export interface WritingReviewList {
+  project_id: string
+  stream_revision: number
+  reverse_outlines: MethodologyRecordList<ReverseOutline>
+  findings: MethodologyRecordList<ReviewFinding>
+}
+
+export interface MethodologyPackageRegistry {
+  registry_revision: number
+  packages: MethodologyRegistryRecordList<KnowledgePackageRecord>
+  evaluations: MethodologyRegistryRecordList<KnowledgePackageEvaluation>
+}
+
+export interface ResearchRunOutcomeView {
+  project_id: string
+  run_stream_revision: number
+  recorded_revision: number
+  replayed: boolean
+  outcome: ResearchRunOutcome
+}
+
+export interface ResearchRunOutcomeList {
+  project_id: string
+  run_stream_revision: number
+  outcomes: ResearchRunOutcomeView[]
+}
+
+export interface RunOutcomeObservationList {
+  project_id: string
+  observations: RunOutcomeObservation[]
+  pending: RunOutcomeObservation[]
+  pending_count: number
+}
+
+export interface SynthesisRecordRequestList {
+  project_id: string
+  requests: SynthesisRecordRequest[]
+  pending: SynthesisRecordRequest[]
+}
+
+export interface NegativeFindingList {
+  project_id: string
+  run_stream_revision: number
+  findings: NegativeFinding[]
+}
+
+export interface ResearchClaimProposalList {
+  project_id: string
+  run_stream_revision: number
+  proposals: ResearchClaimProposal[]
+}
+
+export interface WritingReviewRecordView<T> {
+  project_id: string
+  stream_revision: number
+  recorded_revision: number
+  record: T
+}
+
+export interface WritingReviewRecordList<T> {
+  project_id: string
+  stream_revision: number
+  records: Array<WritingReviewRecordView<T>>
+}
+
+export interface StoredMethodTriad {
+  triad: MethodTriad
+  diagnostic: MethodTriadDiagnostic
+}
+
+export interface WritingPatchList {
+  project_id: string
+  stream_revision: number
+  proposals: WritingReviewRecordList<WritingPatchProposal>
+  applications: WritingReviewRecordList<WritingPatchApplication>
 }
 
 export class ResearchClient {
@@ -188,6 +452,348 @@ export class ResearchClient {
 
   health(): Promise<{ ok: boolean; instance: string }> {
     return this.request('GET', '/v1/health')
+  }
+
+  // ── methodology / knowledge (api-contracts.md §24) ──────────────────────
+
+  getMethodology(projectId: string, principalId: string, signal?: AbortSignal): Promise<MethodologyCompactProjection> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/methodology`, undefined, { 'x-principal-id': principalId }, signal)
+  }
+
+  getMethodologyGraph(projectId: string, principalId: string): Promise<ResearchGraphProjection> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/methodology/graph`, undefined, { 'x-principal-id': principalId })
+  }
+
+  getMethodologyRolloutPolicy(principalId: string): Promise<MethodologyRolloutPolicy> {
+    return this.request('GET', '/v2/methodology/rollout-policy', undefined, { 'x-principal-id': principalId })
+  }
+
+  updateMethodologyRolloutPolicy(
+    principalId: string,
+    input: { mode: MethodologyRolloutMode; expected_revision: number },
+  ): Promise<MethodologyRolloutPolicy> {
+    return this.request('POST', '/v2/methodology/rollout-policy', input, { 'x-principal-id': principalId })
+  }
+
+  pinProjectMethodologyRollout(
+    projectId: string,
+    principalId: string,
+    input: {
+      expected_project_pin_revision: number
+      expected_policy_revision: number
+      expected_policy_hash: string
+    },
+  ): Promise<ProjectMethodologyRolloutPin> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/rollout-policy`, input, { 'x-principal-id': principalId })
+  }
+
+  listAssuranceAudits(projectId: string, principalId: string): Promise<AssuranceAuditList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/assurance-audits`, undefined, { 'x-principal-id': principalId })
+  }
+
+  runWritingAssurance(
+    projectId: string,
+    principalId: string,
+    input: { expected_revision: number; audit_kind: WritingAssuranceAuditKind; mode: 'deterministic'; semantic_review: null },
+    signal?: AbortSignal,
+  ): Promise<AssuranceAuditView> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/assurance-executions`,
+      input,
+      { 'x-principal-id': principalId },
+      signal,
+    )
+  }
+
+  runWritingAssuranceForDshSession(
+    sessionId: string,
+    input:
+      | { expected_revision: number; audit_kind: WritingAssuranceAuditKind; mode: 'deterministic'; semantic_review: null }
+      | { expected_revision: number; audit_kind: WritingAssuranceAuditKind; mode: 'semantic'; semantic_review: AssuranceSemanticReviewReceipt },
+    signal?: AbortSignal,
+  ): Promise<AssuranceAuditView> {
+    return this.request(
+      'POST',
+      `/internal/dsh-sessions/${encodeURIComponent(sessionId)}/assurance-executions`,
+      input,
+      {
+        'x-service-principal': 'dsh-plugin',
+        ...this.dshPluginToken !== undefined ? { 'x-dsh-plugin-token': this.dshPluginToken } : {},
+      },
+      signal,
+    )
+  }
+
+  acceptAssuranceAudit(projectId: string, auditId: string, principalId: string, expectedRevision: number): Promise<AssuranceAuditView> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/assurance-audits/${encodeURIComponent(auditId)}/accept`,
+      { expected_revision: expectedRevision },
+      { 'x-principal-id': principalId },
+    )
+  }
+
+  recordResearchRun(
+    projectId: string,
+    principalId: string,
+    input: ResearchRunOutcomeWrite,
+  ): Promise<ResearchRunOutcomeView> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/research-runs`, input, { 'x-principal-id': principalId })
+  }
+
+  listResearchRuns(projectId: string, principalId: string): Promise<ResearchRunOutcomeList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/research-runs`, undefined, { 'x-principal-id': principalId })
+  }
+
+  listRunOutcomeObservations(projectId: string, principalId: string): Promise<RunOutcomeObservationList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/run-outcome-observations`, undefined, { 'x-principal-id': principalId })
+  }
+
+  listSynthesisRecordRequests(projectId: string, principalId: string): Promise<SynthesisRecordRequestList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/synthesis-requests`, undefined, { 'x-principal-id': principalId })
+  }
+
+  listNegativeFindings(projectId: string, principalId: string): Promise<NegativeFindingList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/negative-findings`, undefined, { 'x-principal-id': principalId })
+  }
+
+  listResearchClaimProposals(projectId: string, principalId: string): Promise<ResearchClaimProposalList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/claim-proposals`, undefined, { 'x-principal-id': principalId })
+  }
+
+  listMethodTriads(projectId: string, principalId: string): Promise<WritingReviewRecordList<StoredMethodTriad>> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/method-triads`, undefined, { 'x-principal-id': principalId })
+  }
+
+  recordMethodTriad(projectId: string, principalId: string, input: MethodTriadWrite): Promise<WritingReviewRecordView<StoredMethodTriad>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/method-triads`, input, { 'x-principal-id': principalId })
+  }
+
+  listSectionGuides(projectId: string, principalId: string): Promise<WritingReviewRecordList<SectionGuideActivation>> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/section-guides`, undefined, { 'x-principal-id': principalId })
+  }
+
+  activateSectionGuide(projectId: string, principalId: string, input: SectionGuideActivationWrite): Promise<WritingReviewRecordView<SectionGuideActivation>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/section-guides`, input, { 'x-principal-id': principalId })
+  }
+
+  listWritingReviewerPanels(projectId: string, principalId: string): Promise<WritingReviewRecordList<WritingReviewerPanelAggregate>> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/reviewer-panels`, undefined, { 'x-principal-id': principalId })
+  }
+
+  recordWritingReviewerPanel(projectId: string, principalId: string, input: WritingReviewerPanelWrite): Promise<WritingReviewRecordView<WritingReviewerPanelAggregate>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/reviewer-panels`, input, { 'x-principal-id': principalId })
+  }
+
+  listWritingPatches(projectId: string, principalId: string): Promise<WritingPatchList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/writing-patches`, undefined, { 'x-principal-id': principalId })
+  }
+
+  proposeWritingPatch(projectId: string, principalId: string, input: WritingPatchProposalWrite): Promise<WritingReviewRecordView<WritingPatchProposal>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/writing-patches`, input, { 'x-principal-id': principalId })
+  }
+
+  applyWritingPatch(
+    projectId: string,
+    proposalId: string,
+    principalId: string,
+    input: WritingPatchApplyInput,
+  ): Promise<WritingReviewRecordView<WritingPatchApplication>> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/writing-patches/${encodeURIComponent(proposalId)}/apply`,
+      input,
+      { 'x-principal-id': principalId },
+    )
+  }
+
+  listProtocols(projectId: string, principalId: string): Promise<MethodologyRecordList<ProtocolRevision>> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/protocols`, undefined, { 'x-principal-id': principalId })
+  }
+
+  recordProtocol(
+    projectId: string,
+    principalId: string,
+    input: { record: ProtocolRevision; expected_revision: number },
+  ): Promise<MethodologyRecordView<ProtocolRevision>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/protocols`, input, { 'x-principal-id': principalId })
+  }
+
+  listSyntheses(projectId: string, principalId: string): Promise<MethodologyRecordList<ResearchSynthesis>> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/syntheses`, undefined, { 'x-principal-id': principalId })
+  }
+
+  recordSynthesis(
+    projectId: string,
+    principalId: string,
+    input: { request_id: string; record: ResearchSynthesis; expected_revision: number },
+  ): Promise<MethodologyRecordView<ResearchSynthesis>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/syntheses`, input, { 'x-principal-id': principalId })
+  }
+
+  listDirections(projectId: string, principalId: string): Promise<DirectionList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/directions`, undefined, { 'x-principal-id': principalId })
+  }
+
+  recordDirection(
+    projectId: string,
+    principalId: string,
+    input: { record: DirectionProposal; expected_revision: number },
+  ): Promise<MethodologyRecordView<DirectionProposal>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/directions`, input, { 'x-principal-id': principalId })
+  }
+
+  adoptDirection(
+    projectId: string,
+    proposalId: string,
+    principalId: string,
+    input: {
+      adoption_id: string
+      decision: 'adopted' | 'rejected'
+      gate_decision_ref: string | null
+      created_at: string
+      expected_revision: number
+    },
+  ): Promise<MethodologyRecordView<DirectionAdoption>> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/directions/${encodeURIComponent(proposalId)}/adopt`,
+      input,
+      { 'x-principal-id': principalId },
+    )
+  }
+
+  listKnowledgeActivations(projectId: string, principalId: string): Promise<MethodologyRecordList<StoredKnowledgeActivation>> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/knowledge-activations`, undefined, { 'x-principal-id': principalId })
+  }
+
+  activateKnowledgePackage(
+    projectId: string,
+    principalId: string,
+    sessionId: string,
+    input: KnowledgeActivationIntent,
+  ): Promise<MethodologyRecordView<StoredKnowledgeActivation>> {
+    return this.request('POST', `/v2/projects/${encodeURIComponent(projectId)}/knowledge-activations`, input, {
+      'x-principal-id': principalId,
+      'x-principal-session': sessionId,
+    })
+  }
+
+  activateKnowledgePackageForDshSession(
+    sessionId: string,
+    input: KnowledgeActivationIntent,
+  ): Promise<MethodologyRecordView<StoredKnowledgeActivation>> {
+    return this.request(
+      'POST',
+      `/internal/dsh-sessions/${encodeURIComponent(sessionId)}/knowledge-activations`,
+      input,
+      {
+        'x-service-principal': 'dsh-plugin',
+        ...this.dshPluginToken !== undefined ? { 'x-dsh-plugin-token': this.dshPluginToken } : {},
+      },
+    )
+  }
+
+  reconcileNativeKnowledgePacks(): Promise<{ registry_revision: number; package_names: string[] }> {
+    return this.request('POST', '/internal/methodology/native-packs/reconcile', {}, {
+      'x-service-principal': 'dsh-plugin',
+      ...this.dshPluginToken !== undefined ? { 'x-dsh-plugin-token': this.dshPluginToken } : {},
+    })
+  }
+
+  deactivateKnowledgePackage(
+    projectId: string,
+    activationId: string,
+    principalId: string,
+    input: {
+      request: {
+        project_id: string
+        session_id: string
+        activation_id: string
+        explicit_human_deactivation: true
+        reason: 'user-requested' | 'superseded' | 'no-longer-needed'
+      }
+      expected_revision: number
+    },
+  ): Promise<MethodologyRecordView<StoredKnowledgeDeactivation>> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/knowledge-activations/${encodeURIComponent(activationId)}/deactivate`,
+      input,
+      { 'x-principal-id': principalId },
+    )
+  }
+
+  getKnowledgeDelivery(
+    projectId: string,
+    principalId: string,
+    input: { session_id: string; surface: 'scholar-chat' | 'assurance-reviewer' },
+    signal?: AbortSignal,
+  ): Promise<KnowledgeDeliverySnapshot> {
+    const query = new URLSearchParams({ session_id: input.session_id, surface: input.surface })
+    return this.request(
+      'GET',
+      `/v2/projects/${encodeURIComponent(projectId)}/knowledge-delivery?${query.toString()}`,
+      undefined,
+      { 'x-principal-id': principalId },
+      signal,
+    )
+  }
+
+  listWritingReviews(projectId: string, principalId: string): Promise<WritingReviewList> {
+    return this.request('GET', `/v2/projects/${encodeURIComponent(projectId)}/writing-reviews`, undefined, { 'x-principal-id': principalId })
+  }
+
+  recordReverseOutline(
+    projectId: string,
+    principalId: string,
+    input: { record: ReverseOutline; expected_revision: number },
+  ): Promise<MethodologyRecordView<ReverseOutline>> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/writing-reviews`,
+      { kind: 'reverse-outline', ...input },
+      { 'x-principal-id': principalId },
+    )
+  }
+
+  recordReviewFinding(
+    projectId: string,
+    principalId: string,
+    input: { record: ReviewFinding; expected_revision: number },
+  ): Promise<MethodologyRecordView<ReviewFinding>> {
+    return this.request(
+      'POST',
+      `/v2/projects/${encodeURIComponent(projectId)}/writing-reviews`,
+      { kind: 'review-finding', ...input },
+      { 'x-principal-id': principalId },
+    )
+  }
+
+  listMethodologyPackages(principalId: string): Promise<MethodologyPackageRegistry> {
+    return this.request('GET', '/v2/methodology/packages', undefined, { 'x-principal-id': principalId })
+  }
+
+  registerMethodologyPackage(
+    principalId: string,
+    input: { record: KnowledgePackageRecord; expected_revision: number },
+  ): Promise<MethodologyRegistryRecordView<KnowledgePackageRecord>> {
+    return this.request('POST', '/v2/methodology/packages', input, { 'x-principal-id': principalId })
+  }
+
+  evaluateMethodologyPackage(
+    packageName: string,
+    packageVersion: string,
+    principalId: string,
+    input: { record: KnowledgePackageEvaluation; expected_revision: number },
+  ): Promise<MethodologyRegistryRecordView<KnowledgePackageEvaluation>> {
+    return this.request(
+      'POST',
+      `/v2/methodology/packages/${encodeURIComponent(packageName)}/${encodeURIComponent(packageVersion)}/evaluations`,
+      input,
+      { 'x-principal-id': principalId },
+    )
   }
 
   // ── paper reproduction (docs/reproduction-contracts.md §4) ───────────────
@@ -443,18 +1049,6 @@ export class ResearchClient {
     return this.request('GET', `/v1/projects/${projectId}/gates`)
   }
 
-  decideGate(input: {
-    gate_id: string
-    actor: string
-    decision: 'approved' | 'rejected' | 'revised'
-    reason?: string
-    diff?: string
-    session_id?: string | null
-    event_id?: string | null
-  }): Promise<{ gate: Gate; decision: Decision; project: ResearchProject }> {
-    return this.request('POST', `/v1/gates/${input.gate_id}/decisions`, input)
-  }
-
   // ── artifacts ────────────────────────────────────────────────────────────
 
   registerArtifact(input: { project_id: string; kind: string; content_base64: string; metadata?: Record<string, unknown>; media_type?: string; file_name?: string }): Promise<ArtifactRecord> {
@@ -628,7 +1222,9 @@ export class ResearchClient {
     output_contract?: { metrics: string; logs: string }
     runner_profile_id?: string | null
     runner_target_id?: string | null
-  }): Promise<JobRecord> {
+    protocol_pin?: FrozenProtocolPin | null
+    run_intent?: ResearchIntent
+  }): Promise<JobSpecBound> {
     return this.request('POST', `/v1/projects/${input.project_id}/jobs`, input)
   }
 
@@ -1149,6 +1745,7 @@ export class ResearchClient {
     mode?: 'one-shot' | 'continuable' | 'read-only'
     role?: string | null
     state?: 'running'
+    execution_identity?: ChildExecutionIdentity
   }, sessionId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const { project_id: projectId, ...body } = input
     return this.request(

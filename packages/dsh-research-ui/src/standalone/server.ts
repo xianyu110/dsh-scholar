@@ -795,7 +795,6 @@ const BOOTSTRAP_HTML = `<!doctype html>
     if (saved) { unlock(saved); }
     else { boot.style.display = 'flex'; }
     form.addEventListener('submit', function (e) { e.preventDefault(); unlock(input.value.trim()); });
-    window.addEventListener('load', notifyFrameReady, { once: true });
     input.focus();
   })();
 </script>
@@ -850,6 +849,20 @@ export function loadOptions(argv: string[]): StandaloneOptions {
 }
 
 export async function startStandalone(options: StandaloneOptions): Promise<void> {
+  const sidecar = new UiKernelSidecar({
+    host: '127.0.0.1',
+    port: options.kernelPort,
+    dataDir: options.kernelDataDir,
+    log: line => console.error(line),
+  })
+  // Token authentication proves access to this local BFF; Human actions
+  // additionally need one stable server-side Principal. Both the DSH plugin
+  // and standalone derive it from the same protected sidecar credential, so
+  // upgrades and entry-point changes do not create a new project namespace.
+  // An explicit --principal remains available for controlled deployments.
+  if (options.token !== null && options.principal === null) {
+    options = { ...options, principal: sidecar.operatorPrincipal }
+  }
   // CONFIG-01: the standalone effective config is validated through the
   // canonical Config Registry BEFORE anything binds — unknown keys, invalid
   // values and security-floor violations fail fast (the registry enforces
@@ -869,23 +882,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
   const configPin = resolvedConfig.pinHash
   const frameAncestorSources = standaloneFrameAncestorSources(options.frameAncestors)
   console.error(`[standalone] config pin ${configPin} (${options.host}:${options.port}, kernel=${options.kernelPort})`)
-  const sidecar = new UiKernelSidecar({
-    host: '127.0.0.1',
-    port: options.kernelPort,
-    dataDir: options.kernelDataDir,
-    log: line => console.error(line),
-  })
   try {
     await sidecar.start()
   } catch (error) {
     await sidecar.stop()
     throw error
   }
-  // Standalone Human identity is explicit. The Kernel sidecar also owns a
-  // credential-derived principal for trusted DSH-plugin calls, but borrowing
-  // it here would silently turn a token-only browser session into a Human PI.
-  // Token mode without --principal therefore stays fail-closed; --no-token is
-  // the deliberately unauthenticated loopback development mode.
+  // `options.principal` is now either explicit or the stable credential-bound
+  // local operator. It is never accepted from a browser request.
   const endpoint = sidecar.endpoint
   // §4 P0 (API-01/EVID-01): the kernel's internal-route service identity.
   // The BFF is a service process holding the 0600 dataDir token; it attaches
@@ -1209,12 +1213,10 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
 
       const humanGateMatch = /^\/bff\/research\/gates\/([^/]+)\/decision$/.exec(url.pathname)
 
-      // API-01/GOV-01 (hardening §4 P0): in token mode the loopback operator
-      // identity (--principal) is REQUIRED. A token without a principal is a
-      // misconfiguration, not an anonymous mode: every surface except the
-      // unlock screen, CSRF issuance, static assets and health answers
-      // 401 {ok:false,error:'principal required'} — fail-closed, before any
-      // kernel contact. --no-token keeps its loopback-dev behavior.
+      // API-01/GOV-01: token mode must always carry an effective local
+      // Principal. startStandalone derives it from the protected shared
+      // sidecar credential when --principal is absent; this branch remains a
+      // defense-in-depth guard for invalid programmatic construction.
       if (
         options.token !== null &&
         options.principal === null &&
@@ -1229,7 +1231,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
       // GOV-01: browser Gate decisions use a dedicated Human BFF route.
       // The browser submits business fields only; this adapter resolves the
       // Gate's project, checks fresh membership/role, injects the durable
-      // Principal + request id, then calls the fail-closed Kernel v1 route.
+      // Principal + request id, then calls the service-only Kernel bridge.
       if (method === 'POST' && humanGateMatch !== null) {
         const requestId = `req_${randomBytes(12).toString('hex')}`
         if (options.token !== null) {
@@ -1299,12 +1301,13 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         }
         let upstream: Response
         try {
-          upstream = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}/decisions`, {
+          upstream = await fetch(`${endpoint}/internal/human-gates/${encodeURIComponent(gateId)}/decisions`, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               accept: 'application/json',
               ...upstreamAuthHeaders,
+              'x-service-principal': 'standalone-human-bff',
               'x-principal-id': opSession.principal_id,
               'x-principal-role': role,
               'x-principal-session': opSession.session_id,
@@ -1439,6 +1442,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           return
         }
         const projectId = typeof raw.project_id === 'string' ? raw.project_id.trim() : ''
+        const sessionId = typeof raw.session_id === 'string' ? raw.session_id.trim() : ''
         const text = typeof raw.text === 'string' ? raw.text.trim() : ''
         const locale: 'zh' | 'en' = raw.locale === 'en' ? 'en' : 'zh'
         const history = Array.isArray(raw.history) ? raw.history.slice(-12).flatMap(item => {
@@ -1448,8 +1452,8 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           const itemText = row.text.trim().slice(0, 2_000)
           return itemText === '' ? [] : [{ role: row.role, text: itemText }]
         }) : []
-        if (projectId === '' || projectId.length > 256 || text === '' || text.length > 16_000) {
-          sendJson(res, 422, bffError('validation_error', 'project_id and text are required'))
+        if (projectId === '' || projectId.length > 256 || sessionId === '' || sessionId.length > 256 || text === '' || text.length > 16_000) {
+          sendJson(res, 422, bffError('validation_error', 'project_id, session_id and text are required'))
           return
         }
         if (options.principal !== null && !(await isProjectMember(projectId))) {
@@ -1470,6 +1474,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         try {
           const reply = await requestScholarAgent(options.dataDir, {
             operation: 'conversation',
+            session_id: sessionId,
             text,
             locale,
             project: {
@@ -1523,11 +1528,12 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
           return
         }
         const projectId = typeof raw.project_id === 'string' ? raw.project_id.trim() : ''
+        const sessionId = typeof raw.session_id === 'string' ? raw.session_id.trim() : ''
         const text = typeof raw.text === 'string' ? raw.text.trim() : ''
         const count = typeof raw.count === 'number' && Number.isInteger(raw.count) ? raw.count : 3
         const locale: 'zh' | 'en' = raw.locale === 'en' ? 'en' : 'zh'
-        if (projectId === '' || projectId.length > 256 || text === '' || text.length > 16_000 || count < 1 || count > 5) {
-          sendJson(res, 422, bffError('validation_error', 'project_id, text and count (1-5) are required'))
+        if (projectId === '' || projectId.length > 256 || sessionId === '' || sessionId.length > 256 || text === '' || text.length > 16_000 || count < 1 || count > 5) {
+          sendJson(res, 422, bffError('validation_error', 'project_id, session_id, text and count (1-5) are required'))
           return
         }
         if (options.principal !== null) {
@@ -1582,6 +1588,7 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
         try {
           reply = await requestScholarAgent(options.dataDir, {
             operation: 'generate_ideas',
+            session_id: sessionId,
             text,
             locale,
             count,
@@ -1997,17 +2004,6 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             const childId = childIdFromPath(url.pathname)
             if (childId !== null) memberProjectId = await childProjectId(childId)
           }
-          if (memberProjectId === null && url.pathname.startsWith('/v1/gates/') && url.pathname.includes('/decisions')) {
-            // GOV-01/API-01: a gate DECISION is project-scoped via the gate's
-            // owning project — resolve it through the kernel (the gate id is
-            // NOT a project id; treating it as one caused false 404s).
-            const gateId = url.pathname.split('/').filter(Boolean)[2] ?? ''
-            if (gateId !== '') {
-              memberProjectId = await fetch(`${endpoint}/v1/gates/${encodeURIComponent(gateId)}`, { headers: { accept: 'application/json', ...upstreamAuthHeaders } })
-                .then(async r => (r.ok ? (await r.json() as { project_id?: string }).project_id ?? null : null))
-                .catch(() => null)
-            }
-          }
           if (memberProjectId === null) {
             // API-01/PTY-01 (hardening §5 P0-2): global-id routes — artifact,
             // document/TeX, pty session and global events ids carry no path
@@ -2170,6 +2166,14 @@ export async function startStandalone(options: StandaloneOptions): Promise<void>
             const role = await projectRole(memberProjectId)
             if (role !== null) proxyHeaders['x-principal-role'] = role
           }
+        }
+        // WRITING-PRINCIPAL-02: canonical TeX patch application is a Human
+        // BFF operation. The Kernel accepts the identity only when this
+        // server-owned audience accompanies the session-derived principal;
+        // browser-supplied service/audience headers are never forwarded.
+        if (options.principal !== null && method === 'POST'
+          && /^\/v2\/projects\/[^/]+\/writing-patches\/[^/]+\/apply$/.test(url.pathname)) {
+          proxyHeaders['x-service-principal'] = 'standalone-human-bff'
         }
         // v2 shape (domain-model.md §9): job submission records the durable
         // submitter principal (jobs.created_by_principal_id). On the v1 jobs

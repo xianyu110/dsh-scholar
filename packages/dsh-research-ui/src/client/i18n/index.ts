@@ -28,6 +28,7 @@ import { zh as trajectoryZh, en as trajectoryEn } from './locales/trajectory'
 import { zh as topologyZh, en as topologyEn } from './locales/topology'
 import { zh as workspaceZh, en as workspaceEn } from './locales/workspace'
 import { zh as ptyZh, en as ptyEn } from './locales/pty'
+import { zh as methodologyZh, en as methodologyEn } from './locales/methodology'
 
 export type Locale = 'zh' | 'en'
 
@@ -53,6 +54,7 @@ const DICTS: AllDicts = {
     topology: topologyZh as unknown as Record<string, string>,
     workspace: workspaceZh as unknown as Record<string, string>,
     pty: ptyZh as unknown as Record<string, string>,
+    methodology: methodologyZh as unknown as Record<string, string>,
   },
   en: {
     common: commonEn as unknown as Record<string, string>,
@@ -72,6 +74,7 @@ const DICTS: AllDicts = {
     topology: topologyEn as unknown as Record<string, string>,
     workspace: workspaceEn as unknown as Record<string, string>,
     pty: ptyEn as unknown as Record<string, string>,
+    methodology: methodologyEn as unknown as Record<string, string>,
   },
 }
 

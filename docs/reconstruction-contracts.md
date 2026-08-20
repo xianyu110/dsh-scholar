@@ -109,7 +109,7 @@ Gate Decision 效果：
 
 ~~~typescript
 type ProjectMode = 'gate-only' | 'full-auto'
-type GateType = 'scope'|'idea'|'contract'|'budget'|'release'
+type GateType = 'scope'|'idea'|'contract'|'budget'|'release'|'direction'
 type GateDecision = 'approved'|'rejected'|'revised'
 type JobStatus = 'queued'|'running'|'succeeded'|'failed'|'cancelled'|'retryable'
 type JobKind = 'echo'|'smoke'|'baseline'|'pilot'|'formal'|'analysis'|'reproduce'|'latex-compile'|'clean-room'
@@ -359,16 +359,22 @@ Action 包含 action_id、project_id、phase、type、idempotency_key、status�
 
 工具目录只注册 canonical 名 `claim_verify_request`、`analysis_request`、`release_bundle_request`。已废弃的 `claim_verify`、`analysis_build`、`release_bundle` 不注册、不授权，也不提供兼容 adapter；调用方必须升级到 canonical 契约。
 
-Canonical Tool registry：
+Canonical Tool registry（共 40 个实际可调用名称；表中以 `/` 并列的每一项都是独立工具）：
 
 | Tool | Client method / action |
 |---|---|
+| dsh_scholar | 当前 DSH session 的一般研究 façade；只执行受控 name-only create 与 authoritative ready survey，其余写动作建议/阻断/Human-only |
 | research_project | action=create/list/get/projection；映射 projects create/list/get/projection |
 | research_phase | project transition；to enum 排除 Gate 控制状态 |
 | research_gate_request | action=create/list；gate-requests/gates |
 | research_budget | action=read/record；budget projection/usage request |
 | research_status | project projection |
-| research_onboarding | action=create/stage/scan/grill/propose/status；只输出 observation/proposal，不提供 accept/Decision。注册名以 research_intake_ 前缀实现（research_intake_begin/stage/scan/answers/propose，research-onboarding.md §2）；不接受 adopt |
+| research_methodology_status | 从当前 DSH session link 读取 compact methodology projection |
+| research_protocol_record | 对当前 session-bound project 追加 strict ProtocolRevision，使用 methodology stream CAS |
+| research_synthesis_record | 对当前 session-bound project 追加 strict agent-generated ResearchSynthesis |
+| research_writing_review_record | 对当前 session-bound project 追加 revision/hash-bound ReverseOutline 或 ReviewFinding |
+| research_knowledge_activate | 当前 session-bound project 的显式 Knowledge Pack activation；要求 Host confirmation 与 Kernel resolver 全通过 |
+| research_intake_begin / research_intake_stage / research_intake_scan / research_intake_answers / research_intake_propose | 五个独立 prepare-only Intake 工具；只输出 observation/question/proposal，不提供 accept/adopt/Decision |
 | literature_search | Connector search，不写 Kernel |
 | paper_resolve | Connector resolve |
 | corpus_snapshot | Connector search + create corpus snapshot |
@@ -390,7 +396,7 @@ Canonical Tool registry：
 | manuscript_review | manuscript review projection |
 | release_bundle_request | release bundle request |
 
-Tool input 不接受 principal、verified/accepted provenance、internal token、host path 或 arbitrary URL。project_id 省略时只允许从当前 Principal session link 唯一解析，否则 project_required。Tool output 为 {ok:true,...route response fields}，错误通过 DSH tool failure 携带稳定 code，不把 ErrorEnvelope 当成功值。
+Tool input 不接受 principal、verified/accepted provenance、internal token、host path 或 arbitrary URL。普通 role-scoped tool 的 project_id 省略时只允许从当前 Principal session link 唯一解析，否则 project_required；七个 methodology tools 根本不接受可任选 project_id，只能使用调用 DSH session 的持久 link。Unknown/root role 只允许 `dsh_scholar` 与这七个 exact-session methodology tools，其他普通 Research tool fail closed。Knowledge activation 只接收 package identity/CAS，Assurance semantic identity 只从 durable child topology 派生。Tool output 为 {ok:true,...route response fields}，错误通过 DSH tool failure 携带稳定 code，不把 ErrorEnvelope 当成功值。
 
 ## 18. 可观测性
 

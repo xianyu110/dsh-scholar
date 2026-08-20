@@ -98,6 +98,30 @@ afterEach(async () => {
 })
 
 describe('KernelSidecar (research-plugin) — SIDE-01', () => {
+  it('does not scan or mutate retired data directories during ordinary startup', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-canonical-only-'))
+    const retiredDir = mkdtempSync(join(tmpdir(), 'sidecar-retired-source-'))
+    tempDirs.push(dataDir, retiredDir)
+    // This deliberately is not a valid database. The retired automatic
+    // discovery path would try to adopt it and fail before boot; current
+    // startup must ignore it entirely.
+    writeFileSync(join(retiredDir, 'kernel.db'), 'retired data is not a runtime source')
+    const previous = process.env.DSH_SCHOLAR_LEGACY_KERNEL_DIRS
+    process.env.DSH_SCHOLAR_LEGACY_KERNEL_DIRS = retiredDir
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port: 0, dataDir })
+    try {
+      await sidecar.start()
+      const endpoint = readEndpoint(dataDir)
+      allPids.push(endpoint.pid as number)
+      expect((await fetch(`${sidecar.endpoint}/v1/health`)).ok).toBe(true)
+      expect(readFileSync(join(retiredDir, 'kernel.db'), 'utf8')).toBe('retired data is not a runtime source')
+    } finally {
+      await sidecar.stop()
+      if (previous === undefined) delete process.env.DSH_SCHOLAR_LEGACY_KERNEL_DIRS
+      else process.env.DSH_SCHOLAR_LEGACY_KERNEL_DIRS = previous
+    }
+  })
+
   it('port=0 resolves the actual port from runtime/endpoint.json (0600), health works, second start reuses with identity verified', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-port0-'))
     tempDirs.push(dataDir)
@@ -335,6 +359,7 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
       { file: 'kernel-token', read: sidecar => sidecar.kernelToken },
       { file: 'service-token', read: sidecar => sidecar.serviceToken },
       { file: 'dsh-plugin-token', read: sidecar => sidecar.dshPluginToken },
+      { file: 'orchestrator-token', read: sidecar => sidecar.orchestratorToken },
     ]
     for (const [index, testCase] of cases.entries()) {
       const symlinkDir = mkdtempSync(join(tmpdir(), `sidecar-token-symlink-${index}-`))
@@ -356,7 +381,8 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
     const dataDir = mkdtempSync(join(tmpdir(), 'sidecar-kt-'))
     tempDirs.push(dataDir)
     const port = await freePort()
-    const sidecar = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: () => undefined })
+    const logs: string[] = []
+    const sidecar = new KernelSidecar({ host: '127.0.0.1', port, dataDir, log: line => logs.push(line) })
     await sidecar.start()
     const pid = readEndpoint(dataDir).pid as number
     allPids.push(pid)
@@ -376,6 +402,18 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
       expect(lstatSync(dshPluginFile).isSymbolicLink()).toBe(false)
       expect(sidecar.dshPluginToken).toBe(dshPluginToken)
       expect(dshPluginToken).not.toBe(readFileSync(join(dataDir, 'service-token'), 'utf8').trim())
+      const orchestratorFile = join(dataDir, 'orchestrator-token')
+      const orchestratorToken = readFileSync(orchestratorFile, 'utf8').trim()
+      expect(orchestratorToken).toMatch(hex32)
+      expect(statSync(orchestratorFile).mode & 0o777).toBe(0o600)
+      expect(lstatSync(orchestratorFile).isSymbolicLink()).toBe(false)
+      expect(sidecar.orchestratorToken).toBe(orchestratorToken)
+      expect(orchestratorToken).not.toBe(token)
+      expect(orchestratorToken).not.toBe(sidecar.serviceToken)
+      expect(orchestratorToken).not.toBe(dshPluginToken)
+      expect(readFileSync(`/proc/${pid}/cmdline`, 'utf8')).not.toContain(orchestratorToken)
+      expect(logs.join('\n')).not.toContain(orchestratorToken)
+      expect(JSON.stringify(readEndpoint(dataDir))).not.toContain(orchestratorToken)
       // direct read without the bearer -> 401 (the local-process hole is closed).
       const noAuth = await request(port, '/v1/projects')
       expect(noAuth.status).toBe(401)
@@ -418,6 +456,7 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
     const pid = readEndpoint(dataDir).pid as number
     allPids.push(pid)
     const token = readFileSync(tokenFile(dataDir), 'utf8').trim()
+    const orchestratorToken = readFileSync(join(dataDir, 'orchestrator-token'), 'utf8').trim()
     await sidecarA.stop()
     // stop() removes the endpoint.json but NOT the kernel-token file.
     expect(existsSync(tokenFile(dataDir))).toBe(true)
@@ -428,6 +467,7 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
     allPids.push(readEndpoint(dataDir).pid as number)
     try {
       expect(sidecarB.kernelToken).toBe(token)
+      expect(sidecarB.orchestratorToken).toBe(orchestratorToken)
       // the respawned kernel demands the SAME token.
       expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
       expect((await request(port, '/v1/projects')).status).toBe(401)
@@ -468,6 +508,10 @@ describe('§5 P0-1 kernel bearer token (hardening API-01/SIDE-01) — 0600 kerne
       expect(dshPluginToken).toMatch(hex32)
       expect(statSync(join(dataDir, 'dsh-plugin-token')).mode & 0o777).toBe(0o600)
       expect(sidecar.operatorPrincipal).toBe(dshOperatorPrincipal(dshPluginToken))
+      const orchestratorToken = readFileSync(join(dataDir, 'orchestrator-token'), 'utf8').trim()
+      expect(orchestratorToken).toMatch(hex32)
+      expect(statSync(join(dataDir, 'orchestrator-token')).mode & 0o777).toBe(0o600)
+      expect(sidecar.orchestratorToken).toBe(orchestratorToken)
       expect((await request(port, '/v1/projects')).status).toBe(401)
       expect((await request(port, '/v1/projects', 'GET', { authorization: `Bearer ${token}` })).status).toBe(200)
       expect((await request(port, '/v1/projects', 'POST', {}, { name: 'x', workspace: '/w' })).status).toBe(401)

@@ -1,8 +1,7 @@
 /**
  * budget-gate-resume tests (acceptance-tests.md §2): crossing a budget limit
- * blocks the project AND creates a Budget Gate whose payload declares the
- * ONLY allowed resume target (the pre-block status); a client-supplied
- * resume_to is ignored.
+ * blocks the project AND durably journals the only allowed resume target
+ * (the pre-block status); a client-supplied resume_to is ignored.
  */
 import { describe, expect, it } from 'vitest'
 import { mkdtempSync } from 'node:fs'
@@ -23,7 +22,7 @@ function makeBrief() {
   }
 }
 
-describe('budget gate resume (payload-declared only)', () => {
+describe('budget gate resume (Kernel-recorded provenance only)', () => {
   it('blocks with a gate declaring the pre-block status; client resume_to is ignored', () => {
     const kernel = freshKernel()
     const project = kernel.createProject({
@@ -44,7 +43,7 @@ describe('budget gate resume (payload-declared only)', () => {
     kernel.transition(project.project_id, 'EXPERIMENTING', kernel.getProject(project.project_id).revision)
     expect(kernel.getProject(project.project_id).status).toBe('EXPERIMENTING')
 
-    // Cross the model-cost limit -> BLOCKED_GATE + Budget Gate with payload.
+    // Cross the model-cost limit -> BLOCKED_GATE + Gate/provenance in one transaction.
     kernel.recordUsage(project.project_id, { model_cost_usd: 11 })
     expect(kernel.getProject(project.project_id).status).toBe('BLOCKED_GATE')
     const gates = kernel.listGates(project.project_id).filter(g => g.type === 'budget')
@@ -52,7 +51,7 @@ describe('budget gate resume (payload-declared only)', () => {
     expect(gates[0]!.payload.resume_to).toBe('EXPERIMENTING')
 
     // Approving with a CLIENT-supplied resume_to of RELEASED must be ignored:
-    // the payload-declared EXPERIMENTING is used.
+    // the Kernel-recorded EXPERIMENTING provenance is used.
     kernel.decideGate({
       gate_id: gates[0]!.gate_id,
       actor: 'u1',
@@ -80,6 +79,45 @@ describe('budget gate resume (payload-declared only)', () => {
     expect(gates[0]!.payload.resume_to).toBe('SURVEYING')
     kernel.decideGate({ gate_id: gates[0]!.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved' })
     expect(kernel.getProject(project.project_id).status).toBe('SURVEYING')
+    kernel.close()
+  })
+
+  it('rejects a Budget Gate whose payload no longer matches the durable block provenance', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({
+      name: 'tampered budget gate', workspace: '/w', brief: makeBrief(),
+      constraints: { max_model_cost_usd: 0, max_gpu_hours: 10, max_api_requests: 100, max_parallel_jobs: 1 },
+    })
+    kernel.db.prepare("UPDATE projects SET status = 'SURVEYING' WHERE project_id = ?").run(project.project_id)
+    kernel.recordUsage(project.project_id, { model_cost_usd: 1 })
+    const gate = kernel.listGates(project.project_id).find(candidate => candidate.type === 'budget')!
+    kernel.db.prepare('UPDATE gates SET payload = ? WHERE gate_id = ?')
+      .run(JSON.stringify({ resume_to: 'RELEASED' }), gate.gate_id)
+
+    expect(() => kernel.decideGate({
+      gate_id: gate.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved',
+    })).toThrow(/provenance/i)
+    expect(kernel.getProject(project.project_id).status).toBe('BLOCKED_GATE')
+    expect(kernel.listDecisions(project.project_id)).toEqual([])
+    kernel.close()
+  })
+
+  it('rejects a Budget Gate after the blocked Project revision diverges from its durable provenance', () => {
+    const kernel = freshKernel()
+    const project = kernel.createProject({
+      name: 'stale budget block', workspace: '/w', brief: makeBrief(),
+      constraints: { max_model_cost_usd: 0, max_gpu_hours: 10, max_api_requests: 100, max_parallel_jobs: 1 },
+    })
+    kernel.db.prepare("UPDATE projects SET status = 'SURVEYING' WHERE project_id = ?").run(project.project_id)
+    kernel.recordUsage(project.project_id, { model_cost_usd: 1 })
+    const gate = kernel.listGates(project.project_id).find(candidate => candidate.type === 'budget')!
+    kernel.db.prepare('UPDATE projects SET revision = revision + 1 WHERE project_id = ?').run(project.project_id)
+
+    expect(() => kernel.decideGate({
+      gate_id: gate.gate_id, actor: 'u1', principal: { principal_id: 'u1' }, decision: 'approved',
+    })).toThrow(/provenance/i)
+    expect(kernel.getProject(project.project_id).status).toBe('BLOCKED_GATE')
+    expect(kernel.listDecisions(project.project_id)).toEqual([])
     kernel.close()
   })
 })

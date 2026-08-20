@@ -9,6 +9,7 @@ import {
   type ResearchSettingsField,
   type ScholarSettingsMutation,
   type ScholarSettingsWireSnapshot,
+  type ScholarAutomationStatus,
 } from '../shared/settings-rpc.js'
 
 export type ScholarSettingsRpcCaller = {
@@ -47,6 +48,18 @@ function decodeSettings(value: unknown): ResearchSettings | undefined {
       standalone.shortcut = value.standalone.shortcut
     }
     result.standalone = standalone
+  }
+  if ('automation' in value) {
+    if (!isRecord(value.automation)) return undefined
+    const automation = value.automation
+    if ((automation.worker !== 'running' && automation.worker !== 'stopped')
+      || (automation.runtime_default_mode !== 'gate-only' && automation.runtime_default_mode !== 'full-auto')
+      || typeof automation.restart_required !== 'boolean'
+      || automation.fixture_only !== true
+      || automation.release_requires_human !== true
+      || !(automation.last_park === null || (isRecord(automation.last_park)
+        && typeof automation.last_park.code === 'string' && typeof automation.last_park.reason === 'string'))) return undefined
+    result.automation = automation as unknown as ScholarAutomationStatus
   }
   return result
 }

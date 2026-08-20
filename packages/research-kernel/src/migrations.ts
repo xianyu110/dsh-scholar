@@ -20,10 +20,14 @@ import { PROVIDER_DDL } from './provider.js'
 import { CHUNKED_UPLOAD_DDL } from './chunked-upload.js'
 import { REPRODUCTION_DDL } from './reproduction.js'
 import { RUNNER_TARGET_DDL, seedBuiltinRunnerTargets } from './runner-target-registry.js'
+import { ASSURANCE_DDL } from './assurance-store.js'
+import { METHODOLOGY_DDL, RESEARCH_RUN_OUTCOME_DDL } from './methodology-store.js'
+import { WRITING_REVIEW_DDL } from './writing-review-store.js'
+import { METHODOLOGY_ROLLOUT_DDL } from './rollout-policy.js'
 import { ArtifactCas } from './cas.js'
 
 /** Code-side schema version; bumped only when the migration set grows. */
-export const SCHEMA_VERSION = 23
+export const SCHEMA_VERSION = 30
 
 export interface MigrationReport {
   /** Row counts per affected table (legacy import steps). */
@@ -54,6 +58,60 @@ export interface Migration {
   body: string
   up: (db: DatabaseSync, report: MigrationReport, ctx?: MigrationContext) => void
 }
+
+/** CORRECT-01: gate-specific budget block provenance plus a cross-store
+ * Writing patch intent journal. These are new tables in a new migration;
+ * released migration bodies remain immutable. */
+export const CORRECTNESS_HARDENING_DDL = `
+CREATE TABLE IF NOT EXISTS budget_block_provenance (
+  gate_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  resume_to TEXT NOT NULL,
+  project_revision INTEGER NOT NULL CHECK (project_revision >= 0),
+  payload_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (gate_id) REFERENCES gates(gate_id),
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_budget_block_provenance_project
+  ON budget_block_provenance(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS writing_patch_intents (
+  application_id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL UNIQUE,
+  project_id TEXT NOT NULL,
+  intent_json TEXT NOT NULL CHECK (json_valid(intent_json)),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_writing_patch_intents_pending
+  ON writing_patch_intents(state, created_at);
+`
+
+/** CORRECT-02: process-independent global key namespace for full-auto Gate
+ * approval requests. The receipt is stored with the exact canonical digest
+ * so replay never has to infer authority from a Gate-local Decision scan. */
+export const FULL_AUTO_IDEMPOTENCY_DDL = `
+CREATE TABLE IF NOT EXISTS full_auto_gate_idempotency (
+  idempotency_key TEXT PRIMARY KEY,
+  request_sha256 TEXT NOT NULL CHECK (
+    length(request_sha256) = 71
+    AND substr(request_sha256, 1, 7) = 'sha256:'
+    AND substr(request_sha256, 8) NOT GLOB '*[^0-9a-f]*'
+  ),
+  project_id TEXT NOT NULL,
+  gate_id TEXT NOT NULL,
+  expected_project_revision INTEGER NOT NULL CHECK (expected_project_revision >= 0),
+  decision_id TEXT NOT NULL UNIQUE,
+  receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects(project_id),
+  FOREIGN KEY (gate_id) REFERENCES gates(gate_id),
+  FOREIGN KEY (decision_id) REFERENCES decisions(decision_id)
+);
+`
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
@@ -1251,6 +1309,63 @@ const runnerTargetServiceIdentity = (db: DatabaseSync, report: MigrationReport):
 }
 
 /**
+ * 0027 — projects created before runner profiles became explicit may carry
+ * the removed `runner_profile` label or omit `runner_profile_id`. Normalize
+ * every stored value once at the storage boundary. A legacy label is not an
+ * executable profile id: it becomes null so readiness remains fail-closed
+ * until the operator explicitly selects a current RunnerProfile.
+ */
+const canonicalizeProjectExecution = (db: DatabaseSync, report: MigrationReport): void => {
+  const rows = db.prepare('SELECT project_id, execution FROM projects').all() as Array<{
+    project_id: string
+    execution: string
+  }>
+  const update = db.prepare('UPDATE projects SET execution = ? WHERE project_id = ?')
+  let normalized = 0
+  let malformed = 0
+  for (const row of rows) {
+    let source: Record<string, unknown> = {}
+    try {
+      const parsed = JSON.parse(row.execution) as unknown
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        source = parsed as Record<string, unknown>
+      } else {
+        malformed += 1
+      }
+    } catch {
+      malformed += 1
+    }
+    const runnerProfileId = typeof source.runner_profile_id === 'string' && source.runner_profile_id.trim() !== ''
+      ? source.runner_profile_id
+      : null
+    const runnerTargetId = typeof source.runner_target_id === 'string' && source.runner_target_id.trim() !== ''
+      ? source.runner_target_id
+      : 'target_local_docker_v1'
+    const networkPolicy = source.network_policy === 'none' ? 'none' : 'allowlist'
+    const fixtureId = typeof source.fixture_id === 'string' && source.fixture_id.trim() !== ''
+      ? source.fixture_id
+      : null
+    const canonical = JSON.stringify({
+      runner_profile_id: runnerProfileId,
+      runner_target_id: runnerTargetId,
+      network_policy: networkPolicy,
+      artifact_store: 'local-cas',
+      fixture_id: fixtureId,
+    })
+    if (canonical !== row.execution) {
+      update.run(canonical, row.project_id)
+      normalized += 1
+    }
+  }
+  if (report.rows === undefined) report.rows = {}
+  report.rows.projects_normalized = normalized
+  report.rows.projects_with_malformed_execution = malformed
+  if (malformed > 0) {
+    report.notes = [`${malformed} project execution value(s) were malformed and reset to an explicit unconfigured runner profile`]
+  }
+}
+
+/**
  * Ordered migration registry. Never reorder or edit a released migration:
  * its checksum is recorded in schema_migrations and a mismatch is fatal.
  * New steps append at the end and bump SCHEMA_VERSION.
@@ -1407,6 +1522,48 @@ export const MIGRATIONS: Migration[] = [
     description: 'EXEC-ENV-04: target-scoped service identity SecretRef for authenticated RunnerTarget heartbeats',
     body: runnerTargetServiceIdentity.toString(),
     up: runnerTargetServiceIdentity,
+  },
+  {
+    id: '0027_project_execution_shape',
+    description: 'UPGRADE-01: canonical project execution shape; legacy runner labels stay explicitly unconfigured',
+    body: canonicalizeProjectExecution.toString(),
+    up: canonicalizeProjectExecution,
+  },
+  {
+    id: '0028_methodology_knowledge_layer',
+    description: 'METH-01: append-only Assurance, Protocol, Synthesis, Direction, Knowledge and writing-methodology ledgers',
+    body: `${ASSURANCE_DDL}\n${METHODOLOGY_DDL}`,
+    up: (db) => { db.exec(ASSURANCE_DDL); db.exec(METHODOLOGY_DDL) },
+  },
+  {
+    id: '0029_research_run_outcomes',
+    description: 'METH-02: append-only terminal research-run outcomes, NegativeFindings and proposal-only Claim relations',
+    body: RESEARCH_RUN_OUTCOME_DDL,
+    up: (db) => { db.exec(RESEARCH_RUN_OUTCOME_DDL) },
+  },
+  {
+    id: '0030_writing_review_methodology',
+    description: 'WRITE-01: append-only MethodTriad, SectionGuide, reviewer-panel and TeX patch proposal/application receipts',
+    body: WRITING_REVIEW_DDL,
+    up: (db) => { db.exec(WRITING_REVIEW_DDL) },
+  },
+  {
+    id: '0031_correctness_hardening',
+    description: 'CORRECT-01: durable Budget Gate block provenance and crash-recoverable Writing patch intents',
+    body: CORRECTNESS_HARDENING_DDL,
+    up: (db) => { db.exec(CORRECTNESS_HARDENING_DDL) },
+  },
+  {
+    id: '0032_methodology_rollout_policy',
+    description: 'METH-ROLLOUT-01: append-only methodology rollout policies plus project and execution pins',
+    body: METHODOLOGY_ROLLOUT_DDL,
+    up: (db) => { db.exec(METHODOLOGY_ROLLOUT_DDL) },
+  },
+  {
+    id: '0033_full_auto_global_idempotency',
+    description: 'CORRECT-02: globally bind each full-auto Gate approval key to one canonical request digest and receipt',
+    body: FULL_AUTO_IDEMPOTENCY_DDL,
+    up: (db) => { db.exec(FULL_AUTO_IDEMPOTENCY_DDL) },
   },
 ]
 

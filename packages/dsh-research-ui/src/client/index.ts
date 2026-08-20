@@ -44,6 +44,10 @@ import { renderTrajectory, stopTrajectoryStream } from './panels/trajectory'
 import { renderTopology } from './panels/topology'
 import { renderWorkspace, stopWorkspaceWatch } from './panels/workspace'
 import { renderPty, ptyPanelDetachAll } from './panels/pty'
+import {
+  methodologyProjectionPath,
+  type CompactMethodologyProjection,
+} from './methodology-projection'
 import { openSettingsModal } from './modals/settings'
 import { openCommandsModal, openShortcutsModal } from './modals/commands'
 import { openNotificationsModal, openSessionSearchModal, openProjectSwitcherModal } from './modals/search'
@@ -1089,6 +1093,7 @@ export function apply(options: ApplyOptions = {}): void {
     targetChatDock: HTMLElement,
     key: TabKey,
     projection: LoadedProjection,
+    methodology: CompactMethodologyProjection | null,
     projectId: string,
     docked: boolean,
   ): Promise<void> => {
@@ -1142,16 +1147,16 @@ export function apply(options: ApplyOptions = {}): void {
 
     switch (key) {
       case 'chat': await renderChat(targetBody, targetChatDock, projectId, modelSelect, docked ? 'dock' : 'main'); break
-      case 'phase': await renderPhase(targetBody, projection, projectId); break
+      case 'phase': await renderPhase(targetBody, projection, projectId, methodology); break
       case 'gates': await renderGates(targetBody, projectId); break
       case 'runs': renderRuns(targetBody, projection); break
       case 'terminal': renderTerminal(targetBody, projection, projectId); break
       case 'artifacts': await renderArtifacts(targetBody, projectId); break
       case 'evidence': await renderEvidence(targetBody, projectId); break
       case 'budget': renderBudget(targetBody, projection); break
-      case 'manuscript': await renderManuscript(targetBody, projection, projectId); break
+      case 'manuscript': await renderManuscript(targetBody, projection, projectId, methodology); break
       case 'trajectory': await renderTrajectory(targetBody, projectId); break
-      case 'topology': await renderTopology(targetBody, projectId); break
+      case 'topology': await renderTopology(targetBody, projectId, methodology); break
       case 'workspace': await renderWorkspace(targetBody, projectId); break
       case 'pty': renderPty(targetBody, projection, projectId); break
       default: {
@@ -1224,8 +1229,13 @@ export function apply(options: ApplyOptions = {}): void {
     // a project (startScreenVisible in nav.ts is the pure contract).
     const target = state.projectId
     let projection: LoadedProjection | null = null
+    let methodology: CompactMethodologyProjection | null = null
     if (target !== undefined) {
-      const fetched = await api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`)
+      const [fetched, methodologyFetched] = await Promise.all([
+        api<Projection>(`/v1/projects/${encodeURIComponent(target)}/projection`),
+        api<CompactMethodologyProjection>(methodologyProjectionPath(target)),
+      ])
+      methodology = methodologyFetched
       if (fetched === null || fetched.project === undefined) {
         projection = null
         // A deleted project is absent from the authoritative list and all
@@ -1330,11 +1340,11 @@ export function apply(options: ApplyOptions = {}): void {
     // PTY-01: leaving the PTY tab detaches the session wire (the process
     // keeps running server-side; the next visit reconnects via after_seq).
     if (!panelVisible('pty')) ptyPanelDetachAll()
-    await renderPage(body, chatDock, state.activeTab as TabKey, projection, activeTarget, false)
+    await renderPage(body, chatDock, state.activeTab as TabKey, projection, methodology, activeTarget, false)
     applyDockGeometry()
     paintDockChrome()
     if (dockedPanel !== null) {
-      await renderPage(dockBody, dockChatDock, dockedPanel, projection, activeTarget, true)
+      await renderPage(dockBody, dockChatDock, dockedPanel, projection, methodology, activeTarget, true)
     } else {
       dockBody.replaceChildren()
       dockChatDock.hidden = true

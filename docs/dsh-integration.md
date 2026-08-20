@@ -6,9 +6,9 @@
 
 根包名为 @dsh-scholar/research-plugin，ESM，导出 Cordis Agent 插件，并通过 `./client` 与 `dsh.client` 提供 DSH Web 半侧。该半侧向 Settings → Plugin config 注入 Scholar 配置卡，并向会话 `conversation.view` 注册 `dsh Scholar` 页签；页签是 Host 原生的 session-focused 绑定/阶段视图，完整 standalone 只从新页面打开，不在 DSH 主区 iframe。宿主提供私有 `@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-settings` 以及 Host/Client 相关 DSH 包；这些 DeepSeek 包不假设存在于公共 npm registry。
 
-当前支持基线是 DSH `0.1.0-rc.7`。根包的 DSH peer 下限与开发依赖必须保持在同一基线，禁止用旧 Host 类型编译后再交给新 Host 运行。`settings.plugin.item` 在该基线是 keyed slot：Scholar 必须以其 Host Settings namespace `research-plugin` 注册 `options.key`，且不得再提交 list-slot 的 `id`/`order`。缺 key 必须由真实 DSH 启动验收捕获；只使用不执行 slot kind 校验的 mock 不能计为兼容性 PASS。
+当前安装与支持基线是 `@deepseek-ai/dsh@next`；每次安装都必须记录 tag 当时解析出的精确版本，本文更新时为 DSH `0.1.0-rc.8`。根包的 DSH peer 下限与开发依赖必须保持在 RC8 基线，禁止用旧 Host 类型编译后再交给新 Host 运行。`settings.plugin.item` 在该基线是 keyed slot：Scholar 必须以其 Host Settings namespace `research-plugin` 注册 `options.key`，且不得再提交 list-slot 的 `id`/`order`。缺 key 必须由真实 DSH 启动验收捕获；只使用不执行 slot kind 校验的 mock 不能计为兼容性 PASS。2026-08-17 的 RC7 keyed-slot 修复记录仅作为历史回归证据保留，不能替代当前 RC8 运行态验收。
 
-开发环境通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。symlink/check-out 验证只用于开发反馈，不能计为宿主兼容性 PASS。
+常规安装先用 `npm install -g @deepseek-ai/dsh@next` 安装宿主，再在本仓库 build 后执行 `dsh plugin --profile web add /absolute/path/to/dsh-scholar`。开发环境可通过 DSH_SCHOLAR_DSH_ROOT 指向 DSH checkout，脚本只建立可恢复的 symlink；该源码路径只用于宿主开发和补充验证。生产运行由 DSH profile 的扁平 node_modules 提供同一 Cordis 实例，禁止打包第二份 Cordis。symlink/check-out 验证只用于开发反馈，不能计为当前 `@next` 精确版本的宿主兼容性 PASS。
 
 ## 2. Cordis 插件形状
 
@@ -72,7 +72,9 @@ port=0 必须通过 sidecar handshake 回填，不能把 0 当作客户端 endpo
 | 角色 | 工具 |
 |---|---|
 | DSH 会话公共受控入口 | dsh_scholar |
-| director | research_project、research_phase、research_gate_request、research_budget、research_status；`research_onboarding` 是五个实际 `research_intake_*` prepare-only tools 的概念组，不是可调用工具名 |
+| DSH 会话方法论入口 | research_methodology_status、research_protocol_record、research_synthesis_record、research_writing_review_record、research_knowledge_activate |
+| director | research_project、research_phase、research_gate_request、research_budget、research_status |
+| intake | research_intake_begin、research_intake_stage、research_intake_scan、research_intake_answers、research_intake_propose（prepare-only，不提供 adopt） |
 | scholar/curator | literature_search、paper_resolve、corpus_snapshot、passage_lookup |
 | panel | research_panel、idea_create、idea_compare、novelty_audit |
 | engineer | workspace_snapshot、patch_apply、baseline_prepare、test_run、baseline_verify |
@@ -80,7 +82,7 @@ port=0 必须通过 sidecar handshake 回填，不能把 0 当作客户端 endpo
 | statistician | evidence_note_create、claim_create、claim_verify_request、analysis_request |
 | writer/reviewer | manuscript_build、manuscript_review、release_bundle_request |
 
-Unknown role 映射 none。tools/pre-execute waterfall 对未授权工具返回 deny；允许时必须调用 next()。唯一公共例外 `dsh_scholar` 只接受有界 `text`、可选 `project_name`、可选 `project_id` 与 `locale`，默认从 `exec.agent.id` 解析当前 DSH session link；session id 只允许安全 opaque-id 字符并在 ResearchClient 中编码成一个 URL segment。`project_name` 只在 session 尚未关联、用户原文是整句肯定创建指令、且字段等于确定性语法从命令后缀解析出的完整名称时启用 name-only Init；只取名称子串、疑问、否定/取消/避免、主题讨论、模型补写/改写名称、名称不一致或已有 link 均不得创建。否定/疑问词只作用于命令结构，合法名称中的“风险”“方法”“类别”或英文 `What` 不应被误拒。它返回精确、封闭的脱敏阶段投影和受控动作结果，不授予任何低层 Research role capability。DSH 当前 Tool schema DSL 不表达 string min/max，故 `text` 的 1–4000 和 `project_name` 的 1–120 长度由运行时再次强制；其余 input/output 字段、enum、对象开放性必须在 schema 中精确声明。Human Gate Decision、accepted Evidence 写入和任意宿主 shell 不注册为 Agent Tool。
+Canonical catalog 固定为 42 个可调用工具名。Unknown/root role 不是空集合：只允许 `dsh_scholar` 与上述七个 exact-session methodology tools；其余普通 Research tools 继续 deny。tools/pre-execute waterfall 对未授权工具返回 deny；允许时必须调用 next()。`dsh_scholar` 只接受有界 `text`、可选 `project_name`、可选 `project_id` 与 `locale`，默认从 `exec.agent.id` 解析当前 DSH session link；session id 只允许安全 opaque-id 字符并在 ResearchClient 中编码成一个 URL segment。`project_name` 只在 session 尚未关联、用户原文是整句肯定创建指令、且字段等于确定性语法从命令后缀解析出的完整名称时启用 name-only Init；只取名称子串、疑问、否定/取消/避免、主题讨论、模型补写/改写名称、名称不一致或已有 link 均不得创建。否定/疑问词只作用于命令结构，合法名称中的“风险”“方法”“类别”或英文 `What` 不应被误拒。它返回精确、封闭的脱敏阶段投影和受控动作结果，不授予任何低层 Research role capability。七个 methodology tools 必须从调用 DSH session 精确解析持久 project link，不接受任意 `project_id`；`research_knowledge_activate` 只接收 package identity 与 CAS，Host confirmation 后由 Kernel 派生 session/project/PI/phase/NextAction/policy/capability；`research_assurance_run` 的 semantic reviewer identity 只从 durable child topology 派生。DSH 当前 Tool schema DSL 不表达 string min/max，故 `text` 的 1–4000 和 `project_name` 的 1–120 长度由运行时再次强制；其余 input/output 字段、enum、对象开放性必须在 schema 中精确声明。Human Gate Decision、accepted Evidence 写入和任意宿主 shell 不注册为 Agent Tool。
 
 ## 5. 命令
 

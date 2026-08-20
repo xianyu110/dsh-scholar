@@ -1,7 +1,7 @@
 {
   "name": "@dsh-scholar/research-orchestrator",
   "version": "0.1.0",
-  "description": "DSH Research OS — Durable Research Orchestrator (v2 §8): state-driven poller over the Research Kernel projection API. Advances projects from their current status toward the next Human Gate and pauses there. Self-contained: own SQLite action store (node:sqlite), talks to the Kernel only over HTTP; no dependency on long-lived sessions or in-process Tasks.",
+  "description": "DSH Scholar fixture-only automation runtime: durably approves Kernel-authorized Gate allowlists, records typed parks, and reconciles exact receipts across restarts.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",
@@ -24,7 +24,9 @@
     "orchestrator": "node lib/bin/orchestrator.js"
   },
   "dependencies": {
-    "@dsh-scholar/research-schemas": "workspace:^"
+    "@dsh-scholar/research-kernel": "workspace:^",
+    "@dsh-scholar/research-schemas": "workspace:^",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

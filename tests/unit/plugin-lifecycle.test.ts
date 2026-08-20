@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, inject, KernelSidecar } from '../../src/plugin/index.js'
 import { createScholarRpcHandler, createScholarViewRpcHandler } from '../../src/plugin/settings-rpc.js'
+import { Engine as ResearchOrchestrator } from '../../workers/research-orchestrator/lib/index.js'
+import { ResearchClient } from '../../packages/research-client/lib/index.js'
 
 describe('DSH research plugin lifecycle', () => {
   it('waits for the settings provider before applying the host plugin', () => {
@@ -33,16 +35,25 @@ describe('DSH research plugin lifecycle', () => {
     }))
     let startedPort: number | undefined
     let startedDataDir: string | undefined
+    const order: string[] = []
+    const disposers: Array<() => unknown> = []
     const start = vi.spyOn(KernelSidecar.prototype, 'start').mockImplementation(function () {
       startedPort = this.port
       startedDataDir = this.dataDir
+      order.push('kernel:start')
       return Promise.resolve()
     })
-    const stop = vi.spyOn(KernelSidecar.prototype, 'stop').mockResolvedValue()
+    const stop = vi.spyOn(KernelSidecar.prototype, 'stop').mockImplementation(async () => { order.push('kernel:stop') })
+    const orchestratorStart = vi.spyOn(ResearchOrchestrator.prototype, 'start').mockImplementation(async () => { order.push('orchestrator:start') })
+    const orchestratorStop = vi.spyOn(ResearchOrchestrator.prototype, 'stop').mockImplementation(() => { order.push('orchestrator:stop') })
+    const reconcile = vi.spyOn(ResearchClient.prototype, 'reconcileNativeKnowledgePacks').mockResolvedValue({} as never)
     const ctx = {
       get: (service: string) => service === 'settings' ? { register } : undefined,
       logger: () => ({ info() {}, warn() {}, error() {} }),
-      effect: (body: () => unknown) => { body() },
+      effect: (body: () => unknown) => {
+        const disposer = body()
+        if (typeof disposer === 'function') disposers.push(disposer as () => unknown)
+      },
       provide() {},
       on() {},
       tools: { register() {} },
@@ -66,9 +77,15 @@ describe('DSH research plugin lifecycle', () => {
       expect(register.mock.calls[0]?.[2]).not.toHaveProperty('exposeToConfigurationClients')
       expect(startedPort).toBe(7521)
       expect(startedDataDir).toBe(settingsDataDir)
+      expect(order.slice(0, 2)).toEqual(['kernel:start', 'orchestrator:start'])
+      await disposers[0]?.()
+      expect(order.indexOf('orchestrator:stop')).toBeLessThan(order.indexOf('kernel:stop'))
     } finally {
       start.mockRestore()
       stop.mockRestore()
+      orchestratorStart.mockRestore()
+      orchestratorStop.mockRestore()
+      reconcile.mockRestore()
       rmSync(dataDir, { recursive: true, force: true })
     }
   })
@@ -93,7 +110,11 @@ describe('DSH research plugin lifecycle', () => {
     const sessionWorkspace = vi.fn().mockResolvedValue({ session_id: 'session_1', projection: { linked: false }, available_projects: [] })
     const bindSessionProject = vi.fn().mockResolvedValue({ session_id: 'session_1', projection: { linked: true }, available_projects: [] })
     const createSessionProject = vi.fn().mockResolvedValue({ session_id: 'session_1', projection: { linked: true }, available_projects: [] })
-    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token')
+    const handler = createScholarRpcHandler(settings as never, () => 'clipboard-token', () => ({
+      worker: 'running', runtime_default_mode: 'gate-only', fixture_only: true,
+      release_requires_human: true,
+      last_park: { code: 'unsupported_executor', reason: 'executor is not registered' },
+    }))
     const viewHandler = createScholarViewRpcHandler({
       readSessionWorkspace: sessionWorkspace,
       bindSessionProject,
@@ -102,7 +123,14 @@ describe('DSH research plugin lifecycle', () => {
 
     const snapshot = await handler('settings-snapshot', {}, new AbortController().signal)
     expect(snapshot).toMatchObject({ ok: true, value: { available: true, snapshot: {
-      value: { defaultMode: 'gate-only', unattended: false },
+      value: {
+        defaultMode: 'gate-only', unattended: false,
+        automation: {
+          worker: 'running', runtime_default_mode: 'gate-only', restart_required: false,
+          fixture_only: true, release_requires_human: true,
+          last_park: { code: 'unsupported_executor', reason: 'executor is not registered' },
+        },
+      },
       user: { unattended: false }, revision: 7, writable: true, applies: 'restart',
     } } })
     expect(JSON.stringify(snapshot)).not.toContain('must-not-cross-the-wire')
@@ -159,11 +187,18 @@ describe('DSH research plugin lifecycle', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'dsh-plugin-lifecycle-'))
     const start = vi.spyOn(KernelSidecar.prototype, 'start').mockResolvedValue()
     const stop = vi.spyOn(KernelSidecar.prototype, 'stop').mockResolvedValue()
+    const orchestratorStart = vi.spyOn(ResearchOrchestrator.prototype, 'start').mockResolvedValue()
+    const orchestratorStop = vi.spyOn(ResearchOrchestrator.prototype, 'stop').mockImplementation(() => {})
+    const reconcile = vi.spyOn(ResearchClient.prototype, 'reconcileNativeKnowledgePacks').mockResolvedValue({} as never)
+    const disposers: Array<() => unknown> = []
     let releaseSkill!: () => void
     const skillMounted = new Promise<void>(resolve => { releaseSkill = resolve })
     const ctx = {
       logger: () => ({ info() {}, warn() {}, error() {} }),
-      effect: (body: () => unknown) => { body() },
+      effect: (body: () => unknown) => {
+        const disposer = body()
+        if (typeof disposer === 'function') disposers.push(disposer as () => unknown)
+      },
       provide() {},
       on() {},
       tools: { register() {} },
@@ -182,9 +217,13 @@ describe('DSH research plugin lifecycle', () => {
       expect(settled).toBe(false)
       releaseSkill()
       await applying
+      await disposers[0]?.()
     } finally {
       start.mockRestore()
       stop.mockRestore()
+      orchestratorStart.mockRestore()
+      orchestratorStop.mockRestore()
+      reconcile.mockRestore()
       rmSync(dataDir, { recursive: true, force: true })
     }
   })

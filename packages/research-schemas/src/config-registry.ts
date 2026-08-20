@@ -215,7 +215,6 @@ export const CONFIG_REGISTRY: readonly ConfigKeyDefinition[] = [
     sources: ['http', 'ui', 'file'],
     description: 'Project-level manifest signature requirement (§12.7); the kernel-level default is true.',
   },
-
   // ── job (reserved) ────────────────────────────────────────────────────────
   // No job-scope keys yet: per-job policy (timeout, log retention) is derived
   // from the runner-profile scope and the JobSpec payload. Reserved so the
@@ -1002,7 +1001,19 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchemaNode {
     return node
   }
   if (s instanceof z.ZodNativeEnum) return { enum: [...Object.values(s._def.values)] }
-  if (s instanceof z.ZodLiteral) return { const: s._def.value }
+  if (s instanceof z.ZodLiteral) {
+    const value = s._def.value
+    const type = typeof value === 'string'
+      ? 'string'
+      : typeof value === 'number'
+        ? 'number'
+        : typeof value === 'boolean'
+          ? 'boolean'
+          : value === null
+            ? 'null'
+            : undefined
+    return type === undefined ? { const: value } : { type, const: value }
+  }
   if (s instanceof z.ZodArray) return { type: 'array', items: zodToJsonSchema(s._def.type) }
   if (s instanceof z.ZodUnion) return { anyOf: s._def.options.map(zodToJsonSchema) }
   if (s instanceof z.ZodObject) {

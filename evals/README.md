@@ -11,8 +11,8 @@
 | `docker-eval.sh` | §4.6.1 Runner 安全合同 | 真实 docker:非 root/禁网/1g 内存 OOM 强制/容器内失败分类/孤儿容器清理 | 11/11 |
 | `baseline-eval.sh` | §11.3 Baseline | 复现容差内接受、容差外阻止比较 | 3/3 |
 | `experiment-eval.sh` | §11.3 Experiment | 7 场景失败分类、成功率、预算硬停止 | 11/11 |
-| `release-bundle/run-release-eval.sh` | §14.4/§14.5 自包含 Release Bundle(SCH-REL-001) | 真实归档:kernel API→build-bundle.sh→verify-bundle.sh→clean-room reproduce.sh(docker 重跑+容差) | 19/19 |
-| `tests/security/run-release-bundle-tests.sh` | §19.2 / SCH-REL-001 阻断 | bundle 自包含(结构+哈希)、reproduce.sh 可执行、metrics §12.5 schema、in-bundle verify.sh | 8/8 |
+| `release-bundle/run-release-eval.sh` | §14.4/§14.5 自包含 Release Bundle(SCH-REL-001) | 真实归档:kernel API→standalone Human BFF Gate 决策→build-bundle.sh→verify-bundle.sh→clean-room reproduce.sh(docker 重跑+容差) | 25/25 |
+| `tests/security/run-release-bundle-tests.sh` | §19.2 / SCH-REL-001 阻断 | bundle 自包含(结构+哈希)、生成脚本只走 Human BFF 决策 seam、reproduce.sh 可执行、metrics §12.5 schema、in-bundle verify.sh | 25/25 |
 
 ## 环境限制(已记录)
 
@@ -96,4 +96,3 @@ bash evals/golden-path-v2/run-golden-v2.sh
 bash evals/release-bundle/run-release-eval.sh --keep-bundle /tmp/my-bundle
 bash tests/security/run-release-bundle-tests.sh
 ```
-

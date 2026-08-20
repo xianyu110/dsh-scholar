@@ -76,6 +76,30 @@ describe('config registry — key coverage', () => {
     expect(CONFIG_SCOPES).toEqual(['global', 'project', 'job', 'runner-profile', 'orchestrator', 'kernel', 'standalone'])
   })
 
+  it('does not advertise methodology controls before a writable project-config consumer exists', () => {
+    const deferred = [
+      'methodology.assurance_level',
+      'methodology.inner_loop_max_iterations',
+      'methodology.synthesis_valid_cycles',
+      'methodology.synthesis_stagnation_cycles',
+      'methodology.reviewer_max_fanout',
+      'knowledge_registry.enabled',
+      'knowledge_registry.remote_sources',
+      'knowledge_registry.max_active_packs',
+      // Rollout is an append-only Kernel policy with project/execution pins,
+      // not a file/env/UI Setting. Registering this key would create a
+      // second, unused source of truth.
+      'methodology.rollout_mode',
+    ]
+    const projectKeys = new Set(configKeysForScope('project').map(def => def.key))
+    for (const key of deferred) {
+      expect(projectKeys.has(key)).toBe(false)
+      expect(getConfigKey(key)).toBeUndefined()
+      expect(() => validateConfig({ [key]: key.endsWith('.enabled') ? true : 1 }, { scopes: ['project'] }))
+        .toThrow(ConfigRegistryError)
+    }
+  })
+
   it('every zod schema accepts its own default and rejects a wrong type', () => {
     for (const def of CONFIG_REGISTRY) {
       expect(def.schema.safeParse(def.default).success).toBe(true)

@@ -32,6 +32,7 @@ const CorpusPaperContext = z.object({
 export const ScholarAgentRequest = z.discriminatedUnion('operation', [
   z.object({
     operation: z.literal('conversation'),
+    session_id: z.string().min(1).max(256),
     text: z.string().min(1).max(16_000),
     locale: z.enum(['zh', 'en']).default('zh'),
     project: ChatProjectContext,
@@ -39,6 +40,7 @@ export const ScholarAgentRequest = z.discriminatedUnion('operation', [
   }).strict(),
   z.object({
     operation: z.literal('generate_ideas'),
+    session_id: z.string().min(1).max(256),
     text: z.string().min(1).max(16_000),
     locale: z.enum(['zh', 'en']).default('zh'),
     count: z.number().int().min(1).max(5),

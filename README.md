@@ -1,37 +1,32 @@
 # DSH Scholar
 
-> **DSH compatibility work is underway on an accelerated schedule!**
-
 [简体中文](README.zh-CN.md) | **English**
 
-DSH Scholar is an AI research workspace for computational research. It keeps research materials, project conversations, code and data, experiment runs, the evidence ledger, and TeX manuscripts in one recoverable project. You can start with a new question or resume work already in progress elsewhere.
+DSH Scholar is an AI research workspace for computational research. It keeps project conversations, research materials, code and data, controlled experiment runs, evidence, and TeX manuscripts in one recoverable project. You can start from a new question or continue work that already exists elsewhere.
 
-![DSH Scholar home page in Chinese](docs/assets/dsh-scholar-home-zh.png)
+![DSH Scholar standalone workspace in Chinese](docs/assets/dsh-scholar-home-zh.png)
 
-## Core capabilities
+## What it provides
 
-- **Governed research workflow**: human Gates protect critical transitions from Scope, Idea, and Experiment Contract through Evidence, Claim, and Release.
-- **Controlled experiments**: the Runner executes frozen experiment plans in local Docker or on a controlled remote machine and records logs, status, and artifacts.
-- **Traceable evidence**: manuscript claims can be traced back to controlled Runs, Artifacts, and reviewed Evidence.
-- **Integrated workspace**: Chat, Workspace, Terminal, Manuscript, Trajectory, and Settings share the same project context.
-- **Recoverable and auditable state**: the Research Kernel stores authoritative state, NextAction, approval history, and artifact references.
+- **Stage-aware research guidance**: Chat supports natural conversation, Grill Me intake, file upload, explicit slash commands, and an authoritative next-step prompt for the current research stage.
+- **Governed research workflow**: Scope, Idea, Contract, Evidence, Direction, and Release decisions remain explicit, revision-bound, and auditable.
+- **Controlled execution**: Runner Profiles describe local, local-Docker, or remote-SSH environments, including pinned container images and declared NVIDIA GPU capability.
+- **Integrated workspace**: project-scoped Chat, editable files, session-bound Web terminals, run logs, artifacts, TeX source, compilation diagnostics, and PDF preview share the same context.
+- **Traceable methodology**: Protocol revisions, run classifications, synthesis requests, assurance results, reviewer findings, knowledge-pack activation, and claim-to-evidence links are recorded as durable research state.
+- **Visible collaboration**: Trajectory and Topology expose subagent parent-child relationships, status, follow-ups, and outputs.
 
 ## Intended use and boundaries
 
 - DSH Scholar assists researchers; it does not assume responsibility for scientific judgment, approval, authorship, or publication.
-- The default mode is `gate-only`. Agents cannot approve Human Gates, fabricate accepted Evidence, or bypass an experiment contract.
-- Formal experiments must bind immutable code and data snapshots to a fixed execution environment and run through a controlled Runner.
-- Chat messages, ordinary stdout, and Interactive Terminal output do not automatically become formal Evidence.
-- The product is designed for computational research such as machine learning, data science, and bioinformatics. It is not intended for clinical decisions, human studies, wet-lab work, or other high-risk research.
+- `gate-only` is the normal mode. Agents cannot impersonate a Human principal, fabricate accepted Evidence, or bypass a research Gate.
+- `full-auto` means automatic approval only for the allowlisted Scope, Idea, Contract, and Budget Gates of an exact registered FixtureProfile. Its only canonical action executor is currently `survey_run`. Release, Direction, Intake, Evidence, and unsupported actions remain Human-controlled or are parked with a typed reason.
+- A name-only `/new <name>` project always starts as `gate-only` and collects its Brief through Grill Me; it does not silently inherit `full-auto`.
+- Formal experiments must bind immutable code and data snapshots, a frozen Protocol where required, and an explicit Runner Profile. Chat text, ordinary stdout, and Interactive Terminal output do not automatically become formal Evidence.
+- The product focuses on computational research such as machine learning, data science, and bioinformatics. It is not intended for clinical decisions, human studies, wet-lab work, or other high-risk research.
 
 ## Quick start
 
-See the [development, testing, and deployment guide](docs/test-instance-plan.md) for the complete environment, port, variable, and acceptance matrix. A local setup requires:
-
-- Linux;
-- Node.js 24;
-- pnpm 11.20.0;
-- Docker Engine, required for formal experiments, TeX compilation, and clean-room reproduction.
+The local workspace requires Linux, Node.js 24, pnpm 11.20.0, and Docker Engine for controlled experiments, TeX compilation, and clean-room reproduction.
 
 ### 1. Install and build
 
@@ -46,181 +41,114 @@ pnpm run build
 bash scripts/start-standalone-ui.sh
 ```
 
-The default page is <http://127.0.0.1:18610>. DSH and the standalone workspace share the Research Kernel at `127.0.0.1:7412` and the `~/.dsh/research-kernel` data directory, so both surfaces display and operate on the same project set. Browser authentication, session state, and display preferences remain in the separate BFF directory. On first open, paste the access token from this `0600` file:
+Open <http://127.0.0.1:18610> and paste the token from:
 
 ```text
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
 ```
 
-Use `--no-token` only in an isolated, supervised, loopback-only development environment.
+The standalone workspace and DSH use the same Research Kernel at `127.0.0.1:7412` and the same canonical project data directory at `~/.dsh/research-kernel`. Upgrading either surface must keep that directory unchanged so existing projects remain accessible. Browser tokens and display preferences live separately in the standalone BFF directory. Use `--no-token` only on an isolated, supervised, loopback-only development instance.
 
-### 3. Start the experiment Runner
+### 3. Configure an execution environment
 
-You can manage projects and files without a Runner, but experiment Jobs will remain queued. To execute experiments in local Docker, open another terminal:
+Open **Settings → Execution environment** and select an explicit Runner Profile:
+
+- local machine for trusted development and smoke checks;
+- local Docker with a pinned image, optionally requiring the NVIDIA runtime and GPU capability;
+- remote SSH with server-side endpoint, credential, known-hosts, and target-identity SecretRefs.
+
+Formal Jobs do not execute until the selected profile and target pass readiness checks. A missing Runner, offline target, unavailable SecretRef, capability mismatch, or incomplete Contract/Protocol is shown as preparation or a blocker instead of being treated as ready. See the [runtime guide](docs/test-instance-plan.md) for target registration, target-scoped heartbeat credentials, Runner startup, ports, and security constraints.
+
+### 4. Install the plugin in DSH
+
+Install the current DSH prerelease through its moving `next` tag, then record the exact installed version:
 
 ```bash
-export DSH_SCHOLAR_KERNEL_TOKEN="$(< ~/.dsh/research-kernel/kernel-token)"
-export DSH_SCHOLAR_SERVICE_TOKEN="$(< ~/.dsh/research-kernel/service-token)"
-node workers/runner-gateway/lib/bin/runner.js \
-  --kernel http://127.0.0.1:7412 \
-  --mode docker
+npm install -g @deepseek-ai/dsh@next
+npm ls -g @deepseek-ai/dsh --depth=0
 ```
 
-### 4. Install the Agent plugin in DSH
-
-For the complete DSH Scholar integration experience, install and build the latest DSH source with pnpm, then run DSH from that source checkout. From the DSH repository root, run:
+The `@dsh-scholar/*` packages are not published yet. Build this repository and add its absolute path to DSH's `web` profile:
 
 ```bash
-pnpm install
+cd /absolute/path/to/dsh-scholar
+pnpm install --frozen-lockfile
 pnpm run build
+dsh plugin --profile web add /absolute/path/to/dsh-scholar
+dsh plugin --profile web why @dsh-scholar/research-plugin
+dsh web
 ```
 
-The `@dsh-scholar/*` packages are not published yet, so add the absolute path of this repository as a local plugin in DSH's `web` profile:
+To update Scholar, rebuild this same checkout and add the same absolute path again. To uninstall it:
 
 ```bash
-cd /path/to/dsh-source
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar
-pnpm dsh plugin --profile web why @dsh-scholar/research-plugin
-pnpm dsh web
+dsh plugin --profile web remove @dsh-scholar/research-plugin
 ```
 
-Here, `/path/to/dsh-source` is the latest DSH source checkout and `/absolute/path/to/dsh-scholar` is this repository. This keeps the plugin APIs, Web UI, Skills, and configuration surface aligned with the latest DSH source. The standalone workspace does not require DSH, but it does not include the full Agent tools, slash commands, Skills, configuration card, and `dsh Scholar` tab integration.
+The plugin adds Scholar tools, slash commands, Skills, settings, and a compact `dsh Scholar` tab. An unlinked DSH conversation can bind an existing project or create a name-only project. A linked conversation shows only its current stage, next action, and execution summary; use **Open in new page** or the configured shortcut for the complete workspace.
 
-To update Scholar, run `pnpm run build` in this repository, return to the DSH source checkout, and run `pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar` again. To uninstall:
+## Plugin configuration
 
-```bash
-pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
-```
+Open **Settings → Plugin config → dsh Scholar** in DSH. Saved plugin changes take effect after the next DSH restart.
 
-The plugin provides Scholar Agent tools, slash commands, Skills, a configuration card, and the `dsh Scholar` tab. The tab is a compact session view: unlinked DSH conversations can bind an existing project or create a name-only project, while linked conversations show the current stages and next action. Use its button or the configured shortcut to open the complete standalone workspace in a new page.
-
-## Plugin config
-
-After installing the plugin, open **Settings → Plugin config → dsh Scholar** in DSH. Saved changes take effect after the next DSH restart.
-
-![DSH Scholar plugin configuration in the Chinese UI](docs/assets/dsh-scholar-plugin-config-zh.png)
-
-| Setting | Default | Description |
+| Setting | Default | Meaning |
 |---|---|---|
-| Default governance mode | `gate-only` | Used when a new project does not explicitly specify a mode. `gate-only` preserves human approval Gates; `full-auto` is only suitable for low-risk sandboxes with a configured FixtureProfile. |
-| Unattended runs | Off | Does not bypass Human Gates. At a Gate, the project pauses instead of waiting for an interactive answer. |
-| Standalone URL | `http://127.0.0.1:18610/` | Target used by **Open in new page** and the shortcut. Only HTTPS or loopback HTTP is allowed. |
-| Open-page shortcut | `Alt+Shift+S` | Can be disabled. It does not trigger while typing or using an IME. |
+| Default governance mode | `gate-only` | Applies only when a fully configured project explicitly qualifies for that mode. Name-only creation remains `gate-only`. |
+| Unattended runs | Off | Does not bypass Human Gates; an interaction requirement parks the project. |
+| Standalone URL | `http://127.0.0.1:18610/` | Target for **Open in new page** and the shortcut. Only HTTPS or loopback HTTP is accepted. |
+| Open-page shortcut | `Alt+Shift+S` | Can be disabled and does not fire while typing or using an IME. |
 
-The Standalone URL cannot contain credentials, query parameters, or fragments, and tokens must not be placed in the URL. **Copy standalone access token** is available only from a local loopback DSH instance and reads the fixed `0600` token file after an explicit user click. The page never displays the token. This action does not copy Kernel, Runner, Provider, or SSH secrets.
+When `full-auto` is enabled for a valid fixture, Settings also reports worker state, restart-required state, the fixture-only boundary, and the latest park reason. Release remains Human-controlled. The Standalone URL cannot contain credentials, query parameters, or fragments. **Copy standalone access token** is available only from a loopback DSH instance after an explicit click; the page never displays the token and does not expose Kernel, Runner, Provider, or SSH secrets.
 
-See the [DSH host integration specification](docs/dsh-integration.md) for the complete configuration and host constraints.
+## Start or continue research
 
-## Start a research project
+Choose one of three entry points:
 
-There are three ways to begin:
+1. **New research**: provide only a project name, then answer the Grill Me questions in Chat to complete the Brief.
+2. **Open an existing project**: continue its persisted stage, project conversations, files, tasks, runs, and methodology history.
+3. **Upload / join**: add papers, code, data, images, or logs and attach them to an existing stage. Uploaded material first enters isolated Intake and never becomes Evidence automatically.
 
-1. **Init**: enter a project name, complete the research Brief through Grill Me in Chat, and create the Scope Gate after confirmation.
-2. **Resume**: open an existing project and restore its stage, sessions, files, and tasks.
-3. **Upload**: add papers, code, data, or logs and join an existing research stage. Uploaded material first enters isolated Intake and does not automatically become Evidence.
-
-Typical workflow:
+The usual flow is:
 
 ```text
-Create/import project → Grill Me → Scope Gate → literature survey → Idea Gate
-→ Baseline → Experiment Contract → experiment runs → Evidence and Claim
-→ TeX writing and review → private export → Release Gate
+Create or join → Grill Me → Scope → survey → Ideas → Baseline → Contract
+→ controlled Runs → classification and synthesis → Evidence and Claims
+→ TeX writing and review → private bundle → Human Release Gate
 ```
 
-At every stage, Overview and Chat read the authoritative `NextAction` from the Kernel and show the next step, rationale, actor, and blockers.
+Chat accepts ordinary natural language and top-level slash commands. Explicit commands are deterministic advanced entry points; prose is interpreted against the project's current authoritative `NextAction`. For example:
 
-## Workspace overview
+```text
+/new  /status  /survey  /ideas  /ideas generate 3  /ideas select <idea_id>
+/gates  /contract  /run  /evidence  /claims  /write  /review
+/release-bundle  /release
+```
+
+`/run` executes only when its exact snapshots, Protocol, Runner, target, and budget are ready. `/release` creates or opens a Human Release decision; it does not let an Agent publish automatically.
+
+## Workspace areas
 
 | Area | Purpose |
 |---|---|
-| Chat | Hold project conversations, answer Grill questions, upload files, and trigger explicit research operations. |
-| Workspace | Browse, edit, upload, and manage project files; version/etag prevents silent overwrites. |
-| Run / Terminal | Inspect formal Job status and read-only logs, or use a project-bound Interactive Terminal. |
-| Evidence / Artifacts | Review claims, metrics, confidence, provenance, and generated outputs. |
-| Manuscript | Edit TeX, inspect diagnostics and compilation logs, and preview the latest PDF. |
-| Trajectory / Topology | Inspect the research trajectory, subagent parent-child relationships, status, and outputs. |
-| Settings | Configure Model Providers, OCR, budgets, Runner Profiles, and execution environments. |
+| Chat | Natural conversation, Grill questions, uploads, command completion, and stage-aware guidance. |
+| Workspace | Browse, search, edit, upload, and manage project files with version/etag conflict protection. |
+| Run / Terminal | Inspect formal Job state and read-only logs, or operate a project/session-bound Web PTY. |
+| Evidence / Artifacts | Preview and download outputs, and review metrics, provenance, confidence, and claim links. |
+| Manuscript | Edit TeX, inspect compilation diagnostics, and preview the latest successful PDF generation. |
+| Trajectory / Topology | Inspect research history and enter subagent nodes to review their work and follow-ups. |
+| Settings | Configure model and OCR providers, MinerU, budgets, Runner Profiles, targets, Docker images, GPU requirements, and SSH SecretRefs. |
 
-Chat supports natural-language messages and top-level slash commands. Common commands include:
+## Validation boundary
 
-```text
-/new  /status  /survey  /ideas  /ideas generate 3  /ideas select <idea_id>  /gates  /contract  /run
-/evidence  /claims  /write  /review  /release-bundle  /release
-```
+The repository's automated acceptance covers builds, schemas, Kernel and Client behavior, governance and security regressions, persistence/restart behavior, DSH plugin contracts, and controlled local-Docker fixtures. Real browser/ARIA observation, a clean DSH Host cold start, production model/reviewer providers, remote SSH/GPU execution, production mTLS termination, and environment-specific TeX rendering remain deployment-specific manual acceptance items. Check the [current implementation status](docs/hardening-v0.2-status.md) and [manual acceptance checklist](docs/manual-acceptance.md) before relying on those paths.
 
-See the [usage guide](docs/USAGE_GUIDE.md) for complete interactions, commands, and stage-by-stage instructions.
+## Documentation
 
-## Use case: CNN handwritten-digit recognition
-
-The `cnn-mnist-digits` project shows how a model-improvement idea becomes an auditable conclusion.
-
-| Item | Details |
-|---|---|
-| Research question | Does a two-convolution CNN with per-channel normalization outperform a single-convolution CNN baseline? |
-| Dataset and metric | `mnist_subset_v1`; `test_accuracy` |
-| Random seeds | `11` / `23` / `47` |
-| Result | `test_accuracy = 96.8%`; `+4.4` percentage points over baseline |
-| Uncertainty | bootstrap 95% CI for the mean difference `[1.2, 8.6]`; `n=3` |
-
-The Overview page brings the research question, current stage, completion, and next action into a single view.
-
-![CNN handwritten-digit recognition project overview](docs/assets/cnn-mnist-overview.png)
-
-### 1. Advance the project through Chat
-
-Each research project has independent conversations. Researchers can describe a task directly, use commands such as `/status`, `/survey`, and `/run`, and add research materials through attachments, drag-and-drop, or paste.
-
-![Project Chat for the CNN example](docs/assets/cnn-mnist-chat.png)
-
-### 2. Approve the research design
-
-Scope, Idea, and Contract Gates successively lock the scope, proposal, and experiment contract. The researcher still decides the Release Gate.
-
-![Human Gate approvals for the CNN example](docs/assets/cnn-mnist-gates.png)
-
-### 3. Execute controlled comparisons
-
-Baseline and formal configurations run as independent Jobs. In the screenshot, seven of eight runs succeeded and one failed. The failed record remains visible with an explicit retry action.
-
-![Baseline and formal experiment runs for the CNN example](docs/assets/cnn-mnist-runs.png)
-
-### 4. Inspect run data and the remote terminal
-
-Run Terminal provides read-only stdout/stderr, exit status, and recoverable logs for a formal Job. The following view shows baseline `train_loss` and `test_acc` by epoch, plus the final `test_accuracy = 88.3` for random seed `23`.
-
-![Training metrics and run logs for the CNN example](docs/assets/cnn-mnist-run-terminal.png)
-
-Interactive Terminal is a real Web PTY bound to a project or session. It connects to the execution environment for command input, resizing, and session reconnection. It is useful for interactive inspection and debugging, but its output does not automatically become formal Evidence.
-
-![DSH Scholar remote interactive Web terminal](docs/assets/cnn-mnist-web-terminal.png)
-
-### 5. Aggregate evidence
-
-The system binds metrics, effect size, confidence intervals, Runs, and Artifacts to Evidence. After review, this example's Evidence is marked `accepted` and supports the claim that the two-convolution configuration outperforms the baseline.
-
-![Accuracy Evidence and confidence interval for the CNN example](docs/assets/cnn-mnist-evidence.png)
-
-### 6. Write and release
-
-The Manuscript workspace edits `paper.tex` and `main.bib` and compiles the manuscript in a pinned TeX Live environment. After review and packaging, external release still requires approval at the Release Gate.
-
-![TeX Manuscript workspace for the CNN example](docs/assets/cnn-mnist-manuscript.png)
-
-## Development and reference
-
-Common validation commands:
-
-```bash
-pnpm run verify:docs
-pnpm test
-bash scripts/ci-gate.sh
-```
-
-- [Usage guide](docs/USAGE_GUIDE.md): complete interaction flow and troubleshooting.
-- [Runtime guide](docs/test-instance-plan.md): environment, ports, environment variables, Runner, and test commands.
-- [DSH host integration](docs/dsh-integration.md): plugin shape, configuration, tools, commands, and installation.
-- [Security and research-integrity baseline](docs/security-baseline.md): Gates, secrets, Runner, Evidence, and web security.
-- [Acceptance and test specification](docs/acceptance-tests.md): functional, security, and regression scenarios.
+- [Usage guide](docs/USAGE_GUIDE.md)
+- [Runtime and deployment guide](docs/test-instance-plan.md)
+- [DSH host integration](docs/dsh-integration.md)
+- [Security and research-integrity baseline](docs/security-baseline.md)
+- [Acceptance specification](docs/acceptance-tests.md)
 
 ## License
 

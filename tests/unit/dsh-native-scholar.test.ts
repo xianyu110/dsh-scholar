@@ -64,13 +64,109 @@ describe('DSH native Scholar conversation façade', () => {
     const value = projection('EXPERIMENTING', action({ code: 'evidence_verify', state: 'blocked', blocking: true }))
     value.jobs = [{ status: 'queued' }, { status: 'running' }, { status: 'leased' }, { status: 'failed' }]
     value.pending_gates = [{}]
-    const snapshot = buildScholarSessionProjection('session_a', value)
+    const methodology = {
+      project_id: 'rsp_1', revision: 3,
+      assurance: null,
+      protocol: { current_id: 'protocol_1', revision: 1, status: 'frozen' as const, intent: 'exploratory' as const },
+      synthesis: null,
+      knowledge: { active_count: 0, package_names: [], suppressed_count: 1, status: 'suppressed' as const },
+      writing: null,
+      manuscript: {
+        revision: 2,
+        method_triad: { triad_id: 'triad_1', status: 'diagnostic_gap' as const, gap_codes: ['missing_measurement'] },
+        section_guide: null,
+        reviewer_panel: {
+          aggregate_id: 'panel_1', state: 'partial' as const,
+          complete_roles: ['methods'], missing_roles: ['statistics'],
+        },
+        patches: { proposal_count: 2, application_count: 1, latest_proposal_id: 'patch_2', latest_application_id: 'apply_1' },
+      },
+      runs: { revision: 4, count: 3, negative_finding_count: 1, claim_proposal_count: 2, latest_run_ref: 'run_3' },
+      topology: { assurance_audit_count: 0, latest_audit_id: null, research_node_count: 1, research_edge_count: 0 },
+      next_recommendation: { code: 'run_synthesis', label_key: 'methodology.next.runSynthesis' },
+    }
+    const snapshot = buildScholarSessionProjection('session_a', value, methodology)
     expect(snapshot).toMatchObject({
       linked: true, session_id: 'session_a', project: { project_id: 'rsp_1' },
       next_action: { code: 'evidence_verify' },
       summary: { pending_gates: 1, jobs: { total: 4, queued: 1, running: 2, failed: 1 } },
+      methodology: {
+        project_id: 'rsp_1', protocol: { current_id: 'protocol_1' },
+        knowledge: { status: 'suppressed', suppressed_count: 1 },
+        manuscript: { revision: 2, reviewer_panel: { state: 'partial' } },
+        runs: { revision: 4, count: 3, negative_finding_count: 1 },
+      },
     })
     expect(snapshot).not.toHaveProperty('token')
+    expect(() => buildScholarSessionProjection('session_a', value, { ...methodology, project_id: 'rsp_other' }))
+      .toThrow('does not belong')
+  })
+
+  it('normalizes old compact methodology responses without losing the session timeline', () => {
+    const snapshot = buildScholarSessionProjection('session_a', projection('WRITING'), {
+      project_id: 'rsp_1', revision: 7,
+      assurance: null, protocol: null, synthesis: null, writing: null, next_recommendation: null,
+    })
+
+    expect(snapshot).toMatchObject({
+      linked: true,
+      session_id: 'session_a',
+      stages: expect.arrayContaining([expect.objectContaining({ id: 'writing', state: 'current' })]),
+      methodology: {
+        project_id: 'rsp_1', revision: 7,
+        knowledge: { active_count: 0, package_names: [], suppressed_count: 0, status: 'inactive' },
+        manuscript: {
+          revision: 0, method_triad: null, section_guide: null, reviewer_panel: null,
+          patches: { proposal_count: 0, application_count: 0, latest_proposal_id: null, latest_application_id: null },
+        },
+        runs: { revision: 0, count: 0, negative_finding_count: 0, claim_proposal_count: 0, latest_run_ref: null },
+        topology: { assurance_audit_count: 0, latest_audit_id: null, research_node_count: 0, research_edge_count: 0 },
+      },
+    })
+  })
+
+  it('shows only an exactly paired Kernel Direction recommendation in the DSH compact projection', () => {
+    const base = {
+      project_id: 'rsp_1', revision: 9,
+      assurance: null, protocol: null, synthesis: null, writing: null,
+      next_recommendation: { code: 'direction_pivot_intake', label_key: 'methodology.next.directionPivotIntake' },
+    }
+    expect(buildScholarSessionProjection('session_a', projection('EXPERIMENTING'), base).methodology?.next_recommendation)
+      .toEqual(base.next_recommendation)
+
+    const mismatched = buildScholarSessionProjection('session_a', projection('EXPERIMENTING'), {
+      ...base,
+      next_recommendation: { code: 'direction_pivot_intake', label_key: 'methodology.next.runSynthesis' },
+    }).methodology
+    expect(mismatched?.next_recommendation).toBeNull()
+    expect(mismatched?.unavailable_blocks).toContain('next_recommendation')
+  })
+
+  it('drops one malformed methodology block and records it unavailable without exposing additive content', () => {
+    const snapshot = buildScholarSessionProjection('session_a', projection('EXPERIMENTING'), {
+      project_id: 'rsp_1', revision: 8,
+      assurance: null,
+      protocol: null,
+      synthesis: null,
+      knowledge: {
+        active_count: 1, package_names: ['assurance-native'], suppressed_count: 0, status: 'delivery-ready',
+        content: 'must-not-enter-projection',
+      },
+      writing: null,
+      manuscript: null,
+      runs: { revision: 3, count: -1, negative_finding_count: 0, claim_proposal_count: 0, latest_run_ref: null },
+      topology: null,
+      next_recommendation: null,
+      payload: { token: 'must-not-enter-projection' },
+    })
+
+    expect(snapshot.methodology).toMatchObject({
+      knowledge: { active_count: 1, package_names: ['assurance-native'], status: 'delivery-ready' },
+      runs: { revision: 0, count: 0, negative_finding_count: 0, claim_proposal_count: 0 },
+      unavailable_blocks: ['runs'],
+    })
+    expect(JSON.stringify(snapshot)).not.toContain('must-not-enter-projection')
+    expect(snapshot.stages).toHaveLength(10)
   })
 
   it('classifies natural intents and produces canonical slash suggestions', () => {

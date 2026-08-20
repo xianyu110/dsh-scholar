@@ -58,6 +58,12 @@ bad() { printf '  FAIL: %s\n' "$*"; FAIL=$((FAIL + 1)); }
 # (runners inherit the env var and authenticate their own internal calls).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# GOV-03: this eval exercises the same service-only Human BFF bridge as the
+# browser workflow. The obsolete public v1 Gate decision writer is absent.
+human_decide() { # <gate-id> <decision-json>
+  api -H 'x-service-principal: standalone-human-bff' \
+    -X POST "http://127.0.0.1:$PORT/internal/human-gates/$1/decisions" -d "$2"
+}
 # P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
 # into a project workspace and POST workspace_id + root_relative_path.
 # shellcheck source=code-snapshot-lib.sh
@@ -94,20 +100,20 @@ PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"release-
 # an unrelated DRAFT. This leaves the fixture at CONTRACT_PENDING before the
 # contract below is registered and approved by its Human Gate.
 G_SCOPE=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Release eval scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/gates/$G_SCOPE/decisions" -d '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_SCOPE" '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi","auth_method":"dsh-session"},"decision":"approved"}' > /dev/null
 for PHASE in SURVEYING IDEATING; do
   REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
   api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"$PHASE\",\"expected_revision\":$REV}" > /dev/null
 done
 G_IDEA=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Release eval idea"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/gates/$G_IDEA/decisions" -d '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_IDEA" '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi","auth_method":"dsh-session"},"decision":"approved"}' > /dev/null
 REV=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
 api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
 # Contract — feeds data/dataset-manifest.json and the manuscript methods section.
 CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_release_bundle","data":{"dataset_id":"synth-smoke-v1","version":"1.0.0","split":"official","preprocessing_hash":"sha256:eval"},"methods":{"baseline":"no-treatment","treatment":"smoke-treatment"},"metrics":{"primary":"m1","secondary":["n_samples"]},"seeds":[1,2],"analysis":{"effect_size":"cohens_d","interval":"bootstrap-95","multiple_testing":"none"},"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":2,"stop_on_data_leakage":true}}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).contract_id))")
 [[ "$CONTRACT" == expc_* ]] && ok "contract $CONTRACT registered" || bad "contract id '$CONTRACT'"
 G_CONTRACT=$(api -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Release eval Contract\",\"payload\":{\"contract_id\":\"$CONTRACT\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/gates/$G_CONTRACT/decisions" -d '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_CONTRACT" '{"actor":"release-eval","principal":{"principal_id":"release-eval-pi","auth_method":"dsh-session"},"decision":"approved"}' > /dev/null
 ok "contract $CONTRACT frozen (approval recorded)"
 
 say "baseline jobs (kind=baseline, seeds 1/2, matched-seed design §13.6)"

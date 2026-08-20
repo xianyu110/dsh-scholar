@@ -9,9 +9,9 @@ import { join } from 'node:path'
 import { ResearchKernel, KernelError } from '@dsh-scholar/research-kernel'
 import { startKernelServer } from '../../packages/research-kernel/lib/server.js'
 
-function freshKernel(): ResearchKernel {
+function freshKernel(options: { serviceToken?: string } = {}): ResearchKernel {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-gov-test-'))
-  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false })
+  return new ResearchKernel({ dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false, serviceToken: options.serviceToken })
 }
 
 function makeBrief() {
@@ -185,16 +185,21 @@ describe('governance: gate type flows & gate-controlled states (acceptance-tests
 
 describe('governance: concurrent decision (acceptance-tests.md §2)', () => {
   it('two parallel decisions on one gate: exactly one succeeds, the other 409', async () => {
-    const kernel = freshKernel()
+    const kernel = freshKernel({ serviceToken: 'human-bff-secret' })
     const project = kernel.createProject({ name: 't', workspace: '/w', brief: makeBrief() })
     const gate = kernel.createGate({ project_id: project.project_id, type: 'scope', title: 'Scope' })
     const { server, port } = await startKernelServer({ kernel, port: 0 })
     try {
-      const url = `http://127.0.0.1:${port}/v1/gates/${gate.gate_id}/decisions`
+      const url = `http://127.0.0.1:${port}/internal/human-gates/${gate.gate_id}/decisions`
       const body = JSON.stringify({ actor: 'human-a', principal: { principal_id: 'p-a' }, decision: 'approved' })
+      const headers = {
+        'content-type': 'application/json',
+        'x-service-token': 'human-bff-secret',
+        'x-service-principal': 'standalone-human-bff',
+      }
       const [r1, r2] = await Promise.all([
-        fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
-        fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
+        fetch(url, { method: 'POST', headers, body }),
+        fetch(url, { method: 'POST', headers, body }),
       ])
       const statuses = [r1.status, r2.status].sort((a, b) => a - b)
       expect(statuses).toEqual([200, 409])

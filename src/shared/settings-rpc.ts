@@ -4,6 +4,15 @@ import type { StandaloneShortcut } from './standalone.js'
 export const SCHOLAR_RPC_CHANNEL = '/dsh-scholar'
 export const SCHOLAR_SETTINGS_NAMESPACE = 'research-plugin'
 
+export interface ScholarAutomationStatus {
+  worker: 'running' | 'stopped'
+  runtime_default_mode: 'gate-only' | 'full-auto'
+  restart_required: boolean
+  fixture_only: true
+  release_requires_human: true
+  last_park: { code: string; reason: string } | null
+}
+
 /** Browser-editable subset of the full Host config. Kernel secrets never enter this type. */
 export interface ResearchSettings {
   defaultMode?: 'gate-only' | 'full-auto'
@@ -12,9 +21,11 @@ export interface ResearchSettings {
     url?: string
     shortcut?: StandaloneShortcut
   }
+  /** Read-only runtime projection; never accepted as a mutation field. */
+  automation?: ScholarAutomationStatus
 }
 
-export type ResearchSettingsField = keyof ResearchSettings
+export type ResearchSettingsField = 'defaultMode' | 'unattended' | 'standalone'
 
 export interface ScholarSettingsWireSnapshot {
   value: ResearchSettings

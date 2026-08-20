@@ -1,10 +1,10 @@
 /**
  * Durable Research Orchestrator (design §8) — public surface.
  *
- * This is NOT a DSH plugin and does not export an `apply()` hook: it is a
- * standalone service that polls the Research Kernel projection API and
- * advances projects toward the next Human Gate (§8.3), with its own durable
- * SQLite action store (§8.2) and crash recovery (§8.5).
+ * This package does not export an `apply()` hook. Its Engine can be owned by
+ * the DSH Scholar plugin lifecycle or launched by the CLI; either way it
+ * polls only the strict Research Kernel projection and persists its own
+ * SQLite Action/lease journal for crash-safe receipt reconciliation.
  *
  * @module @dsh-scholar/research-orchestrator
  */
@@ -20,14 +20,16 @@ export {
 export {
   Engine,
   KernelApiError,
-  decideActions,
-  planForStatus,
-  type ActionPlan,
-  type ActionPlanKind,
+  decideFullAutoPlans,
+  planFullAutoProjection,
+  FULL_AUTO_GATE_ALLOWLIST,
+  FULL_AUTO_ACTION_EXECUTOR_ALLOWLIST,
   type EngineOptions,
+  type EngineRuntimeStatus,
+  type FullAutoPlan,
   type KernelProjection,
+  type ParkCode,
+  type ParkReason,
   type PollResult,
   type ProjectPollDetail,
-  type ProjectionGate,
-  type ProjectStatus,
 } from './engine.js'

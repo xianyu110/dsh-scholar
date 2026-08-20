@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod'
+import { FrozenProtocolPin, ResearchIntent } from './methodology.js'
 
 /** Pre-registered experiment contract; immutable once approved (ADR-004). */
 export const ExperimentContract = z.object({
@@ -101,6 +102,10 @@ export const JobSpecBinding = z.object({
   // 不一致 → environment 失败不执行）。缺省 null = legacy job（无 pin）。
   runner_profile_id: z.string().nullable().default(null),
   profile_config_hash: z.string().nullable().default(null),
+  /** Methodology protocol admission pin. Formal or confirmatory jobs require
+   * an exact frozen revision; exploratory fixture/analysis jobs may be null. */
+  protocol_pin: FrozenProtocolPin.nullable().default(null),
+  run_intent: ResearchIntent.default('exploratory'),
 })
 export type JobSpecBinding = z.infer<typeof JobSpecBinding>
 

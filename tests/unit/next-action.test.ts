@@ -16,18 +16,83 @@ import {
 } from '@dsh-scholar/research-kernel'
 import {
   NEXT_ACTION_UNKNOWN_CODE, NextAction, ProjectStatus,
-  fixtureContract, fixtureEvidence, fixtureIdea, fixtureProject,
-  type Gate, type ResearchProject,
+  fixtureContract, fixtureCorpus, fixtureEvidence, fixtureIdea, fixtureProject,
+  DirectionAdoption, DirectionProposal, ResearchSynthesis,
+  type Gate, type ResearchDirection, type ResearchProject,
 } from '@dsh-scholar/research-schemas'
 
 const PROJECT_ID = 'rsp_20260806_001'
 const NOW = '2026-08-06T12:00:00.000Z'
+const HASH = `sha256:${'a'.repeat(64)}` as const
+const BASIS = {
+  provenance: 'explicit' as const,
+  statement: 'The direction follows from accepted evidence.',
+  source_refs: [{ kind: 'evidence' as const, id: 'evidence_direction', sha256: HASH }],
+}
 
 function gate(type: Gate['type'], id = `gate_${type}_x1`): Gate {
   return {
     gate_id: id, project_id: PROJECT_ID, type, title: `${type} gate`, summary: '',
     payload: {}, status: 'pending', dsh_session_id: null, dsh_event_id: null,
     created_at: NOW, decided_at: null,
+  }
+}
+
+function methodologyOverlay(
+  direction: ResearchDirection,
+  snapshot: { project_revision: number; next_action_revision: number },
+  adoptions: DirectionAdoption[] = [],
+  projectId = PROJECT_ID,
+) {
+  const synthesis = ResearchSynthesis.parse({
+    synthesis_id: 'synth_next_action_1', project_id: projectId,
+    window: { from_event_seq: 1, to_event_seq: 2 }, snapshot_pin: snapshot,
+    inputs: { accepted_evidence_refs: ['evidence_direction'], verified_evidence_refs: [], run_refs: [], corpus_snapshot_refs: [] },
+    findings: { supported: [BASIS], contradicted: [], negative: [], inconclusive: [], infrastructure_failures: [] },
+    patterns: [], open_questions: [], constraints_learned: [], artifact_body_ref: 'artifact:direction-synthesis',
+    direction_proposal_id: 'direction_next_action_1', confidence: 'high', generated_by: 'human', input_hash: HASH,
+    status: 'reviewed', adoption_ref: null, created_at: NOW,
+  })
+  const proposal = DirectionProposal.parse({
+    proposal_id: 'direction_next_action_1', project_id: projectId, synthesis_id: synthesis.synthesis_id,
+    direction, rationale_artifact_id: 'artifact:direction-rationale', basis: [BASIS], snapshot_pin: snapshot,
+    input_hash: HASH, status: 'proposed', created_at: NOW,
+  })
+  return { syntheses: [synthesis], proposals: [proposal], adoptions }
+}
+
+function adoptedMethodologyOverlay(
+  direction: ResearchDirection,
+  snapshot: { project_revision: number; next_action_revision: number },
+  projectId = PROJECT_ID,
+) {
+  const overlay = methodologyOverlay(direction, snapshot, [], projectId)
+  overlay.adoptions = [DirectionAdoption.parse({
+    adoption_id: `adoption_${direction}_next_action`, proposal_id: overlay.proposals[0]!.proposal_id,
+    project_id: projectId, decision: 'adopted', actor: { kind: 'human', ref: 'pi-direction' },
+    gate_decision_ref: direction === 'pivot' || direction === 'broaden' ? 'dec_direction' : null,
+    created_at: NOW,
+  })]
+  return {
+    ...overlay,
+    direction_gate_approvals: direction === 'pivot' || direction === 'broaden' ? [{
+      decision_id: 'dec_direction',
+      gate_id: 'gate_direction_adopted',
+      project_id: projectId,
+      decision: 'approved' as const,
+      gate: {
+        ...gate('direction', 'gate_direction_adopted'),
+        project_id: projectId,
+        status: 'approved' as const,
+        decided_at: NOW,
+        payload: {
+          purpose: 'direction_adoption',
+          proposal_id: overlay.proposals[0]!.proposal_id,
+          source_synthesis_id: overlay.syntheses[0]!.synthesis_id,
+          direction,
+        },
+      },
+    }] : [],
   }
 }
 
@@ -63,6 +128,158 @@ function freshKernel(): { kernel: ResearchKernel; dir: string } {
 }
 
 describe('GUIDE-01 NextAction projection (pure)', () => {
+  it('projects a fresh governed Direction through the exact dedicated Gate', () => {
+    const base = ctx({ status: 'EXPERIMENTING', contracts: [fixtureContract()] })
+    const nextRevision = nextActionProjection(base).find(item => item.state === 'ready')!.revision!
+    const exactGate: Gate = {
+      ...gate('direction', 'gate_direction_exact'),
+      payload: {
+        purpose: 'direction_adoption', proposal_id: 'direction_next_action_1',
+        source_synthesis_id: 'synth_next_action_1', direction: 'pivot',
+      },
+    }
+    const actions = nextActionProjection({
+      ...base,
+      gates: [exactGate],
+      methodology: methodologyOverlay('pivot', { project_revision: base.project.revision, next_action_revision: nextRevision }),
+    } as NextActionContext)
+
+    expect(actions.find(item => item.code === 'direction_gate_review')).toEqual(expect.objectContaining({
+      state: 'ready', required: true, required_by: 'human', capability: 'pi', revision: nextRevision,
+      refs: [
+        { kind: 'gate', id: exactGate.gate_id },
+        { kind: 'direction', id: 'direction_next_action_1' },
+        { kind: 'synthesis', id: 'synth_next_action_1' },
+      ],
+    }))
+  })
+
+  it('fails closed with diagnostics when Direction project, NextAction or input pins are stale', () => {
+    const base = ctx({ status: 'EXPERIMENTING', contracts: [fixtureContract()] })
+    const nextRevision = nextActionProjection(base).find(item => item.state === 'ready')!.revision!
+    const snapshot = { project_revision: base.project.revision, next_action_revision: nextRevision }
+    const cases = [
+      {
+        required: 'direction_project_revision_changed',
+        overlay: { ...methodologyOverlay('pivot', snapshot), proposals: [{ ...methodologyOverlay('pivot', snapshot).proposals[0]!, snapshot_pin: { ...snapshot, project_revision: snapshot.project_revision + 1 } }] },
+      },
+      {
+        required: 'direction_next_action_revision_changed',
+        overlay: { ...methodologyOverlay('pivot', snapshot), proposals: [{ ...methodologyOverlay('pivot', snapshot).proposals[0]!, snapshot_pin: { ...snapshot, next_action_revision: snapshot.next_action_revision + 1 } }] },
+      },
+      {
+        required: 'direction_input_hash_changed',
+        overlay: { ...methodologyOverlay('pivot', snapshot), proposals: [{ ...methodologyOverlay('pivot', snapshot).proposals[0]!, input_hash: `sha256:${'b'.repeat(64)}` as const }] },
+      },
+    ]
+
+    for (const { overlay, required } of cases) {
+      const actions = nextActionProjection({ ...base, methodology: overlay } as NextActionContext)
+      expect(actions).toContainEqual(expect.objectContaining({
+        code: 'direction_overlay_stale', state: 'blocked', required: expect.arrayContaining([required]),
+      }))
+      expect(actions.some(item => item.code === 'direction_gate_review' && item.state === 'ready')).toBe(false)
+      expect(actions.some(item => item.code.startsWith('direction_') && item.required_by === 'agent' && item.state === 'ready')).toBe(false)
+    }
+  })
+
+  it('never treats a wrong-bound or cross-project Direction Gate as reviewable', () => {
+    const base = ctx({ status: 'EXPERIMENTING', contracts: [fixtureContract()] })
+    const nextRevision = nextActionProjection(base).find(item => item.state === 'ready')!.revision!
+    const snapshot = { project_revision: base.project.revision, next_action_revision: nextRevision }
+    const wrongGate: Gate = {
+      ...gate('direction', 'gate_direction_wrong'),
+      payload: {
+        purpose: 'direction_adoption', proposal_id: 'direction_next_action_1',
+        source_synthesis_id: 'synth_wrong', direction: 'pivot',
+      },
+    }
+    const wrongBinding = nextActionProjection({
+      ...base, gates: [wrongGate], methodology: methodologyOverlay('pivot', snapshot),
+    } as NextActionContext).find(item => item.code === 'direction_gate_review')
+    expect(wrongBinding).toEqual(expect.objectContaining({
+      state: 'blocked', required: ['direction_gate_binding_mismatch'],
+    }))
+    expect(wrongBinding?.refs).not.toContainEqual({ kind: 'gate', id: wrongGate.gate_id })
+
+    const exactGate: Gate = {
+      ...gate('direction', 'gate_direction_exact_a'),
+      payload: {
+        purpose: 'direction_adoption', proposal_id: 'direction_next_action_1',
+        source_synthesis_id: 'synth_next_action_1', direction: 'pivot',
+      },
+    }
+    const duplicateGate: Gate = { ...exactGate, gate_id: 'gate_direction_exact_b' }
+    const ambiguous = nextActionProjection({
+      ...base, gates: [exactGate, duplicateGate], methodology: methodologyOverlay('pivot', snapshot),
+    } as NextActionContext).find(item => item.code === 'direction_gate_review')
+    expect(ambiguous).toEqual(expect.objectContaining({
+      state: 'blocked', required: ['direction_gate_ambiguous'], refs: expect.not.arrayContaining([
+        { kind: 'gate', id: exactGate.gate_id },
+        { kind: 'gate', id: duplicateGate.gate_id },
+      ]),
+    }))
+
+    const foreign = methodologyOverlay('pivot', snapshot)
+    foreign.proposals[0] = { ...foreign.proposals[0]!, project_id: 'rsp_foreign' }
+    const crossProject = nextActionProjection({ ...base, gates: [wrongGate], methodology: foreign } as NextActionContext)
+      .find(item => item.code === 'direction_overlay_invalid')
+    expect(crossProject).toEqual(expect.objectContaining({
+      state: 'blocked', required: expect.arrayContaining(['direction_project_binding_invalid']),
+    }))
+    expect(crossProject?.refs).not.toContainEqual({ kind: 'direction', id: 'direction_next_action_1' })
+  })
+
+  it('maps every adopted Direction to one deterministic revision-bound continuation', () => {
+    const base = ctx({ status: 'EXPERIMENTING', contracts: [fixtureContract()] })
+    const nextRevision = nextActionProjection(base).find(item => item.state === 'ready')!.revision!
+    const snapshot = { project_revision: base.project.revision, next_action_revision: nextRevision }
+    const cases: Array<[ResearchDirection, string, string, 'human' | 'agent']> = [
+      ['deepen', 'direction_deepen_continue', 'runs', 'agent'],
+      ['broaden', 'direction_broaden_intake', 'overview', 'human'],
+      ['pivot', 'direction_pivot_intake', 'overview', 'human'],
+      ['conclude', 'direction_conclude_prepare', 'evidence', 'agent'],
+      ['pause', 'direction_pause_review', 'overview', 'human'],
+    ]
+    for (const [direction, code, route, requiredBy] of cases) {
+      const overlay = adoptedMethodologyOverlay(direction, snapshot)
+      const action = nextActionProjection({ ...base, methodology: overlay } as NextActionContext)
+        .find(item => item.code === code)
+      expect(action, direction).toEqual(expect.objectContaining({
+        state: 'ready', required: true, required_by: requiredBy, route, revision: nextRevision,
+        refs: [
+          { kind: 'adoption', id: `adoption_${direction}_next_action` },
+          { kind: 'direction', id: 'direction_next_action_1' },
+          { kind: 'synthesis', id: 'synth_next_action_1' },
+          { kind: 'project', id: PROJECT_ID },
+        ],
+      }))
+    }
+  })
+
+  it('fails closed when a governed adoption receipt is wrong-bound on replay', () => {
+    const base = ctx({ status: 'EXPERIMENTING', contracts: [fixtureContract()] })
+    const nextRevision = nextActionProjection(base).find(item => item.state === 'ready')!.revision!
+    const overlay = adoptedMethodologyOverlay('pivot', {
+      project_revision: base.project.revision,
+      next_action_revision: nextRevision,
+    })
+    overlay.direction_gate_approvals[0]!.gate.payload = {
+      purpose: 'direction_adoption',
+      proposal_id: 'direction_next_action_1',
+      source_synthesis_id: 'synth_wrong',
+      direction: 'pivot',
+    }
+
+    const actions = nextActionProjection({ ...base, methodology: overlay } as NextActionContext)
+    expect(actions).toContainEqual(expect.objectContaining({
+      code: 'direction_overlay_invalid',
+      state: 'blocked',
+      required: ['direction_adoption_gate_binding_invalid'],
+    }))
+    expect(actions.some(item => item.code === 'direction_pivot_intake')).toBe(false)
+  })
+
   it('every known status yields ≥1 schema-valid action; code/id set is deterministic', () => {
     for (const status of ProjectStatus.options) {
       const actions = nextActionProjection(ctx({ status }))
@@ -86,7 +303,7 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
     const cases: Array<[ResearchProject['status'], string[]]> = [
       ['DRAFT', ['scope_gate_submit']],
       ['SCOPED', ['survey_run']],
-      ['SURVEYING', ['idea_generate']],
+      ['SURVEYING', ['idea_generate', 'survey_run']],
       ['IDEATING', ['idea_gate_approve']],
       ['IDEA_APPROVED', ['contract_register']],
       ['CONTRACT_PENDING' as ResearchProject['status'], ['contract_register']],
@@ -123,6 +340,45 @@ describe('GUIDE-01 NextAction projection (pure)', () => {
     })
     expect(actions[0]?.refs).toEqual([{ kind: 'idea', id: 'idea_003' }])
     expect(actions.some(action => action.code === 'idea_generate')).toBe(false)
+  })
+
+  it('keeps idea generation blocked until the latest corpus snapshot is frozen, complete, and non-empty', () => {
+    const noCorpus = nextActionProjection(ctx({ status: 'SURVEYING' }))
+    expect(noCorpus).toContainEqual(expect.objectContaining({
+      code: 'idea_generate',
+      state: 'blocked',
+      required: ['frozen_nonempty_corpus_snapshot'],
+    }))
+    expect(noCorpus).toContainEqual(expect.objectContaining({
+      code: 'survey_run', state: 'ready', required_by: 'agent', route: 'chat',
+    }))
+
+    const emptyCorpus = fixtureCorpus(PROJECT_ID)
+    emptyCorpus.papers = []
+    emptyCorpus.passages = []
+    emptyCorpus.external_claims = []
+    emptyCorpus.quality.total_papers = 0
+    expect(nextActionProjection(ctx({ status: 'SURVEYING', corpus_snapshots: [emptyCorpus] })))
+      .toContainEqual(expect.objectContaining({
+        code: 'idea_generate',
+        state: 'blocked',
+        required: ['frozen_nonempty_corpus_snapshot'],
+      }))
+
+    const pendingCorpus = fixtureCorpus(PROJECT_ID)
+    pendingCorpus.source_status = 'pending'
+    expect(nextActionProjection(ctx({ status: 'SURVEYING', corpus_snapshots: [pendingCorpus] })))
+      .toContainEqual(expect.objectContaining({
+        code: 'idea_generate',
+        state: 'blocked',
+      }))
+
+    expect(nextActionProjection(ctx({ status: 'SURVEYING', corpus_snapshots: [fixtureCorpus(PROJECT_ID)] })))
+      .toContainEqual(expect.objectContaining({
+        code: 'idea_generate',
+        state: 'ready',
+        required: true,
+      }))
   })
 
   it('never deadlocks after Idea approval: contract draft is ready before contract-bound baseline', () => {
@@ -349,6 +605,97 @@ describe('GUIDE-01 intake overlay (ONBOARD-01 landing — intake_* actions)', ()
 })
 
 describe('GUIDE-01 kernel integration (projectProjection)', () => {
+  it('rebuilds the same adopted pivot continuation after reopen without mutating Project authority', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-direction-reopen-'))
+    const options = { dbPath: join(dir, 'kernel.db'), casRoot: join(dir, 'cas'), requireSignedManifest: false }
+    const first = new ResearchKernel(options)
+    try {
+      const project = first.createProject({
+        name: 'direction reopen', workspace: '/research/direction-reopen',
+        brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
+      })
+      const authorityBefore = first.getProject(project.project_id)
+      const revision = first.projectProjection(project.project_id).next_actions_v2.find(item => item.state === 'ready')!.revision!
+      const overlay = methodologyOverlay('pivot', {
+        project_revision: project.revision, next_action_revision: revision,
+      }, [], project.project_id)
+      first.methodology.recordResearchSynthesis({ record: overlay.syntheses[0]!, expected_revision: 0 })
+      first.methodology.recordDirectionProposal({ record: overlay.proposals[0]!, expected_revision: 1 })
+      const gate = first.createGate({
+        project_id: project.project_id, type: 'direction', title: 'Pivot review',
+        payload: {
+          purpose: 'direction_adoption', proposal_id: 'direction_next_action_1',
+          source_synthesis_id: 'synth_next_action_1', direction: 'pivot',
+        },
+      })
+      expect(first.projectProjection(project.project_id).next_actions_v2)
+        .toContainEqual(expect.objectContaining({ code: 'direction_gate_review', state: 'ready' }))
+      const decision = first.decideGate({
+        gate_id: gate.gate_id, actor: 'pi-direction',
+        principal: { principal_id: 'pi-direction', auth_method: 'dsh-session' }, decision: 'approved',
+      }).decision
+      first.methodology.recordDirectionAdoption({
+        expected_revision: 2,
+        record: DirectionAdoption.parse({
+          adoption_id: 'adoption_pivot_reopen', proposal_id: 'direction_next_action_1', project_id: project.project_id,
+          decision: 'adopted', actor: { kind: 'human', ref: 'pi-direction' },
+          gate_decision_ref: decision.decision_id, created_at: NOW,
+        }),
+      })
+      const continuation = first.projectProjection(project.project_id).next_actions_v2
+        .find(item => item.code === 'direction_pivot_intake')!
+      expect(first.getProject(project.project_id)).toEqual(authorityBefore)
+      expect(first.listGates(project.project_id)).toHaveLength(1)
+      first.close()
+
+      const reopened = new ResearchKernel(options)
+      try {
+        expect(reopened.projectProjection(project.project_id).next_actions_v2
+          .find(item => item.code === 'direction_pivot_intake')).toEqual(continuation)
+        expect(reopened.getProject(project.project_id)).toEqual(authorityBefore)
+        expect(reopened.listGates(project.project_id)).toHaveLength(1)
+      } finally {
+        reopened.close()
+      }
+    } finally {
+      try { first.close() } catch { /* already closed */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reads the persisted Methodology stream into the authoritative Direction overlay', () => {
+    const { kernel, dir } = freshKernel()
+    try {
+      const project = kernel.createProject({
+        name: 'direction overlay', workspace: '/research/direction-overlay',
+        brief: { problem: 'p', scope: 's', questions: [], primary_metrics: ['m'], resources: '', risks: [], target_outputs: ['paper'], target_venue: null, baseline_repo: null, domain: 'ml' },
+      })
+      const before = kernel.projectProjection(project.project_id)
+      const revision = before.next_actions_v2.find(item => item.state === 'ready')!.revision!
+      const methodology = methodologyOverlay('pivot', {
+        project_revision: project.revision, next_action_revision: revision,
+      }, [], project.project_id)
+      kernel.methodology.recordResearchSynthesis({ record: methodology.syntheses[0]!, expected_revision: 0 })
+      kernel.methodology.recordDirectionProposal({ record: methodology.proposals[0]!, expected_revision: 1 })
+      const exactGate = kernel.createGate({
+        project_id: project.project_id, type: 'direction', title: 'Pivot review',
+        payload: {
+          purpose: 'direction_adoption', proposal_id: 'direction_next_action_1',
+          source_synthesis_id: 'synth_next_action_1', direction: 'pivot',
+        },
+      })
+
+      expect(kernel.projectProjection(project.project_id).next_actions_v2)
+        .toContainEqual(expect.objectContaining({
+          code: 'direction_gate_review', state: 'ready',
+          refs: expect.arrayContaining([{ kind: 'gate', id: exactGate.gate_id }]),
+        }))
+    } finally {
+      kernel.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('DRAFT projects project scope_gate_submit with derived legacy strings', () => {
     const { kernel, dir } = freshKernel()
     try {
@@ -405,7 +752,7 @@ describe('GUIDE-01 kernel integration (projectProjection)', () => {
     }
   })
 
-  it('freezing the survey corpus advances SCOPED atomically and removes the stale survey_run action', () => {
+  it('an empty frozen survey advances SCOPED atomically but projects a repair survey instead of executable ideas', () => {
     const { kernel, dir } = freshKernel()
     try {
       const out = kernel.createProjectWithInitialGate({
@@ -428,7 +775,9 @@ describe('GUIDE-01 kernel integration (projectProjection)', () => {
       expect(projection.project.status).toBe('SURVEYING')
       expect(projection.project.revision).toBe(before.revision + 1)
       expect(projection.next_actions_v2[0]?.code).toBe('idea_generate')
-      expect(projection.next_actions_v2.some(a => a.code === 'survey_run')).toBe(false)
+      expect(projection.next_actions_v2[0]?.state).toBe('blocked')
+      expect(projection.next_actions_v2[0]?.required).toEqual(['frozen_nonempty_corpus_snapshot'])
+      expect(projection.next_actions_v2).toContainEqual(expect.objectContaining({ code: 'survey_run', state: 'ready' }))
     } finally {
       kernel.close()
       rmSync(dir, { recursive: true, force: true })

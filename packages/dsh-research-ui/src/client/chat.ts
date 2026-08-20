@@ -320,6 +320,7 @@ export interface ChatTurnResult {
 }
 
 interface ChatModelTurnRequest {
+  sessionId: string
   text: string
   locale: 'zh' | 'en'
   project: {
@@ -345,6 +346,7 @@ const standaloneChatModel: ChatModelTurn = async payload => {
     headers: { 'content-type': 'application/json', ...(await authHeaders()), 'x-csrf-token': (await ensureCsrfToken()) ?? '' },
     body: JSON.stringify({
       project_id: payload.project.project_id,
+      session_id: payload.sessionId,
       text: payload.text,
       locale: payload.locale,
       history: payload.history,
@@ -437,6 +439,7 @@ export async function executeChatTurn(
   let modelReply: ChatModelTurnReply | null = null
   try {
     modelReply = await chatModelTurn({
+      sessionId: state.chatActiveId ?? `scholar-${activeProjectId}`,
       text: input.text,
       locale: getLocale() === 'en' ? 'en' : 'zh',
       project: {
@@ -609,6 +612,7 @@ export async function executeChatCommand(
           headers: { 'content-type': 'application/json', ...(await authHeaders()), 'x-csrf-token': (await ensureCsrfToken()) ?? '' },
           body: JSON.stringify({
             project_id: activeProjectId,
+            session_id: state.chatActiveId ?? `scholar-${activeProjectId}`,
             text: context.naturalText ?? `/ideas generate ${parsedCount}`,
             count: parsedCount,
             locale: getLocale() === 'en' ? 'en' : 'zh',

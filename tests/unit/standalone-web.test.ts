@@ -69,7 +69,7 @@ describe('standalone web application', () => {
     expect(o.frameAncestors).toContain('http://127.0.0.1:3080')
   })
 
-  it('uses only an explicitly configured standalone principal', () => {
+  it('parses only an explicit principal; startup derives the stable default later', () => {
     const dir = join(tmpdir(), `dsh-standalone-principal-${Date.now()}`)
     expect(loadOptions(['--data-dir', dir, '--token', 'token-only']).principal).toBeNull()
     expect(loadOptions(['--data-dir', dir, '--token', 'token-with-principal', '--principal', 'ops-1']).principal).toBe('ops-1')
@@ -176,6 +176,7 @@ describe('standalone web application', () => {
     expect(html).toContain('<script nonce="runtime-style-nonce"')
     expect(html).toContain('var cspNonce = document.currentScript')
     expect(html).toContain('apply({ styleNonce: cspNonce })')
+    expect(html).not.toContain('notifyFrameReady')
   })
 
   it('allows explicit HTTPS embedders while rejecting remote plaintext origins', () => {

@@ -12,11 +12,10 @@
 #           unchanged Corpus Snapshot/Outbox counts; token never in server
 #           log or kernel/server argv (0600 token-file handoff); stable
 #           error bodies without internal paths/env detail.
-#   hardening §4 P0 (GOV-01/API-01): token startup WITHOUT --principal is
-#           fail-closed — list/create/read/write all 401 'principal required'
-#           (only health/unlock/CSRF/static stay open); client-forged
-#           creator/actor/tenant/principal/session in write bodies is
-#           overwritten by the BFF with the session-derived principal.
+#   DATA-UPGRADE-01/GOV-01: token startup WITHOUT --principal derives the
+#           same stable server-side local principal as the DSH plugin;
+#           browser-forged creator/actor/tenant/principal/session values are
+#           overwritten and cannot escape the membership boundary.
 #
 # Usage: bash tests/security/run-standalone-http-tests.sh
 set -eu
@@ -320,6 +319,7 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
   # Direct kernel calls authenticate with the MEM kernel's own token file
   # (§5 P0-1: sidecar-spawned kernels always demand the bearer).
   MEMKTOKEN=$(tr -d '\n' < "$MEM_DATA/kernel-token" 2>/dev/null || true)
+  MEMSTOKEN=$(tr -d '\n' < "$MEM_DATA/service-token" 2>/dev/null || true)
   PB=$(curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects" \
     -d '{"name":"foreign-b","workspace":"/w/foreign-b","mode":"gate-only","creator_principal_id":"ops-other","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
     | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.project_id||'')})")
@@ -332,7 +332,8 @@ if [ "$memready" = 1 ] && [ -n "$MP" ]; then
   SG=$(curl -s -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" -X POST "http://127.0.0.1:$MEM_KERNEL/v1/projects/$SP/gates" \
     -d '{"type":"scope","title":"survey scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.gate_id||'')})")
   R=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "Authorization: Bearer $MEMKTOKEN" \
-    -X POST "http://127.0.0.1:$MEM_KERNEL/v1/gates/$SG/decisions" \
+    -H "x-service-token: $MEMSTOKEN" -H 'x-service-principal: standalone-human-bff' \
+    -X POST "http://127.0.0.1:$MEM_KERNEL/internal/human-gates/$SG/decisions" \
     -d '{"actor":"ops-1","principal":{"principal_id":"ops-1","auth_method":"dsh-session","session_id":"sess_survey"},"decision":"approved"}')
   [ -n "$SP" ] && [ -n "$SG" ] && [ "$R" = "200" ] && ok "GUIDE-01: scoped survey fixture ready ($SP)" || fail "GUIDE-01: scoped survey fixture -> project=$SP gate=$SG status=$R"
   R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$MEM_WEB/v1/projects/$PB")
@@ -1081,11 +1082,11 @@ if [ "$sprinc_ready" = 1 ]; then
   kill_test_servers
 fi
 
-# ── hardening §4 P0: default token startup WITHOUT --principal is ───────────
-# fail-closed — list/create/read/write (v1 AND v2) all answer 401
-# {ok:false,error:'principal required'}; only health, the unlock screen,
-# CSRF issuance and static assets stay open.
-echo "== hardening §4: missing principal fail-closed (default token startup) =="
+# ── DATA-UPGRADE-01/GOV-01: default token startup derives one stable local ─
+# Principal from the protected shared sidecar credential. The browser cannot
+# submit or override it, and projects created through this entry point remain
+# visible after switching between standalone and the DSH plugin.
+echo "== DATA-UPGRADE-01: stable server-derived principal (default token startup) =="
 FC_WEB=$((WEB_PORT + 800))
 FC_KERNEL=$((WEB_PORT + 801))
 FC_DATA="$WORK/fc-data"
@@ -1097,7 +1098,7 @@ for _ in $(seq 1 60); do
   if curl -sf -m 2 -X POST "http://127.0.0.1:$FC_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}" > /dev/null 2>&1; then fcready=1; break; fi
   sleep 0.5
 done
-[ "$fcready" = 1 ] && ok "FC: default token startup without --principal serves the unlock screen" || fail "FC: default startup readiness (log: $(tail -3 "$WORK/fc.log" | tr '\n' ' '))"
+[ "$fcready" = 1 ] && ok "FC: default token startup derives a stable server-side principal" || fail "FC: default startup readiness (log: $(tail -3 "$WORK/fc.log" | tr '\n' ' '))"
 if [ "$fcready" = 1 ]; then
   R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FC_WEB/")
   [ "$R" = "200" ] && ok "FC: GET / bootstrap page (allowlisted) -> 200" || fail "FC: bootstrap -> $R"
@@ -1107,44 +1108,37 @@ if [ "$fcready" = 1 ]; then
   [ "$R" = "204" ] && ok "FC: GET /favicon.ico static (allowlisted) -> 204" || fail "FC: favicon -> $R"
   R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$FC_WEB/api/token-check" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}")
   [ "$R" = "200" ] && ok "FC: POST /api/token-check (allowlisted) -> 200" || fail "FC: token-check -> $R"
-  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/api/session/csrf")
+  FC_CSRF_BODY=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/api/session/csrf")
+  FC_CSRF=$(printf '%s' "$FC_CSRF_BODY" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).csrf_token||''))")
+  R=$([ -n "$FC_CSRF" ] && printf 200 || printf 500)
   [ "$R" = "200" ] && ok "FC: GET /api/session/csrf (allowlisted) -> 200" || fail "FC: csrf -> $R"
   for HEALTH in /v1/health /v2/health; do
     R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB$HEALTH")
     [ "$R" = "200" ] && ok "FC: $HEALTH (allowlisted) -> 200" || fail "FC: $HEALTH -> $R"
   done
-  # Everything else is 401 principal required — with a VALID bearer token,
-  # proving this is an AuthZ fail-closed, not an AuthN failure.
-  principal_required() {
-    local desc="$1" url="$2" method="$3" body="${4:-}"
-    local out R
-    out=$(curl -s -w '\n%{http_code}' -X "$method" -H "Authorization: Bearer $TOKEN" \
-      -H "Origin: http://127.0.0.1:$FC_WEB" -H 'content-type: application/json' \
-      ${body:+-d "$body"} "http://127.0.0.1:$FC_WEB$url")
-    R=$(printf '%s' "$out" | tail -1)
-    if [ "$R" = "401" ] && printf '%s' "$out" | grep -q '"principal required"'; then
-      ok "FC: $desc -> 401 principal required"
-    else
-      fail "FC: $desc -> $R $(printf '%s' "$out" | head -c 120)"
-    fi
-  }
-  principal_required "GET /v1/projects (list)" "/v1/projects" GET
-  principal_required "POST /v1/projects (create, forged creator)" "/v1/projects" POST '{"name":"x","workspace":"/w/x","mode":"gate-only","creator_principal_id":"evil-pi","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}'
-  principal_required "GET /v1/projects/rsp_x (read)" "/v1/projects/rsp_x" GET
-  principal_required "GET /v2/projects (list)" "/v2/projects" GET
-  principal_required "POST /v2/projects (create, forged creator)" "/v2/projects" POST '{"name":"x","workspace":"/w/x","mode":"gate-only","creator_principal_id":"evil-pi","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}'
-  principal_required "GET /v2/projects/rsp_x (read)" "/v2/projects/rsp_x" GET
-  principal_required "PUT /api/model (write)" "/api/model" PUT '{"model":"deepseek-v4-flash"}'
-  principal_required "POST /api/chat/survey (write)" "/api/chat/survey" POST '{"project_id":"x","query":"y"}'
-  # Without a principal no project data can be reached: the list must NOT
-  # return the full project set (the old fail-open leak).
-  LEAK=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/v1/projects")
-  case "$LEAK" in
-    *'project_id'*) fail "FC: project list leaked without principal -> $LEAK" ;;
-    *) ok "FC: no project data reachable without principal (list fail-closed)" ;;
+  R=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/v1/projects")
+  [ "$R" = "200" ] && ok "FC: stable principal can list its projects" || fail "FC: project list -> $R"
+  FC_PROJECT=$(curl -s -H "Authorization: Bearer $TOKEN" -H "x-csrf-token: $FC_CSRF" \
+    -H "Origin: http://127.0.0.1:$FC_WEB" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$FC_WEB/v1/projects" \
+    -d '{"name":"stable-principal-project","workspace":"/w/stable","mode":"gate-only","creator_principal_id":"evil-pi","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id||''))")
+  [ -n "$FC_PROJECT" ] && ok "FC: project create succeeds without explicit --principal" || fail "FC: stable-principal project create"
+  FC_MEMBERS=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/v1/projects/$FC_PROJECT/members")
+  case "$FC_MEMBERS" in
+    *'"principal_id":"dsh:'*'"role":"pi"'*) ok "FC: membership uses credential-derived dsh: principal" ;;
+    *) fail "FC: derived principal membership -> $FC_MEMBERS" ;;
   esac
-  # No session is derived and no kernel contact happens on the 401 path.
-  [ ! -f "$FC_DATA/session.json" ] && ok "FC: no session derived without principal" || fail "FC: session.json unexpectedly present"
+  case "$FC_MEMBERS" in
+    *'evil-pi'*) fail "FC: browser-forged creator became a member -> $FC_MEMBERS" ;;
+    *) ok "FC: browser cannot override the derived principal" ;;
+  esac
+  FC_LIST=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$FC_WEB/v1/projects")
+  case "$FC_LIST" in
+    *"$FC_PROJECT"*) ok "FC: newly created project remains visible to the stable principal" ;;
+    *) fail "FC: created project missing from stable-principal list -> $(printf '%s' "$FC_LIST" | head -c 160)" ;;
+  esac
+  [ -f "$FC_DATA/session.json" ] && ok "FC: operator session is bound to the stable principal" || fail "FC: stable principal session.json missing"
   R=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FC_WEB/v1/projects")
   [ "$R" = "401" ] && ok "FC: /v1/projects without token -> 401" || fail "FC: no-token list -> $R"
   kill "$FC_PID" 2>/dev/null || true
@@ -1152,7 +1146,7 @@ if [ "$fcready" = 1 ]; then
     if ! ss -ltn 2>/dev/null | grep -qE ":$FC_WEB |:$FC_KERNEL "; then break; fi
     sleep 0.5
   done
-  ok "FC: fail-closed instance cleaned up"
+  ok "FC: stable-principal instance cleaned up"
 fi
 
 echo "== standalone http acceptance: $PASS passed, $FAIL failed =="

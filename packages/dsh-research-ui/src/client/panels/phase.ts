@@ -6,9 +6,18 @@ import { state, tabSave } from '../state'
 import { phasePipeline, copyText, el, fmtId, openContextMenu } from '../ui'
 import { renderNextActionSection } from './overview'
 import { isTabVisible } from '../nav'
+import {
+  methodologySummaryNode,
+  type CompactMethodologyProjection,
+} from '../methodology-projection'
 /* ─────────────────────────── tab renderers ─────────────────────────── */
 
-export async function renderPhase(body: HTMLElement, p: Projection, projectId?: string): Promise<void> {
+export async function renderPhase(
+  body: HTMLElement,
+  p: Projection,
+  projectId?: string,
+  methodology?: CompactMethodologyProjection | null,
+): Promise<void> {
   const status = p.project?.status ?? ''
   // Evaluated per render against the CURRENT locale (§13.4).
   const pipelineDefs = phasePipeline()
@@ -47,6 +56,8 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
     if (parts.length > 0) sum.textContent = parts.join(' · ')
     body.appendChild(sum)
   }
+
+  if (projectId !== undefined) body.appendChild(methodologySummaryNode(methodology, 'overview'))
 
   // next actions: GUIDE-01 structured v2 cards (panels/overview.ts) with
   // legacy string[] fallback for old kernels — see next-action-cards.ts.
@@ -94,7 +105,9 @@ export async function renderPhase(body: HTMLElement, p: Projection, projectId?: 
       fill.style.cssText = `width:${Math.max(ratio * 100, used > 0 ? 4 : 0)}%;background:${color};box-shadow:0 0 6px ${color}`
       track.appendChild(fill)
       row.appendChild(track)
-      const val = el('span', 'budget-val', `${used}${unit}${max !== undefined ? ` / ${max}${unit}` : ''}`)
+      const val = el('span', 'budget-val', max === undefined
+        ? t('overview', 'overview.budgetValue', { used: String(used), unit })
+        : t('overview', 'overview.budgetValueWithMax', { used: String(used), max: String(max), unit }))
       row.appendChild(val)
       bcard.appendChild(row)
     }

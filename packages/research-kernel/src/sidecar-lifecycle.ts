@@ -20,6 +20,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { chmodSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dshOperatorPrincipal } from './dsh-principal.js'
+import { kernelDatabaseNeedsMigration } from './data-upgrade.js'
 
 export interface KernelSidecarLifecycleOptions {
   host?: string
@@ -70,6 +71,7 @@ const DB_FILE_NAME = 'kernel.db'
 const SERVICE_TOKEN_FILE = 'service-token'
 const KERNEL_TOKEN_FILE = 'kernel-token'
 const DSH_PLUGIN_TOKEN_FILE = 'dsh-plugin-token'
+const ORCHESTRATOR_TOKEN_FILE = 'orchestrator-token'
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 function sleep(ms: number): Promise<void> {
@@ -123,6 +125,8 @@ export class KernelSidecarLifecycle {
   private serviceTokenValue: string | undefined
   /** Cached route-specific DSH create/link token. */
   private dshPluginTokenValue: string | undefined
+  /** Cached route-specific managed orchestrator credential. */
+  private orchestratorTokenValue: string | undefined
   /** Cached value of <dataDir>/kernel-token (lazy, see ensureKernelToken). */
   private kernelTokenValue: string | undefined
   private readonly require = createRequire(import.meta.url)
@@ -179,6 +183,14 @@ export class KernelSidecarLifecycle {
       this.dshPluginTokenValue = ensureTokenFile(this.dataDir, DSH_PLUGIN_TOKEN_FILE, 'DSH plugin token')
     }
     return this.dshPluginTokenValue
+  }
+
+  /** Route-specific credential passed only to Kernel and managed worker. */
+  get orchestratorToken(): string {
+    if (this.orchestratorTokenValue === undefined) {
+      this.orchestratorTokenValue = ensureTokenFile(this.dataDir, ORCHESTRATOR_TOKEN_FILE, 'orchestrator token')
+    }
+    return this.orchestratorTokenValue
   }
 
   /** Stable local Human Principal shared with the standalone BFF. */
@@ -384,7 +396,14 @@ export class KernelSidecarLifecycle {
    * matches this instance (SIDE-01); a foreign kernel is never terminated.
    */
   async start(): Promise<void> {
-    if (await this.tryReuse()) return
+    const schemaUpgradePending = kernelDatabaseNeedsMigration(this.dataDir)
+    if (schemaUpgradePending) {
+      if (await this.tryReuse()) {
+        throw new Error('research-kernel data upgrade requires a full DSH Scholar restart; the canonical Kernel is still running')
+      }
+    } else if (await this.tryReuse()) {
+      return
+    }
     mkdirSync(this.dataDir, { recursive: true })
     const bin = this.resolveKernelBin()
     const dbPath = join(this.dataDir, DB_FILE_NAME)
@@ -396,6 +415,10 @@ export class KernelSidecarLifecycle {
       bin, '--db', dbPath, '--cas', casRoot, '--host', this.host, '--port', String(this.port),
       '--endpoint-file', this.endpointFilePath(),
     ]
+    // Every schema upgrade is backup-first. Data adoption already creates a
+    // target backup and migrates the target before this spawn; ordinary
+    // Scholar upgrades let the Kernel produce its own pre-migration backup.
+    if (kernelDatabaseNeedsMigration(this.dataDir)) args.push('--backup-on-start')
     this.log(`[${this.logTag}] spawning research kernel: node ${args.join(' ')}`)
     const childEnv = { ...process.env }
     // §5 P0-1 (hardening API-01/SIDE-01): the kernel's PUBLIC bearer token is
@@ -412,6 +435,8 @@ export class KernelSidecarLifecycle {
     childEnv.DSH_SCHOLAR_SECRET_ROOT = secretRoot
     delete childEnv.DSH_SCHOLAR_DSH_PLUGIN_TOKEN
     childEnv.DSH_SCHOLAR_DSH_PLUGIN_TOKEN = this.dshPluginToken
+    delete childEnv.DSH_SCHOLAR_ORCHESTRATOR_TOKEN
+    childEnv.DSH_SCHOLAR_ORCHESTRATOR_TOKEN = this.orchestratorToken
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {

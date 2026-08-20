@@ -39,15 +39,18 @@ import type {
   BudgetRecord,
   Claim,
   CorpusSnapshot,
+  DirectionAdoption,
+  DirectionProposal,
   EvidenceItem,
   ExperimentContract,
   Gate,
   IdeaCard,
   NextAction,
   NextActionRef,
+  ResearchSynthesis,
   ResearchProject,
 } from '@dsh-scholar/research-schemas'
-import { NEXT_ACTION_UNKNOWN_CODE } from '@dsh-scholar/research-schemas'
+import { DirectionGatePayload, NEXT_ACTION_UNKNOWN_CODE } from '@dsh-scholar/research-schemas'
 
 /** Minimal durable-job view the projection needs (subset of JobRecord). */
 export interface NextActionJob {
@@ -93,6 +96,38 @@ export interface NextActionReproduction {
   has_running_attempt: boolean
 }
 
+/** Fresh, append-only Methodology facts used as a projection overlay. The
+ * Methodology stream remains the only durable source; this is not another
+ * loop state machine. */
+export interface NextActionMethodology {
+  syntheses: ResearchSynthesis[]
+  proposals: DirectionProposal[]
+  adoptions: DirectionAdoption[]
+  /** Durable Gate/Decision pairs used to revalidate governed adoptions when
+   * rebuilding the projection after restart. */
+  direction_gate_approvals?: Array<{
+    decision_id: string
+    gate_id: string
+    project_id: string
+    decision: 'approved' | 'rejected' | 'revised'
+    gate: Gate
+  }>
+}
+
+export interface NextActionRunObservation {
+  observation_id: string
+  job_id: string
+  run_id: string
+  attempt_no: number
+}
+
+export interface NextActionSynthesisRequest {
+  request_id: string
+  trigger_run_ref: string
+  reasons: string[]
+  window: { from_event_seq: number; to_event_seq: number }
+}
+
 /** Authoritative state inputs the projection derives actions from. */
 export interface NextActionContext {
   project: ResearchProject
@@ -115,6 +150,12 @@ export interface NextActionContext {
   /** Paper reproduction specs (REPRO-01 overlay; absent for legacy
    *  callers — baseline_reproduce then keeps its job-based semantics). */
   reproductions?: NextActionReproduction[]
+  /** Project-scoped Methodology stream records, in append order. */
+  methodology?: NextActionMethodology
+  /** Exact terminal attempts not yet consumed by an immutable outcome. */
+  run_outcome_observations?: NextActionRunObservation[]
+  /** Trigger receipts not yet covered by a stored synthesis window. */
+  synthesis_requests?: NextActionSynthesisRequest[]
 }
 
 /** UI tab / operation path an action maps to. */
@@ -238,17 +279,40 @@ function baseActions(ctx: NextActionContext): BaseActionSpec[] {
         refs: [],
       }]
     case 'SURVEYING':
-      return proposedIdeaRefs.length === 0 ? [{
-        code: 'idea_generate',
-        label: 'Generate idea cards',
-        reason: 'the survey corpus is ready — produce candidate ideas',
-        route: 'ideas',
-        state: 'ready',
-        required: true,
-        required_by: 'agent',
-        revision: project.revision,
-        refs: [],
-      }] : [{
+      if (proposedIdeaRefs.length === 0) {
+        const corpus = ctx.corpus_snapshots
+          .filter(snapshot => snapshot.project_id === project.project_id
+            && snapshot.frozen
+            && snapshot.source_status === 'complete'
+            && snapshot.papers.length > 0)
+          .at(-1)
+        const ideaAction: BaseActionSpec = {
+          code: 'idea_generate',
+          label: 'Generate idea cards',
+          reason: corpus === undefined
+            ? 'idea generation requires a frozen, complete, non-empty corpus snapshot'
+            : 'the survey corpus is ready — produce candidate ideas',
+          route: 'ideas',
+          state: corpus === undefined ? 'blocked' : 'ready',
+          required: corpus === undefined ? ['frozen_nonempty_corpus_snapshot'] : true,
+          required_by: 'agent',
+          revision: project.revision,
+          refs: corpus === undefined ? [] : [{ kind: 'corpus_snapshot', id: corpus.snapshot_id }],
+        }
+        if (corpus !== undefined) return [ideaAction]
+        return [ideaAction, {
+          code: 'survey_run',
+          label: 'Run literature survey → corpus snapshot',
+          reason: 'the current survey has no complete non-empty frozen corpus; run or repair the survey before generating ideas',
+          route: 'chat',
+          state: 'ready',
+          required: true,
+          required_by: 'agent',
+          revision: project.revision,
+          refs: [],
+        }]
+      }
+      return [{
         code: 'idea_select',
         label: 'Select an idea → novelty audit + Idea Gate',
         reason: `${proposedIdeaRefs.length} proposed idea(s) are ready — a human must select one for counter-search before the Idea Gate`,
@@ -567,6 +631,10 @@ function gateOverlay(ctx: NextActionContext): BaseActionSpec[] {
   const overBudget = budget.model_cost_usd > maxCost || budget.gpu_hours > maxGpu
   const actions: BaseActionSpec[] = []
   for (const gate of gates) {
+    // A Direction Gate is meaningful only through its exact Methodology
+    // proposal/synthesis binding. Once that overlay is available, never
+    // degrade it to the generic gate CTA.
+    if (gate.type === 'direction' && ctx.methodology !== undefined) continue
     if (gate.type === 'budget') {
       actions.push({
         code: 'budget_resolve',
@@ -596,6 +664,173 @@ function gateOverlay(ctx: NextActionContext): BaseActionSpec[] {
     }
   }
   return actions
+}
+
+function directionOverlay(ctx: NextActionContext, currentNextActionRevision: number): BaseActionSpec[] {
+  const methodology = ctx.methodology
+  if (methodology === undefined || methodology.proposals.length === 0) return []
+  const proposal = methodology.proposals[methodology.proposals.length - 1]!
+  const synthesis = methodology.syntheses.find(candidate => candidate.synthesis_id === proposal.synthesis_id)
+  const adoption = methodology.adoptions.find(candidate => candidate.proposal_id === proposal.proposal_id)
+  const invalid: string[] = []
+  const stale: string[] = []
+  if (proposal.project_id !== ctx.project.project_id) invalid.push('direction_project_binding_invalid')
+  if (synthesis === undefined) invalid.push('direction_synthesis_missing')
+  if (synthesis !== undefined && synthesis.project_id !== ctx.project.project_id) invalid.push('direction_synthesis_project_invalid')
+  if (synthesis !== undefined && synthesis.direction_proposal_id !== proposal.proposal_id) invalid.push('direction_synthesis_binding_invalid')
+  if (adoption !== undefined && adoption.project_id !== ctx.project.project_id) invalid.push('direction_adoption_project_invalid')
+  if (proposal.status !== 'proposed') stale.push('direction_proposal_stale')
+  if (proposal.snapshot_pin.project_revision !== ctx.project.revision
+    || synthesis?.snapshot_pin.project_revision !== ctx.project.revision) {
+    stale.push('direction_project_revision_changed')
+  }
+  if (proposal.snapshot_pin.next_action_revision !== currentNextActionRevision
+    || synthesis?.snapshot_pin.next_action_revision !== currentNextActionRevision) {
+    stale.push('direction_next_action_revision_changed')
+  }
+  if (synthesis?.status === 'stale') stale.push('direction_synthesis_stale')
+  if (synthesis !== undefined && synthesis.input_hash !== proposal.input_hash) stale.push('direction_input_hash_changed')
+  const safeRefs: NextActionRef[] = [
+    ...(proposal.project_id === ctx.project.project_id ? [{ kind: 'direction', id: proposal.proposal_id }] : []),
+    ...(synthesis?.project_id === ctx.project.project_id ? [{ kind: 'synthesis', id: synthesis.synthesis_id }] : []),
+  ]
+  if (invalid.length > 0) {
+    return [{
+      code: 'direction_overlay_invalid', label: 'Inspect invalid Direction binding',
+      reason: `Direction overlay is not project-bound: ${invalid.join(', ')}`,
+      route: 'overview', state: 'blocked', required: invalid, required_by: 'human', capability: 'pi',
+      revision: currentNextActionRevision, refs: safeRefs, blocking: false,
+    }]
+  }
+  if (stale.length > 0) {
+    return [{
+      code: 'direction_overlay_stale', label: 'Refresh stale Direction proposal',
+      reason: `Direction proposal no longer matches current authority: ${stale.join(', ')}`,
+      route: 'overview', state: 'blocked', required: [...new Set(stale)], required_by: 'human', capability: 'pi',
+      revision: currentNextActionRevision, refs: safeRefs, blocking: false,
+    }]
+  }
+  if (synthesis === undefined) return []
+
+  if (adoption !== undefined) {
+    if (adoption.decision !== 'adopted') return []
+    const gateWasRequired = proposal.direction === 'pivot' || proposal.direction === 'broaden'
+      || (proposal.direction === 'deepen'
+        && !['CONTRACT_APPROVED', 'BASELINE_REPRO', 'EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'].includes(ctx.project.status))
+    if (gateWasRequired && adoption.gate_decision_ref === null) {
+      return [{
+        code: 'direction_overlay_invalid', label: 'Inspect invalid Direction adoption',
+        reason: `adoption ${adoption.adoption_id} has no required Direction Gate decision receipt`,
+        route: 'overview', state: 'blocked', required: ['direction_adoption_gate_missing'], required_by: 'human', capability: 'pi',
+        revision: currentNextActionRevision, refs: safeRefs, blocking: false,
+      }]
+    }
+    if (gateWasRequired) {
+      const approval = methodology.direction_gate_approvals?.find(candidate =>
+        candidate.decision_id === adoption.gate_decision_ref)
+      const binding = approval?.gate.type === 'direction'
+        ? DirectionGatePayload.safeParse(approval.gate.payload)
+        : undefined
+      const exactApproval = approval !== undefined
+        && approval.project_id === ctx.project.project_id
+        && approval.gate_id === approval.gate.gate_id
+        && approval.gate.project_id === ctx.project.project_id
+        && approval.decision === 'approved'
+        && approval.gate.status === 'approved'
+        && binding?.success === true
+        && binding.data.proposal_id === proposal.proposal_id
+        && binding.data.source_synthesis_id === synthesis.synthesis_id
+        && binding.data.direction === proposal.direction
+      if (!exactApproval) {
+        return [{
+          code: 'direction_overlay_invalid', label: 'Inspect invalid Direction adoption',
+          reason: `adoption ${adoption.adoption_id} does not replay against its exact approved Direction Gate receipt`,
+          route: 'overview', state: 'blocked', required: ['direction_adoption_gate_binding_invalid'], required_by: 'human', capability: 'pi',
+          revision: currentNextActionRevision, refs: safeRefs, blocking: false,
+        }]
+      }
+    }
+    const continuation = {
+      deepen: {
+        code: 'direction_deepen_continue', label: 'Continue deeper research inside the approved boundary',
+        reason: 'the adopted direction deepens the current approved question without changing Scope or Contract',
+        route: 'runs' as const, required_by: 'agent' as const, capability: 'researcher',
+      },
+      broaden: {
+        code: 'direction_broaden_intake', label: 'Propose a broader continuation through Intake',
+        reason: 'the adopted broader direction must enter the existing Human Intake proposal/adoption flow',
+        route: 'overview' as const, required_by: 'human' as const, capability: 'pi',
+      },
+      pivot: {
+        code: 'direction_pivot_intake', label: 'Propose a pivot through Intake',
+        reason: 'the adopted pivot must enter the existing Human Intake proposal/adoption flow',
+        route: 'overview' as const, required_by: 'human' as const, capability: 'pi',
+      },
+      conclude: {
+        code: 'direction_conclude_prepare', label: 'Prepare evidence and writing for conclusion',
+        reason: 'the adopted conclusion proposes evidence/manuscript preparation without changing Project phase',
+        route: 'evidence' as const, required_by: 'agent' as const, capability: 'researcher',
+      },
+      pause: {
+        code: 'direction_pause_review', label: 'Review the adopted pause',
+        reason: 'the adopted pause leaves Project state unchanged until a Human chooses an existing authoritative action',
+        route: 'overview' as const, required_by: 'human' as const, capability: 'pi',
+      },
+    }[proposal.direction]
+    return [{
+      ...continuation,
+      state: 'ready', required: true, revision: currentNextActionRevision, blocking: false,
+      refs: [
+        { kind: 'adoption', id: adoption.adoption_id },
+        { kind: 'direction', id: proposal.proposal_id },
+        { kind: 'synthesis', id: synthesis.synthesis_id },
+        { kind: 'project', id: ctx.project.project_id },
+      ],
+    }]
+  }
+
+  const withinApprovedContract = ['CONTRACT_APPROVED', 'BASELINE_REPRO', 'EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY']
+    .includes(ctx.project.status)
+  const requiresGate = proposal.direction === 'pivot' || proposal.direction === 'broaden'
+    || (proposal.direction === 'deepen' && !withinApprovedContract)
+  if (!requiresGate) return []
+  const exactGates = ctx.gates.filter(gate => {
+    const binding = DirectionGatePayload.safeParse(gate.payload)
+    return gate.type === 'direction'
+      && gate.project_id === ctx.project.project_id
+      && gate.status === 'pending'
+      && binding.success
+      && binding.data.proposal_id === proposal.proposal_id
+      && binding.data.source_synthesis_id === synthesis.synthesis_id
+      && binding.data.direction === proposal.direction
+  })
+  const exactGate = exactGates.length === 1 ? exactGates[0] : undefined
+  const hasWrongDirectionGate = exactGates.length === 0 && ctx.gates.some(gate => gate.type === 'direction')
+  const gateDiagnostic = exactGates.length > 1
+    ? 'direction_gate_ambiguous'
+    : hasWrongDirectionGate ? 'direction_gate_binding_mismatch' : 'pending_direction_gate'
+  return [{
+    code: 'direction_gate_review',
+    label: `Review ${proposal.direction} direction at the Direction Gate`,
+    reason: exactGate === undefined
+      ? exactGates.length > 1
+        ? `direction ${proposal.proposal_id} has multiple matching pending Gates and cannot choose authority`
+        : `direction ${proposal.proposal_id} requires a dedicated pending Gate bound to its proposal, synthesis and direction`
+      : `direction gate ${exactGate.gate_id} is exactly bound to proposal ${proposal.proposal_id}`,
+    route: 'gates',
+    state: exactGate === undefined ? 'blocked' : 'ready',
+    required: exactGate === undefined
+      ? [gateDiagnostic]
+      : true,
+    required_by: 'human',
+    capability: 'pi',
+    revision: currentNextActionRevision,
+    refs: [
+      ...(exactGate === undefined ? [] : [{ kind: 'gate', id: exactGate.gate_id }]),
+      { kind: 'direction', id: proposal.proposal_id },
+      { kind: 'synthesis', id: synthesis.synthesis_id },
+    ],
+  }]
 }
 
 /**
@@ -833,6 +1068,52 @@ function reproductionOverlay(ctx: NextActionContext): BaseActionSpec[] {
   return actions
 }
 
+/** Runner execution facts and deterministic outer-loop trigger receipts are
+ * projected as explicit work. Neither is silently converted into scientific
+ * content, and both remain outside the automatic full-auto executor allowlist. */
+function researchLoopOverlay(ctx: NextActionContext): BaseActionSpec[] {
+  const actions: BaseActionSpec[] = []
+  const observations = ctx.run_outcome_observations ?? []
+  if (observations.length > 0) {
+    actions.push({
+      code: 'run_outcome_classify',
+      label: 'Classify completed run outcome',
+      reason: `${observations.length} terminal Runner observation(s) need an authorized outcome/validity classification; process success is not a scientific conclusion`,
+      route: 'runs',
+      state: 'ready',
+      required: true,
+      required_by: 'agent',
+      capability: 'researcher',
+      revision: ctx.project.revision,
+      refs: observations.flatMap(observation => [
+        { kind: 'run', id: observation.run_id } as NextActionRef,
+        { kind: 'job', id: observation.job_id } as NextActionRef,
+      ]),
+      blocking: true,
+    })
+  }
+  const requests = ctx.synthesis_requests ?? []
+  if (requests.length > 0) {
+    actions.push({
+      code: 'synthesis_record',
+      label: 'Record research synthesis',
+      reason: `${requests.length} deterministic trigger request(s) await explicit synthesis content; the Kernel will not generate or adopt it`,
+      route: 'chat',
+      state: 'ready',
+      required: true,
+      required_by: 'agent',
+      capability: 'researcher',
+      revision: ctx.project.revision,
+      refs: requests.flatMap(request => [
+        { kind: 'synthesis_request', id: request.request_id } as NextActionRef,
+        { kind: 'run', id: request.trigger_run_ref } as NextActionRef,
+      ]),
+      blocking: true,
+    })
+  }
+  return actions
+}
+
 /**
  * GUIDE-01 authoritative projection: deterministic structured actions for
  * the current project state. Pure — no DB, no side effects, never throws.
@@ -840,7 +1121,18 @@ function reproductionOverlay(ctx: NextActionContext): BaseActionSpec[] {
  */
 export function nextActionProjection(ctx: NextActionContext): NextAction[] {
   const base = baseActions(ctx)
-  const overlays = [...gateOverlay(ctx), ...jobOverlay(ctx), ...intakeOverlay(ctx), ...reproductionOverlay(ctx)]
+  const ordinaryOverlays = [
+    ...researchLoopOverlay(ctx),
+    ...gateOverlay(ctx),
+    ...jobOverlay(ctx),
+    ...intakeOverlay(ctx),
+    ...reproductionOverlay(ctx),
+  ]
+  const ordinary = [...base, ...ordinaryOverlays]
+  const currentNextActionRevision = ordinary.find(spec => spec.state === 'ready')?.revision
+    ?? ordinary.find(spec => spec.state !== 'done')?.revision
+    ?? ctx.project.revision
+  const overlays = [...ordinaryOverlays, ...directionOverlay(ctx, currentNextActionRevision)]
   return [...base, ...overlays].map(spec => action(ctx.project.project_id, spec))
 }
 
