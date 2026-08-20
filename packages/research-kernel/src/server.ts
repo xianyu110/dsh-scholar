@@ -9,15 +9,47 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { z } from 'zod'
 import { ResearchKernel, KernelError, TEX_ENGINES, validateUploadFileName } from './kernel.js'
+import { dshOperatorPrincipal } from './dsh-principal.js'
 import { TexError } from './tex-workspace.js'
 import { PtyError } from './pty-session.js'
 import { WorkspaceError } from './workspace-store.js'
-import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, NoveltyAudit, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, RunnerTargetCreateInput, RunnerTargetUpdateInput, IdeaDraft, type PtySession } from '@dsh-scholar/research-schemas'
+import { PtyOpenRequest, PtyControlRequest, HumanPrincipal, NoveltyAudit, ObservedPhase, WorkspaceWriteRequest, WorkspaceMoveRequest, generateJsonSchema, randomId, ReproductionReportInput, ProviderCreateInput, ProviderUpdateInput, ProjectModelBindingInput, RunnerTargetCreateInput, RunnerTargetUpdateInput, IdeaDraft, runnerTargetConfigHash, type PtySession } from '@dsh-scholar/research-schemas'
 import {
   UPLOAD_MAX_BODY_BYTES, extractBoundary, parseMultipart,
   type MultipartPart,
 } from './uploads.js'
 import { validateSecretRefInput } from './provider.js'
+import { AssuranceStoreError } from './assurance-store.js'
+import { MethodologyStoreError } from './methodology-store.js'
+import { WritingReviewStoreError } from './writing-review-store.js'
+import { MethodologyRolloutStoreError } from './rollout-policy.js'
+import { evaluateResearchMethodology } from './research-methodology.js'
+import { buildResearchGraph } from './research-graph.js'
+import { writingClaimEvidenceSha256, writingTexSha256 } from './writing-methodology.js'
+import { FullAutoSurveyResultSchema } from './full-auto.js'
+import {
+  AssuranceAuditKind,
+  AssuranceSemanticReviewReceipt,
+  ChildExecutionIdentity,
+  WritingAssuranceAuditKind,
+  DirectionGatePayload,
+  DirectionProposal,
+  KnowledgeActivationIntent,
+  KnowledgePackageEvaluation,
+  KnowledgePackageRecord,
+  ProtocolRevision,
+  ResearchRunOutcomeWrite,
+  ResearchSynthesis,
+  ReviewFinding,
+  ReverseOutline,
+  MethodTriadWrite,
+  SectionGuideActivationWrite,
+  WritingReviewerPanelWrite,
+  WritingPatchProposalWrite,
+  WritingPatchApplyInput,
+  MethodologyRolloutMode,
+  MethodologyRolloutSha256,
+} from '@dsh-scholar/research-schemas'
 
 export interface KernelServerOptions {
   kernel: ResearchKernel
@@ -45,6 +77,87 @@ export interface KernelServerOptions {
 
 const idSchema = z.string().min(1)
 
+const methodologyExpectedRevision = z.number().int().nonnegative().safe()
+const assuranceAcceptSchema = z.object({
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const writingAssuranceExecutionSchema = z.object({
+  expected_revision: methodologyExpectedRevision,
+  audit_kind: WritingAssuranceAuditKind,
+  mode: z.literal('deterministic'),
+  semantic_review: z.null(),
+}).strict()
+const internalWritingAssuranceExecutionSchema = z.discriminatedUnion('mode', [
+  writingAssuranceExecutionSchema,
+  z.object({
+    expected_revision: methodologyExpectedRevision,
+    audit_kind: WritingAssuranceAuditKind,
+    mode: z.literal('semantic'),
+    semantic_review: AssuranceSemanticReviewReceipt,
+  }).strict(),
+])
+const protocolRevisionWriteSchema = z.object({
+  record: ProtocolRevision,
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const researchSynthesisWriteSchema = z.object({
+  request_id: z.string().regex(/^synthesis_request_[a-z0-9_]+$/),
+  record: ResearchSynthesis,
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const methodologyRolloutPolicyUpdateSchema = z.object({
+  mode: MethodologyRolloutMode,
+  expected_revision: z.number().int().positive().safe(),
+}).strict()
+const projectMethodologyRolloutPinSchema = z.object({
+  expected_project_pin_revision: z.number().int().positive().safe(),
+  expected_policy_revision: z.number().int().positive().safe(),
+  expected_policy_hash: MethodologyRolloutSha256,
+}).strict()
+const researchRunOutcomeWriteSchema = ResearchRunOutcomeWrite
+const directionProposalWriteSchema = z.object({
+  record: DirectionProposal,
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const directionAdoptionWriteSchema = z.object({
+  adoption_id: z.string().regex(/^adoption_[a-z0-9_]+$/),
+  decision: z.enum(['adopted', 'rejected']),
+  gate_decision_ref: z.string().min(1).max(256).nullable(),
+  created_at: z.string().datetime(),
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const knowledgePackageWriteSchema = z.object({
+  record: KnowledgePackageRecord,
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const knowledgeEvaluationWriteSchema = z.object({
+  record: KnowledgePackageEvaluation,
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const knowledgeActivationWriteSchema = KnowledgeActivationIntent
+const knowledgeDeactivationWriteSchema = z.object({
+  request: z.object({
+    project_id: z.string().min(1).max(256),
+    session_id: z.string().min(1).max(256),
+    activation_id: z.string().regex(/^activation_[a-z0-9_]+$/),
+    explicit_human_deactivation: z.literal(true),
+    reason: z.enum(['user-requested', 'superseded', 'no-longer-needed']),
+  }).strict(),
+  expected_revision: methodologyExpectedRevision,
+}).strict()
+const writingReviewWriteSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('reverse-outline'),
+    record: ReverseOutline,
+    expected_revision: methodologyExpectedRevision,
+  }).strict(),
+  z.object({
+    kind: z.literal('review-finding'),
+    record: ReviewFinding,
+    expected_revision: methodologyExpectedRevision,
+  }).strict(),
+])
+
 /** TRAJ-01/SUBAGENT-01 (trajectory-subagents.md §3): register one spawned
  * subagent child link. `project_id` comes from the route path (never the
  * body — the kernel binds the child to the path project). */
@@ -63,6 +176,7 @@ const registerChildSchema = z.object({
 
 const registerChildFromSessionSchema = registerChildSchema.extend({
   session_id: z.string().min(1).max(256),
+  execution_identity: ChildExecutionIdentity.optional(),
 }).strict()
 
 const updateChildFromSessionSchema = z.object({
@@ -161,7 +275,7 @@ const transitionSchema = z.object({
 })
 
 const gateSchema = z.object({
-  type: z.enum(['scope', 'idea', 'contract', 'budget', 'release']),
+  type: z.enum(['scope', 'idea', 'contract', 'budget', 'release', 'direction']),
   title: z.string().min(1),
   summary: z.string().optional(),
   payload: z.record(z.unknown()).optional(),
@@ -252,6 +366,12 @@ const jobSchema = z.object({
   output_contract: z.object({ metrics: z.string(), logs: z.string() }).optional(),
   runner_profile_id: z.string().nullable().optional(),
   runner_target_id: z.string().nullable().optional(),
+  protocol_pin: z.object({
+    protocol_id: z.string().regex(/^protocol_[a-z0-9_]+$/),
+    revision: z.number().int().positive(),
+    canonical_hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  }).strict().nullable().optional(),
+  run_intent: z.enum(['exploratory', 'confirmatory']).optional(),
   // v2 shape (domain-model.md §9): durable submitter principal. The route
   // prefers the BFF-injected x-principal-id header; a body value is accepted
   // only as an explicit override for internal callers — absent both → NULL.
@@ -775,6 +895,8 @@ const SERVICE_ROUTES: ReadonlyArray<{ method: string; re: RegExp; label: string 
   { method: 'POST', re: /^\/internal\/reproduction-attempts\/[^/]+\/reports$/, label: 'reproduction/reports' },
   { method: 'POST', re: /^\/internal\/projects\/[^/]+\/topology\/children$/, label: 'topology/children' },
   { method: 'PATCH', re: /^\/internal\/topology\/[^/]+\/state$/, label: 'topology/state' },
+  { method: 'POST', re: /^\/internal\/dsh-sessions\/[^/]+\/knowledge-activations$/, label: 'dsh/knowledge-activation' },
+  { method: 'POST', re: /^\/internal\/dsh-sessions\/[^/]+\/assurance-executions$/, label: 'dsh/assurance-execution' },
 ]
 
 function isServiceRoute(method: string, pathname: string): boolean {
@@ -807,6 +929,26 @@ function requireDshPlugin(
   }
   if (req.headers['x-service-principal'] !== 'dsh-plugin') {
     send(res, 403, { error: errorEnvelope('service_identity_required', `${action} requires x-service-principal: dsh-plugin`) })
+    return false
+  }
+  return true
+}
+
+function requireResearchOrchestrator(
+  req: IncomingMessage,
+  res: ServerResponse,
+  kernel: ResearchKernel,
+  action: string,
+): boolean {
+  if (req.headers['x-service-principal'] !== 'research-orchestrator') {
+    send(res, 403, { error: errorEnvelope('service_identity_required', `${action} requires x-service-principal: research-orchestrator`) })
+    return false
+  }
+  const configured = kernel.orchestratorToken
+  const provided = req.headers['x-orchestrator-token']
+  if (configured === undefined || typeof provided !== 'string' || provided.trim() === ''
+    || !serviceTokenEquals(provided, configured)) {
+    send(res, 403, { error: errorEnvelope('orchestrator_token_required', `${action} requires the managed orchestrator credential`) })
     return false
   }
   return true
@@ -1162,6 +1304,122 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
       return
     }
   }
+  if (version === 'internal' && resource === 'methodology' && id === 'native-packs'
+    && sub === 'reconcile' && method === 'POST') {
+    if (!requireDshPlugin(req, res, kernel, 'native Knowledge reconciliation')) return
+    send(res, 200, kernel.methodology.reconcileNativeKnowledgePacks())
+    return
+  }
+  // FULLAUTO-01: the Durable Orchestrator is a service authority, never a
+  // Human Principal. It can request an allowlisted fixture Gate decision only
+  // through this internal endpoint. The Kernel re-derives every authority pin
+  // and commits Decision/receipt/Gate/Project/Outbox atomically.
+  if (version === 'internal' && resource === 'projects' && id !== undefined
+    && sub === 'full-auto-gates' && subId !== undefined && subSubId === 'approve' && method === 'POST') {
+    if (kernel.serviceToken === undefined) {
+      send(res, 403, { error: errorEnvelope('service_token_required', 'full-auto Gate approval requires a configured service token') })
+      return
+    }
+    if (!requireResearchOrchestrator(req, res, kernel, 'full-auto Gate approval')) return
+    void readJson(req).then((body) => {
+      try {
+        const input = z.object({
+          expected_project_revision: z.number().int().nonnegative(),
+          idempotency_key: z.string().min(1).max(240),
+        }).strict().parse(body)
+        send(res, 200, kernel.decideFullAutoGate({
+          project_id: id,
+          gate_id: subId,
+          ...input,
+        }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  // GOV-03: Human Gate decisions have no public Kernel write route. The
+  // standalone Human BFF authenticates the browser, checks membership/role
+  // and CSRF, then crosses this service-only bridge with its own credential.
+  // This remains separate from the full-auto authority endpoint above.
+  if (version === 'internal' && resource === 'human-gates' && id !== undefined
+    && sub === 'decisions' && method === 'POST') {
+    if (kernel.serviceToken === undefined) {
+      send(res, 403, { error: errorEnvelope('service_token_required', 'Human Gate decisions require a configured service token') })
+      return
+    }
+    if (req.headers['x-service-principal'] !== 'standalone-human-bff') {
+      send(res, 403, { error: errorEnvelope('service_identity_required', 'Human Gate decisions require x-service-principal: standalone-human-bff') })
+      return
+    }
+    void readJson(req).then((body) => {
+      try {
+        const input = decisionSchema.parse(body)
+        const forwardedSession = req.headers['x-principal-session']
+        if ((input.session_id === undefined || input.session_id === null)
+          && typeof forwardedSession === 'string' && forwardedSession !== '') {
+          input.session_id = forwardedSession
+        }
+        ok(res, kernel.decideGate({
+          gate_id: id,
+          actor: input.actor ?? input.principal.principal_id,
+          ...input,
+        }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  // FULLAUTO-01 canonical survey executor: the plugin-hosted connector only
+  // supplies untrusted structured retrieval output. Kernel authority derives
+  // the complete Brief query and revalidates action/revision/fixture/runner/
+  // budget/protocol pins before the atomic corpus+phase+Outbox commit.
+  if (version === 'internal' && resource === 'projects' && id !== undefined
+    && sub === 'full-auto-actions' && subId === 'survey-run' && subSubId === 'authority' && method === 'POST') {
+    if (kernel.serviceToken === undefined) {
+      send(res, 403, { error: errorEnvelope('service_token_required', 'full-auto survey authority requires a configured service token') })
+      return
+    }
+    if (!requireResearchOrchestrator(req, res, kernel, 'full-auto survey authority')) return
+    void readJson(req).then((body) => {
+      try {
+        const input = z.object({
+          expected_project_revision: z.number().int().nonnegative(),
+          action_id: z.string().min(1).max(512),
+          action_revision: z.number().int().nonnegative(),
+        }).strict().parse(body)
+        send(res, 200, kernel.fullAutoSurveyAuthority({ project_id: id, ...input }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  if (version === 'internal' && resource === 'projects' && id !== undefined
+    && sub === 'full-auto-actions' && subId === 'survey-run' && subSubId === undefined && method === 'POST') {
+    if (kernel.serviceToken === undefined) {
+      send(res, 403, { error: errorEnvelope('service_token_required', 'full-auto survey requires a configured service token') })
+      return
+    }
+    if (!requireResearchOrchestrator(req, res, kernel, 'full-auto survey')) return
+    void readJson(req).then((body) => {
+      try {
+        const input = z.object({
+          expected_project_revision: z.number().int().nonnegative(),
+          action_id: z.string().min(1).max(512),
+          action_revision: z.number().int().nonnegative(),
+          expected_authority_sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+          idempotency_key: z.string().min(1).max(240),
+          result: FullAutoSurveyResultSchema.optional(),
+        }).strict().parse(body)
+        send(res, 200, kernel.executeFullAutoSurvey({ project_id: id, ...input }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
   // REPRO-01 (docs/reproduction-contracts.md §4): POST
   // /internal/reproduction-attempts/{attempt}/reports — verifier service
   // identity (x-service-token gate above + x-service-principal: verifier
@@ -1258,6 +1516,62 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
     }).catch((error: unknown) => fail(res, error))
     return
   }
+  if (version === 'internal' && resource === 'dsh-sessions' && id !== undefined && sub === 'knowledge-activations' && method === 'POST') {
+    void readJson(req).then((body) => {
+      try {
+        if (!requireDshPlugin(req, res, kernel, 'DSH Knowledge activation')) return
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(id)) {
+          send(res, 422, { error: errorEnvelope('invalid_session_id', 'DSH session id is not a safe opaque id') })
+          return
+        }
+        const linked = kernel.getProjectBySession(id)
+        if (linked === null) {
+          send(res, 409, { error: errorEnvelope('session_link_required', 'DSH session is not linked to a Scholar project') })
+          return
+        }
+        const input = knowledgeActivationWriteSchema.parse(body)
+        const dshToken = kernel.dshPluginToken
+        if (dshToken === undefined) {
+          send(res, 403, { error: errorEnvelope('dsh_plugin_token_required', 'DSH plugin credential is unavailable') })
+          return
+        }
+        send(res, 201, kernel.activateKnowledgePackageFromAuthority({
+          project_id: linked.project_id,
+          session_id: id,
+          principal_id: dshOperatorPrincipal(dshToken),
+          ...input,
+        }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
+  if (version === 'internal' && resource === 'dsh-sessions' && id !== undefined && sub === 'assurance-executions' && method === 'POST') {
+    void readJson(req).then((body) => {
+      try {
+        if (!requireDshPlugin(req, res, kernel, 'DSH Assurance execution')) return
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(id)) {
+          send(res, 422, { error: errorEnvelope('invalid_session_id', 'DSH session id is not a safe opaque id') })
+          return
+        }
+        const linked = kernel.getProjectBySession(id)
+        if (linked === null) {
+          send(res, 409, { error: errorEnvelope('session_link_required', 'DSH session is not linked to a Scholar project') })
+          return
+        }
+        const input = internalWritingAssuranceExecutionSchema.parse(body)
+        if (input.mode === 'semantic' && input.semantic_review.session_id !== id) {
+          send(res, 409, { error: errorEnvelope('semantic_review_session_mismatch', 'semantic review does not belong to the exact DSH session') })
+          return
+        }
+        send(res, 201, kernel.runWritingAssurance({ project_id: linked.project_id, ...input }))
+      } catch (error) {
+        fail(res, error)
+      }
+    }).catch((error: unknown) => fail(res, error))
+    return
+  }
   if (version === 'internal' && resource === 'projects' && id !== undefined && sub === 'topology' && subId === 'children' && method === 'POST') {
     void readJson(req).then((body) => {
       try {
@@ -1339,9 +1653,12 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
   if (version === 'v2') {
     void readJson(req, requestBodyCap(method, version, resource, id, sub)).then(async (body) => {
       try {
-        await handleV2({ req, res, method, url, id, sub, subId, subSubId, body, kernel, configPin })
+        await handleV2({ req, res, method, url, resource, id, sub, subId, subSubId, body, kernel, configPin })
       } catch (error) {
         if (error instanceof KernelError) send(res, error.status, { error: { code: error.code, message: error.message } })
+        else if (error instanceof AssuranceStoreError || error instanceof MethodologyStoreError || error instanceof WritingReviewStoreError || error instanceof MethodologyRolloutStoreError) {
+          send(res, error.status, { error: { code: error.code, message: error.message } })
+        }
         else if (error instanceof z.ZodError) {
           // INIT-GRILL-02 §1: v2 契约校验失败（如 name 去空白后 1–120）→
           // 稳定的 422 validation_error，绝不 500。
@@ -2186,36 +2503,6 @@ function route(req: IncomingMessage, res: ServerResponse, kernel: ResearchKernel
             // Gate lookup (BFF principal resolver uses it to map a gate
             // decision to the gate's project for membership/role checks).
             ok(res, kernel.getGate(id))
-            return
-          }
-          if (id !== undefined && sub === 'decisions' && method === 'POST') {
-            // GOV-01 (fail-closed): a Human Gate decision is only accepted
-            // with an authenticated principal — anonymous or bare-actor
-            // (forged identity) decisions are 422 principal_required and
-            // never recorded. The internal orchestrator approve route
-            // (contracts/{id}/approve) is NOT a gate decision and keeps its
-            // actor-only semantics.
-            const bodyObj = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
-            const p = bodyObj.principal as Record<string, unknown> | undefined
-            const principalId = typeof p === 'object' && p !== null && !Array.isArray(p)
-              && typeof p.principal_id === 'string'
-              ? p.principal_id
-              : ''
-            if (principalId === '') {
-              send(res, 422, { error: errorEnvelope('principal_required', 'gate decisions require an authenticated principal (principal.principal_id); anonymous or actor-only decisions are rejected') })
-              return
-            }
-            const input = decisionSchema.parse(body)
-            // GOV-01 principal resolver: when the BFF forwarded a durable
-            // session (x-principal-session, session.json-derived) and the
-            // decision carries no explicit session_id, bind the forwarded
-            // session so the recorded decision is traceable to the
-            // authenticated session ("Session link 在重启后恢复").
-            const forwardedSession = req.headers['x-principal-session']
-            if ((input.session_id === undefined || input.session_id === null) && typeof forwardedSession === 'string' && forwardedSession !== '') {
-              input.session_id = forwardedSession
-            }
-            ok(res, kernel.decideGate({ gate_id: id, actor: input.actor ?? principalId, ...input }))
             return
           }
           break
@@ -3227,6 +3514,338 @@ function handleTrajectorySse(
 }
 
 /** Start the kernel API server; returns the listening server. */
+function canonicalMethodologyHash(value: unknown): `sha256:${string}` {
+  const canonical = (item: unknown): string => {
+    if (item === null || typeof item === 'string' || typeof item === 'boolean') return JSON.stringify(item)
+    if (typeof item === 'number' && Number.isFinite(item)) return JSON.stringify(item)
+    if (Array.isArray(item)) return `[${item.map(canonical).join(',')}]`
+    if (typeof item === 'object') {
+      const record = item as Record<string, unknown>
+      return `{${Object.keys(record).filter(key => record[key] !== undefined).sort()
+        .map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`
+    }
+    throw new TypeError('methodology hash accepts JSON values only')
+  }
+  return `sha256:${createHash('sha256').update(canonical(value), 'utf8').digest('hex')}`
+}
+
+function currentAssuranceInputHashes(
+  kernel: ResearchKernel,
+  projectId: string,
+  refs: readonly string[],
+): Record<string, `sha256:${string}`> {
+  const hashes: Record<string, `sha256:${string}`> = {}
+  for (const ref of refs) {
+    try {
+      const separator = ref.indexOf(':')
+      const kind = separator === -1 ? '' : ref.slice(0, separator)
+      const id = separator === -1 ? ref : ref.slice(separator + 1)
+      if (kind === 'artifact' || kind === 'bundle' || kind === 'data' || ref.startsWith('sha256:')) {
+        const artifact = kernel.getArtifact(projectId, ref.startsWith('sha256:') ? ref : id)
+        hashes[ref] = `sha256:${artifact.sha256}`
+      } else if (kind === 'tex') {
+        const document = kernel.tex.getDocument(id)
+        if (document.project_id !== projectId) continue
+        hashes[ref] = writingTexSha256(kernel.tex.tree(id).files)
+      } else if (kind === 'claim') {
+        const claim = kernel.getClaim(id)
+        if (claim.project_id !== projectId) continue
+        hashes[ref] = canonicalMethodologyHash(claim)
+      } else if (kind === 'claim-evidence') {
+        if (id !== projectId) continue
+        const accepted = new Set(kernel.listAcceptedEvidence(projectId).map(item => item.evidence_id))
+        hashes[ref] = writingClaimEvidenceSha256(kernel.listClaims(projectId).map(claim => ({
+          claim_ref: claim.claim_id,
+          accepted_evidence_refs: claim.evidence.evidence_ids.filter(evidenceId => accepted.has(evidenceId)),
+        })))
+      } else if (kind === 'evidence') {
+        const evidence = kernel.listEvidence(projectId).find(item => item.evidence_id === id)
+        if (evidence !== undefined) hashes[ref] = canonicalMethodologyHash(evidence)
+      } else if (kind === 'protocol') {
+        const protocol = kernel.methodology.getProtocolRevision(projectId, id).record
+        if (protocol.canonical_hash !== undefined) hashes[ref] = protocol.canonical_hash as `sha256:${string}`
+      } else if (kind === 'contract') {
+        const contract = kernel.getContract(id)
+        if (contract.project_id !== projectId) continue
+        hashes[ref] = canonicalMethodologyHash(contract)
+      } else if (kind === 'code') {
+        const snapshot = kernel.getCodeSnapshot(id)
+        if (snapshot.project_id !== projectId) continue
+        hashes[ref] = `sha256:${snapshot.sha256}`
+      } else if (kind === 'environment') {
+        hashes[ref] = runnerTargetConfigHash(kernel.runnerTargets.get(id)) as `sha256:${string}`
+      }
+    } catch {
+      // An absent/unresolvable ref is intentionally omitted. verifyAssurance
+      // turns it into input_missing/stale instead of trusting an old pin.
+    }
+  }
+  return hashes
+}
+
+function compactMethodologyProjection(kernel: ResearchKernel, projectId: string): Record<string, unknown> {
+  const projectProjection = kernel.projectProjection(projectId)
+  const project = projectProjection.project
+  const nextActionRevision = projectProjection.next_actions_v2.find(action => action.state === 'ready')?.revision
+    ?? projectProjection.next_actions_v2.find(action => action.state !== 'done')?.revision
+    ?? project.revision
+  const assurance = kernel.assurance.list(projectId)
+  const protocols = kernel.methodology.listProtocolRevisions(projectId)
+  const syntheses = kernel.methodology.listResearchSyntheses(projectId)
+  const activations = kernel.methodology.listKnowledgeActivations(projectId)
+  const outlines = kernel.methodology.listReverseOutlines(projectId)
+  const findings = kernel.methodology.listReviewFindings(projectId)
+  const runOutcomes = kernel.methodology.listResearchRunOutcomes(projectId)
+  const methodTriads = kernel.writingReview.listMethodTriads(projectId)
+  const sectionGuides = kernel.writingReview.listSectionGuides(projectId)
+  const reviewerPanels = kernel.writingReview.listReviewerPanels(projectId)
+  const patchProposals = kernel.writingReview.listPatchProposals(projectId)
+  const patchApplications = kernel.writingReview.listPatchApplications(projectId)
+
+  const currentAudits = new Map<string, (typeof assurance.audits)[number]>()
+  for (const audit of assurance.audits) currentAudits.set(audit.audit.audit_kind, audit)
+  const selectedAudits = [...currentAudits.values()]
+  const latestAudit = selectedAudits.at(-1)
+  const assuranceLevel = selectedAudits.some(item => item.audit.assurance_level === 'submission')
+    ? 'submission' as const
+    : 'draft' as const
+  const assuranceProjection = kernel.assurance.project({
+    project_id: projectId,
+    level: assuranceLevel,
+    required_audit_kinds: assuranceLevel === 'submission' ? [...AssuranceAuditKind.options] : [],
+    current_input_hashes: currentAssuranceInputHashes(
+      kernel,
+      projectId,
+      selectedAudits.flatMap(item => item.audit.input_pins.map(pin => pin.ref)),
+    ),
+  })
+  const assuranceReasons = [...new Set([
+    ...assuranceProjection.missing_audit_kinds.map(kind => `missing_${kind}`),
+    ...assuranceProjection.audits.flatMap(audit => audit.reasons),
+  ])]
+  const assuranceSummary = latestAudit === undefined
+    ? null
+    : {
+        level: assuranceProjection.level,
+        ready: assuranceProjection.submission_ready,
+        reason_codes: assuranceReasons,
+      }
+
+  const latestProtocol = protocols.records.at(-1)?.record
+  const protocolSummary = latestProtocol === undefined
+    ? null
+    : {
+        current_id: latestProtocol.protocol_id,
+        revision: latestProtocol.revision,
+        status: latestProtocol.status,
+        intent: latestProtocol.intent,
+      }
+  const latestSynthesis = syntheses.records.at(-1)?.record
+  const synthesisAssessment = latestSynthesis === undefined
+    ? null
+    : evaluateResearchMethodology({
+        operation: 'synthesis_freshness',
+        synthesis: latestSynthesis,
+        current: {
+          project_revision: project.revision,
+          next_action_revision: nextActionRevision ?? project.revision,
+          input_hash: latestSynthesis.input_hash,
+        },
+      })
+  if (synthesisAssessment?.operation === 'synthesis_freshness') {
+    kernel.methodologyTelemetry.synthesisFreshness({
+      mode: kernel.rollout.projectPin(projectId).mode,
+      fresh: synthesisAssessment.effective_status !== 'stale',
+      stale_reasons: synthesisAssessment.stale_reasons,
+    })
+  }
+  const synthesisSummary = latestSynthesis === undefined || synthesisAssessment?.operation !== 'synthesis_freshness'
+    ? null
+    : {
+        current_id: latestSynthesis.synthesis_id,
+        fresh: synthesisAssessment.effective_status !== 'stale',
+        stale_reasons: synthesisAssessment.stale_reasons,
+      }
+
+  const deliveryItems = [...new Set(activations.records.map(item => item.record.request.session_id))]
+    .flatMap(sessionId => kernel.methodology.resolveKnowledgeDelivery({
+      project_id: projectId,
+      session_id: sessionId,
+      phase: project.status,
+      next_action_revision: nextActionRevision,
+      surface: 'scholar-chat',
+    }).deliveries)
+  const activeDeliveries = [...new Map(deliveryItems.map(item => [item.activation_id, item])).values()]
+  const activeNames = [...new Set(activeDeliveries.map(item => item.package_name))]
+  const knowledgeSummary = {
+    active_count: activeDeliveries.length,
+    package_names: activeNames,
+    suppressed_count: Math.max(0, activations.records.length - activeDeliveries.length),
+    status: activeDeliveries.length > 0 ? 'delivery-ready' : activations.records.length > 0 ? 'suppressed' : 'inactive',
+  }
+  const latestOutline = outlines.records.at(-1)?.record
+  const blockingCount = findings.records.filter(item =>
+    item.record.severity === 'blocking'
+      && item.record.resolution_status !== 'resolved'
+      && item.record.resolution_status !== 'dismissed',
+  ).length
+  let writingStale: boolean | null = null
+  const writingReasons: string[] = []
+  let currentBlockingCount = blockingCount
+  if (latestOutline !== undefined) {
+    try {
+      const document = kernel.tex.getDocument(latestOutline.input_pin.document_id)
+      if (document.project_id !== projectId) throw new Error('document_project_mismatch')
+      const tree = kernel.tex.tree(document.document_id)
+      const acceptedEvidence = new Set(kernel.listEvidence(projectId)
+        .filter(evidence => (evidence as typeof evidence & { provenance_status?: string }).provenance_status === 'accepted')
+        .map(evidence => evidence.evidence_id))
+      const claimEvidence = kernel.listClaims(projectId).map(claim => ({
+        claim_ref: claim.claim_id,
+        accepted_evidence_refs: claim.evidence.evidence_ids.filter(id => acceptedEvidence.has(id)),
+      }))
+      const report = kernel.methodology.assessWriting({
+        project_id: projectId,
+        outline_id: latestOutline.outline_id,
+        finding_ids: findings.records.map(item => item.record.finding_id),
+        current_input: {
+          project_id: projectId,
+          document_id: document.document_id,
+          document_revision: document.revision,
+          tex_sha256: writingTexSha256(tree.files),
+          claim_evidence_sha256: writingClaimEvidenceSha256(claimEvidence),
+        },
+        claim_evidence: claimEvidence,
+      })
+      writingStale = report.outline.status === 'stale'
+      writingReasons.push(...report.outline.reasons)
+      if (report.claim_evidence_gaps.length > 0) writingReasons.push('claim_evidence_gap')
+      const freshFindingIds = new Set(report.findings
+        .filter(finding => finding.status === 'fresh')
+        .map(finding => finding.finding_id))
+      currentBlockingCount = findings.records.filter(item =>
+        freshFindingIds.has(item.record.finding_id)
+          && item.record.severity === 'blocking'
+          && item.record.resolution_status !== 'resolved'
+          && item.record.resolution_status !== 'dismissed',
+      ).length
+    } catch {
+      writingStale = true
+      writingReasons.push('document_not_found')
+      currentBlockingCount = 0
+    }
+  }
+  const writingSummary = latestOutline === undefined
+    ? null
+    : {
+        outline_id: latestOutline.outline_id,
+        blocking_count: currentBlockingCount,
+        stale: writingStale,
+        reason_codes: writingReasons,
+      }
+  const researchGraph = buildResearchGraph({
+    project_id: projectId,
+    protocols: protocols.records.map(item => item.record),
+    syntheses: syntheses.records.map(item => item.record),
+    directions: kernel.methodology.listDirectionProposals(projectId).records.map(item => item.record),
+    adoptions: kernel.methodology.listDirectionAdoptions(projectId).records.map(item => item.record),
+    run_outcomes: runOutcomes.outcomes.map(item => item.outcome),
+  })
+  const topologySummary = {
+    assurance_audit_count: assurance.audits.length,
+    latest_audit_id: assurance.audits.at(-1)?.audit.audit_id ?? null,
+    research_node_count: researchGraph.nodes.length,
+    research_edge_count: researchGraph.edges.length,
+  }
+  const negativeFindingCount = runOutcomes.outcomes.filter(item => item.outcome.negative_finding !== null).length
+  const claimProposalCount = runOutcomes.outcomes.filter(item => item.outcome.claim_proposal !== null).length
+  const runSummary = {
+    revision: runOutcomes.run_stream_revision,
+    count: runOutcomes.outcomes.length,
+    negative_finding_count: negativeFindingCount,
+    claim_proposal_count: claimProposalCount,
+    latest_run_ref: runOutcomes.outcomes.at(-1)?.outcome.run.run_ref ?? null,
+  }
+  const latestTriad = methodTriads.records.at(-1)?.record
+  const latestGuide = sectionGuides.records.at(-1)?.record
+  const latestPanel = reviewerPanels.records.at(-1)?.record
+  const latestPatch = patchProposals.records.at(-1)?.record
+  const latestApplication = patchApplications.records.at(-1)?.record
+  const manuscriptSummary = {
+    revision: kernel.writingReview.revision(projectId),
+    method_triad: latestTriad === undefined ? null : {
+      triad_id: latestTriad.triad.triad_id,
+      status: latestTriad.diagnostic.status,
+      gap_codes: latestTriad.diagnostic.gaps.map(gap => gap.code),
+    },
+    section_guide: latestGuide === undefined ? null : {
+      activation_id: latestGuide.activation_id,
+      section: latestGuide.section,
+      state: latestGuide.state,
+      missing_inputs: latestGuide.missing_inputs,
+    },
+    reviewer_panel: latestPanel === undefined ? null : {
+      aggregate_id: latestPanel.aggregate_id,
+      state: latestPanel.state,
+      complete_roles: latestPanel.roles.filter(item => item.state === 'complete').map(item => item.role),
+      missing_roles: latestPanel.roles.filter(item => item.state === 'missing').map(item => item.role),
+    },
+    patches: {
+      proposal_count: patchProposals.records.length,
+      application_count: patchApplications.records.length,
+      latest_proposal_id: latestPatch?.proposal_id ?? null,
+      latest_application_id: latestApplication?.application_id ?? null,
+    },
+  }
+
+  const directionRecommendationKeys: Readonly<Record<string, string>> = {
+    direction_gate_review: 'methodology.next.directionGateReview',
+    direction_deepen_continue: 'methodology.next.directionDeepenContinue',
+    direction_broaden_intake: 'methodology.next.directionBroadenIntake',
+    direction_pivot_intake: 'methodology.next.directionPivotIntake',
+    direction_conclude_prepare: 'methodology.next.directionConcludePrepare',
+    direction_pause_review: 'methodology.next.directionPauseReview',
+    direction_overlay_stale: 'methodology.next.directionOverlayStale',
+    direction_overlay_invalid: 'methodology.next.directionOverlayInvalid',
+  }
+  const directionAction = projectProjection.next_actions_v2.find(action =>
+    action.state !== 'done' && directionRecommendationKeys[action.code] !== undefined)
+  const nextRecommendation = directionAction !== undefined
+    ? { code: directionAction.code, label_key: directionRecommendationKeys[directionAction.code]! }
+    : latestProtocol?.status !== 'frozen'
+      ? { code: 'configure_protocol', label_key: 'methodology.next.configureProtocol' }
+      : latestSynthesis === undefined
+        ? { code: 'run_synthesis', label_key: 'methodology.next.runSynthesis' }
+        : activations.records.length === 0
+          ? { code: 'activate_knowledge', label_key: 'methodology.next.activateKnowledge' }
+          : blockingCount > 0
+            ? { code: 'review_writing', label_key: 'methodology.next.reviewWriting' }
+            : assuranceSummary?.ready !== true
+              ? { code: 'run_assurance', label_key: 'methodology.next.runAssurance' }
+              : null
+  const rolloutPin = kernel.rollout.projectPin(projectId)
+
+  return {
+    project_id: projectId,
+    revision: kernel.methodology.projectRevision(projectId),
+    assurance: assuranceSummary,
+    protocol: protocolSummary,
+    synthesis: synthesisSummary,
+    knowledge: knowledgeSummary,
+    writing: writingSummary,
+    manuscript: manuscriptSummary,
+    runs: runSummary,
+    topology: topologySummary,
+    next_recommendation: nextRecommendation,
+    rollout: {
+      mode: rolloutPin.mode,
+      policy_revision: rolloutPin.policy_revision,
+      project_pin_revision: rolloutPin.project_pin_revision,
+      telemetry: kernel.methodologyTelemetry.redactedAggregate(),
+    },
+  }
+}
+
 /**
  * v2 adapter (api-contracts.md §4): the /v2 surface the BFF exposes to the
  * UI. Idempotency-Key-scoped project creation, membership-filtered paginated
@@ -3240,6 +3859,7 @@ async function handleV2(ctx: {
   res: ServerResponse
   method: string
   url: URL
+  resource?: string
   id?: string
   sub?: string
   subId?: string
@@ -3248,7 +3868,7 @@ async function handleV2(ctx: {
   kernel: ResearchKernel
   configPin?: string
 }): Promise<void> {
-  const { req, res, method, url, id, sub, subId, subSubId, body, kernel, configPin } = ctx
+  const { req, res, method, url, resource, id, sub, subId, subSubId, body, kernel, configPin } = ctx
   const principal = typeof req.headers['x-principal-id'] === 'string' ? req.headers['x-principal-id'] : undefined
   // API-01 role capabilities: the BFF injects x-principal-role from ITS OWN
   // membership lookup (client-supplied values are never trusted). When
@@ -3280,6 +3900,58 @@ async function handleV2(ctx: {
     if (!members.some(m => m.principal_id === principal)) {
       throw new KernelError(404, 'project_not_found', 'project not found or access denied')
     }
+  }
+  const methodologyMember = (projectId: string): { principal_id: string; role: string } | null => {
+    if (principal === undefined || principal.trim() === '') {
+      send(res, 422, { error: errorEnvelope('principal_required', 'methodology access requires an authenticated Human Principal') })
+      return null
+    }
+    const durableRole = kernel.getProjectMemberRole(projectId, principal)
+    if (durableRole === null) {
+      send(res, 404, { error: errorEnvelope('project_not_found', 'project not found or access denied') })
+      return null
+    }
+    return { principal_id: principal, role: durableRole }
+  }
+  const methodologyWriter = (projectId: string, piOnly = false): { principal_id: string; role: string } | null => {
+    const member = methodologyMember(projectId)
+    if (member === null) return null
+    const allowed = piOnly ? member.role === 'pi' : member.role === 'pi' || member.role === 'researcher'
+    if (!allowed) {
+      send(res, 403, {
+        error: errorEnvelope(
+          'role_forbidden',
+          piOnly ? 'methodology decision requires project PI authority' : 'methodology write requires project PI or researcher authority',
+        ),
+      })
+      return null
+    }
+    return member
+  }
+  const methodologyOperator = (): string | null => {
+    if (principal === undefined || principal.trim() === '') {
+      send(res, 422, { error: errorEnvelope('principal_required', 'methodology registry access requires an authenticated Operator') })
+      return null
+    }
+    const operator = kernel.db.prepare(`
+      SELECT 1
+      FROM project_members AS membership
+      JOIN projects AS project ON project.project_id = membership.project_id
+      WHERE membership.principal_id = ?
+        AND membership.role = 'operator'
+        AND project.deleted_at IS NULL
+      LIMIT 1
+    `).get(principal)
+    if (operator === undefined) {
+      send(res, 403, { error: errorEnvelope('role_forbidden', 'methodology registry access requires durable Operator authority') })
+      return null
+    }
+    return principal
+  }
+  const sameProject = (pathProjectId: string, recordProjectId: string): boolean => {
+    if (pathProjectId === recordProjectId) return true
+    send(res, 404, { error: errorEnvelope('project_not_found', 'project not found or access denied') })
+    return false
   }
   if (id === undefined && sub === undefined && method === 'GET' && url.pathname === '/v2/health') {
     // api-contracts.md §3 / reconstruction-contracts.md §5: canonical
@@ -3313,6 +3985,55 @@ async function handleV2(ctx: {
       },
       time: new Date().toISOString(),
     })
+    return
+  }
+  // Methodology / Knowledge API (api-contracts.md §24): global registry
+  // access is Operator-only and derives authority from durable membership,
+  // never x-principal-role.
+  if (resource === 'methodology' && id === 'rollout-policy' && sub === undefined && subId === undefined && subSubId === undefined) {
+    const operator = methodologyOperator()
+    if (operator === null) return
+    if (method === 'GET') {
+      send(res, 200, kernel.rollout.currentPolicy())
+      return
+    }
+    if (method === 'POST') {
+      const input = methodologyRolloutPolicyUpdateSchema.parse(body)
+      send(res, 201, kernel.rollout.updatePolicy({ ...input, actor_ref: operator }))
+      return
+    }
+  }
+  if (resource === 'methodology' && id === 'packages' && sub === undefined && subId === undefined && subSubId === undefined) {
+    if (methodologyOperator() === null) return
+    if (method === 'GET') {
+      const packages = kernel.methodology.listKnowledgePackages()
+      const evaluations = kernel.methodology.listKnowledgeEvaluations()
+      send(res, 200, { registry_revision: packages.registry_revision, packages, evaluations })
+      return
+    }
+    if (method === 'POST') {
+      const input = knowledgePackageWriteSchema.parse(body)
+      send(res, 201, kernel.methodology.registerKnowledgePackage(input))
+      return
+    }
+  }
+  if (resource === 'methodology' && id === 'packages' && sub !== undefined && subId !== undefined && subSubId === 'evaluations' && method === 'POST') {
+    if (methodologyOperator() === null) return
+    const input = knowledgeEvaluationWriteSchema.parse(body)
+    if (input.record.package_name !== sub || input.record.package_version !== subId) {
+      send(res, 404, { error: errorEnvelope('methodology_knowledge_package_not_found', 'knowledge package not found') })
+      return
+    }
+    send(res, 201, kernel.methodology.recordKnowledgeEvaluation(input))
+    return
+  }
+  if (resource === 'methodology' && id === 'native-packs' && sub === 'reconcile' && subId === undefined && subSubId === undefined && method === 'POST') {
+    if (methodologyOperator() === null) return
+    send(res, 200, kernel.methodology.reconcileNativeKnowledgePacks())
+    return
+  }
+  if (resource !== 'projects') {
+    send(res, 404, { error: { code: 'not_found', message: 'unknown v2 route' } })
     return
   }
   if (id === undefined && method === 'POST') {
@@ -3350,6 +4071,356 @@ async function handleV2(ctx: {
       ? page.items
       : page.items.filter(p => kernel.listProjectMembers(p.project_id).some(m => m.principal_id === principal))
     send(res, 200, { items, next_cursor: page.next_cursor })
+    return
+  }
+  if (id !== undefined && sub === 'methodology' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, compactMethodologyProjection(kernel, id))
+    return
+  }
+  if (id !== undefined && sub === 'rollout-policy' && subId === undefined && method === 'POST') {
+    const member = methodologyWriter(id, true)
+    if (member === null) return
+    const input = projectMethodologyRolloutPinSchema.parse(body)
+    send(res, 201, kernel.rollout.pinProject({
+      project_id: id,
+      ...input,
+      actor_ref: member.principal_id,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'methodology' && subId === 'graph' && subSubId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, buildResearchGraph({
+      project_id: id,
+      protocols: kernel.methodology.listProtocolRevisions(id).records.map(item => item.record),
+      syntheses: kernel.methodology.listResearchSyntheses(id).records.map(item => item.record),
+      directions: kernel.methodology.listDirectionProposals(id).records.map(item => item.record),
+      adoptions: kernel.methodology.listDirectionAdoptions(id).records.map(item => item.record),
+      run_outcomes: kernel.methodology.listResearchRunOutcomes(id).outcomes.map(item => item.outcome),
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'research-runs' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.methodology.listResearchRunOutcomes(id))
+    return
+  }
+  if (id !== undefined && sub === 'run-outcome-observations' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.listRunOutcomeObservations(id))
+    return
+  }
+  if (id !== undefined && sub === 'synthesis-requests' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.listSynthesisRecordRequests(id))
+    return
+  }
+  if (id !== undefined && sub === 'research-runs' && subId === undefined && method === 'POST') {
+    const member = methodologyWriter(id)
+    if (member === null) return
+    const input = researchRunOutcomeWriteSchema.parse(body)
+    if (!sameProject(id, input.record.project_id)) return
+    send(res, 201, kernel.recordResearchRunOutcome(input, member.principal_id))
+    return
+  }
+  if (id !== undefined && sub === 'negative-findings' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.methodology.listNegativeFindings(id))
+    return
+  }
+  if (id !== undefined && sub === 'claim-proposals' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.methodology.listResearchClaimProposals(id))
+    return
+  }
+  if (id !== undefined && sub === 'method-triads' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.writingReview.listMethodTriads(id))
+    return
+  }
+  if (id !== undefined && sub === 'method-triads' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = MethodTriadWrite.parse(body)
+    if (!sameProject(id, input.record.input_pin.project_id)) return
+    send(res, 201, kernel.recordMethodTriad(input))
+    return
+  }
+  if (id !== undefined && sub === 'section-guides' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.writingReview.listSectionGuides(id))
+    return
+  }
+  if (id !== undefined && sub === 'section-guides' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = SectionGuideActivationWrite.parse(body)
+    if (!sameProject(id, input.request.input_pin.project_id)) return
+    send(res, 201, kernel.recordSectionGuideActivation(input))
+    return
+  }
+  if (id !== undefined && sub === 'reviewer-panels' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.writingReview.listReviewerPanels(id))
+    return
+  }
+  if (id !== undefined && sub === 'reviewer-panels' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = WritingReviewerPanelWrite.parse(body)
+    if (!sameProject(id, input.input_pin.project_id)) return
+    send(res, 201, kernel.recordWritingReviewerPanel(input))
+    return
+  }
+  if (id !== undefined && sub === 'writing-patches' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    const proposals = kernel.writingReview.listPatchProposals(id)
+    const applications = kernel.writingReview.listPatchApplications(id)
+    send(res, 200, { project_id: id, stream_revision: proposals.stream_revision, proposals, applications })
+    return
+  }
+  if (id !== undefined && sub === 'writing-patches' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = WritingPatchProposalWrite.parse(body)
+    if (!sameProject(id, input.record.project_id)) return
+    send(res, 201, kernel.recordWritingPatchProposal(input))
+    return
+  }
+  if (id !== undefined && sub === 'writing-patches' && subId !== undefined && subSubId === 'apply' && method === 'POST') {
+    const member = methodologyWriter(id)
+    if (member === null) return
+    const sessionId = req.headers['x-principal-session']
+    const serviceCredential = req.headers['x-service-token']
+    const trustedHumanSession = kernel.serviceToken !== undefined
+      && typeof serviceCredential === 'string'
+      && serviceTokenEquals(serviceCredential, kernel.serviceToken)
+      && req.headers['x-service-principal'] === 'standalone-human-bff'
+      && typeof sessionId === 'string'
+      && sessionId.trim() !== ''
+    if (!trustedHumanSession) {
+      send(res, 403, { error: errorEnvelope('writing_patch_trusted_session_required', 'Writing patch apply requires a server-verified Human BFF session') })
+      return
+    }
+    const input = WritingPatchApplyInput.parse(body)
+    send(res, 201, kernel.applyWritingPatch(id, subId, input, {
+      principal_id: member.principal_id,
+      auth_method: 'dsh-session',
+      session_id: sessionId,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'assurance-audits' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.assurance.list(id))
+    return
+  }
+  if (id !== undefined && sub === 'assurance-executions' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = writingAssuranceExecutionSchema.parse(body)
+    send(res, 201, kernel.runWritingAssurance({ project_id: id, ...input }))
+    return
+  }
+  if (id !== undefined && sub === 'assurance-audits' && subId !== undefined && subSubId === 'accept' && method === 'POST') {
+    const member = methodologyWriter(id, true)
+    if (member === null) return
+    const input = assuranceAcceptSchema.parse(body)
+    send(res, 200, kernel.assurance.accept({
+      project_id: id,
+      audit_id: subId,
+      expected_revision: input.expected_revision,
+      accepted_by: member.principal_id,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'protocols' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.methodology.listProtocolRevisions(id))
+    return
+  }
+  if (id !== undefined && sub === 'protocols' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = protocolRevisionWriteSchema.parse(body)
+    if (!sameProject(id, input.record.project_id)) return
+    send(res, 201, kernel.methodology.recordProtocolRevision(input))
+    return
+  }
+  if (id !== undefined && sub === 'syntheses' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.methodology.listResearchSyntheses(id))
+    return
+  }
+  if (id !== undefined && sub === 'syntheses' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = researchSynthesisWriteSchema.parse(body)
+    if (!sameProject(id, input.record.project_id)) return
+    send(res, 201, kernel.recordResearchSynthesis(input))
+    return
+  }
+  if (id !== undefined && sub === 'directions' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    const proposals = kernel.methodology.listDirectionProposals(id)
+    const adoptions = kernel.methodology.listDirectionAdoptions(id)
+    send(res, 200, { project_id: id, stream_revision: proposals.stream_revision, proposals, adoptions })
+    return
+  }
+  if (id !== undefined && sub === 'directions' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = directionProposalWriteSchema.parse(body)
+    if (!sameProject(id, input.record.project_id)) return
+    send(res, 201, kernel.methodology.recordDirectionProposal(input))
+    return
+  }
+  if (id !== undefined && sub === 'directions' && subId !== undefined && subSubId === 'adopt' && method === 'POST') {
+    const member = methodologyWriter(id, true)
+    if (member === null) return
+    const input = directionAdoptionWriteSchema.parse(body)
+    // Scope the proposal path before evaluating the immutable decision so a
+    // proposal id from another project is indistinguishable from missing.
+    const proposal = kernel.methodology.getDirectionProposal(id, subId).record
+    const project = kernel.getProject(id)
+    const nextActions = kernel.projectProjection(id).next_actions_v2
+    const nextActionRevision = nextActions.find(action => action.state === 'ready')?.revision
+      ?? nextActions.find(action => action.state !== 'done')?.revision
+      ?? project.revision
+    const gateDecision = input.gate_decision_ref === null
+      ? undefined
+      : kernel.listDecisions(id).find(candidate => candidate.decision_id === input.gate_decision_ref)
+    const directionGate = gateDecision === undefined ? undefined : kernel.getGate(gateDecision.gate_id)
+    const gateBinding = directionGate?.type === 'direction'
+      ? DirectionGatePayload.safeParse(directionGate.payload)
+      : undefined
+    const gatePrincipal = gateDecision?.principal
+    const gatePrincipalRole = gatePrincipal === undefined
+      ? null
+      : kernel.getProjectMemberRole(id, gatePrincipal.principal_id)
+    const gateHasAuthenticatedHuman = gatePrincipal !== undefined
+      && gatePrincipal.auth_method !== 'agent'
+      && gatePrincipal.auth_method !== 'unverified'
+      && (gatePrincipalRole === 'pi' || gatePrincipalRole === 'operator')
+    const gateMatchesProposal = gateHasAuthenticatedHuman
+      && gateDecision?.decision === 'approved'
+      && directionGate?.project_id === id
+      && gateBinding?.success === true
+      && gateBinding.data.proposal_id === proposal.proposal_id
+      && gateBinding.data.source_synthesis_id === proposal.synthesis_id
+      && gateBinding.data.direction === proposal.direction
+    const verifiedGateApproval = gateMatchesProposal
+      ? {
+          decision_ref: gateDecision.decision_id,
+          gate_id: directionGate.gate_id,
+          gate_type: 'direction' as const,
+          decision: 'approved' as const,
+          human_principal_ref: gatePrincipal.principal_id,
+          binding: gateBinding.data,
+        }
+      : null
+    const decision = evaluateResearchMethodology({
+      operation: 'direction_adoption',
+      proposal,
+      request: {
+        adoption_id: input.adoption_id,
+        decision: input.decision === 'adopted' ? 'adopt' : 'reject',
+        actor: { kind: 'human', ref: member.principal_id },
+        within_approved_contract: ['CONTRACT_APPROVED', 'BASELINE_REPRO', 'EXPERIMENTING', 'EVIDENCE_READY', 'WRITING', 'REVIEWING', 'RELEASE_READY'].includes(project.status),
+        gate_approval: verifiedGateApproval,
+        current: {
+          project_revision: project.revision,
+          next_action_revision: nextActionRevision ?? project.revision,
+          // The project/NextAction revision fence above detects authoritative
+          // movement. `input_hash` is the immutable proposal pin; a future
+          // typed graph projection may recompute it from its source refs.
+          input_hash: proposal.input_hash,
+        },
+        requested_at: input.created_at,
+      },
+    })
+    if (decision.operation !== 'direction_adoption') {
+      throw new KernelError(500, 'direction_adoption_internal', 'methodology evaluator returned the wrong operation')
+    }
+    if (!decision.adoptable || decision.adoption_candidate === null) {
+      throw new KernelError(422, decision.blockers[0] ?? 'direction_adoption_denied',
+        `direction adoption denied: ${decision.blockers.join(',')}`)
+    }
+    send(res, 201, kernel.methodology.recordDirectionAdoption({
+      expected_revision: input.expected_revision,
+      record: decision.adoption_candidate,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'knowledge-activations' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    send(res, 200, kernel.methodology.listKnowledgeActivations(id))
+    return
+  }
+  if (id !== undefined && sub === 'knowledge-activations' && subId === undefined && method === 'POST') {
+    const member = methodologyWriter(id, true)
+    if (member === null) return
+    const input = knowledgeActivationWriteSchema.parse(body)
+    const sessionId = typeof req.headers['x-principal-session'] === 'string'
+      ? req.headers['x-principal-session'].trim()
+      : ''
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/.test(sessionId)) {
+      send(res, 422, { error: errorEnvelope('principal_session_required', 'Knowledge activation requires the authenticated BFF session') })
+      return
+    }
+    send(res, 201, kernel.activateKnowledgePackageFromAuthority({
+      project_id: id,
+      session_id: sessionId,
+      principal_id: member.principal_id,
+      ...input,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'knowledge-activations' && subId !== undefined && subSubId === 'deactivate' && method === 'POST') {
+    if (methodologyWriter(id, true) === null) return
+    const input = knowledgeDeactivationWriteSchema.parse(body)
+    if (!sameProject(id, input.request.project_id)) return
+    if (input.request.activation_id !== subId) {
+      send(res, 404, { error: errorEnvelope('methodology_activation_not_found', 'knowledge activation not found') })
+      return
+    }
+    send(res, 201, kernel.deactivateKnowledgePackage(input))
+    return
+  }
+  if (id !== undefined && sub === 'knowledge-delivery' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    const sessionId = url.searchParams.get('session_id')?.trim() ?? ''
+    const surface = url.searchParams.get('surface')
+    if (sessionId === '' || sessionId.length > 256 || (surface !== 'scholar-chat' && surface !== 'assurance-reviewer')) {
+      send(res, 422, { error: errorEnvelope('validation_error', 'session_id and a valid surface are required') })
+      return
+    }
+    const projection = kernel.projectProjection(id)
+    const actionRevision = projection.next_actions_v2.find(action => action.state === 'ready')?.revision
+      ?? projection.next_actions_v2.find(action => action.state !== 'done')?.revision
+      ?? projection.project.revision
+    send(res, 200, kernel.resolveKnowledgeDelivery({
+      project_id: id,
+      session_id: sessionId,
+      phase: projection.project.status,
+      next_action_revision: actionRevision,
+      surface,
+    }))
+    return
+  }
+  if (id !== undefined && sub === 'writing-reviews' && subId === undefined && method === 'GET') {
+    if (methodologyMember(id) === null) return
+    const reverseOutlines = kernel.methodology.listReverseOutlines(id)
+    const findings = kernel.methodology.listReviewFindings(id)
+    send(res, 200, {
+      project_id: id,
+      stream_revision: reverseOutlines.stream_revision,
+      reverse_outlines: reverseOutlines,
+      findings,
+    })
+    return
+  }
+  if (id !== undefined && sub === 'writing-reviews' && subId === undefined && method === 'POST') {
+    if (methodologyWriter(id) === null) return
+    const input = writingReviewWriteSchema.parse(body)
+    if (!sameProject(id, input.record.input_pin.project_id)) return
+    const receipt = input.kind === 'reverse-outline'
+      ? kernel.methodology.recordReverseOutline({ record: input.record, expected_revision: input.expected_revision })
+      : kernel.methodology.recordReviewFinding({ record: input.record, expected_revision: input.expected_revision })
+    send(res, 201, receipt)
     return
   }
   if (id !== undefined && sub === 'grill' && subId === undefined && method === 'GET') {
@@ -3423,7 +4494,7 @@ async function handleV2(ctx: {
     const capabilities = {
       editor: true,
       runner_profile_id: project.execution.runner_profile_id,
-      gates: ['scope', 'idea', 'contract', 'release'],
+      gates: ['scope', 'idea', 'contract', 'release', 'direction'],
       roles: members.map(m => m.role),
       membership: principal === undefined ? null : members.find(m => m.principal_id === principal)?.role ?? null,
     }
@@ -3433,7 +4504,7 @@ async function handleV2(ctx: {
   if (id !== undefined && sub === 'gate-requests' && subId === undefined && method === 'POST') {
     memberOr404(id)
     const input = z.object({
-      type: z.enum(['scope', 'idea', 'contract', 'release']),
+      type: z.enum(['scope', 'idea', 'contract', 'release', 'direction']),
       title: z.string().min(1),
       summary: z.string().optional(),
       payload: z.record(z.unknown()).optional(),

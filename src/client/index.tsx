@@ -19,7 +19,9 @@ import { SCHOLAR_SETTINGS_NAMESPACE, type ResearchSettings } from '../shared/set
 import {
   SCHOLAR_STAGE_IDS,
   normalizeDshSessionId,
+  normalizeScholarMethodology,
   type ScholarProjectSummary,
+  type ScholarMethodologySummary,
   type ScholarSessionProjection,
   type ScholarSessionWorkspace,
   type ScholarStageId,
@@ -32,6 +34,8 @@ const LOCALE_NAMESPACE = 'settings.dshScholar'
 type ResearchConfigKey =
   | 'title' | 'description' | 'restart' | 'expand' | 'collapse'
   | 'mode' | 'modeHint' | 'gateOnly' | 'fullAuto'
+  | 'automationTitle' | 'automationRunning' | 'automationStopped' | 'automationRestartRequired'
+  | 'automationFixtureOnly' | 'automationReleaseHuman' | 'automationLastPark'
   | 'unattended' | 'unattendedHint' | 'overridden' | 'reset'
   | 'standaloneUrl' | 'standaloneUrlHint' | 'shortcut' | 'shortcutHint' | 'shortcutDisabled'
   | 'openStandalone' | 'copyToken' | 'copyingToken' | 'tokenCopied' | 'tokenCopyFailed'
@@ -42,6 +46,21 @@ type ResearchConfigKey =
   | 'projectNamePlaceholder' | 'createProject' | 'creatingProject' | 'noProjects'
   | 'bindFailed' | 'createFailed' | 'archivedProject'
   | 'projectRevision' | 'nextAction' | 'nextReason' | 'pendingGates' | 'jobsSummary'
+  | 'methodologyTitle' | 'protocolStatus' | 'synthesisStatus' | 'assuranceStatus'
+  | 'writingStatus' | 'knowledgeStatus' | 'manuscriptMethodStatus' | 'runsStatus' | 'methodologyRecommendation'
+  | 'researchGraphStatus' | 'methodologyUnavailable'
+  | 'notConfigured' | 'fresh' | 'stale' | 'ready' | 'notReady' | 'blockingFindings'
+  | 'recommendConfigureProtocol' | 'recommendRunSynthesis' | 'recommendActivateKnowledge'
+  | 'recommendReviewWriting' | 'recommendRunAssurance'
+  | 'recommendDirectionGateReview' | 'recommendDirectionDeepen' | 'recommendDirectionBroaden'
+  | 'recommendDirectionPivot' | 'recommendDirectionConclude' | 'recommendDirectionPause'
+  | 'recommendDirectionStale' | 'recommendDirectionInvalid'
+  | 'protocolDraft' | 'protocolFrozen' | 'intentExploratory' | 'intentConfirmatory' | 'activePackages'
+  | 'knowledgeDeliveryReady' | 'knowledgeSuppressed' | 'knowledgeInactive' | 'suppressedPackages'
+  | 'methodTriadReady' | 'methodTriadGap' | 'sectionGuideActive' | 'sectionGuideGap'
+  | 'reviewerPanelComplete' | 'reviewerPanelPartial' | 'reviewerPanelMissing'
+  | 'patchProposals' | 'patchApplications' | 'runCount' | 'negativeFindings' | 'claimProposals'
+  | 'graphNodes' | 'graphEdges'
   | 'stageInit' | 'stageSurvey' | 'stageIdea' | 'stageReproduce' | 'stageContract'
   | 'stageExperiment' | 'stageEvidence' | 'stageWriting' | 'stageReview' | 'stageRelease'
   | 'stageDone' | 'stageCurrent' | 'stageUpcoming' | 'stageBlocked'
@@ -54,9 +73,16 @@ const en: Record<ResearchConfigKey, string> = {
   expand: 'Show settings',
   collapse: 'Hide settings',
   mode: 'Default governance mode',
-  modeHint: 'Gate-only keeps human approval gates; full-auto is intended for low-risk sandboxes.',
+  modeHint: 'Automatic approval requires an exact registered FixtureProfile and RunnerProfile. Release always stays human-controlled.',
   gateOnly: 'Gate only',
-  fullAuto: 'Full auto',
+  fullAuto: 'Automatic approval (Fixture only)',
+  automationTitle: 'Automation runtime',
+  automationRunning: 'Worker running',
+  automationStopped: 'Worker stopped',
+  automationRestartRequired: 'Restart DSH to apply the selected mode.',
+  automationFixtureOnly: 'Only exact registered fixture projects with an explicit Runner profile are eligible.',
+  automationReleaseHuman: 'Release always requires human approval.',
+  automationLastPark: 'Latest parked reason',
   unattended: 'Unattended runs',
   unattendedHint: 'Park work at human gates instead of waiting for an interactive answer.',
   standaloneUrl: 'Standalone URL',
@@ -96,6 +122,59 @@ const en: Record<ResearchConfigKey, string> = {
   nextReason: 'Reason',
   pendingGates: 'Pending gates',
   jobsSummary: 'Jobs',
+  methodologyTitle: 'Research method',
+  protocolStatus: 'Protocol',
+  synthesisStatus: 'Synthesis',
+  assuranceStatus: 'Assurance',
+  writingStatus: 'Writing',
+  knowledgeStatus: 'Knowledge',
+  manuscriptMethodStatus: 'Manuscript methodology',
+  runsStatus: 'Research outcomes',
+  researchGraphStatus: 'Research graph',
+  methodologyRecommendation: 'Method recommendation',
+  methodologyUnavailable: 'Unavailable from this server response',
+  notConfigured: 'Not configured',
+  fresh: 'Fresh',
+  stale: 'Stale',
+  ready: 'Ready',
+  notReady: 'Not ready',
+  blockingFindings: 'blocking findings',
+  recommendConfigureProtocol: 'Freeze the research protocol',
+  recommendRunSynthesis: 'Synthesize the latest research cycle',
+  recommendActivateKnowledge: 'Activate an approved knowledge package',
+  recommendReviewWriting: 'Resolve the writing review',
+  recommendRunAssurance: 'Complete the assurance review',
+  recommendDirectionGateReview: 'Review the research direction Gate',
+  recommendDirectionDeepen: 'Deepen research inside the approved boundary',
+  recommendDirectionBroaden: 'Propose broader research through Intake',
+  recommendDirectionPivot: 'Propose the adopted pivot through Intake',
+  recommendDirectionConclude: 'Prepare evidence and writing for conclusion',
+  recommendDirectionPause: 'Review the adopted pause',
+  recommendDirectionStale: 'Refresh the stale research direction proposal',
+  recommendDirectionInvalid: 'Inspect the invalid research direction binding',
+  protocolDraft: 'Draft',
+  protocolFrozen: 'Frozen',
+  intentExploratory: 'Exploratory',
+  intentConfirmatory: 'Confirmatory',
+  activePackages: 'active',
+  knowledgeDeliveryReady: 'delivery ready',
+  knowledgeSuppressed: 'suppressed',
+  knowledgeInactive: 'inactive',
+  suppressedPackages: 'suppressed',
+  methodTriadReady: 'method triad ready',
+  methodTriadGap: 'method triad gap',
+  sectionGuideActive: 'section guide active',
+  sectionGuideGap: 'section guide gap',
+  reviewerPanelComplete: 'review panel complete',
+  reviewerPanelPartial: 'review panel partial',
+  reviewerPanelMissing: 'review panel missing',
+  patchProposals: 'patch proposals',
+  patchApplications: 'patch applications',
+  runCount: 'runs',
+  negativeFindings: 'negative findings',
+  claimProposals: 'claim proposals',
+  graphNodes: 'nodes',
+  graphEdges: 'edges',
   stageInit: 'Init',
   stageSurvey: 'Survey',
   stageIdea: 'Idea',
@@ -124,9 +203,16 @@ const zh: Record<ResearchConfigKey, string> = {
   expand: '展开设置',
   collapse: '收起设置',
   mode: '默认治理模式',
-  modeHint: 'Gate only 保留人工审批关卡；Full auto 仅适合低风险沙箱。',
+  modeHint: '自动审批要求项目精确绑定已注册的 FixtureProfile 和 RunnerProfile；Release 始终由人工审批。',
   gateOnly: 'Gate only',
-  fullAuto: 'Full auto',
+  fullAuto: '自动审批（仅 Fixture）',
+  automationTitle: '自动审批运行状态',
+  automationRunning: '执行器运行中',
+  automationStopped: '执行器已停止',
+  automationRestartRequired: '需要重启 DSH 才会应用所选模式。',
+  automationFixtureOnly: '仅精确绑定已注册 Fixture 和明确 Runner 配置的项目可用。',
+  automationReleaseHuman: 'Release 始终需要人工审批。',
+  automationLastPark: '最近暂停原因',
   unattended: '无人值守运行',
   unattendedHint: '遇到人工关卡时暂停项目，而不是等待交互回答。',
   standaloneUrl: 'Standalone 地址',
@@ -166,6 +252,59 @@ const zh: Record<ResearchConfigKey, string> = {
   nextReason: '原因',
   pendingGates: '待审批',
   jobsSummary: '任务',
+  methodologyTitle: '研究方法',
+  protocolStatus: '研究协议',
+  synthesisStatus: '研究综合',
+  assuranceStatus: '可信度',
+  writingStatus: '写作',
+  knowledgeStatus: '知识包',
+  manuscriptMethodStatus: '论文方法',
+  runsStatus: '研究运行结果',
+  researchGraphStatus: '研究图谱',
+  methodologyRecommendation: '方法建议',
+  methodologyUnavailable: '此服务端响应中的该项不可用',
+  notConfigured: '未配置',
+  fresh: '最新',
+  stale: '已过期',
+  ready: '就绪',
+  notReady: '未就绪',
+  blockingFindings: '项阻塞问题',
+  recommendConfigureProtocol: '冻结研究协议',
+  recommendRunSynthesis: '综合最新研究循环',
+  recommendActivateKnowledge: '启用已批准的知识包',
+  recommendReviewWriting: '处理写作评审问题',
+  recommendRunAssurance: '完成可信度审查',
+  recommendDirectionGateReview: '人工审查研究方向 Gate',
+  recommendDirectionDeepen: '在已批准边界内深化研究',
+  recommendDirectionBroaden: '通过 Intake 提议扩大研究范围',
+  recommendDirectionPivot: '通过 Intake 提议已采纳的研究转向',
+  recommendDirectionConclude: '为研究结论准备证据与写作',
+  recommendDirectionPause: '人工复核已采纳的暂停',
+  recommendDirectionStale: '刷新已过期的研究方向提案',
+  recommendDirectionInvalid: '检查无效的研究方向绑定',
+  protocolDraft: '草稿',
+  protocolFrozen: '已冻结',
+  intentExploratory: '探索性',
+  intentConfirmatory: '验证性',
+  activePackages: '个已启用',
+  knowledgeDeliveryReady: '可交付',
+  knowledgeSuppressed: '已抑制',
+  knowledgeInactive: '未启用',
+  suppressedPackages: '个被抑制',
+  methodTriadReady: '方法三元组就绪',
+  methodTriadGap: '方法三元组有缺口',
+  sectionGuideActive: '章节指南已启用',
+  sectionGuideGap: '章节指南有缺口',
+  reviewerPanelComplete: '评审面板完整',
+  reviewerPanelPartial: '评审面板部分完成',
+  reviewerPanelMissing: '评审面板缺失',
+  patchProposals: '个补丁提案',
+  patchApplications: '个已应用补丁',
+  runCount: '次运行',
+  negativeFindings: '个负向发现',
+  claimProposals: '个主张提案',
+  graphNodes: '个节点',
+  graphEdges: '条边',
   stageInit: '初始化',
   stageSurvey: '调研',
   stageIdea: '想法',
@@ -239,6 +378,13 @@ const style = {
   fieldHead: { display: 'flex', alignItems: 'center', gap: 8 },
   label: { flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
   hint: { margin: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
+  automation: {
+    display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4, padding: '10px 12px',
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+    background: 'var(--dsw-alias-bg-layer-2)',
+  },
+  automationHead: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
+  automationTitle: { flex: 1, fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
   select: {
     height: 34, padding: '0 10px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
     background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)', font: 'inherit',
@@ -303,32 +449,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  const allowedSet = new Set(allowed)
-  return Object.keys(value).every(key => allowedSet.has(key))
+function hasSensitiveOwnKey(value: Record<string, unknown>): boolean {
+  return Object.keys(value).some(key => /token|secret|payload|content/i.test(key))
 }
 
-function isScholarProjection(value: unknown, expectedSessionId: string): value is ScholarSessionProjection {
-  if (!isRecord(value) || typeof value.linked !== 'boolean' || value.session_id !== expectedSessionId) return false
-  if (!hasOnlyKeys(value, ['linked', 'session_id', 'project', 'stages', 'next_action', 'summary'])) return false
-  if (!Array.isArray(value.stages) || value.stages.length !== SCHOLAR_STAGE_IDS.length || !isRecord(value.summary)) return false
+function normalizeScholarProjection(value: unknown, expectedSessionId: string): ScholarSessionProjection | null {
+  if (!isRecord(value) || typeof value.linked !== 'boolean' || value.session_id !== expectedSessionId) return null
+  if (hasSensitiveOwnKey(value)) return null
+  if (!Array.isArray(value.stages) || value.stages.length !== SCHOLAR_STAGE_IDS.length || !isRecord(value.summary)) return null
   const nonnegativeInteger = (candidate: unknown): candidate is number => Number.isInteger(candidate) && (candidate as number) >= 0
-  if (!hasOnlyKeys(value.summary, ['pending_gates', 'jobs', 'counts'])) return false
-  if (!nonnegativeInteger(value.summary.pending_gates) || !isRecord(value.summary.jobs) || !isRecord(value.summary.counts)) return false
-  if (!hasOnlyKeys(value.summary.jobs, ['total', 'queued', 'running', 'succeeded', 'failed'])) return false
+  if (!nonnegativeInteger(value.summary.pending_gates) || !isRecord(value.summary.jobs) || !isRecord(value.summary.counts)) return null
   for (const key of ['total', 'queued', 'running', 'succeeded', 'failed']) {
-    if (!nonnegativeInteger(value.summary.jobs[key])) return false
+    if (!nonnegativeInteger(value.summary.jobs[key])) return null
   }
-  if (!Object.values(value.summary.counts).every(nonnegativeInteger)) return false
-  if (value.linked && (!isRecord(value.project) || !hasOnlyKeys(value.project, ['project_id', 'name', 'status', 'revision', 'brief_status'])
+  if (!Object.values(value.summary.counts).every(nonnegativeInteger)) return null
+  if (value.linked && (!isRecord(value.project) || hasSensitiveOwnKey(value.project)
     || typeof value.project.project_id !== 'string'
     || typeof value.project.name !== 'string' || typeof value.project.status !== 'string'
     || !nonnegativeInteger(value.project.revision)
-    || (value.project.brief_status !== undefined && typeof value.project.brief_status !== 'string'))) return false
-  if (!value.linked && (value.project !== undefined || value.next_action !== undefined)) return false
+    || (value.project.brief_status !== undefined && typeof value.project.brief_status !== 'string'))) return null
+  if (!value.linked && (value.project !== undefined || value.next_action !== undefined || value.methodology !== undefined)) return null
+  let methodology: ScholarMethodologySummary | undefined
+  if (value.methodology !== undefined && value.methodology !== null) {
+    if (!value.linked || !isRecord(value.project)) return null
+    try {
+      methodology = normalizeScholarMethodology(value.methodology, value.project.project_id as string)
+    } catch {
+      return null
+    }
+  }
+  let nextAction: ScholarSessionProjection['next_action']
   if (value.next_action !== undefined) {
     if (!isRecord(value.next_action)
-      || !hasOnlyKeys(value.next_action, ['code', 'label', 'reason', 'route', 'state', 'blocking', 'required_by', 'required', 'revision'])
       || typeof value.next_action.code !== 'string'
       || typeof value.next_action.label !== 'string' || typeof value.next_action.reason !== 'string'
       || typeof value.next_action.route !== 'string'
@@ -337,27 +489,77 @@ function isScholarProjection(value: unknown, expectedSessionId: string): value i
       || (value.next_action.required_by !== 'human' && value.next_action.required_by !== 'agent' && value.next_action.required_by !== 'runner')
       || (value.next_action.required !== true && (!Array.isArray(value.next_action.required)
         || !value.next_action.required.every(item => typeof item === 'string')))
-      || (value.next_action.revision !== null && !nonnegativeInteger(value.next_action.revision))) return false
+      || (value.next_action.revision !== null && !nonnegativeInteger(value.next_action.revision))) return null
+    nextAction = {
+      code: value.next_action.code,
+      label: value.next_action.label,
+      reason: value.next_action.reason,
+      route: value.next_action.route,
+      state: value.next_action.state,
+      blocking: value.next_action.blocking,
+      required_by: value.next_action.required_by,
+      required: value.next_action.required as true | string[],
+      revision: value.next_action.revision,
+    }
   }
-  return value.stages.every((stage, index) => isRecord(stage)
-    && hasOnlyKeys(stage, ['id', 'state'])
+  const validStages = value.stages.every((stage, index) => isRecord(stage)
     && stage.id === SCHOLAR_STAGE_IDS[index]
     && (stage.state === 'done' || stage.state === 'current' || stage.state === 'upcoming' || stage.state === 'blocked'))
+  if (!validStages) return null
+  const project = value.linked && isRecord(value.project) ? {
+    project_id: value.project.project_id as string,
+    name: value.project.name as string,
+    status: value.project.status as string,
+    revision: value.project.revision as number,
+    ...(value.project.brief_status === undefined ? {} : { brief_status: value.project.brief_status as string }),
+  } : undefined
+  return {
+    linked: value.linked,
+    session_id: expectedSessionId,
+    ...(project === undefined ? {} : { project }),
+    stages: value.stages.map(stage => ({
+      id: (stage as Record<string, unknown>).id as ScholarStageId,
+      state: (stage as Record<string, unknown>).state as ScholarStageState,
+    })),
+    ...(nextAction === undefined ? {} : { next_action: nextAction }),
+    ...(methodology === undefined ? {} : { methodology }),
+    summary: {
+      pending_gates: value.summary.pending_gates,
+      jobs: {
+        total: value.summary.jobs.total as number,
+        queued: value.summary.jobs.queued as number,
+        running: value.summary.jobs.running as number,
+        succeeded: value.summary.jobs.succeeded as number,
+        failed: value.summary.jobs.failed as number,
+      },
+      counts: Object.fromEntries(Object.entries(value.summary.counts).map(([key, count]) => [key, count as number])),
+    },
+  }
 }
 
-function isProjectSummary(value: unknown): value is ScholarProjectSummary {
-  return isRecord(value) && hasOnlyKeys(value, ['project_id', 'name', 'status', 'revision', 'brief_status'])
-    && typeof value.project_id === 'string' && /^rsp_[a-z0-9_]+$/.test(value.project_id)
-    && typeof value.name === 'string' && typeof value.status === 'string'
-    && Number.isInteger(value.revision) && (value.revision as number) >= 0
-    && (value.brief_status === undefined || typeof value.brief_status === 'string')
+function normalizeProjectSummary(value: unknown): ScholarProjectSummary | null {
+  if (!isRecord(value) || hasSensitiveOwnKey(value)
+    || typeof value.project_id !== 'string' || !/^rsp_[a-z0-9_]+$/.test(value.project_id)
+    || typeof value.name !== 'string' || typeof value.status !== 'string'
+    || !Number.isInteger(value.revision) || (value.revision as number) < 0
+    || (value.brief_status !== undefined && typeof value.brief_status !== 'string')) return null
+  return {
+    project_id: value.project_id,
+    name: value.name,
+    status: value.status,
+    revision: value.revision as number,
+    ...(value.brief_status === undefined ? {} : { brief_status: value.brief_status }),
+  }
 }
 
-function isScholarWorkspace(value: unknown, expectedSessionId: string): value is ScholarSessionWorkspace {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['session_id', 'projection', 'available_projects'])) return false
-  if (value.session_id !== expectedSessionId || !isScholarProjection(value.projection, expectedSessionId)
-    || !Array.isArray(value.available_projects) || !value.available_projects.every(isProjectSummary)) return false
-  return value.projection.linked ? value.available_projects.length === 0 : true
+function normalizeScholarWorkspace(value: unknown, expectedSessionId: string): ScholarSessionWorkspace | null {
+  if (!isRecord(value) || hasSensitiveOwnKey(value) || value.session_id !== expectedSessionId
+    || !Array.isArray(value.available_projects)) return null
+  const projection = normalizeScholarProjection(value.projection, expectedSessionId)
+  if (projection === null) return null
+  const projects = value.available_projects.map(normalizeProjectSummary)
+  if (projects.some(project => project === null) || (projection.linked && projects.length !== 0)) return null
+  return { session_id: expectedSessionId, projection, available_projects: projects as ScholarProjectSummary[] }
 }
 
 async function callScholarWorkspaceEndpoint(
@@ -373,10 +575,13 @@ async function callScholarWorkspaceEndpoint(
   const response = signal === undefined
     ? await rpc.call('/dsh-scholar-view', endpoint, payload)
     : await rpc.call('/dsh-scholar-view', endpoint, payload, signal)
-  if (!isRecord(response) || response.ok !== true || !isScholarWorkspace(response.value, normalized)) {
+  const workspace = !isRecord(response) || response.ok !== true
+    ? null
+    : normalizeScholarWorkspace(response.value, normalized)
+  if (workspace === null) {
     throw new Error('Scholar session workspace is unavailable')
   }
-  return response.value
+  return workspace
 }
 
 export function callScholarSessionWorkspace(
@@ -406,6 +611,33 @@ const STAGE_KEYS: Record<ScholarStageId, ResearchConfigKey> = {
 }
 const STAGE_STATE_KEYS: Record<ScholarStageState, ResearchConfigKey> = {
   done: 'stageDone', current: 'stageCurrent', upcoming: 'stageUpcoming', blocked: 'stageBlocked',
+}
+const METHODOLOGY_RECOMMENDATION_KEYS: Record<string, ResearchConfigKey> = {
+  configure_protocol: 'recommendConfigureProtocol',
+  run_synthesis: 'recommendRunSynthesis',
+  activate_knowledge: 'recommendActivateKnowledge',
+  review_writing: 'recommendReviewWriting',
+  run_assurance: 'recommendRunAssurance',
+  direction_gate_review: 'recommendDirectionGateReview',
+  direction_deepen_continue: 'recommendDirectionDeepen',
+  direction_broaden_intake: 'recommendDirectionBroaden',
+  direction_pivot_intake: 'recommendDirectionPivot',
+  direction_conclude_prepare: 'recommendDirectionConclude',
+  direction_pause_review: 'recommendDirectionPause',
+  direction_overlay_stale: 'recommendDirectionStale',
+  direction_overlay_invalid: 'recommendDirectionInvalid',
+}
+const KNOWLEDGE_STATUS_KEYS: Record<ScholarMethodologySummary['knowledge']['status'], ResearchConfigKey> = {
+  'delivery-ready': 'knowledgeDeliveryReady', suppressed: 'knowledgeSuppressed', inactive: 'knowledgeInactive',
+}
+const TRIAD_STATUS_KEYS: Record<NonNullable<ScholarMethodologySummary['manuscript']['method_triad']>['status'], ResearchConfigKey> = {
+  ready: 'methodTriadReady', diagnostic_gap: 'methodTriadGap',
+}
+const GUIDE_STATUS_KEYS: Record<NonNullable<ScholarMethodologySummary['manuscript']['section_guide']>['state'], ResearchConfigKey> = {
+  active: 'sectionGuideActive', diagnostic_gap: 'sectionGuideGap',
+}
+const REVIEWER_STATUS_KEYS: Record<NonNullable<ScholarMethodologySummary['manuscript']['reviewer_panel']>['state'], ResearchConfigKey> = {
+  complete: 'reviewerPanelComplete', partial: 'reviewerPanelPartial', missing: 'reviewerPanelMissing',
 }
 
 function isEditableTarget(target: unknown): boolean {
@@ -573,6 +805,8 @@ function ScholarView(props: ScholarViewProps) {
   }
 
   const projection = workspace?.projection ?? null
+  const methodology = projection?.methodology
+  const unavailableMethodologyBlocks = new Set(methodology?.unavailable_blocks ?? [])
   const options = workspace?.available_projects ?? []
   return (
     <section style={style.view} aria-label={props.t('title')}>
@@ -669,6 +903,95 @@ function ScholarView(props: ScholarViewProps) {
               </div>
               {projection.next_action === undefined ? null : (
                 <p style={style.nextLine}>{props.t('nextReason')}: {projection.next_action.reason}</p>
+              )}
+              {methodology === undefined ? null : (
+                <section aria-label={props.t('methodologyTitle')}>
+                  <h3 style={style.choiceTitle}>{props.t('methodologyTitle')}</h3>
+                  <div style={style.summaryGrid}>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('protocolStatus')}</p>
+                      <strong>{unavailableMethodologyBlocks.has('protocol')
+                        ? props.t('methodologyUnavailable')
+                        : methodology.protocol === null
+                        ? props.t('notConfigured')
+                        : `${props.t(methodology.protocol.intent === 'exploratory' ? 'intentExploratory' : 'intentConfirmatory')} · ${props.t(methodology.protocol.status === 'frozen' ? 'protocolFrozen' : 'protocolDraft')}`}</strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('synthesisStatus')}</p>
+                      <strong>{unavailableMethodologyBlocks.has('synthesis')
+                        ? props.t('methodologyUnavailable')
+                        : methodology.synthesis === null
+                        ? props.t('notConfigured')
+                        : props.t(methodology.synthesis.fresh ? 'fresh' : 'stale')}</strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('assuranceStatus')}</p>
+                      <strong>{unavailableMethodologyBlocks.has('assurance')
+                        ? props.t('methodologyUnavailable')
+                        : methodology.assurance === null
+                        ? props.t('notConfigured')
+                        : props.t(methodology.assurance.ready ? 'ready' : 'notReady')}</strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('writingStatus')}</p>
+                      <strong>{unavailableMethodologyBlocks.has('writing')
+                        ? props.t('methodologyUnavailable')
+                        : methodology.writing === null
+                        ? props.t('notConfigured')
+                        : `${methodology.writing.stale === null ? props.t('notConfigured') : props.t(methodology.writing.stale ? 'stale' : 'fresh')} · ${methodology.writing.blocking_count} ${props.t('blockingFindings')}`}</strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('knowledgeStatus')}</p>
+                      <strong>
+                        {unavailableMethodologyBlocks.has('knowledge')
+                          ? props.t('methodologyUnavailable')
+                          : <>{methodology.knowledge.active_count} {props.t('activePackages')} · {props.t(KNOWLEDGE_STATUS_KEYS[methodology.knowledge.status])}
+                            {' · '}{methodology.knowledge.suppressed_count} {props.t('suppressedPackages')}</>}
+                      </strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('manuscriptMethodStatus')}</p>
+                      <strong>
+                        {unavailableMethodologyBlocks.has('manuscript')
+                          ? props.t('methodologyUnavailable')
+                          : <>{methodology.manuscript.method_triad === null
+                          ? props.t('notConfigured')
+                          : props.t(TRIAD_STATUS_KEYS[methodology.manuscript.method_triad.status])}
+                        {' · '}{methodology.manuscript.section_guide === null
+                          ? props.t('notConfigured')
+                          : props.t(GUIDE_STATUS_KEYS[methodology.manuscript.section_guide.state])}
+                        {' · '}{methodology.manuscript.reviewer_panel === null
+                          ? props.t('notConfigured')
+                          : props.t(REVIEWER_STATUS_KEYS[methodology.manuscript.reviewer_panel.state])}
+                        {' · '}{methodology.manuscript.patches.proposal_count} {props.t('patchProposals')}
+                        {' · '}{methodology.manuscript.patches.application_count} {props.t('patchApplications')}</>}
+                      </strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('runsStatus')}</p>
+                      <strong>
+                        {unavailableMethodologyBlocks.has('runs')
+                          ? props.t('methodologyUnavailable')
+                          : <>{methodology.runs.count} {props.t('runCount')}
+                        {' · '}{methodology.runs.negative_finding_count} {props.t('negativeFindings')}
+                        {' · '}{methodology.runs.claim_proposal_count} {props.t('claimProposals')}</>}
+                      </strong>
+                    </div>
+                    <div style={style.summaryItem}>
+                      <p style={style.nextLine}>{props.t('researchGraphStatus')}</p>
+                      <strong>{unavailableMethodologyBlocks.has('topology')
+                        ? props.t('methodologyUnavailable')
+                        : <>{methodology.topology.research_node_count} {props.t('graphNodes')} · {methodology.topology.research_edge_count} {props.t('graphEdges')}</>}</strong>
+                    </div>
+                  </div>
+                  {methodology.next_recommendation === null ? null : (
+                    <p style={style.nextLine}>
+                      {props.t('methodologyRecommendation')}: {props.t(
+                        METHODOLOGY_RECOMMENDATION_KEYS[methodology.next_recommendation.code] ?? 'notConfigured',
+                      )}
+                    </p>
+                  )}
+                </section>
               )}
             </div>
           ) : null}
@@ -774,6 +1097,26 @@ function ResearchConfigCard(props: ResearchCardProps) {
                 <option value="full-auto">{t('fullAuto')}</option>
               </select>
               <p style={style.hint}>{t('modeHint')}</p>
+              {mode === 'full-auto' ? (
+                <section style={style.automation} aria-label={t('automationTitle')}>
+                  <div style={style.automationHead}>
+                    <strong style={style.automationTitle}>{t('automationTitle')}</strong>
+                    <span style={style.badge}>{t(snapshot.value.automation?.worker === 'running' ? 'automationRunning' : 'automationStopped')}</span>
+                  </div>
+                  {snapshot.value.automation?.restart_required === true
+                    ? <p role="status" style={style.error}>{t('automationRestartRequired')}</p>
+                    : null}
+                  <p style={style.hint}>{t('automationFixtureOnly')}</p>
+                  <p style={style.hint}>{t('automationReleaseHuman')}</p>
+                  {snapshot.value.automation?.last_park === null || snapshot.value.automation?.last_park === undefined
+                    ? null
+                    : (
+                      <p role="status" style={style.hint}>
+                        {t('automationLastPark')}: {snapshot.value.automation.last_park.code} — {snapshot.value.automation.last_park.reason}
+                      </p>
+                    )}
+                </section>
+              ) : null}
             </div>
             <div style={style.field}>
               <div style={style.fieldHead}>

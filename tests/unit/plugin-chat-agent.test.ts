@@ -21,7 +21,7 @@ describe('Harness-backed Scholar agent boundary', () => {
     }
     const agent = createHarnessScholarAgent(llm as never, () => 'deepseek-v4-pro')
     await expect(agent({
-      operation: 'conversation', text: '聊聊研究方向', locale: 'zh', project, history: [],
+      operation: 'conversation', session_id: 'chat_1', text: '聊聊研究方向', locale: 'zh', project, history: [],
     })).resolves.toEqual({
       operation: 'conversation', assistant_text: '可以先比较两个假设。下一步可输入 `/ideas` 查看已有想法。',
     })
@@ -41,7 +41,7 @@ describe('Harness-backed Scholar agent boundary', () => {
     }
     const agent = createHarnessScholarAgent(llm as never, () => 'deepseek-v4-pro')
     await expect(agent({
-      operation: 'conversation', text: '聊聊研究方向', locale: 'zh', project, history: [],
+      operation: 'conversation', session_id: 'chat_1', text: '聊聊研究方向', locale: 'zh', project, history: [],
     })).resolves.toEqual({
       operation: 'conversation',
       assistant_text: '**取舍**\n\n1. 先检查可证伪性\n2. 再比较实验成本',
@@ -70,7 +70,7 @@ describe('Harness-backed Scholar agent boundary', () => {
     }
     const agent = createHarnessScholarAgent(llm as never, () => 'deepseek-v4-pro')
     await expect(agent({
-      operation: 'generate_ideas', text: '生成两个 idea', locale: 'zh', count: 2, project,
+      operation: 'generate_ideas', session_id: 'chat_1', text: '生成两个 idea', locale: 'zh', count: 2, project,
       corpus: { snapshot_id: 'corpus_1', papers: [{ paper_id: 'doi:10.1/test', title: 'Prior work', abstract: '' }] },
       history: [],
     })).resolves.toMatchObject({ operation: 'generate_ideas', ideas: [{ title: draft.title }, { title: 'Second' }] })
@@ -87,9 +87,50 @@ describe('Harness-backed Scholar agent boundary', () => {
     }
     const agent = createHarnessScholarAgent(llm as never, () => 'deepseek-v4-pro')
     await expect(agent({
-      operation: 'generate_ideas', text: '生成三个 idea', locale: 'zh', count: 3, project,
+      operation: 'generate_ideas', session_id: 'chat_1', text: '生成三个 idea', locale: 'zh', count: 3, project,
       corpus: { snapshot_id: 'corpus_1', papers: [{ paper_id: 'doi:10.1/test', title: 'Prior work', abstract: '' }] },
       history: [],
     })).rejects.toThrow()
+  })
+
+  it('injects only resolver-issued trusted native instructions and labels external references untrusted', async () => {
+    let captured: Record<string, unknown> | undefined
+    const llm = {
+      listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
+      listModels: async () => [{ provider: 'deepseek', id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }],
+      stream: async function * (options: Record<string, unknown>) {
+        captured = options
+        yield { type: 'text-delta', index: 0, text: 'reviewed' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    const agent = createHarnessScholarAgent(llm as never, () => 'deepseek-v4-pro', async request => ({
+      context: {
+        project_id: request.project.project_id, session_id: request.session_id,
+        phase: 'WRITING', next_action_revision: 9, surface: 'scholar-chat',
+      },
+      deliveries: [{
+        activation_id: 'activation_native', package_name: 'scholar.writing.reverse-outline', package_version: '1.0.0',
+        manifest_sha256: `sha256:${'a'.repeat(64)}`, payload_sha256: `sha256:${'b'.repeat(64)}`,
+        trust: 'trusted-native-instruction', effective_capabilities: ['project:read-manuscript-snapshot'],
+        content: {
+          schema_version: 1, purpose: 'diagnose structure', surfaces: ['scholar-chat'],
+          instructions: ['Bind findings to the pinned manuscript.'],
+          prohibitions: ['Do not mutate TeX.'],
+        },
+      }, {
+        activation_id: 'activation_external', package_name: 'external.reference', package_version: '1.0.0',
+        manifest_sha256: `sha256:${'c'.repeat(64)}`, payload_sha256: `sha256:${'d'.repeat(64)}`,
+        trust: 'untrusted-external-reference', effective_capabilities: ['knowledge:retrieve'], content: null,
+      }],
+      suppressed: [],
+    }))
+    await agent({
+      operation: 'conversation', session_id: 'chat_1', text: 'review', locale: 'en', project, history: [],
+    })
+    expect(captured?.system).toContain('Bind findings to the pinned manuscript.')
+    expect(captured?.system).toContain('Do not mutate TeX.')
+    expect(captured?.system).toContain('external.reference')
+    expect(captured?.system).toContain('UNTRUSTED REFERENCE')
   })
 })

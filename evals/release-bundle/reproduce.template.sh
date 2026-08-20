@@ -183,6 +183,12 @@ BASE="http://127.0.0.1:$PORT"
 # approve route works (runners inherit the env var for their own calls).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+# GOV-03: clean-room Gate decisions cross the dedicated Human BFF bridge;
+# reproduce.sh never depends on the removed public v1 decision writer.
+human_decide() { # <gate-id> <decision-json>
+  api -H 'x-service-principal: standalone-human-bff' \
+    -X POST "$BASE/internal/human-gates/$1/decisions" -d "$2"
+}
 
 # ---------------------------------------------------------------------------
 # Bundle-only clean-room isolation: snapshot the bundle into a fresh empty
@@ -221,13 +227,13 @@ echo "reproduce.sh: rerun project $PROJ created from bundle manifest"
 # lifecycle as the original project; it must not fabricate BASELINE_REPRO with
 # a generic transition or submit a baseline through the ordinary Job API.
 G_SCOPE=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Clean-room scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "$BASE/v1/gates/$G_SCOPE/decisions" -d '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_SCOPE" '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi","auth_method":"dsh-session"},"decision":"approved"}' > /dev/null
 for PHASE in SURVEYING IDEATING; do
   REV=$(api "$BASE/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
   api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"$PHASE\",\"expected_revision\":$REV}" > /dev/null
 done
 G_IDEA=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Clean-room idea"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "$BASE/v1/gates/$G_IDEA/decisions" -d '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_IDEA" '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi","auth_method":"dsh-session"},"decision":"approved"}' > /dev/null
 REV=$(api "$BASE/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).revision))")
 api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
 
@@ -247,7 +253,7 @@ for i in $(seq 0 $((NC - 1))); do
 done
 if [ -n "$PRIMARY_CT" ]; then
   G_CONTRACT=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Clean-room Contract\",\"payload\":{\"contract_id\":\"$PRIMARY_CT\"}}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-  api -X POST "$BASE/v1/gates/$G_CONTRACT/decisions" -d '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi"},"decision":"approved"}' > /dev/null
+  human_decide "$G_CONTRACT" '{"actor":"clean-room","principal":{"principal_id":"clean-room-pi","auth_method":"dsh-session"},"decision":"approved"}' > /dev/null
 fi
 echo "reproduce.sh: re-registered + frozen $NC contract(s)"
 

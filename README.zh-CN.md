@@ -1,37 +1,32 @@
 # DSH Scholar
 
-> **加急开发适配中！**
-
 **简体中文** | [English](README.md)
 
-DSH Scholar 是面向纯计算研究的 AI 科研工作台。它把研究资料、项目对话、代码与数据、实验运行、证据账本和 TeX 手稿放在同一个可恢复项目中，既可以从新问题开始，也可以接入已经进行到一半的研究。
+DSH Scholar 是面向纯计算研究的 AI 科研工作台。它把项目对话、研究资料、代码与数据、受控实验、证据和 TeX 手稿保存在同一个可恢复项目中，既可以从新问题开始，也可以继续其他地方已经进行到一半的研究。
 
-![dsh Scholar 中文首页](docs/assets/dsh-scholar-home-zh.png)
+![DSH Scholar 中文独立工作台](docs/assets/dsh-scholar-home-zh.png)
 
-## 核心能力
+## 产品能力
 
-- **可治理的研究流程**：从 Scope、Idea、Experiment Contract 到 Evidence、Claim 和 Release，关键节点由人类 Gate 把关。
-- **受控实验**：Runner 在本机 Docker 或受控远端机器上执行冻结的实验计划，记录日志、状态与产物。
-- **可追溯证据**：论文主张可追溯到受控 Run、Artifact 和经评审的 Evidence。
-- **一体化工作台**：Chat、Workspace、Terminal、Manuscript、Trajectory 和 Settings 共用同一项目上下文。
-- **可恢复与可审计**：Research Kernel 保存权威状态、NextAction、审批轨迹和产物引用。
+- **按阶段引导研究**：Chat 支持自由对话、Grill Me 信息收集、文件上传、显式 slash command，并依据当前研究阶段展示权威下一步。
+- **可治理的研究流程**：Scope、Idea、Contract、Evidence、Direction 和 Release 决策都有明确权限、revision 绑定和审计记录。
+- **受控执行**：Runner Profile 描述本机、本机 Docker 或远程 SSH 环境，包括固定容器镜像和声明式 NVIDIA GPU 能力。
+- **一体化工作台**：项目级 Chat、可编辑文件、session 绑定 Web 终端、运行日志、产物、TeX 源码、编译诊断和 PDF 预览共用同一上下文。
+- **可追溯方法论**：Protocol revision、运行分类、综合请求、Assurance、Reviewer finding、Knowledge Pack 激活和 Claim-Evidence 关系会成为持久研究状态。
+- **可查看协作拓扑**：Trajectory 与 Topology 展示 subagent 父子关系、状态、follow-up 和产出，并可进入节点查看。
 
 ## 使用边界
 
 - DSH Scholar 辅助研究，不代替研究者承担科学判断、审批、署名和发布责任。
-- 默认使用 `gate-only`；Agent 不能批准 Human Gate、伪造 accepted Evidence 或绕过实验合同。
-- 正式实验必须绑定不可变代码/数据快照和固定执行环境，并由受控 Runner 真实执行。
-- Chat、普通 stdout 和 Interactive Terminal 输出不会自动成为正式 Evidence。
+- `gate-only` 是常规模式。Agent 不能冒充 Human principal、伪造 accepted Evidence 或绕过研究 Gate。
+- `full-auto` 只会为精确登记的 FixtureProfile 自动批准 allowlist 内的 Scope、Idea、Contract 和 Budget Gate；目前唯一的 canonical action executor 是 `survey_run`。Release、Direction、Intake、Evidence 和未登记动作仍由人处理，或以明确原因 park。
+- 只有名称的 `/new <name>` 始终以 `gate-only` 创建，并通过 Grill Me 收集 Brief，不会静默继承 `full-auto`。
+- 正式实验必须绑定不可变代码/数据快照、必要时的 frozen Protocol，以及显式 Runner Profile。Chat 文本、普通 stdout 和 Interactive Terminal 输出不会自动成为正式 Evidence。
 - 产品聚焦机器学习、数据科学、生物信息学等纯计算研究，不适用于临床决策、人体试验、湿实验或其他高风险研究。
 
 ## 快速开始
 
-完整的环境、端口、变量和验收矩阵见 [开发、测试与部署运行规范](docs/test-instance-plan.md)。本地体验需要：
-
-- Linux；
-- Node.js 24；
-- pnpm 11.20.0；
-- Docker Engine（正式实验、TeX 编译和 clean-room 复现必需）。
+本地工作台需要 Linux、Node.js 24、pnpm 11.20.0；受控实验、TeX 编译和 clean-room 复现需要 Docker Engine。
 
 ### 1. 安装与构建
 
@@ -46,185 +41,114 @@ pnpm run build
 bash scripts/start-standalone-ui.sh
 ```
 
-默认页面为 <http://127.0.0.1:18610>。DSH 与独立工作台共享 `127.0.0.1:7412` 的 Research Kernel 和 `~/.dsh/research-kernel` 数据目录，因此两处显示并操作同一批项目。浏览器 Token、会话和显示偏好仍独立保存在 BFF 目录中。首次打开时，粘贴以下 `0600` 文件中的访问令牌：
+打开 <http://127.0.0.1:18610>，粘贴以下文件中的访问令牌：
 
 ```text
 ~/.dsh-scholar-standalone/research-ui-standalone/standalone-token
 ```
 
-若 DSH Web 不在默认的本机 `3080` 端口，启动前通过 `DSH_SCHOLAR_STANDALONE_FRAME_ANCESTORS` 配置允许嵌入的精确 origin（逗号分隔）。远端来源必须使用 HTTPS；本机来源可使用 loopback HTTP。禁止通配符、凭据、path、query 与 fragment。
+独立工作台和 DSH 使用 `127.0.0.1:7412` 的同一个 Research Kernel，并共享 `~/.dsh/research-kernel` 这一权威项目数据目录。升级任一端时都必须保持该目录不变，已有项目才能继续访问。浏览器 Token 和显示偏好独立保存在 standalone BFF 目录中。`--no-token` 只用于 loopback、隔离且有人监督的开发实例。
 
-`--no-token` 只用于 loopback、隔离且有人监督的开发环境。
+### 3. 配置实验环境
 
-### 3. 启动实验 Runner
+打开 **设置 → 实验环境**，显式选择 Runner Profile：
 
-没有 Runner 时仍可管理项目和文件，但实验 Job 会保持排队。需要在本机 Docker 中执行时，另开一个终端：
+- 本机：仅用于可信开发和冒烟测试；
+- 本机 Docker：固定镜像，并可要求 NVIDIA runtime 与 GPU capability；
+- 远程 SSH：使用服务端 endpoint、credential、known-hosts 和 target-identity SecretRef。
+
+只有 profile 和 target 都通过 readiness 检查后，正式 Job 才能执行。缺少 Runner、target 离线、SecretRef 不可用、能力不匹配，或 Contract/Protocol 尚未补齐时，界面会显示准备项或阻断原因，而不会假装 ready。target 注册、独立 heartbeat 凭据、Runner 启动、端口和安全约束见[运行规范](docs/test-instance-plan.md)。
+
+### 4. 将插件安装到 DSH
+
+通过会移动的 `next` tag 安装当前 DSH 预发布版，并记录实际解析出的精确版本：
 
 ```bash
-export DSH_SCHOLAR_KERNEL_TOKEN="$(< ~/.dsh/research-kernel/kernel-token)"
-export DSH_SCHOLAR_SERVICE_TOKEN="$(< ~/.dsh/research-kernel/service-token)"
-node workers/runner-gateway/lib/bin/runner.js \
-  --kernel http://127.0.0.1:7412 \
-  --mode docker
+npm install -g @deepseek-ai/dsh@next
+npm ls -g @deepseek-ai/dsh --depth=0
 ```
 
-### 4. 将 Agent 插件接入 DSH
-
-当前安装兼容性验证基线为 `@deepseek-ai/dsh@0.1.0-rc.6`。该版本已通过全新 npm 安装、`dsh plugin add`、Web 启动、Scholar 客户端加载和 Research Kernel 健康检查。
-
-要获得完整的 DSH Scholar 集成体验，推荐使用 pnpm 安装并构建最新 DSH 源码，再从该源码仓库运行 DSH。先在 DSH 源码根目录执行：
+当前 `@dsh-scholar/*` 包尚未发布。构建本仓库后，把其绝对路径加入 DSH 的 `web` profile：
 
 ```bash
-pnpm install
+cd /absolute/path/to/dsh-scholar
+pnpm install --frozen-lockfile
 pnpm run build
+dsh plugin --profile web add /absolute/path/to/dsh-scholar
+dsh plugin --profile web why @dsh-scholar/research-plugin
+dsh web
 ```
 
-当前 `@dsh-scholar/*` 包尚未发布，因此随后仍需把本仓库的绝对路径作为本地插件加入 DSH 的 `web` profile：
+更新 Scholar 时，在同一 checkout 重新构建，并再次添加同一绝对路径。卸载命令：
 
 ```bash
-cd /path/to/dsh-source
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar
-pnpm dsh plugin --profile web why @dsh-scholar/research-plugin
-pnpm dsh web
+dsh plugin --profile web remove @dsh-scholar/research-plugin
 ```
 
-这里的 `/path/to/dsh-source` 是最新 DSH 源码仓库，`/absolute/path/to/dsh-scholar` 是本仓库。这样会使用与最新 DSH 源码一致的插件 API、Web UI、Skills 和配置面。只运行 standalone 工作台不要求 DSH，但不会包含 Agent tools、slash commands、Skills、配置卡和 `dsh Scholar` 页签等完整集成能力。
+插件会增加 Scholar tools、slash commands、Skills、设置项和紧凑的 `dsh Scholar` 页签。未绑定的 DSH 对话可以选择已有项目，或只填写名称创建项目；绑定后只显示当前阶段、下一步与执行摘要。完整工作台通过 **在新页面打开** 或配置的快捷键进入。
 
-更新 Scholar 时，先在本仓库重新执行 `pnpm run build`，然后回到 DSH 源码仓库再次执行 `pnpm dsh plugin --profile web add /absolute/path/to/dsh-scholar`。卸载命令为：
+## 插件配置
 
-```bash
-pnpm dsh plugin --profile web remove @dsh-scholar/research-plugin
-```
+在 DSH 中打开 **设置 → 插件配置 → dsh Scholar**。保存后的插件设置在下一次重启 DSH 时生效。
 
-插件向 DSH 提供 Scholar Agent 的 tools、slash commands、Skills、配置卡和 `dsh Scholar` 页签。页签是面向当前 DSH 对话的紧凑视图：未绑定时可选择已有项目或只填写名称创建项目并绑定，绑定后显示项目阶段与下一步；完整 Scholar 工作台只通过按钮或快捷键在新页面打开。
-
-## Plugin config
-
-安装插件后，在 DSH 中打开 **设置 → 插件配置 → dsh Scholar**。保存的修改会在下一次重启 DSH 后生效。
-
-![dsh Scholar 中文 Plugin config](docs/assets/dsh-scholar-plugin-config-zh.png)
-
-| 配置项 | 默认值 | 说明 |
+| 配置项 | 默认值 | 含义 |
 |---|---|---|
-| 默认治理模式 | `gate-only` | 新建项目没有显式指定 mode 时使用。`gate-only` 保留人工关卡；`full-auto` 仅适合已配置 FixtureProfile 的低风险沙箱。 |
-| 无人值守运行 | 关闭 | 不绕过人工 Gate；遇到 Gate 时暂停项目，而不是等待交互式回答。 |
-| Standalone 地址 | `http://127.0.0.1:18610/` | “在新页面打开”和快捷键的目标地址。仅允许 HTTPS 或 loopback HTTP。 |
-| 新页面快捷键 | `Alt+Shift+S` | 可改为禁用；正在输入或使用输入法时不会触发。 |
+| 默认治理模式 | `gate-only` | 只在完整配置且明确满足条件的项目上生效；name-only 创建仍为 `gate-only`。 |
+| 无人值守运行 | 关闭 | 不绕过 Human Gate；需要交互时将项目 park。 |
+| Standalone 地址 | `http://127.0.0.1:18610/` | “在新页面打开”和快捷键的目标；只允许 HTTPS 或 loopback HTTP。 |
+| 新页面快捷键 | `Alt+Shift+S` | 可以禁用；正在输入或使用输入法时不会触发。 |
 
-Standalone 地址不允许凭据、查询参数或 URL 片段，令牌不应放入 URL。“复制 standalone 访问令牌”只在本机 loopback DSH 中、由用户显式点击后读取固定的 `0600` 令牌文件；页面不会显示令牌。它不会复制 Kernel、Runner、Provider 或 SSH 密钥。
+有效 fixture 启用 `full-auto` 后，Settings 还会显示 worker 状态、是否需要重启、fixture-only 边界和最近一次 park 原因；Release 始终由人决定。Standalone 地址不能包含凭据、query 或 fragment。“复制 standalone 访问令牌”只在 loopback DSH 中、经用户显式点击后可用；页面不会显示令牌，也不会暴露 Kernel、Runner、Provider 或 SSH secret。
 
-更完整的配置与宿主约束见 [DSH 宿主集成规范](docs/dsh-integration.md)。
+## 开始或继续研究
 
-## 开始一个研究项目
+有三种入口：
 
-进入工作台后可以从三种方式开始：
+1. **新建研究**：只提供项目名，再在 Chat 中回答 Grill Me 问题以补全 Brief。
+2. **打开已有项目**：继续持久化的阶段、项目对话、文件、任务、运行和方法论记录。
+3. **上传 / 接入**：把论文、代码、数据、图片或日志接入已有阶段。上传内容先进入隔离 Intake，不会自动成为 Evidence。
 
-1. **Init**：填写项目名，在 Chat 中通过 Grill Me 补全研究 Brief，确认后创建 Scope Gate。
-2. **Resume**：打开已有项目，恢复其阶段、会话、文件和任务。
-3. **Upload**：上传论文、代码、数据或日志，从已有研究阶段接入。上传内容先进入隔离 Intake，不会自动成为 Evidence。
-
-典型流程：
+常规流程：
 
 ```text
-创建/接入项目 → Grill Me → Scope Gate → 文献调研 → Idea Gate
-→ Baseline → Experiment Contract → 实验运行 → Evidence 与 Claim
-→ TeX 写作与评审 → 私有导出 → Release Gate
+创建或接入 → Grill Me → Scope → 调研 → Ideas → Baseline → Contract
+→ 受控运行 → 分类与综合 → Evidence 与 Claims
+→ TeX 写作与评审 → 私有打包 → Human Release Gate
 ```
 
-每个阶段的 Overview 和 Chat 都会读取 Kernel 的权威 `NextAction`，说明下一步、原因、执行者和阻断项。
+Chat 同时接受普通自然语言和一级 slash command。显式命令是确定性的高级入口；自然语言会结合项目当前的权威 `NextAction` 解释和执行。例如：
 
-## 工作台速览
+```text
+/new  /status  /survey  /ideas  /ideas generate 3  /ideas select <idea_id>
+/gates  /contract  /run  /evidence  /claims  /write  /review
+/release-bundle  /release
+```
+
+`/run` 只在快照、Protocol、Runner、target 和预算全部 exact-ready 时执行。`/release` 只会创建或打开 Human Release 决策，不允许 Agent 自动发布。
+
+## 工作台区域
 
 | 区域 | 用途 |
 |---|---|
-| Chat | 进行项目对话、回答 Grill、上传文件并触发明确的研究操作。 |
-| Workspace | 浏览、编辑、上传和管理项目文件，通过 version/etag 防止静默覆盖。 |
-| Run / Terminal | 查看正式 Job 状态与只读日志，或使用项目绑定的 Interactive Terminal。 |
-| Evidence / Artifacts | 评审主张、指标、置信度、来源和生成产物。 |
-| Manuscript | 编辑 TeX、查看诊断与编译日志，并预览最新 PDF。 |
-| Trajectory / Topology | 查看研究轨迹、subagent 父子关系、状态和产物。 |
-| Settings | 配置 Model Provider、OCR、预算、Runner Profile 和执行环境。 |
+| Chat | 自由对话、Grill 问题、上传、命令补全和按阶段引导。 |
+| Workspace | 浏览、搜索、编辑、上传和管理项目文件，通过 version/etag 防止冲突覆盖。 |
+| Run / Terminal | 查看正式 Job 状态和只读日志，或操作项目/session 绑定的 Web PTY。 |
+| Evidence / Artifacts | 预览和下载产物，评审指标、来源、置信度和 Claim 关系。 |
+| Manuscript | 编辑 TeX、查看编译诊断并预览最近一次成功 generation 的 PDF。 |
+| Trajectory / Topology | 查看研究轨迹，并进入 subagent 节点检查其工作与 follow-up。 |
+| Settings | 配置模型与 OCR provider、MinerU、预算、Runner Profile、target、Docker 镜像、GPU 要求和 SSH SecretRef。 |
 
-Chat 支持普通文本和一级 slash command，常用命令包括：
+## 验收边界
 
-```text
-/new  /status  /survey  /ideas  /ideas generate 3  /ideas select <idea_id>  /gates  /contract  /run
-/evidence  /claims  /write  /review  /release-bundle  /release
-```
+仓库自动验收覆盖构建、Schema、Kernel/Client 行为、治理和安全回归、持久化与重启、DSH 插件契约，以及受控的本机 Docker fixture。真实浏览器/ARIA 观感、干净 DSH Host 冷启动、生产模型与 reviewer provider、远程 SSH/GPU、生产 mTLS 终止和具体环境的 TeX 渲染仍需部署方人工验收。使用这些路径前，请查看[当前实现状态](docs/hardening-v0.2-status.md)和[人工验收清单](docs/manual-acceptance.md)。
 
-完整的交互、命令和各阶段说明见 [使用指南](docs/USAGE_GUIDE.md)。
+## 文档
 
-## 使用案例：CNN 手写数字识别
-
-`cnn-mnist-digits` 项目演示了如何将模型改进想法推进为可审计结论。
-
-| 项目 | 内容 |
-|---|---|
-| 研究问题 | 带逐通道归一化的双卷积 CNN，是否比单卷积 CNN 基线更准确？ |
-| 数据与指标 | `mnist_subset_v1`；`test_accuracy` |
-| 随机种子 | `11` / `23` / `47` |
-| 结果 | `test_accuracy = 96.8%`；相比基线 `+4.4` 个百分点 |
-| 不确定性 | bootstrap 95% 平均差置信区间 `[1.2, 8.6]`；`n=3` |
-
-总览页把研究问题、当前阶段、完成度和下一步行动放在同一个视图中。
-
-![CNN 手写数字识别项目总览](docs/assets/cnn-mnist-overview.png)
-
-### 1. 通过 Chat 推进项目
-
-每个研究项目拥有独立会话。研究者可以直接描述任务，也可以使用 `/status`、`/survey`、`/run` 等命令，并通过附件、拖拽或粘贴接入研究资料。
-
-![CNN 案例的项目 Chat 页面](docs/assets/cnn-mnist-chat.png)
-
-### 2. 审批研究设计
-
-Scope、Idea 和 Contract Gate 依次锁定范围、方案与实验合同；Release Gate 仍由研究者决定。
-
-![CNN 案例的人工 Gate 审批](docs/assets/cnn-mnist-gates.png)
-
-### 3. 执行受控对照实验
-
-基线与正式方案以独立 Job 执行。截图中的 8 次运行有 7 次成功、1 次失败；失败记录被保留并显式提示重试。
-
-![CNN 案例的基线与正式实验运行](docs/assets/cnn-mnist-runs.png)
-
-### 4. 查看运行数据与远程终端
-
-Run Terminal 提供某个正式 Job 的只读 stdout/stderr、退出状态和可恢复日志。下图可查看 baseline 在各轮训练中的 `train_loss` 和 `test_acc`，以及随机种子 `23` 的最终 `test_accuracy = 88.3`。
-
-![CNN 案例的训练指标与运行日志](docs/assets/cnn-mnist-run-terminal.png)
-
-Interactive Terminal 是绑定项目或 session 的真实 Web PTY，用于连接执行环境、输入命令、调整窗口和重连会话。它适合交互式检查和调试，但其输出不会自动成为正式 Evidence。
-
-![DSH Scholar 远程 Web 交互终端](docs/assets/cnn-mnist-web-terminal.png)
-
-### 5. 聚合证据
-
-系统将指标、效应量、置信区间、Run 和 Artifact 绑定到 Evidence。本案例的证据经评审后标记为 `accepted`，用于支持“双卷积方案优于基线”的主张。
-
-![CNN 案例的准确率证据与置信区间](docs/assets/cnn-mnist-evidence.png)
-
-### 6. 写作与发布
-
-Manuscript 工作台用于编辑 `paper.tex` 和 `main.bib`，在固定 TeX Live 环境中编译手稿。评审与打包完成后，最终对外发布仍需批准 Release Gate。
-
-![CNN 案例的 TeX 手稿工作台](docs/assets/cnn-mnist-manuscript.png)
-
-## 开发与参考
-
-常用校验命令：
-
-```bash
-pnpm run verify:docs
-pnpm test
-bash scripts/ci-gate.sh
-```
-
-- [使用指南](docs/USAGE_GUIDE.md)：完整交互流程与常见问题。
-- [运行规范](docs/test-instance-plan.md)：环境、端口、环境变量、Runner 与测试命令。
-- [DSH 宿主集成](docs/dsh-integration.md)：插件形状、配置、工具、命令和安装。
-- [安全与科研完整性基线](docs/security-baseline.md)：Gate、Secret、Runner、Evidence 和 Web 安全。
-- [验收与测试规范](docs/acceptance-tests.md)：功能、安全与回归场景。
+- [使用指南](docs/USAGE_GUIDE.md)
+- [运行与部署规范](docs/test-instance-plan.md)
+- [DSH 宿主集成](docs/dsh-integration.md)
+- [安全与科研完整性基线](docs/security-baseline.md)
+- [验收规范](docs/acceptance-tests.md)
 
 ## License
 

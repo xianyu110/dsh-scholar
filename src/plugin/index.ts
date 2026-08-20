@@ -47,11 +47,12 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { KernelUnavailableError, ResearchClient } from '@dsh-scholar/research-client'
-import { DiskCache } from '@dsh-scholar/scholar-connectors'
+import { Engine as ResearchOrchestrator, type EngineRuntimeStatus } from '@dsh-scholar/research-orchestrator'
+import { buildPassages, DiskCache, multiSourceSearch } from '@dsh-scholar/scholar-connectors'
 import { KernelSidecar, resolveDshHome } from './sidecar.js'
 import { registerResearchTools } from './tools.js'
 import { registerResearchCommands } from './commands.js'
-import { RoleRegistry, RESEARCH_TOOLS, stageProjectScopeDenial, type ResearchRole } from './acl.js'
+import { RESEARCH_HUMAN_CONFIRMATION_TOOLS, RoleRegistry, RESEARCH_TOOLS, stageProjectScopeDenial, type ResearchRole } from './acl.js'
 import { resolveExistingSkillDirs, selectSkillPacks, selectedSkillNames, type SkillSelection } from './skills.js'
 import { readStandaloneAccessToken } from './standalone-token.js'
 import { createScholarRpcHandler, createScholarViewRpcHandler } from './settings-rpc.js'
@@ -75,6 +76,7 @@ import {
   normalizeStandaloneUrl,
   type StandaloneShortcut,
 } from '../shared/standalone.js'
+import type { ScholarAutomationStatus } from '../shared/settings-rpc.js'
 
 export const name = 'research-plugin'
 
@@ -316,6 +318,12 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   const effectiveConfig = settingsScope?.get() ?? config
   const unattended = effectiveConfig.unattended ?? false
 
+  // Populated only after the sidecar is healthy and the built-in catalog has
+  // been reconciled. The model bridge resolves every turn through the Kernel;
+  // it never reads package paths or a global SkillFilesystem mount.
+  let knowledgeClient: ResearchClient | undefined
+  let knowledgePrincipal = ''
+
   // Scholar's standalone Chat talks to this plugin-owned model callback only
   // through the authenticated loopback bridge started after the Kernel is
   // healthy. The callback tracks the optional DSH llm service lifecycle.
@@ -325,6 +333,14 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
       const handler = createHarnessScholarAgent(
         llmCtx.llm,
         () => effectiveConfig.models?.pi ?? standaloneModelPreference(),
+        async (request, signal) => {
+          const client = knowledgeClient
+          if (client === undefined || knowledgePrincipal === '') throw new Error('Scholar Knowledge delivery is unavailable')
+          return client.getKnowledgeDelivery(request.project.project_id, knowledgePrincipal, {
+            session_id: request.session_id,
+            surface: 'scholar-chat',
+          }, signal)
+        },
       )
       scholarAgent = handler
       return llmCtx.effect(() => () => {
@@ -336,6 +352,20 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
   let readSessionWorkspace: ((sessionId: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
   let bindSessionProject: ((sessionId: string, projectId: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
   let createSessionProject: ((sessionId: string, name: string, signal: AbortSignal) => Promise<ScholarSessionWorkspace>) | undefined
+  let orchestrator: ResearchOrchestrator | undefined
+  let orchestratorRun: Promise<void> | undefined
+  const automationStatus = (): Omit<ScholarAutomationStatus, 'restart_required'> => {
+    const runtime: EngineRuntimeStatus = orchestrator?.runtimeStatus() ?? { worker: 'stopped', last_park: null }
+    return {
+      worker: runtime.worker,
+      runtime_default_mode: effectiveConfig.defaultMode ?? 'gate-only',
+      fixture_only: true,
+      release_requires_human: true,
+      last_park: runtime.last_park === null
+        ? null
+        : { code: runtime.last_park.code, reason: runtime.last_park.reason },
+    }
+  }
 
   // Optional browser Host seam. Privileged settings/token operations remain
   // loopback-only; the trusted-host view channel owns only the redacted,
@@ -344,7 +374,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     ctx.inject(['connection'], connectionCtx => {
       const disposePrivate = connectionCtx.connection.rpc.handle(
         '/dsh-scholar',
-        createScholarRpcHandler(settings as SettingsProvider, readStandaloneAccessToken),
+        createScholarRpcHandler(settings as SettingsProvider, readStandaloneAccessToken, automationStatus),
         { authority: 'loopback' },
       )
       const disposeView = connectionCtx.connection.rpc.handle(
@@ -380,14 +410,22 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     token: effectiveConfig.kernel?.token,
     log: line => ctx.logger('research').info(line.replace(/^\[research-plugin\] /, '')),
   })
-  // Disposer FIRST (effect model): sidecar.stop() runs on fiber unload; the
+  // Disposer FIRST (effect model): the orchestrator stops before the Kernel,
+  // then sidecar.stop() runs on fiber unload. The
   // flag lets the in-flight startup below recognize a dispose instead of
   // logging a spurious failure. stop() only ever terminates OUR child and
   // only removes the endpoint.json owned by it (SIDE-01 ownership).
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     disposed = true
-    return sidecar.stop()
-  }, 'research-plugin.sidecar')
+    if (orchestrator !== undefined) {
+      orchestrator.stop()
+      try { await orchestratorRun } catch { /* startup/poll failure was already logged */ }
+      orchestrator.close()
+      orchestrator = undefined
+      orchestratorRun = undefined
+    }
+    await sidecar.stop()
+  }, 'research-plugin.runtime')
 
   try {
     await sidecar.start()
@@ -403,6 +441,42 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     throw error
   }
   if (disposed) return
+
+  const cacheDir = effectiveConfig.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
+  const cache = new DiskCache(cacheDir)
+
+  // The Durable Orchestrator is a plugin-owned runtime, not a second workflow
+  // authority. It polls the strict Kernel projection and may only call the
+  // service-only fixture Gate endpoint. Its SQLite journal lives beside the
+  // Kernel database, so DSH/plugin upgrades reopen the same action history.
+  orchestrator = new ResearchOrchestrator({
+    kernelUrl: sidecar.endpoint,
+    dbPath: join(sidecar.dataDir, 'orchestrator', 'actions.db'),
+    token: sidecar.kernelToken,
+    serviceToken: sidecar.serviceToken,
+    orchestratorToken: sidecar.orchestratorToken,
+    surveyExecutor: async (query) => {
+      const result = await multiSourceSearch(query, { limit: 20 }, cache)
+      const papers = result.hits.map(hit => hit.paper)
+      return {
+        queries: result.queries.map(item => {
+          const source = item.source
+          if (source === 'semantic-scholar') {
+            throw new Error('canonical full-auto survey accepts only OpenAlex, Crossref and arXiv query receipts')
+          }
+          return { source, query: item.query, run_at: item.run_at }
+        }),
+        papers,
+        passages: buildPassages(papers),
+        citation_edges: result.citation_edges,
+        source_status: result.source_status.some(source => source.status === 'failed') ? 'pending' : 'complete',
+      }
+    },
+  }, line => ctx.logger('research').info(line))
+  orchestratorRun = orchestrator.start()
+  void orchestratorRun.catch(error => {
+    ctx.logger('research').error(`research orchestrator stopped unexpectedly: ${(error as Error).message}`)
+  })
 
   // The standalone BFF and this plugin are separate processes. Publish a
   // private loopback endpoint + one-time bearer under their shared local
@@ -442,8 +516,13 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
     serviceToken: sidecar.serviceToken,
     dshPluginToken: sidecar.dshPluginToken,
   })
-  const cacheDir = effectiveConfig.cacheDir ?? join(sidecar.dataDir, 'connector-cache')
-  const cache = new DiskCache(cacheDir)
+  await client.reconcileNativeKnowledgePacks()
+  knowledgeClient = client
+  knowledgePrincipal = sidecar.operatorPrincipal
+  ctx.effect(() => () => {
+    if (knowledgeClient === client) knowledgeClient = undefined
+    knowledgePrincipal = ''
+  }, 'research-plugin.knowledge-delivery')
   const roles = new RoleRegistry()
   const projectScopes = new Map<string, string>()
   const stageSubagents = new StageSubagentCoordinator({
@@ -466,14 +545,17 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
       const project = await client.getProjectBySession(sessionId, signal)
       if (signal.aborted) throw new Error('aborted')
       if (project !== null) {
-        const projection = await client.projectProjection(project.project_id, signal)
+        const [projection, methodology] = await Promise.all([
+          client.projectProjection(project.project_id, signal),
+          client.getMethodology(project.project_id, sidecar.operatorPrincipal, signal),
+        ])
         if (signal.aborted) throw new Error('aborted')
         const confirmed = await client.getProjectBySession(sessionId, signal)
         if (signal.aborted) throw new Error('aborted')
         if (confirmed?.project_id === project.project_id) {
           return {
             session_id: sessionId,
-            projection: buildScholarSessionProjection(sessionId, projection),
+            projection: buildScholarSessionProjection(sessionId, projection, methodology),
             available_projects: [],
           }
         }
@@ -558,6 +640,7 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
 
   // Role-based ACL: deny research tools outside the caller role's surface.
   const researchToolSet = new Set<string>(RESEARCH_TOOLS)
+  const humanConfirmationToolSet = new Set<string>(RESEARCH_HUMAN_CONFIRMATION_TOOLS)
   ctx.on('tools/pre-execute', async (exec, next) => {
     const agentId = exec.agent?.id
     if (agentId !== undefined && researchToolSet.has(exec.name)) {
@@ -567,6 +650,16 @@ export async function apply(ctx: Context, config: ResearchPluginConfig = {}): Pr
       }
       if (exec.name === 'research_panel') {
         return { kind: 'ask', reason: 'Start the stage-aware subagent panel for the current ready research action?' }
+      }
+      if (humanConfirmationToolSet.has(exec.name)) {
+        return {
+          kind: 'ask',
+          reason: exec.name === 'research_assurance_run'
+            ? 'Run the revision/hash-bound writing assurance for the project linked to the current DSH session?'
+            : exec.name === 'research_knowledge_deactivate'
+              ? 'Deactivate this Knowledge activation for the project linked to the current DSH session?'
+              : 'Activate this evaluated local Knowledge package for the project linked to the current DSH session?',
+        }
       }
       const projectScope = projectScopes.get(agentId)
       if (projectScope !== undefined) {

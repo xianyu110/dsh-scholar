@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { KernelEventKind } from './project.js'
 
 /** Human gate kinds (design §5.2). */
-export const GateType = z.enum(['scope', 'idea', 'contract', 'budget', 'release'])
+export const GateType = z.enum(['scope', 'idea', 'contract', 'budget', 'release', 'direction'])
 export type GateType = z.infer<typeof GateType>
 
 /** A pending human gate attached to a project. */

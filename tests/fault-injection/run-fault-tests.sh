@@ -15,6 +15,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js"
 WORK=$(mktemp -d)
 PORT=17521
+SERVICE_TOKEN="fault-tests-service-token"
 PASS=0
 FAIL=0
 
@@ -23,7 +24,7 @@ ok()   { printf '\033[1;32m  ok: %s\033[0m\n' "$*"; PASS=$((PASS + 1)); }
 bad()  { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
 
 start_kernel() {
-  nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" \
+  DSH_SCHOLAR_SERVICE_TOKEN="$SERVICE_TOKEN" nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" \
     > "$WORK/kernel-$1.log" 2>&1 &
   KERNEL_PID=$!
   for _ in $(seq 1 50); do
@@ -38,7 +39,13 @@ stop_kernel() {
   wait "$KERNEL_PID" 2>/dev/null || true
 }
 
-api() { curl -sf -H 'content-type: application/json' "$@"; }
+api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" "$@"; }
+human_decide() {
+  local gate_id=$1
+  local body=$2
+  api -H 'x-service-principal: standalone-human-bff' \
+    -X POST "http://127.0.0.1:$PORT/internal/human-gates/$gate_id/decisions" -d "$body"
+}
 
 BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}'
 
@@ -46,7 +53,7 @@ say "Test 1: kill -9 kernel between transitions → restart → state intact"
 start_kernel boot1 || { bad "kernel failed to start"; exit 1; }
 PROJ=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"fault1\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"session_id\":\"s1\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 GATE1=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ/gates" -H 'content-type: application/json' -d '{"type":"scope","title":"Scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
-api -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE1/decisions" -d '{"actor":"human-pi","principal":{"principal_id":"u1"},"decision":"approved"}' > /dev/null
+human_decide "$GATE1" '{"actor":"human-pi","principal":{"principal_id":"u1"},"decision":"approved"}' > /dev/null
 stop_kernel
 start_kernel boot2 || { bad "kernel failed to restart"; exit 1; }
 STATUS=$(api "http://127.0.0.1:$PORT/v1/projects/$PROJ" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
@@ -106,9 +113,9 @@ say "Test 6: two processes decide the same gate concurrently — exactly one win
 PROJ2=$(api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"fault-concurrent\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jqfield project_id 2>/dev/null || api -X POST "http://127.0.0.1:$PORT/v1/projects" -d "{\"name\":\"fault-concurrent\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).project_id))")
 GATE2=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/projects/$PROJ2/gates" -H 'content-type: application/json' -d '{"type":"scope","title":"Concurrent Scope"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).gate_id))")
 # Fire both decisions at once.
-curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE2/decisions" -H 'content-type: application/json' -d '{"actor":"browser-a","decision":"approved"}' > "$WORK/code-a" &
+curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/internal/human-gates/$GATE2/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d '{"actor":"browser-a","principal":{"principal_id":"browser-a"},"decision":"approved"}' > "$WORK/code-a" &
 PA=$!
-curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/gates/$GATE2/decisions" -H 'content-type: application/json' -d '{"actor":"browser-b","decision":"approved"}' > "$WORK/code-b" &
+curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/internal/human-gates/$GATE2/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d '{"actor":"browser-b","principal":{"principal_id":"browser-b"},"decision":"approved"}' > "$WORK/code-b" &
 PB=$!
 wait "$PA"; wait "$PB"
 CODE_A=$(cat "$WORK/code-a"); CODE_B=$(cat "$WORK/code-b")

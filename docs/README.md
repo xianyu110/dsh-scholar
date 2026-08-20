@@ -1,7 +1,7 @@
 # DSH Scholar 重建规范
 
 > 规范版本：2.5
-> 更新日期：2026-08-12
+> 更新日期：2026-08-20
 > 目标成熟度：Security Alpha，默认 gate-only
 > 用途：仅依赖本目录 Markdown，即可重新实现、测试和部署 DSH Scholar。
 
@@ -13,7 +13,7 @@ UI 品牌硬规则：正式产品名为 `DSH Scholar`，组合字标为 `dsh Sch
 
 1. 本文件中的全局规则；
 2. product-spec.md、design-notes.md 和 domain-model.md 中的产品、架构与不变量；
-3. research-onboarding.md、init-grill-upload-models.md、reproduction-contracts.md、trajectory-subagents.md、subagent-stage-execution.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
+3. research-onboarding.md、init-grill-upload-models.md、reproduction-contracts.md、trajectory-subagents.md、subagent-stage-execution.md、methodology-knowledge-layer.md、api-contracts.md、execution-runtime.md、gui-plugin-plan.md、dsh-integration.md、storage-migrations.md 和 security-baseline.md 中的模块接口；
 4. repository-blueprint.md 与 acceptance-tests.md 中的工程结构和验收规则；
 5. test-instance-plan.md 与 USAGE_GUIDE.md 中的运行说明；
 6. hardening-v0.2-status.md 中的当前实现差距，仅用于迁移，不能覆盖目标规范；
@@ -39,18 +39,25 @@ DSH Scholar 是运行在 DeepSeek Harness 上的可恢复科研工作台：DSH �
 | 6 | reproduction-contracts.md | 论文复现、实验环境、Chat 附件与 session Terminal 如何形成可追溯闭环 |
 | 7 | trajectory-subagents.md | 如何移植 Trajectory、展示 subagent 拓扑并进入子会话 |
 | 8 | subagent-stage-execution.md | 哪些研究阶段可并行，以及如何安全地 fan-out/fan-in |
-| 9 | storage-migrations.md | 如何持久化、迁移和恢复 |
-| 10 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
-| 11 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
-| 12 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
-| 13 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
-| 14 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
-| 15 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
-| 16 | acceptance-tests.md | 如何证明生成结果符合规范 |
-| 17 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
-| 18 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
-| 19 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
-| 20 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
+| 9 | methodology-knowledge-layer.md | 如何引入 Assurance、Protocol、研究循环和可信知识层而不削弱 Kernel |
+| 10 | storage-migrations.md | 如何持久化、迁移和恢复 |
+| 11 | api-contracts.md | HTTP、流式事件和错误接口是什么 |
+| 12 | dsh-integration.md | 如何作为 DSH Agent 插件、工具、命令与 Skill 运行，以及如何连接独立 UI |
+| 13 | execution-runtime.md | Job、Runner、分析、编排和复现如何工作 |
+| 14 | gui-plugin-plan.md | Web UI、实时终端、TeX 编辑与 PDF 预览如何工作 |
+| 15 | security-baseline.md | 权限、隔离、Secret、Web 与供应链的硬要求 |
+| 16 | repository-blueprint.md | 文件树、包、依赖、构建顺序和实现责任 |
+| 17 | acceptance-tests.md | 如何证明生成结果符合规范 |
+| 18 | manual-acceptance.md | 代码实现完成后如何交给人工在真实环境验收 |
+| 19 | test-instance-plan.md | 如何启动开发、测试和独立实例 |
+| 20 | USAGE_GUIDE.md | 用户如何完成端到端研究 |
+| 21 | hardening-v0.2-status.md | 当前仓库与目标规范还有哪些差距 |
+
+### 3.1 研究与决策依据（非规范）
+
+- [methodology-knowledge-layer-proposal.md](methodology-knowledge-layer-proposal.md)：对 ARIS、Research-Paper-Writing-Skills 与 AI-Research-SKILLs 的来源、方法、许可和取舍记录；当前状态为 `DECIDED / PHASED_IMPLEMENTATION_AUTHORIZED`，规范契约见 methodology-knowledge-layer.md。
+
+研究与决策依据不属于规范生成顺序，不能覆盖本目录任何规范性文档。实现只能依据已拆入的负责规范、acceptance 和 hardening 状态；未进入规范的候选项仍不得实施。
 
 ## 4. 生成约束
 

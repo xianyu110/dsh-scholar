@@ -14,11 +14,11 @@ import { join, relative, sep, dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { z } from 'zod'
 import {
-  ArtifactKind, ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision,
-  EvidenceItem, ExecutionConfig, ExperimentContract, Gate, IdeaCard, IntegrityConfig, NoveltyAudit,
-  JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchProject, ResearchBrief,
+  ArtifactKind, ArtifactRecord, BudgetConstraints, BudgetRecord, Claim, CodeSnapshot, CorpusSnapshot, Decision, DirectionGatePayload,
+  EvidenceItem, ExecutionConfig, ExperimentContract, FrozenProtocolPin, Gate, IdeaCard, IntegrityConfig, NoveltyAudit,
+  JobRecord, KernelEvent, KernelEventKind, Paper, Passage, ResearchIntent, ResearchProject, ResearchBrief,
   RunnerKey, SessionLink, TRANSITION_TABLE, buildClaimId, buildContractId, buildGateId, buildIdeaId,
-  buildProjectId, getFixtureProfile, getRunnerProfile, randomId, resolveRunnerProfileId, runnerTargetConfigHash, validateConfig, RUNNER_PROFILE_IDS, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
+  buildProjectId, canonicalJsonDeep, getFixtureProfile, getRunnerProfile, randomId, resolveRunnerProfileId, runnerTargetConfigHash, validateConfig, RUNNER_PROFILE_IDS, ProjectStatus as ProjectStatusSchema, type GateType, type JobSpecBound, type JobStatus, type NextAction, type ProjectStatus,
   type HumanPrincipal, type IntakeArtifact, type IntakeObservation, type IntakeProjection, type IntakeSession,
   type AdoptionReceipt, type PhaseProposal, type ObservedPhase, type GrillAnswerInput, type GrillAnswerView,
   type IntakeStatus, type ImportMapping,
@@ -38,6 +38,12 @@ import {
   REPRODUCTION_SPEC_TRANSITIONS, PaperReproductionSpec, ReproductionAttempt, ReproductionReportInput, ReproducibilityReport,
   EnvironmentLock, type ClaimToReproduce, type CodeSource, type DataSource, type ExecutionBinding,
   type MetricComparator, type PaperRef, type ReproductionLevel, type ReproductionSpecStatus,
+  WritingAssuranceExecutionInput,
+  NegativeFinding, ResearchClaimProposal, ResearchRunClassification, ResearchRunOutcome, ResearchRunRecord,
+  ResearchRunOutcomeWrite, type ResearchRunOutcomeWrite as ResearchRunOutcomeWriteValue,
+  MethodTriadWrite, SectionGuideActivationWrite, WritingReviewerPanelWrite,
+  WritingPatchProposalWrite, WritingPatchApplyInput, HumanWritingPrincipal,
+  type WritingCompilePin, type WritingInputPin, type WritingPatchApplication,
 } from '@dsh-scholar/research-schemas'
 import { ArtifactCas } from './cas.js'
 import { reproductionCanonicalJson, reproductionSha256 } from './reproduction.js'
@@ -65,6 +71,8 @@ import {
 } from './archive-scan.js'
 import { TrajectoryStore } from './trajectory.js'
 import { MetricsStore } from './metrics.js'
+import { MethodologyRolloutStore } from './rollout-policy.js'
+import { MethodologyTelemetry } from './methodology-telemetry.js'
 import {
   validateSecretRefInput, validateProviderBaseUrl, providerConfigHash, providerRedacted,
   serviceIdentityAvailable, serviceIdentityTokenMatches,
@@ -74,6 +82,41 @@ import { uploadStagedPath, intakeQuotaCheck } from './chunked-upload.js'
 import { RunnerTargetRegistry } from './runner-target-registry.js'
 import { assessRunnerEnvironment } from './runner-environment-readiness.js'
 import { dshOperatorPrincipal } from './dsh-principal.js'
+import { AssuranceStore } from './assurance-store.js'
+import { MethodologyStore } from './methodology-store.js'
+import { evaluateResearchMethodology } from './research-methodology.js'
+import {
+  buildRunOutcomeObservation,
+  buildSynthesisRecordRequest,
+  canonicalManifestSha256,
+  getRunOutcomeObservation,
+  listRunOutcomeObservationLedger,
+  listSynthesisRecordRequests,
+  observesResearchOutcome,
+} from './run-outcome-lifecycle.js'
+import { WritingReviewStore } from './writing-review-store.js'
+import {
+  writingFileSha256,
+} from './writing-review.js'
+import {
+  KnowledgeMethodologyCoordinator,
+  SynthesisMethodologyCoordinator,
+  WritingMethodologyCoordinator,
+} from './methodology-coordinator.js'
+import {
+  evaluateFullAutoGateAuthority,
+  evaluateFullAutoSurveyAuthority,
+  evaluateFullAutoSurveyAuthorityContext,
+  fullAutoAuthorityHash,
+  FullAutoAuthorityReceiptSchema,
+  FullAutoSurveyAuthorityReceiptSchema,
+  FullAutoSurveyResultSchema,
+  type FullAutoAuthorityReceipt,
+  type FullAutoSurveyAuthorityReceipt,
+  type FullAutoSurveyAuthorityContext,
+  type FullAutoSurveyAuthorityReceiptBase,
+  type FullAutoSurveyResult,
+} from './full-auto.js'
 
 /** §12 (reconstruction-contracts.md): bootstrap resamples are FIXED at
  * 10,000 in production — the kernel never lowers them. */
@@ -257,6 +300,9 @@ export interface KernelOptions {
   /** DSH-CREATE-LINK-01: route-specific credential shared only by the DSH
    * plugin client and Kernel. Runners never receive this token. */
   dshPluginToken?: string
+  /** Route-specific credential shared only with the managed full-auto
+   * orchestrator. It never reaches Runner/browser processes. */
+  orchestratorToken?: string
   /**
    * §12.1 (TEX-03): debounce window for live preview builds after a save
    * success (default 800ms). Per-request overrides are accepted by
@@ -313,6 +359,18 @@ export interface KernelOptions {
    */
   providerUrlAllowlist?: ProviderUrlAllowlist
 }
+
+const WritingPatchIntentSchema = z.object({
+  application_id: z.string().regex(/^writing_apply_[a-z0-9_]+$/),
+  proposal_id: z.string().regex(/^writing_patch_[a-z0-9_]+$/),
+  project_id: z.string().min(1).max(256),
+  expected_revision: z.number().int().nonnegative(),
+  expected_file_version: z.number().int().positive(),
+  apply_input: WritingPatchApplyInput,
+  actor: HumanWritingPrincipal,
+  applied_at: z.string().datetime(),
+}).strict()
+type WritingPatchIntent = z.infer<typeof WritingPatchIntentSchema>
 
 /** Error carrying an HTTP status for the API adapter. */
 export class KernelError extends Error {
@@ -455,6 +513,10 @@ function jobFromRow(row: JobRow, db: DatabaseSync, tokenOverride?: string | null
     // （kernel submitJob 注入 payload；runner 按注册表复算校验）。
     runner_profile_id: typeof payload.runner_profile_id === 'string' && payload.runner_profile_id !== '' ? payload.runner_profile_id : null,
     profile_config_hash: typeof payload.profile_config_hash === 'string' && payload.profile_config_hash !== '' ? payload.profile_config_hash : null,
+    protocol_pin: payload.protocol_pin === undefined || payload.protocol_pin === null
+      ? null
+      : FrozenProtocolPin.parse(payload.protocol_pin),
+    run_intent: ResearchIntent.parse(payload.run_intent ?? 'exploratory'),
     output_contract: typeof payload.output_contract === 'object' && payload.output_contract !== null
       ? { metrics: String((payload.output_contract as Record<string, unknown>).metrics ?? '/outputs/metrics.json'), logs: String((payload.output_contract as Record<string, unknown>).logs ?? '/outputs/run.log') }
       : undefined,
@@ -678,6 +740,28 @@ const GATE_APPROVAL_TRANSITION: Record<GateType, { from: ProjectStatus; to: Proj
   contract: { from: 'CONTRACT_PENDING', to: 'CONTRACT_APPROVED' },
   budget: { from: 'BLOCKED_GATE', to: 'EXPERIMENTING' }, // resume: caller pins target in payload
   release: { from: 'RELEASE_READY', to: 'RELEASED' },
+  // Direction Gates authorize an immutable methodology proposal; they never
+  // move the project phase. The dedicated branch in decideGate owns this.
+  direction: { from: 'DRAFT', to: 'DRAFT' },
+}
+
+interface GateDecisionInput {
+  gate_id: string
+  actor: string
+  /** Human calls use a durable Human Principal; fixture automation uses the
+   * dedicated `full-auto-service` auth_method and is never presented as Human. */
+  principal?: {
+    principal_id: string
+    tenant_id?: string
+    auth_method?: string
+    session_id?: string | null
+  }
+  decision: 'approved' | 'rejected' | 'revised'
+  reason?: string
+  diff?: string
+  session_id?: string | null
+  event_id?: string | null
+  resume_to?: ProjectStatus
 }
 
 /** Run `fn` inside a single SQLite transaction (v2 §7.6 transactional kernel). */
@@ -848,6 +932,8 @@ export class ResearchKernel {
   readonly serviceToken: string | undefined
   /** DSH-CREATE-LINK-01: audience-bound credential for direct create/link. */
   readonly dshPluginToken: string | undefined
+  /** FULLAUTO-CREDENTIAL-02: audience-bound managed worker credential. */
+  readonly orchestratorToken: string | undefined
   /**
    * CONFIG-01: sha256 pin of the running kernel's effective config, computed
    * through the canonical Config Registry (research-schemas config-registry
@@ -880,6 +966,12 @@ export class ResearchKernel {
   readonly providerUrlAllowlist: ProviderUrlAllowlist
   /** EXEC-ENV-02: authoritative configurable local/Docker/remote-SSH targets. */
   readonly runnerTargets: RunnerTargetRegistry
+  /** Append-only methodology assurance stream on the Kernel connection. */
+  readonly assurance: AssuranceStore
+  /** Append-only Protocol/Synthesis/Knowledge/Writing methodology streams. */
+  readonly methodology: MethodologyStore
+  /** Append-only writing diagnostics, reviewer aggregates and Human-applied patch receipts. */
+  readonly writingReview: WritingReviewStore
   /** §12.1 (TEX-03): in-flight debounce timers, one per document. */
   private readonly previewTimers = new Map<string, NodeJS.Timeout>()
   /**
@@ -902,6 +994,14 @@ export class ResearchKernel {
    * strings — never paths, ids, tokens or content (OBS-01).
    */
   readonly metrics: MetricsStore
+  /** Append-only rollout policy source consumed by methodology runtime. */
+  readonly rollout: MethodologyRolloutStore
+  /** Closed-label methodology observability producer. */
+  readonly methodologyTelemetry: MethodologyTelemetry
+  /** Deep methodology coordinators; public Kernel methods are stable façades. */
+  private readonly knowledgeMethodology: KnowledgeMethodologyCoordinator
+  private readonly synthesisMethodology: SynthesisMethodologyCoordinator
+  private readonly writingMethodology: WritingMethodologyCoordinator
 
   /**
    * STORE-06 (storage-migrations.md §4): in-memory plaintext lease tokens,
@@ -967,8 +1067,11 @@ export class ResearchKernel {
     // A blank credential must be indistinguishable from a missing one. In
     // particular it must never become an attacker-computable empty HMAC key.
     this.dshPluginToken = options.dshPluginToken?.trim() === '' ? undefined : options.dshPluginToken
+    this.orchestratorToken = options.orchestratorToken?.trim() === '' ? undefined : options.orchestratorToken
     // OBS-01: the runtime metrics store is process-local; no locking needed.
     this.metrics = new MetricsStore()
+    this.rollout = new MethodologyRolloutStore(this.db)
+    this.methodologyTelemetry = new MethodologyTelemetry(this.metrics)
     // RUN-01 (§4): signed run manifests are REQUIRED BY DEFAULT — the runner
     // registers an ephemeral Ed25519 key and signs every completion, so the
     // default only affects callers that never sign. Unit tests that exercise
@@ -999,6 +1102,60 @@ export class ResearchKernel {
       ref => serviceIdentityAvailable(ref, this.secretRoot),
       (ref, provided) => serviceIdentityTokenMatches(ref, this.secretRoot, provided),
     )
+    this.assurance = new AssuranceStore(this.db)
+    this.methodology = new MethodologyStore(this.db)
+    this.writingReview = new WritingReviewStore(this.db)
+    const fail = (status: number, code: string, message: string): never => {
+      throw new KernelError(status, code, message)
+    }
+    this.knowledgeMethodology = new KnowledgeMethodologyCoordinator({
+      transaction: work => withTransaction(this.db, work),
+      fail,
+      getProject: projectId => this.getProject(projectId),
+      getLinkedProjectId: sessionId => this.getProjectBySession(sessionId)?.project_id ?? null,
+      getMemberRole: (projectId, principalId) => this.getProjectMemberRole(projectId, principalId),
+      getNextActions: projectId => this.projectProjection(projectId).next_actions_v2,
+      hasManuscript: projectId => this.listArtifacts(projectId)
+        .some(artifact => artifact.kind === 'paper' || artifact.kind === 'tex-source'),
+      store: this.methodology,
+      rollout: this.rollout,
+      telemetry: this.methodologyTelemetry,
+    })
+    this.synthesisMethodology = new SynthesisMethodologyCoordinator({
+      fail,
+      getProjectRevision: projectId => this.getProject(projectId).revision,
+      getNextActions: projectId => this.projectProjection(projectId).next_actions_v2,
+      getPendingRequests: projectId => this.listSynthesisRecordRequests(projectId).pending,
+      store: this.methodology,
+      rollout: this.rollout,
+      telemetry: this.methodologyTelemetry,
+    })
+    this.writingMethodology = new WritingMethodologyCoordinator({
+      transaction: work => withTransaction(this.db, work),
+      fail,
+      now: nowIso,
+      getProject: projectId => this.getProject(projectId),
+      getLinkedProjectId: sessionId => this.getProjectBySession(sessionId)?.project_id ?? null,
+      getNextActions: projectId => this.projectProjection(projectId).next_actions_v2,
+      getChildDetail: childId => this.getChildDetail(childId),
+      getChildExecutionIdentity: childId => this.trajectory.getChildExecutionIdentity(childId),
+      listArtifacts: projectId => this.listArtifacts(projectId),
+      registerFindingsArtifact: input => this.registerArtifact({
+        ...input,
+        kind: 'analysis',
+        media_type: 'application/json',
+      }),
+      listClaims: projectId => this.listClaims(projectId),
+      listAcceptedEvidence: projectId => this.listAcceptedEvidence(projectId),
+      listCorpusSnapshots: projectId => this.listCorpusSnapshots(projectId),
+      manuscriptChecks: projectId => this.manuscriptReview(projectId).checks,
+      tex: this.tex,
+      methodology: this.methodology,
+      assurance: this.assurance,
+      writing: this.writingReview,
+      rollout: this.rollout,
+      telemetry: this.methodologyTelemetry,
+    })
     // CONFIG-01: pin the effective runtime config through the registry. The
     // registry validates the values (unknown keys / floor violations throw
     // here — fail fast at construction) and returns the one-way sha256 pin.
@@ -1013,6 +1170,11 @@ export class ResearchKernel {
     })
     this.configPinHash = pinned.pinHash
     this.configRedacted = pinned.redacted
+    // WRITE-RECOVERY-01: a patch crosses the Kernel event connection and the
+    // TeX workspace connection. Reconcile every journaled intent before the
+    // server can accept work, completing either the TeX mutation or its
+    // immutable application receipt deterministically.
+    this.recoverWritingPatchIntents()
     // §12.1 (TEX-03): re-arm debounce timers for pending preview requests
     // that survived a kernel restart — preview state is re-projectable from
     // the kernel, it never lives only in a browser debounce timer.
@@ -2062,13 +2224,16 @@ export class ResearchKernel {
     session_id?: string | null
   }): Gate {
     this.getProject(input.project_id)
+    const payload = input.type === 'direction'
+      ? DirectionGatePayload.parse(input.payload ?? {})
+      : input.payload ?? {}
     const gate: Gate = {
       gate_id: buildGateId(),
       project_id: input.project_id,
       type: input.type,
       title: input.title,
       summary: input.summary ?? '',
-      payload: input.payload ?? {},
+      payload,
       status: 'pending',
       dsh_session_id: input.session_id ?? null,
       dsh_event_id: null,
@@ -2095,30 +2260,344 @@ export class ResearchKernel {
     return gateFromRow(row)
   }
 
-  /** Record a human decision and apply the gate side effect (v2 §6.5, §6.6). */
-  decideGate(input: {
-    gate_id: string
-    actor: string
-    /** v2: authenticated human principal; agents cannot call this path. */
-    principal?: {
-      principal_id: string
-      tenant_id?: string
-      auth_method?: string
-      session_id?: string | null
+  /** A Budget Gate may resume only from the immutable provenance row that
+   * the Kernel wrote in the same transaction as that exact budget block. */
+  private budgetBlockResumeTo(gate: Gate): ProjectStatus {
+    const row = this.db.prepare(
+      'SELECT project_id, resume_to, project_revision, payload_sha256, created_at FROM budget_block_provenance WHERE gate_id = ?',
+    ).get(gate.gate_id) as {
+      project_id: string
+      resume_to: string
+      project_revision: number
+      payload_sha256: string
+      created_at: string
+    } | undefined
+    const project = this.getProject(gate.project_id)
+    const exactPayload = Object.keys(gate.payload).length === 1
+      && typeof gate.payload.resume_to === 'string'
+      && gate.payload.resume_to !== 'BLOCKED_GATE'
+    if (row === undefined || row.project_id !== gate.project_id || !exactPayload
+      || project.status !== 'BLOCKED_GATE' || project.revision !== row.project_revision
+      || gate.created_at !== row.created_at || !ProjectStatusSchema.safeParse(row.resume_to).success
+      || row.resume_to !== gate.payload.resume_to
+      || row.payload_sha256 !== fullAutoAuthorityHash(gate.payload)) {
+      throw new KernelError(409, 'budget_block_provenance_mismatch',
+        `Budget Gate ${gate.gate_id} does not match its Kernel-recorded block provenance`)
     }
-    decision: 'approved' | 'rejected' | 'revised'
-    reason?: string
-    diff?: string
-    session_id?: string | null
-    event_id?: string | null
-    /** For budget gates: the status to resume to on approval. */
-    resume_to?: ProjectStatus
-  }): { gate: Gate; decision: Decision; project: ResearchProject } {
+    return row.resume_to as ProjectStatus
+  }
+
+  /**
+   * Fixture-only service authority. Verification and the Decision side effect
+   * share one SQLite transaction; the orchestrator supplies only opaque ids,
+   * a revision fence and an idempotency key.
+   */
+  decideFullAutoGate(input: {
+    project_id: string
+    gate_id: string
+    expected_project_revision: number
+    idempotency_key: string
+  }): { gate: Gate; decision: Decision; project: ResearchProject; receipt: FullAutoAuthorityReceipt } {
+    if (input.idempotency_key.trim() === '' || input.idempotency_key.length > 240) {
+      throw new KernelError(422, 'idempotency_key_required', 'full-auto Gate decision requires a non-empty idempotency key of at most 240 characters')
+    }
+    const requestSha256 = fullAutoAuthorityHash({
+      schema_version: 1,
+      operation: 'full-auto-gate-approval',
+      project_id: input.project_id,
+      gate_id: input.gate_id,
+      expected_project_revision: input.expected_project_revision,
+    })
+    return withTransaction(this.db, () => {
+      const ledger = this.db.prepare(`SELECT request_sha256, project_id, gate_id,
+        expected_project_revision, decision_id, receipt_json
+        FROM full_auto_gate_idempotency WHERE idempotency_key = ?`)
+        .get(input.idempotency_key) as {
+          request_sha256: string
+          project_id: string
+          gate_id: string
+          expected_project_revision: number
+          decision_id: string
+          receipt_json: string
+      } | undefined
+      if (ledger !== undefined) {
+        if (ledger.request_sha256 !== requestSha256
+          || ledger.project_id !== input.project_id
+          || ledger.gate_id !== input.gate_id
+          || ledger.expected_project_revision !== input.expected_project_revision) {
+          throw new KernelError(409, 'idempotency_conflict', 'full-auto approval idempotency key is globally bound to another request')
+        }
+        const receipt = FullAutoAuthorityReceiptSchema.parse(JSON.parse(ledger.receipt_json) as unknown)
+        const decision = this.listDecisions(ledger.project_id)
+          .find(candidate => candidate.decision_id === ledger.decision_id)
+        if (decision === undefined
+          || decision.gate_id !== ledger.gate_id
+          || receipt.project_id !== ledger.project_id
+          || receipt.gate_id !== ledger.gate_id
+          || receipt.project_revision !== ledger.expected_project_revision
+          || receipt.idempotency_key !== input.idempotency_key) {
+          throw new KernelError(409, 'full_auto_receipt_invalid', 'full-auto approval ledger has an invalid Decision or receipt binding')
+        }
+        return {
+          gate: this.getGate(ledger.gate_id),
+          decision,
+          project: this.getProject(ledger.project_id),
+          receipt,
+        }
+      }
+      const replayEventId = `full-auto:${input.idempotency_key}`
+      const project = this.getProject(input.project_id)
+      const gate = this.getGate(input.gate_id)
+      if (gate.project_id !== project.project_id) {
+        throw new KernelError(404, 'gate_not_found', `gate ${input.gate_id} not found in project ${input.project_id}`)
+      }
+      const fixture = getFixtureProfile(project.execution.fixture_id ?? '')
+      const runnerProfile = project.execution.runner_profile_id === null
+        ? null
+        : getRunnerProfile(project.execution.runner_profile_id)
+      const runnerTarget = this.listRunnerTargets().find(target => target.target_id === project.execution.runner_target_id) ?? null
+      const runnerAssessment = runnerProfile === null || runnerTarget === null
+        ? { failures: [] as import('./runner-environment-readiness.js').RunnerEnvironmentFailure[] }
+        : assessRunnerEnvironment(runnerProfile, runnerTarget, ref => this.secretRefAvailable(ref))
+      const ideaId = gate.type === 'idea' && typeof gate.payload.idea_id === 'string' ? gate.payload.idea_id : null
+      const idea = ideaId === null ? null : (() => { try { return this.getIdea(ideaId) } catch { return null } })()
+      const ideaCorpus = idea?.corpus_snapshot_id === null || idea?.corpus_snapshot_id === undefined
+        ? null
+        : (() => { try { return this.getCorpusSnapshot(idea.corpus_snapshot_id as string) } catch { return null } })()
+      const contractId = gate.type === 'contract' && typeof gate.payload.contract_id === 'string' ? gate.payload.contract_id : null
+      const contract = contractId === null ? null : (() => { try { return this.getContract(contractId) } catch { return null } })()
+      const evaluation = evaluateFullAutoGateAuthority({
+        project,
+        gate,
+        expected_project_revision: input.expected_project_revision,
+        idempotency_key: input.idempotency_key,
+        issued_at: nowIso(),
+        fixture,
+        runner_profile: runnerProfile,
+        runner_target: runnerTarget,
+        runner_failures: runnerAssessment.failures,
+        idea,
+        idea_corpus: ideaCorpus,
+        contract,
+      })
+      if (!evaluation.ok) {
+        throw new KernelError(evaluation.code === 'revision_conflict' ? 409 : 422, evaluation.code, evaluation.message)
+      }
+      const decided = this.decideGateInTransaction({
+        gate_id: input.gate_id,
+        actor: 'service:research-orchestrator',
+        principal: {
+          principal_id: 'service:research-orchestrator',
+          tenant_id: 'fixture',
+          auth_method: 'full-auto-service',
+          session_id: null,
+        },
+        decision: 'approved',
+        reason: `fixture-only automatic approval (${evaluation.receipt.fixture.fixture_id}); Release remains Human`,
+        diff: JSON.stringify(evaluation.receipt),
+        event_id: replayEventId,
+      })
+      this.db.prepare(`INSERT INTO full_auto_gate_idempotency
+        (idempotency_key, request_sha256, project_id, gate_id, expected_project_revision,
+         decision_id, receipt_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          input.idempotency_key,
+          requestSha256,
+          input.project_id,
+          input.gate_id,
+          input.expected_project_revision,
+          decided.decision.decision_id,
+          JSON.stringify(evaluation.receipt),
+          decided.decision.decided_at,
+        )
+      return { ...decided, receipt: evaluation.receipt }
+    })
+  }
+
+  /**
+   * Resolve the exact read-only authority context that a connector execution
+   * must pin before it starts I/O. The resulting hash covers the Project /
+   * NextAction / Brief / fixture / runner / budget / Protocol inputs.
+   */
+  fullAutoSurveyAuthority(input: {
+    project_id: string
+    expected_project_revision: number
+    action_id: string
+    action_revision: number
+  }): FullAutoSurveyAuthorityContext {
+    const project = this.getProject(input.project_id)
+    const projection = this.projectProjection(input.project_id)
+    const action = projection.next_actions_v2.find(candidate => candidate.id === input.action_id)
+    if (action === undefined) {
+      throw new KernelError(409, 'full_auto_action_not_ready', `action ${input.action_id} is not present in the authoritative projection`)
+    }
+    const fixture = getFixtureProfile(project.execution.fixture_id ?? '')
+    const runnerProfile = project.execution.runner_profile_id === null
+      ? null
+      : getRunnerProfile(project.execution.runner_profile_id)
+    const runnerTarget = this.listRunnerTargets().find(target => target.target_id === project.execution.runner_target_id) ?? null
+    const runnerAssessment = runnerProfile === null || runnerTarget === null
+      ? { failures: [] as import('./runner-environment-readiness.js').RunnerEnvironmentFailure[] }
+      : assessRunnerEnvironment(runnerProfile, runnerTarget, ref => this.secretRefAvailable(ref))
+    const latestFrozenProtocol = this.methodology.listProtocolRevisions(input.project_id).records
+      .map(view => view.record)
+      .filter(protocol => protocol.status === 'frozen')
+      .sort((left, right) => left.revision - right.revision)
+      .at(-1)
+    const protocolPin = latestFrozenProtocol === undefined
+      ? null
+      : {
+          protocol_id: latestFrozenProtocol.protocol_id,
+          revision: latestFrozenProtocol.revision,
+          canonical_hash: latestFrozenProtocol.canonical_hash!,
+        }
+    const evaluation = evaluateFullAutoSurveyAuthorityContext({
+      project,
+      action,
+      expected_project_revision: input.expected_project_revision,
+      action_id: input.action_id,
+      action_revision: input.action_revision,
+      fixture,
+      runner_profile: runnerProfile,
+      runner_target: runnerTarget,
+      runner_failures: runnerAssessment.failures,
+      budget: projection.budget,
+      protocol_pin: protocolPin,
+    })
+    if (!evaluation.ok) {
+      const conflict = evaluation.code === 'revision_conflict' || evaluation.code === 'full_auto_action_not_ready'
+      throw new KernelError(conflict ? 409 : 422, evaluation.code, evaluation.message)
+    }
+    return evaluation.context
+  }
+
+  /**
+   * Execute the only canonical non-Gate full-auto action currently
+   * registered. External connector data is untrusted input; this method
+   * re-derives every authority pin and atomically freezes the corpus,
+   * advances SCOPED -> SURVEYING and embeds a replayable receipt in Outbox.
+   */
+  executeFullAutoSurvey(input: {
+    project_id: string
+    expected_project_revision: number
+    action_id: string
+    action_revision: number
+    expected_authority_sha256: string
+    idempotency_key: string
+    result?: FullAutoSurveyResult
+  }): { snapshot: CorpusSnapshot; project: ResearchProject; receipt: FullAutoSurveyAuthorityReceipt } {
+    if (input.idempotency_key.trim() === '' || input.idempotency_key.length > 240) {
+      throw new KernelError(422, 'idempotency_key_required', 'full-auto survey requires a non-empty idempotency key of at most 240 characters')
+    }
+    return withTransaction(this.db, () => {
+      const priorReceipts = this.listEvents(input.project_id)
+        .filter(event => event.kind === 'corpus.snapshotted')
+        .map(event => FullAutoSurveyAuthorityReceiptSchema.safeParse(event.payload.full_auto_survey_receipt))
+        .filter((parsed): parsed is { success: true; data: FullAutoSurveyAuthorityReceipt } => parsed.success)
+        .map(parsed => parsed.data)
+      const prior = priorReceipts.find(receipt => receipt.idempotency_key === input.idempotency_key)
+      if (prior !== undefined) {
+        const parsedResult = input.result === undefined ? null : FullAutoSurveyResultSchema.parse(input.result)
+        if (prior.project_id !== input.project_id
+          || prior.project_revision !== input.expected_project_revision
+          || prior.action.id !== input.action_id
+          || prior.action.revision !== input.action_revision
+          || prior.authority_sha256 !== input.expected_authority_sha256
+          || (parsedResult !== null && prior.result_sha256 !== fullAutoAuthorityHash(parsedResult))) {
+          throw new KernelError(409, 'idempotency_conflict', 'full-auto survey idempotency key was replayed with different project, action, revision or connector result pins')
+        }
+        return {
+          snapshot: this.getCorpusSnapshot(prior.snapshot_id),
+          project: this.getProject(input.project_id),
+          receipt: prior,
+        }
+      }
+      const admitted = this.fullAutoSurveyAuthority(input)
+      if (admitted.authority_sha256 !== input.expected_authority_sha256) {
+        throw new KernelError(409, 'full_auto_survey_authority_changed',
+          'canonical survey authority changed after connector admission; discard the result and re-plan')
+      }
+      if (input.result === undefined) {
+        throw new KernelError(422, 'full_auto_survey_result_required', 'connector result is required before a new canonical survey can commit')
+      }
+
+      const project = this.getProject(input.project_id)
+      const projection = this.projectProjection(input.project_id)
+      const action = projection.next_actions_v2.find(candidate => candidate.id === input.action_id)
+      if (action === undefined) {
+        throw new KernelError(409, 'full_auto_action_not_ready', `action ${input.action_id} is not present in the authoritative projection`)
+      }
+      const fixture = getFixtureProfile(project.execution.fixture_id ?? '')
+      const runnerProfile = project.execution.runner_profile_id === null
+        ? null
+        : getRunnerProfile(project.execution.runner_profile_id)
+      const runnerTarget = this.listRunnerTargets().find(target => target.target_id === project.execution.runner_target_id) ?? null
+      const runnerAssessment = runnerProfile === null || runnerTarget === null
+        ? { failures: [] as import('./runner-environment-readiness.js').RunnerEnvironmentFailure[] }
+        : assessRunnerEnvironment(runnerProfile, runnerTarget, ref => this.secretRefAvailable(ref))
+      const latestFrozenProtocol = this.methodology.listProtocolRevisions(input.project_id).records
+        .map(view => view.record)
+        .filter(protocol => protocol.status === 'frozen')
+        .sort((left, right) => left.revision - right.revision)
+        .at(-1)
+      const protocolPin = latestFrozenProtocol === undefined
+        ? null
+        : {
+            protocol_id: latestFrozenProtocol.protocol_id,
+            revision: latestFrozenProtocol.revision,
+            canonical_hash: latestFrozenProtocol.canonical_hash!,
+          }
+      const result = FullAutoSurveyResultSchema.parse(input.result)
+      const evaluation = evaluateFullAutoSurveyAuthority({
+        project,
+        action,
+        expected_project_revision: input.expected_project_revision,
+        action_id: input.action_id,
+        action_revision: input.action_revision,
+        expected_authority_sha256: input.expected_authority_sha256,
+        idempotency_key: input.idempotency_key,
+        issued_at: nowIso(),
+        fixture,
+        runner_profile: runnerProfile,
+        runner_target: runnerTarget,
+        runner_failures: runnerAssessment.failures,
+        budget: projection.budget,
+        protocol_pin: protocolPin,
+        result,
+      })
+      if (!evaluation.ok) {
+        const conflict = evaluation.code === 'revision_conflict' || evaluation.code === 'full_auto_action_not_ready'
+          || evaluation.code === 'full_auto_survey_authority_changed'
+        throw new KernelError(conflict ? 409 : 422, evaluation.code, evaluation.message)
+      }
+      const snapshot = this.snapshotCorpus({
+        project_id: input.project_id,
+        expected_revision: input.expected_project_revision,
+        queries: result.queries,
+        papers: result.papers,
+        passages: result.passages,
+        citation_edges: result.citation_edges,
+        source_status: result.source_status,
+      }, evaluation.receipt)
+      const receipt = FullAutoSurveyAuthorityReceiptSchema.parse({ ...evaluation.receipt, snapshot_id: snapshot.snapshot_id })
+      return { snapshot, project: this.getProject(input.project_id), receipt }
+    })
+  }
+
+  /** Record a Human decision and apply the gate side effect (v2 §6.5, §6.6). */
+  decideGate(input: GateDecisionInput): { gate: Gate; decision: Decision; project: ResearchProject } {
+    return withTransaction(this.db, () => this.decideGateInTransaction(input))
+  }
+
+  private decideGateInTransaction(input: GateDecisionInput): { gate: Gate; decision: Decision; project: ResearchProject } {
     const gate = this.getGate(input.gate_id)
     if (gate.status !== 'pending') {
       throw new KernelError(409, 'gate_already_decided', `gate ${input.gate_id} already ${gate.status}`)
     }
-    return withTransaction(this.db, () => {
+    const budgetResumeTo = input.decision === 'approved' && gate.type === 'budget'
+      ? this.budgetBlockResumeTo(gate)
+      : null
       const decision: Decision = {
         decision_id: randomId('dec'),
         gate_id: gate.gate_id,
@@ -2161,14 +2640,15 @@ export class ResearchKernel {
       let project = this.getProject(gate.project_id)
       if (input.decision === 'approved') {
         const mapping = GATE_APPROVAL_TRANSITION[gate.type]
-        if (gate.type === 'budget') {
-          // budget-gate-resume (acceptance-tests.md §2): ONLY the resume
-          // target declared in the gate payload may be used; client-supplied
-          // resume_to is ignored.
-          const declared = typeof gate.payload.resume_to === 'string' ? gate.payload.resume_to : ''
-          const resumeTo = declared !== '' && declared !== 'BLOCKED_GATE' ? declared as ProjectStatus : project.status
-          if (project.status === 'BLOCKED_GATE' && resumeTo !== 'BLOCKED_GATE') {
-            project = this.forceTransition(project.project_id, resumeTo, `budget gate ${gate.gate_id} approved`)
+        if (gate.type === 'direction') {
+          // Semantic-only Gate: strict payload validation is repeated on the
+          // durable value before accepting its approval receipt.
+          DirectionGatePayload.parse(gate.payload)
+        } else if (gate.type === 'budget') {
+          // The gate payload is only a projection. The target authority is
+          // the gate-specific provenance row recorded with the budget block.
+          if (project.status === 'BLOCKED_GATE' && budgetResumeTo !== null) {
+            project = this.forceTransition(project.project_id, budgetResumeTo, `budget gate ${gate.gate_id} approved`)
           }
         } else if (gate.type === 'contract') {
           // GOV-02: freeze the target contract ATOMICALLY with the decision
@@ -2246,10 +2726,10 @@ export class ResearchKernel {
         project = this.forceTransition(project.project_id, 'FAILED', `scope gate ${gate.gate_id} rejected`)
       }
       this.emit(gate.project_id, 'gate.decided', {
-        gate_id: gate.gate_id, type: gate.type, decision: input.decision, actor: input.actor, decision_id: decision.decision_id,
+        gate_id: gate.gate_id, type: gate.type, decision: input.decision, actor: input.actor,
+        auth_method: decision.principal?.auth_method ?? 'legacy_unverified', decision_id: decision.decision_id,
       })
       return { gate: this.getGate(gate.gate_id), decision, project }
-    })
   }
 
   listDecisions(projectId: string): Decision[] {
@@ -2353,10 +2833,18 @@ export class ResearchKernel {
           // the project was in before the block (acceptance-tests.md §2
           // budget-gate-resume — never client-supplied).
           const resumeTo = project.status
+          const gateId = buildGateId()
+          const payload = { resume_to: resumeTo }
+          const createdAt = nowIso()
           this.db.prepare(
             `INSERT INTO gates (gate_id, project_id, type, title, summary, payload, status, dsh_session_id, dsh_event_id, created_at, decided_at)
              VALUES (?, ?, 'budget', ?, '', ?, 'pending', NULL, NULL, ?, NULL)`,
-          ).run(buildGateId(), projectId, 'Budget Gate', JSON.stringify({ resume_to: resumeTo }), nowIso())
+          ).run(gateId, projectId, 'Budget Gate', JSON.stringify(payload), createdAt)
+          this.db.prepare(
+            `INSERT INTO budget_block_provenance
+              (gate_id, project_id, resume_to, project_revision, payload_sha256, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          ).run(gateId, projectId, resumeTo, project.revision, fullAutoAuthorityHash(payload), createdAt)
           this.db.prepare('UPDATE projects SET status = ?, updated_at = ?, history = ? WHERE project_id = ?')
             .run('BLOCKED_GATE', nowIso(), JSON.stringify([...project.history, `BLOCKED_GATE (budget: ${exceeded.join('; ')}; resume allowed to ${resumeTo})`]), projectId)
         }
@@ -4811,7 +5299,11 @@ export class ResearchKernel {
         type: 'idea',
         title: 'Idea Gate',
         summary: idea.title,
-        payload: { idea_id: idea.idea_id },
+        payload: {
+          idea_id: idea.idea_id,
+          idea_version: idea.version,
+          idea_sha256: fullAutoAuthorityHash(idea),
+        },
       })
       return { idea, project: transitioned, gate }
     })
@@ -4866,7 +5358,11 @@ export class ResearchKernel {
         type: 'contract',
         title: 'Contract Gate',
         summary: `${idea.title} — ${contract.methods.baseline} → ${contract.methods.treatment}`,
-        payload: { contract_id: contract.contract_id },
+        payload: {
+          contract_id: contract.contract_id,
+          contract_version: contract.version,
+          contract_sha256: fullAutoAuthorityHash(contract),
+        },
       })
       return { contract, project: transitioned, gate }
     })
@@ -4945,7 +5441,7 @@ export class ResearchKernel {
     /** v2 shape (domain-model.md §5): per-source status; any source failure
      * must be recorded here instead of silently dropping the query. */
     source_status?: CorpusSnapshot['source_status']
-  }): CorpusSnapshot {
+  }, fullAutoReceipt?: FullAutoSurveyAuthorityReceiptBase): CorpusSnapshot {
     this.getProject(input.project_id)
     // v2 shape (domain-model.md §5): every passage carries the sha256 of its
     // text — "new-write required": the kernel always fills it on snapshot
@@ -4984,7 +5480,7 @@ export class ResearchKernel {
       frozen: true,
     }
     CorpusSnapshot.parse(snapshot)
-    return withTransaction(this.db, () => {
+    const write = () => {
       const project = this.getProject(input.project_id)
       if (input.expected_session_id !== undefined
         && this.getProjectBySession(input.expected_session_id)?.project_id !== project.project_id) {
@@ -4997,7 +5493,14 @@ export class ResearchKernel {
       }
       this.db.prepare('INSERT INTO corpus_snapshots (snapshot_id, project_id, body, created_at) VALUES (?, ?, ?, ?)')
         .run(snapshot.snapshot_id, snapshot.project_id, JSON.stringify(snapshot), snapshot.created_at)
-      this.emit(input.project_id, 'corpus.snapshotted', { snapshot_id: snapshot.snapshot_id, total_papers: snapshot.papers.length })
+      const authorityReceipt = fullAutoReceipt === undefined
+        ? undefined
+        : FullAutoSurveyAuthorityReceiptSchema.parse({ ...fullAutoReceipt, snapshot_id: snapshot.snapshot_id })
+      this.emit(input.project_id, 'corpus.snapshotted', {
+        snapshot_id: snapshot.snapshot_id,
+        total_papers: snapshot.papers.length,
+        ...(authorityReceipt === undefined ? {} : { full_auto_survey_receipt: authorityReceipt }),
+      })
       // GUIDE-01: completing the survey must retire survey_run. Keep the
       // snapshot, phase CAS and both Outbox events in this same transaction;
       // supplemental snapshots in every other phase are phase-neutral.
@@ -5005,7 +5508,8 @@ export class ResearchKernel {
         this.transition(project.project_id, 'SURVEYING', project.revision, 'corpus snapshot frozen')
       }
       return snapshot
-    })
+    }
+    return this.db.isTransaction ? write() : withTransaction(this.db, write)
   }
 
   listCorpusSnapshots(projectId: string): CorpusSnapshot[] {
@@ -5327,6 +5831,9 @@ export class ResearchKernel {
     runner_profile_id?: string | null
     /** Job override of the project's opaque configurable target id. */
     runner_target_id?: string | null
+    /** Exact frozen methodology protocol required for formal/confirmatory work. */
+    protocol_pin?: import('@dsh-scholar/research-schemas').FrozenProtocolPin | null
+    run_intent?: import('@dsh-scholar/research-schemas').ResearchIntent
     // v2 shape (domain-model.md §9): durable submitter principal, persisted
     // to jobs.created_by_principal_id. The server layer resolves it from the
     // BFF-injected x-principal-id header (never client body trust); internal
@@ -5508,6 +6015,7 @@ export class ResearchKernel {
     // draft/foreign/missing contracts are 422, never queued.
     const CONTRACT_BOUND_KINDS: readonly string[] = ['baseline', 'pilot', 'formal', 'reproduce']
     let contractMetricNames: string[] | undefined
+    let approvedContractBinding: ExperimentContract | null = null
     if (CONTRACT_BOUND_KINDS.includes(input.kind)) {
       const contractId = input.contract_id ?? null
       if (contractId === null || contractId === '') {
@@ -5525,6 +6033,7 @@ export class ResearchKernel {
       if (contract.status !== 'approved' || contract.approval?.gate_decision_id === undefined || contract.approval.gate_decision_id === '') {
         throw new KernelError(422, 'contract_not_approved', `contract ${contractId} is ${contract.status} and not frozen by a Human Gate Decision`)
       }
+      approvedContractBinding = contract
       contractMetricNames = [contract.metrics.primary, ...contract.metrics.secondary]
     }
     // P0 (acceptance-tests.md §4): every `data_artifact_ids` entry must exist,
@@ -5602,6 +6111,87 @@ export class ResearchKernel {
     } else {
       boundImageDigest = input.image_digest ?? runnerTarget.runtime?.image_digest ?? ''
     }
+
+    // METH-01 Protocol-before-run: formal jobs and every confirmatory job
+    // must bind an exact, earlier frozen ProtocolRevision.  The protocol's
+    // Contract/Code/Data/Environment pins are recomputed from authoritative
+    // Kernel objects here; caller-supplied descriptions never establish
+    // readiness.  This check deliberately precedes every Job/Run/outbox
+    // write, so a failed admission is a zero-write failure.
+    const runIntent = ResearchIntent.parse(input.run_intent ?? 'exploratory')
+    const protocolRequired = input.kind === 'formal' || runIntent === 'confirmatory'
+    const requestedProtocolPin = input.protocol_pin ?? null
+    if (protocolRequired || requestedProtocolPin !== null) {
+      if (requestedProtocolPin === null) {
+        throw new KernelError(422, 'protocol_required', 'formal or confirmatory jobs require an exact frozen protocol_pin')
+      }
+      let protocol: import('@dsh-scholar/research-schemas').ProtocolRevision
+      try {
+        protocol = this.methodology.getProtocolRevision(
+          project.project_id,
+          requestedProtocolPin.protocol_id,
+        ).record
+      } catch {
+        throw new KernelError(422, 'protocol_not_found', `protocol ${requestedProtocolPin.protocol_id} is not registered in project ${project.project_id}`)
+      }
+      const contract = approvedContractBinding
+      if (contract === null) {
+        throw new KernelError(422, 'protocol_contract_required', 'protocol-bound jobs require an approved contract_id')
+      }
+      if (boundCodeSnapshotId === null || boundCodeSnapshotId === '') {
+        throw new KernelError(422, 'protocol_code_required', 'protocol-bound jobs require a materialized code snapshot')
+      }
+      let codeArtifact: ArtifactRecord
+      try {
+        codeArtifact = this.getArtifact(project.project_id, boundCodeSnapshotId)
+      } catch {
+        throw new KernelError(422, 'protocol_code_required', 'protocol code pin could not be resolved to an in-project Artifact')
+      }
+      if (dataArtifactIds.length !== 1) {
+        throw new KernelError(422, 'protocol_data_required', 'protocol-bound jobs require exactly one immutable data Artifact (use a dataset bundle Artifact for multiple files)')
+      }
+      const dataArtifactId = dataArtifactIds[0]!.startsWith('sha256:')
+        ? dataArtifactIds[0]!
+        : `sha256:${dataArtifactIds[0]!}`
+      const dataArtifact = this.getArtifact(project.project_id, dataArtifactId)
+      const budget = this.getBudget(project.project_id)
+      const boundaryPins = {
+        contract: {
+          ref: contract.contract_id,
+          sha256: `sha256:${sha256Hex(canonicalJson(contract as unknown as Record<string, unknown>))}`,
+        },
+        code: { ref: boundCodeSnapshotId, sha256: `sha256:${codeArtifact.sha256}` },
+        data: { ref: dataArtifactId, sha256: `sha256:${dataArtifact.sha256}` },
+        environment: { ref: runnerTarget.target_id, sha256: runnerTargetConfigHash(runnerTarget) },
+      }
+      const admission = evaluateResearchMethodology({
+        operation: 'run_admission',
+        project_id: project.project_id,
+        requested_at: nowIso(),
+        run_class: input.kind === 'formal' ? 'formal' : 'informal',
+        intent: runIntent,
+        protocol,
+        protocol_pin: requestedProtocolPin,
+        boundary: {
+          contract_approved: contract.status === 'approved' && contract.approval?.gate_decision_id !== undefined,
+          budget_available: budget.model_cost_usd <= project.constraints.max_model_cost_usd
+            && budget.gpu_hours <= project.constraints.max_gpu_hours
+            && project.status !== 'BLOCKED_GATE',
+          runner_allowed: runnerAssessment.observedReady,
+          network_policy_allowed: project.execution.network_policy === 'none'
+            || project.execution.network_policy === 'allowlist',
+          pins: boundaryPins,
+        },
+      })
+      if (admission.operation !== 'run_admission') {
+        throw new KernelError(500, 'protocol_admission_internal', 'methodology evaluator returned the wrong operation')
+      }
+      if (!admission.admitted) {
+        const first = admission.blockers[0] ?? 'protocol_admission_denied'
+        throw new KernelError(422, first === 'protocol_missing' ? 'protocol_required' : first,
+          `methodology run admission denied: ${admission.blockers.join(',')}`)
+      }
+    }
     const payload = {
       ...(input.payload ?? {}),
       // §12.5 (P0): the Runner validates the metrics FILE against the bound
@@ -5623,6 +6213,8 @@ export class ResearchKernel {
       runner_compute: runnerTarget.runtime?.compute ?? { mode: 'cpu' as const },
       ...(input.data_artifact_ids !== undefined ? { data_artifact_ids: input.data_artifact_ids } : {}),
       ...(input.output_contract !== undefined ? { output_contract: input.output_contract } : {}),
+      protocol_pin: requestedProtocolPin,
+      run_intent: runIntent,
     }
     const job: JobSpecBound = {
       job_id: randomId('job'),
@@ -5646,6 +6238,8 @@ export class ResearchKernel {
       // （secure kinds 由上方 payload 注入；其余 kind 为 null）。
       runner_profile_id: typeof payload.runner_profile_id === 'string' && payload.runner_profile_id !== '' ? payload.runner_profile_id : null,
       profile_config_hash: typeof payload.profile_config_hash === 'string' && payload.profile_config_hash !== '' ? payload.profile_config_hash : null,
+      protocol_pin: requestedProtocolPin,
+      run_intent: runIntent,
       // v2 shape (domain-model.md §9): durable submitter principal (server
       // resolves it from x-principal-id; internal submissions → NULL).
       created_by_principal_id: input.created_by_principal_id ?? null,
@@ -5795,6 +6389,305 @@ export class ResearchKernel {
     // this process) rides on the returned record; legacy rows fall back to
     // their payload.__lease_token.
     return jobFromRow(row, this.db, this.leaseTokens.get(jobId) ?? null)
+  }
+
+  /**
+   * Phase-3 research outcome closure. A caller may describe the scientific
+   * outcome of exactly one authoritative terminal Job, but cannot choose its
+   * execution state, intent, Protocol binding, classification, finding kind
+   * or authority. Those facts are re-derived here and the immutable envelope
+   * is appended atomically by MethodologyStore.
+   *
+   * This deliberately emits no Project transition, Gate/Release decision,
+   * Evidence acceptance or Claim mutation. The only derived relation is a
+   * proposal, which remains proposal-only until the existing authorities act.
+   */
+  recordResearchRunOutcome(rawInput: ResearchRunOutcomeWriteValue, classifiedByPrincipalId: string) {
+    const input = ResearchRunOutcomeWrite.parse(rawInput)
+    const requested = input.record
+    this.getProject(requested.project_id)
+    const existingOutcomes = this.methodology.listResearchRunOutcomes(requested.project_id).outcomes
+      .map(item => item.outcome)
+    const observation = getRunOutcomeObservation(
+      this.db,
+      requested.project_id,
+      requested.run_ref,
+      existingOutcomes,
+    )
+    if (observation === null) {
+      throw new KernelError(
+        404,
+        'research_run_observation_not_found',
+        `unclassified Runner observation ${requested.run_ref} not found in project ${requested.project_id}`,
+      )
+    }
+
+    let job: ReturnType<ResearchKernel['getJob']>
+    try {
+      job = this.getJob(observation.job_id)
+    } catch (error) {
+      if (error instanceof KernelError && error.status === 404) {
+        throw new KernelError(404, 'research_run_job_not_found', `terminal job ${observation.job_id} not found in project ${requested.project_id}`)
+      }
+      throw error
+    }
+    if (job.project_id !== requested.project_id) {
+      throw new KernelError(404, 'research_run_job_not_found', `terminal job ${observation.job_id} not found in project ${requested.project_id}`)
+    }
+    if (job.status !== 'succeeded' && job.status !== 'failed' && job.status !== 'cancelled') {
+      throw new KernelError(409, 'research_run_job_not_terminal', `job ${job.job_id} is ${job.status}; a research outcome requires a terminal Job`)
+    }
+
+    const run = this.getRun(requested.project_id, observation.run_id)
+    const manifest = job.run_manifest ?? undefined
+    if (run.job_id !== observation.job_id
+      || run.attempt_no !== observation.attempt_no
+      || job.attempts !== observation.attempt_no
+      || job.lease_generation !== observation.lease_generation
+      || canonicalManifestSha256(manifest) !== observation.manifest_sha256
+      || JSON.stringify(job.protocol_pin) !== JSON.stringify(observation.protocol_pin)
+      || job.run_intent !== observation.intent) {
+      throw new KernelError(
+        409,
+        'research_run_observation_stale',
+        `Runner observation ${observation.observation_id} no longer exactly matches its Job/run/attempt/lease/manifest/Protocol bindings`,
+      )
+    }
+
+    const record = ResearchRunRecord.parse({
+      ...requested,
+      job_execution: observation.job_execution,
+      intent: observation.intent,
+      protocol_pin: observation.protocol_pin,
+    })
+
+    if (observation.job_execution !== 'succeeded') {
+      const infrastructureFailure = observation.job_execution === 'timed_out'
+        || observation.failure_class === 'environment'
+        || observation.failure_class === 'resources'
+      const expectedValidity = infrastructureFailure ? 'infrastructure_failure' : 'invalid'
+      if (record.outcome !== 'inconclusive' || record.validity !== expectedValidity) {
+        throw new KernelError(
+          422,
+          'research_run_execution_classification_mismatch',
+          `terminal ${observation.job_execution} job must be recorded as inconclusive/${expectedValidity}`,
+        )
+      }
+    } else if (record.validity === 'infrastructure_failure') {
+      throw new KernelError(
+        422,
+        'research_run_execution_classification_mismatch',
+        'a succeeded Job cannot be classified as an infrastructure failure',
+      )
+    }
+
+    let analysisArtifact: ArtifactRecord | null = null
+    if (record.analysis_artifact_id !== null) {
+      try {
+        analysisArtifact = this.getArtifact(record.project_id, record.analysis_artifact_id)
+      } catch (error) {
+        if (error instanceof KernelError && error.status === 404) {
+          throw new KernelError(422, 'research_run_analysis_artifact_not_found', `analysis Artifact ${record.analysis_artifact_id} is not registered in project ${record.project_id}`)
+        }
+        throw error
+      }
+      if (analysisArtifact.kind !== 'analysis' || !this.cas.has(analysisArtifact.sha256)) {
+        throw new KernelError(422, 'research_run_analysis_artifact_invalid', `analysis Artifact ${record.analysis_artifact_id} is not a present analysis CAS object`)
+      }
+    }
+
+    const projectEvidence = this.listEvidence(record.project_id)
+    const evidence = record.evidence_refs.map(evidenceRef => {
+      const item = projectEvidence.find(candidate => candidate.evidence_id === evidenceRef)
+      if (item === undefined) {
+        throw new KernelError(422, 'research_run_evidence_not_found', `Evidence ${evidenceRef} is not registered in project ${record.project_id}`)
+      }
+      return item
+    })
+
+    const report = evaluateResearchMethodology({ operation: 'run_classification', record })
+    if (report.operation !== 'run_classification') {
+      throw new KernelError(500, 'research_run_classification_internal', 'methodology evaluator returned the wrong operation')
+    }
+    const classification = ResearchRunClassification.parse({
+      interpretation: report.interpretation,
+      negative_finding_eligible: report.negative_finding_eligible,
+      claim_authority: report.claim_authority,
+    })
+    const needsProposal = classification.negative_finding_eligible
+      || classification.interpretation === 'hypothesis_proposal'
+    if (needsProposal !== (input.claim_proposal !== null)) {
+      throw new KernelError(
+        422,
+        needsProposal ? 'research_run_claim_proposal_required' : 'research_run_claim_proposal_not_allowed',
+        needsProposal
+          ? `classification ${classification.interpretation} requires proposal-only Claim content`
+          : `classification ${classification.interpretation} cannot create a Claim proposal`,
+      )
+    }
+
+    if (classification.negative_finding_eligible) {
+      if (analysisArtifact === null || record.protocol_pin === null || evidence.length === 0) {
+        throw new KernelError(422, 'research_run_negative_finding_incomplete', 'negative finding requires a frozen Protocol, analysis Artifact and Evidence')
+      }
+      for (const item of evidence) {
+        const bindsJob = item.run_ids.includes(job.job_id)
+          || (job.run_id !== null && item.run_ids.includes(job.run_id))
+        if (!bindsJob || !item.artifact_refs.includes(analysisArtifact.artifact_id)) {
+          throw new KernelError(422, 'research_run_evidence_binding_mismatch', `Evidence ${item.evidence_id} is not exactly bound to Job ${job.job_id} and analysis Artifact ${analysisArtifact.artifact_id}`)
+        }
+      }
+    }
+
+    const proposal = input.claim_proposal === null ? null : ResearchClaimProposal.parse({
+      ...input.claim_proposal,
+      project_id: record.project_id,
+      run_ref: record.run_ref,
+      proposal_kind: classification.negative_finding_eligible ? 'negative_finding' : 'hypothesis',
+      statement: input.claim_proposal.statement,
+      analysis_artifact_id: record.analysis_artifact_id,
+      evidence_refs: classification.negative_finding_eligible ? record.evidence_refs : [],
+      status: 'proposed',
+      authority: 'proposal_only',
+      created_at: record.recorded_at,
+    })
+    const safeRunId = /^[a-z0-9_]+$/.test(record.run_ref)
+      ? record.run_ref
+      : createHash('sha256').update(record.run_ref).digest('hex').slice(0, 24)
+    const finding = classification.negative_finding_eligible
+      ? NegativeFinding.parse({
+          finding_id: `negative_finding_${safeRunId}`,
+          project_id: record.project_id,
+          run_ref: record.run_ref,
+          protocol_pin: record.protocol_pin,
+          outcome: 'negative',
+          validity: 'valid',
+          analysis_artifact_id: record.analysis_artifact_id,
+          evidence_refs: record.evidence_refs,
+          claim_proposal_id: proposal!.proposal_id,
+          created_at: record.recorded_at,
+        })
+      : null
+    const outcome = ResearchRunOutcome.parse({ run: record, classification, negative_finding: finding, claim_proposal: proposal })
+    return withTransaction(this.db, () => {
+      const receipt = this.methodology.recordResearchRunOutcome({ outcome, expected_revision: input.expected_revision })
+      if (receipt.replayed) return receipt
+
+      const classifiedEvent = this.emit(record.project_id, 'research.run.classified', {
+        project_id: record.project_id,
+        run_ref: record.run_ref,
+        observation_id: observation.observation_id,
+        classified_by_principal_id: classifiedByPrincipalId,
+        outcome: record.outcome,
+        validity: record.validity,
+        interpretation: classification.interpretation,
+        valid_cycle: record.job_execution === 'succeeded' && record.validity === 'valid',
+        run_stream_revision: receipt.run_stream_revision,
+      })
+      const synthesis = this.evaluateSynthesisRequest(record.project_id, record.run_ref, classifiedEvent.event_seq ?? 0,
+        classification.negative_finding_eligible)
+      if (synthesis !== null) this.emit(record.project_id, 'research.synthesis.requested', synthesis)
+      return receipt
+    })
+  }
+
+  /** Strict execution-only observations, including whether each has a
+   * matching immutable scientific classification. Durable outbox rows are
+   * the source; a process restart cannot lose pending work. */
+  listRunOutcomeObservations(projectId: string) {
+    this.getProject(projectId)
+    return listRunOutcomeObservationLedger(
+      this.db,
+      projectId,
+      this.methodology.listResearchRunOutcomes(projectId).outcomes.map(item => item.outcome),
+    )
+  }
+
+  listSynthesisRecordRequests(projectId: string) {
+    this.getProject(projectId)
+    return listSynthesisRecordRequests(
+      this.db,
+      projectId,
+      this.methodology.listResearchSyntheses(projectId).records.map(item => item.record.window),
+    )
+  }
+
+  /** Invoke the existing pure synthesis trigger policy after one immutable
+   * classification. A trigger creates only a durable request/NextAction; it
+   * never creates synthesis content or mutates Project/Gate/Release state. */
+  private evaluateSynthesisRequest(
+    projectId: string,
+    triggerRunRef: string,
+    currentEventSeq: number,
+    majorCounterevidence: boolean,
+  ) {
+    const project = this.getProject(projectId)
+    const syntheses = this.methodology.listResearchSyntheses(projectId).records.map(item => item.record)
+    const latest = syntheses.at(-1)
+    const checkpoint = latest === undefined
+      ? { event_seq: 0, project_revision: 0, next_action_revision: 0 }
+      : {
+          event_seq: latest.window.to_event_seq,
+          project_revision: latest.snapshot_pin.project_revision,
+          next_action_revision: latest.snapshot_pin.next_action_revision,
+        }
+    const classified = this.listEvents(projectId)
+      .filter(event => event.kind === 'research.run.classified'
+        && (event.event_seq ?? 0) > checkpoint.event_seq
+        && event.payload.valid_cycle === true)
+    const budget = this.getBudget(projectId)
+    const remainingRatio = (used: number, limit: number): number => limit <= 0
+      ? (used <= 0 ? 1 : 0)
+      : Math.max(0, Math.min(1, (limit - used) / limit))
+    const budgetRemainingRatio = Math.min(
+      remainingRatio(budget.model_cost_usd, project.constraints.max_model_cost_usd),
+      remainingRatio(budget.gpu_hours, project.constraints.max_gpu_hours),
+    )
+    const report = evaluateResearchMethodology({
+      operation: 'synthesis_trigger',
+      project_id: projectId,
+      checkpoint,
+      current: {
+        event_seq: currentEventSeq,
+        project_revision: project.revision,
+        next_action_revision: project.revision,
+        valid_cycles_since_checkpoint: classified.length,
+        stagnant_cycles: 0,
+        budget_remaining_ratio: budgetRemainingRatio,
+      },
+      policy: {
+        // The first complete classified cycle closes the smallest working
+        // inner→outer loop. No Settings key exists until a real policy
+        // consumer and durable policy contract are introduced together.
+        valid_cycles_threshold: 1,
+        stagnation_cycles_threshold: 3,
+        budget_remaining_ratio_lte: 0.1,
+        enabled_events: ['major_counterevidence', 'contract_stopping_condition', 'budget_threshold', 'corpus_revision_changed', 'review_blocked'],
+      },
+      events: majorCounterevidence ? [{
+        event_id: `counterevidence_${triggerRunRef}`,
+        project_id: projectId,
+        event_seq: currentEventSeq,
+        kind: 'major_counterevidence',
+      }] : [],
+      human_requested: false,
+    })
+    if (report.operation !== 'synthesis_trigger' || !report.triggered) return null
+    return buildSynthesisRecordRequest({
+      project_id: projectId,
+      trigger_run_ref: triggerRunRef,
+      source_run_refs: classified.map(event => {
+        const payload = event.payload as { run_ref?: unknown }
+        if (typeof payload.run_ref !== 'string' || payload.run_ref === '') {
+          throw new KernelError(500, 'synthesis_classified_event_invalid', 'classified run event is missing run_ref')
+        }
+        return payload.run_ref
+      }),
+      reasons: report.reasons,
+      window: report.window,
+      snapshot_pin: report.snapshot_pin,
+      requested_at: nowIso(),
+    })
   }
 
   listJobs(projectId: string, status?: JobStatus): Array<JobSpecBound & { run_id: string | null }> {
@@ -6120,6 +7013,26 @@ export class ResearchKernel {
         manifestRow !== undefined ? JSON.stringify(manifestRow) : null,
         signatureStatus, now, input.job_id, job.attempts,
       )
+      if (observesResearchOutcome(job.kind)) {
+        if (job.run_id === null || job.lease_generation === null) {
+          throw new KernelError(409, 'research_run_attempt_missing', `job ${job.job_id} has no exact claimed run/lease identity`)
+        }
+        const timedOut = input.status === 'failed' && input.run_manifest?.timed_out === true
+        const observation = buildRunOutcomeObservation({
+          project_id: job.project_id,
+          job_id: job.job_id,
+          run_id: job.run_id,
+          attempt_no: job.attempts,
+          lease_generation: job.lease_generation,
+          job_execution: input.status === 'failed' && timedOut ? 'timed_out' : input.status,
+          failure_class: input.failure_class ?? null,
+          intent: job.run_intent,
+          protocol_pin: job.protocol_pin,
+          manifest: input.run_manifest,
+          observed_at: now,
+        })
+        this.emit(job.project_id, 'research.run.unclassified', observation)
+      }
       const jobRecord = this.getJob(input.job_id)
       this.emit(job.project_id, 'job.updated', {
         job_id: jobRecord.job_id, status: jobRecord.status, failure_class: jobRecord.failure_class ?? undefined,
@@ -6263,7 +7176,7 @@ export class ResearchKernel {
     } catch {
       throw new KernelError(422, 'manifest_key_unknown', `runner key ${runnerKeyId} is not a valid public key`)
     }
-    const valid = verify(null, Buffer.from(canonicalJson(signedPayload), 'utf8'), publicKey, signatureBytes)
+    const valid = verify(null, Buffer.from(canonicalRunManifestJson(signedPayload), 'utf8'), publicKey, signatureBytes)
     if (!valid) {
       throw new KernelError(422, 'manifest_signature_invalid', `run manifest signature verification failed for key ${runnerKeyId}`)
     }
@@ -7928,6 +8841,292 @@ export class ResearchKernel {
     return { checks, pass }
   }
 
+  /** Current immutable manuscript identity used by every writing diagnostic/proposal. */
+  currentWritingInputPin(projectId: string, documentId: string): WritingInputPin {
+    return this.writingMethodology.currentInputPin(projectId, documentId)
+  }
+
+  /** Latest compile/preview record is the generation fence; null means no build exists yet. */
+  currentWritingCompilePin(projectId: string, documentId: string): WritingCompilePin {
+    return this.writingMethodology.currentCompilePin(projectId, documentId)
+  }
+
+  private assertWritingInputPin(expected: WritingInputPin): WritingInputPin {
+    return this.writingMethodology.assertInputPin(expected)
+  }
+
+  private assertWritingCompilePin(projectId: string, documentId: string, expected: WritingCompilePin): WritingCompilePin {
+    return this.writingMethodology.assertCompilePin(projectId, documentId, expected)
+  }
+
+  /**
+   * Activate immutable Knowledge from untrusted intent. All authority facts
+   * are recomputed inside the Kernel transaction; no route/tool caller can
+   * choose session, phase, NextAction or any capability set.
+   */
+  activateKnowledgePackageFromAuthority(input: {
+    project_id: string
+    session_id: string
+    principal_id: string
+  } & import('@dsh-scholar/research-schemas').KnowledgeActivationIntent): ReturnType<MethodologyStore['activateKnowledgePackage']> {
+    return this.knowledgeMethodology.activate(input)
+  }
+
+  /** Human deactivation is immutable; telemetry contains no activation id. */
+  deactivateKnowledgePackage(
+    input: Parameters<MethodologyStore['deactivateKnowledgePackage']>[0],
+  ): ReturnType<MethodologyStore['deactivateKnowledgePackage']> {
+    return this.knowledgeMethodology.deactivate(input)
+  }
+
+  /** Exact-context Knowledge delivery plus closed-enum suppression metrics. */
+  resolveKnowledgeDelivery(
+    context: Parameters<MethodologyStore['resolveKnowledgeDelivery']>[0],
+  ): ReturnType<MethodologyStore['resolveKnowledgeDelivery']> {
+    return this.knowledgeMethodology.resolveDelivery(context)
+  }
+
+  /** Persist a Synthesis and account for the concrete trigger that produced it. */
+  recordResearchSynthesis(
+    input: Parameters<MethodologyStore['recordResearchSynthesis']>[0] & { request_id: string },
+  ): ReturnType<MethodologyStore['recordResearchSynthesis']> {
+    return this.synthesisMethodology.record(input)
+  }
+
+  recordMethodTriad(input: MethodTriadWrite) {
+    return this.writingMethodology.recordMethodTriad(input)
+  }
+
+  recordSectionGuideActivation(input: SectionGuideActivationWrite) {
+    return this.writingMethodology.recordSectionGuide(input)
+  }
+
+  recordWritingReviewerPanel(input: WritingReviewerPanelWrite) {
+    return this.writingMethodology.recordReviewerPanel(input)
+  }
+
+  recordWritingPatchProposal(input: WritingPatchProposalWrite) {
+    return this.writingMethodology.recordPatchProposal(input)
+  }
+
+  applyWritingPatch(
+    projectId: string,
+    proposalId: string,
+    input: WritingPatchApplyInput,
+    verifiedPrincipal: import('@dsh-scholar/research-schemas').HumanWritingPrincipal,
+  ) {
+    const rolloutPin = this.rollout.projectPin(projectId)
+    const startedAt = performance.now()
+    try {
+      const applied = this.applyWritingPatchCore(projectId, proposalId, input, verifiedPrincipal)
+      this.methodologyTelemetry.writingPatch({
+        mode: rolloutPin.mode, phase: 'apply', outcome: 'success', duration_ms: performance.now() - startedAt,
+      })
+      return applied
+    } catch (error) {
+      this.methodologyTelemetry.writingPatch({
+        mode: rolloutPin.mode, phase: 'apply', outcome: 'failure', duration_ms: performance.now() - startedAt,
+      })
+      throw error
+    }
+  }
+
+  private applyWritingPatchCore(
+    projectId: string,
+    proposalId: string,
+    input: WritingPatchApplyInput,
+    verifiedPrincipal: import('@dsh-scholar/research-schemas').HumanWritingPrincipal,
+  ) {
+    const parsed = WritingPatchApplyInput.parse(input)
+    const actor = HumanWritingPrincipal.parse(verifiedPrincipal)
+    const role = this.getProjectMemberRole(projectId, actor.principal_id)
+    if (role !== 'pi' && role !== 'researcher') {
+      throw new KernelError(403, 'writing_patch_human_required', 'only a project Human Writer or PI may apply a reviewer patch')
+    }
+    const proposal = this.writingReview.getPatchProposal(projectId, proposalId).record
+    const pendingIntentRow = this.db.prepare(
+      "SELECT intent_json FROM writing_patch_intents WHERE project_id = ? AND proposal_id = ? AND state = 'pending'",
+    ).get(projectId, proposalId) as { intent_json: string } | undefined
+    if (pendingIntentRow !== undefined) {
+      this.reconcileWritingPatchIntent(WritingPatchIntentSchema.parse(JSON.parse(pendingIntentRow.intent_json)))
+    }
+    const applications = this.writingReview.listPatchApplications(projectId)
+    const prior = applications.records.find(item => item.record.proposal_id === proposalId)
+    if (prior !== undefined) {
+      const exactReplay = parsed.expected_revision === prior.recorded_revision - 1
+        && JSON.stringify(actor) === JSON.stringify(prior.record.actor)
+        && parsed.expected_document_revision === proposal.input_pin.document_revision
+        && parsed.expected_tex_sha256 === proposal.input_pin.tex_sha256
+        && parsed.expected_claim_evidence_sha256 === proposal.input_pin.claim_evidence_sha256
+        && JSON.stringify(parsed.expected_compile_pin) === JSON.stringify(proposal.compile_pin)
+      if (!exactReplay) {
+        throw new KernelError(409, 'writing_patch_replay_conflict', `writing patch ${proposalId} was already applied with different authority or pins`)
+      }
+      return { ...prior, stream_revision: applications.stream_revision }
+    }
+    this.writingReview.assertRevision(projectId, parsed.expected_revision)
+    if (proposal.input_pin.document_revision !== parsed.expected_document_revision
+      || proposal.input_pin.tex_sha256 !== parsed.expected_tex_sha256
+      || proposal.input_pin.claim_evidence_sha256 !== parsed.expected_claim_evidence_sha256) {
+      throw new KernelError(409, 'writing_patch_input_mismatch', 'apply request does not repeat the exact proposal input pin')
+    }
+    const currentPin = this.assertWritingInputPin(proposal.input_pin)
+    if (JSON.stringify(parsed.expected_compile_pin) !== JSON.stringify(proposal.compile_pin)) {
+      throw new KernelError(409, 'writing_compile_generation_conflict', 'apply request does not repeat the proposal compile generation')
+    }
+    const compilePin = this.assertWritingCompilePin(projectId, proposal.input_pin.document_id, proposal.compile_pin)
+    const currentFile = this.tex.readFile(proposal.input_pin.document_id, proposal.file_path)
+    if (currentFile === null || writingFileSha256(currentFile.content) !== proposal.expected_file_sha256) {
+      throw new KernelError(409, 'writing_patch_file_stale', 'patch proposal base file changed before apply')
+    }
+
+    const applicationId = randomId('writing_apply')
+    const appliedAt = nowIso()
+    const intent: WritingPatchIntent = WritingPatchIntentSchema.parse({
+      application_id: applicationId,
+      proposal_id: proposalId,
+      project_id: projectId,
+      expected_revision: parsed.expected_revision,
+      expected_file_version: currentFile.version,
+      apply_input: parsed,
+      actor,
+      applied_at: appliedAt,
+    })
+    // Commit intent before touching TeX. The proposal already durably owns
+    // the replacement bytes/hash, so the journal needs only immutable ids,
+    // fences and authority needed to replay it.
+    this.db.prepare(`INSERT INTO writing_patch_intents
+      (application_id, proposal_id, project_id, intent_json, state, created_at, completed_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, NULL)`)
+      .run(applicationId, proposalId, projectId, JSON.stringify(intent), appliedAt)
+    const saved = this.texWriteFile(
+      proposal.input_pin.document_id,
+      proposal.file_path,
+      proposal.replacement_content,
+      currentFile.version,
+      { request_id: applicationId, session_id: actor.session_id ?? undefined },
+    )
+    this.texSupersedePreviews(proposal.input_pin.document_id, applicationId)
+    const pending = this.texRequestPreview(proposal.input_pin.document_id)
+    const outputPin = this.currentWritingInputPin(projectId, proposal.input_pin.document_id)
+    const application: WritingPatchApplication = {
+      application_id: applicationId,
+      proposal_id: proposalId,
+      project_id: projectId,
+      actor,
+      input_pin: currentPin,
+      output_pin: outputPin,
+      compile_pin: compilePin,
+      file_path: proposal.file_path,
+      file_version: saved.version,
+      preview_requested_revision: pending.revision,
+      applied_at: appliedAt,
+    }
+    return withTransaction(this.db, () => {
+      const recorded = this.writingReview.recordPatchApplication(application, parsed.expected_revision)
+      this.db.prepare("UPDATE writing_patch_intents SET state = 'completed', completed_at = ? WHERE application_id = ?")
+        .run(nowIso(), applicationId)
+      return recorded
+    })
+  }
+
+  /** Complete one cross-connection patch intent. The current TeX bytes must
+   * be exactly the old proposal base or the exact replacement; any third
+   * state is ambiguous and startup fails loudly instead of inventing a
+   * receipt. */
+  private reconcileWritingPatchIntent(intent: WritingPatchIntent): void {
+    const prior = this.writingReview.listPatchApplications(intent.project_id).records
+      .find(item => item.record.proposal_id === intent.proposal_id)
+    if (prior !== undefined) {
+      if (prior.record.application_id !== intent.application_id) {
+        throw new KernelError(409, 'writing_patch_recovery_conflict',
+          `Writing patch ${intent.proposal_id} has a receipt for another application`)
+      }
+      this.db.prepare("UPDATE writing_patch_intents SET state = 'completed', completed_at = COALESCE(completed_at, ?) WHERE application_id = ?")
+        .run(nowIso(), intent.application_id)
+      return
+    }
+
+    const proposal = this.writingReview.getPatchProposal(intent.project_id, intent.proposal_id).record
+    const currentFile = this.tex.readFile(proposal.input_pin.document_id, proposal.file_path)
+    if (currentFile === null) {
+      throw new KernelError(500, 'writing_patch_recovery_conflict',
+        `Writing patch ${intent.proposal_id} target file is missing during recovery`)
+    }
+    const currentHash = writingFileSha256(currentFile.content)
+    let savedVersion: number
+    if (currentHash === proposal.expected_file_sha256 && currentFile.version === intent.expected_file_version) {
+      const saved = this.texWriteFile(
+        proposal.input_pin.document_id,
+        proposal.file_path,
+        proposal.replacement_content,
+        intent.expected_file_version,
+        { request_id: intent.application_id, session_id: intent.actor.session_id ?? undefined },
+      )
+      savedVersion = saved.version
+    } else if (currentHash === proposal.replacement_sha256
+      && currentFile.version === intent.expected_file_version + 1) {
+      savedVersion = currentFile.version
+    } else {
+      throw new KernelError(500, 'writing_patch_recovery_conflict',
+        `Writing patch ${intent.proposal_id} target is neither its journaled base nor replacement`)
+    }
+
+    this.texSupersedePreviews(proposal.input_pin.document_id, intent.application_id)
+    const pending = this.texRequestPreview(proposal.input_pin.document_id)
+    const outputPin = this.currentWritingInputPin(intent.project_id, proposal.input_pin.document_id)
+    const application: WritingPatchApplication = {
+      application_id: intent.application_id,
+      proposal_id: intent.proposal_id,
+      project_id: intent.project_id,
+      actor: intent.actor,
+      input_pin: proposal.input_pin,
+      output_pin: outputPin,
+      compile_pin: proposal.compile_pin,
+      file_path: proposal.file_path,
+      file_version: savedVersion,
+      preview_requested_revision: pending.revision,
+      applied_at: intent.applied_at,
+    }
+    withTransaction(this.db, () => {
+      this.writingReview.recordPatchApplication(application, intent.expected_revision)
+      this.db.prepare("UPDATE writing_patch_intents SET state = 'completed', completed_at = ? WHERE application_id = ?")
+        .run(nowIso(), intent.application_id)
+    })
+  }
+
+  private recoverWritingPatchIntents(): void {
+    const rows = this.db.prepare(
+      "SELECT intent_json FROM writing_patch_intents WHERE state = 'pending' ORDER BY created_at, application_id",
+    ).all() as unknown as Array<{ intent_json: string }>
+    for (const row of rows) {
+      const intent = WritingPatchIntentSchema.parse(JSON.parse(row.intent_json))
+      const rolloutPin = this.rollout.projectPin(intent.project_id)
+      const startedAt = performance.now()
+      try {
+        this.reconcileWritingPatchIntent(intent)
+        this.methodologyTelemetry.writingPatch({
+          mode: rolloutPin.mode, phase: 'recovery', outcome: 'success', duration_ms: performance.now() - startedAt,
+        })
+      } catch (error) {
+        this.methodologyTelemetry.writingPatch({
+          mode: rolloutPin.mode, phase: 'recovery', outcome: 'failure', duration_ms: performance.now() - startedAt,
+        })
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Produce an immutable writing-assurance audit from the existing
+   * deterministic manuscript reviewer, optionally joined with a verified
+   * read-only StageSubagent receipt. This method deliberately has no Gate,
+   * Release, manuscript, or TeX mutation capability.
+   */
+  runWritingAssurance(input: WritingAssuranceExecutionInput): ReturnType<AssuranceStore['record']> {
+    return this.writingMethodology.runAssurance(input)
+  }
+
   /** Private Release Bundle: everything a clean-room rerun needs (design §4.8.6). */
   releaseBundle(projectId: string): {
     bundle_id: string
@@ -8592,6 +9791,8 @@ export class ResearchKernel {
     const runnerEnvironmentReady = profile !== null
       && target !== undefined
       && assessRunnerEnvironment(profile, target, ref => this.secretRefAvailable(ref)).observedReady
+    const runOutcomeObservations = this.listRunOutcomeObservations(projectId)
+    const synthesisRequests = this.listSynthesisRecordRequests(projectId)
     const nextActionsV2 = nextActionProjection({
       project,
       gates: pendingGates,
@@ -8617,6 +9818,24 @@ export class ResearchKernel {
       // in status=pass; fail/inconclusive/blocked reports project
       // reproduction_retry_or_repair (never done).
       reproductions: this.reproductionProjectionFor(projectId),
+      // METH-L09: fresh Direction guidance is an overlay of the existing
+      // append-only Methodology stream, never a second Project state machine.
+      methodology: {
+        syntheses: this.methodology.listResearchSyntheses(projectId).records.map(item => item.record),
+        proposals: this.methodology.listDirectionProposals(projectId).records.map(item => item.record),
+        adoptions: this.methodology.listDirectionAdoptions(projectId).records.map(item => item.record),
+        direction_gate_approvals: this.listDecisions(projectId)
+          .filter(decision => decision.gate_type === 'direction')
+          .map(decision => ({
+            decision_id: decision.decision_id,
+            gate_id: decision.gate_id,
+            project_id: decision.project_id,
+            decision: decision.decision,
+            gate: this.getGate(decision.gate_id),
+          })),
+      },
+      run_outcome_observations: runOutcomeObservations.pending,
+      synthesis_requests: synthesisRequests.pending,
     })
     const nextActions = legacyNextActionStrings(nextActionsV2)
     return {
@@ -8644,13 +9863,17 @@ function collectManifestRefs(manifest: Record<string, unknown>): string[] {
 }
 
 /**
- * §12.7: canonical JSON used for manifest hashing/signing — top-level keys
- * sorted, no whitespace. This MUST match the runner's canonicalization
- * (workers/runner-gateway `canonicalJson`/`signManifest`) so signatures
- * verify end-to-end: `JSON.stringify(obj, sortedTopLevelKeys)`.
+ * Stable top-level serialization retained for existing non-Manifest hashes
+ * such as approved Contract pins. RunManifest authority uses the dedicated
+ * recursive helper below and must not call this function.
  */
 export function canonicalJson(value: Record<string, unknown>): string {
   return JSON.stringify(value, Object.keys(value).sort())
+}
+
+/** Runner signing/Kernel verification bytes shared across every JSON depth. */
+function canonicalRunManifestJson(value: Record<string, unknown>): string {
+  return canonicalJsonDeep(value)
 }
 
 function sha256Hex(data: string): string {
@@ -8665,7 +9888,7 @@ function sha256Hex(data: string): string {
  */
 function manifestHashPayload(manifest: Record<string, unknown>): string {
   const { signature: _signature, runner_key_id: _keyId, payload_sha256: _payloadHash, ...payload } = manifest
-  return canonicalJson(payload)
+  return canonicalRunManifestJson(payload)
 }
 
 /** Manifest minus its `signature` field + the base64 signature bytes (§12.7). */

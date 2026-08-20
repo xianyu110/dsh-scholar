@@ -25,6 +25,26 @@ export const RESEARCH_ROLES: readonly ResearchRole[] = [
   'operator', 'statistician', 'writer', 'reviewer', 'auditor',
 ]
 
+/** Session-bound methodology entry points callable by the root DSH
+ * conversation. They cannot name an arbitrary project; each resolves the
+ * caller's persisted session link before any read or write. */
+export const DSH_SESSION_METHODOLOGY_TOOLS = [
+  'research_methodology_status',
+  'research_assurance_run',
+  'research_protocol_record',
+  'research_synthesis_record',
+  'research_writing_review_record',
+  'research_knowledge_activate',
+  'research_knowledge_deactivate',
+] as const
+
+/** Tools that require an explicit DSH Host confirmation before execution. */
+export const RESEARCH_HUMAN_CONFIRMATION_TOOLS = [
+  'research_knowledge_activate',
+  'research_knowledge_deactivate',
+  'research_assurance_run',
+] as const
+
 /** Canonical research tool names. Obsolete aliases are intentionally absent. */
 export const RESEARCH_TOOLS = [
   // Bounded native-DSH conversation façade. Public to every DSH role, but it
@@ -35,6 +55,7 @@ export const RESEARCH_TOOLS = [
   'research_gate_request',
   'research_budget',
   'research_status',
+  ...DSH_SESSION_METHODOLOGY_TOOLS,
   'research_panel',
   'literature_search',
   'paper_resolve',
@@ -71,23 +92,23 @@ export const RESEARCH_TOOLS = [
 
 /** Tool surface per role (design §4.1 table) — canonical names only. */
 export const ROLE_TOOLS: Record<ResearchRole, readonly string[]> = {
-  none: ['dsh_scholar'],
-  director: ['research_project', 'research_phase', 'research_gate_request', 'research_budget', 'research_status', 'research_panel', 'release_bundle_request'],
+  none: ['dsh_scholar', ...DSH_SESSION_METHODOLOGY_TOOLS],
+  director: ['research_project', 'research_phase', 'research_gate_request', 'research_budget', 'research_status', 'research_panel', 'release_bundle_request', ...DSH_SESSION_METHODOLOGY_TOOLS],
   // ONBOARD-01 (research-onboarding.md §2): the researcher (scholar) role
   // prepares intakes — begin/stage/scan/answers/propose. There is NO adopt
   // tool: the Agent has no accept; adoption is the Human PI's, via the
   // authenticated BFF/UI (researcher/viewer/auditor project members are
   // likewise 403 on the kernel's adopt route).
-  scholar: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status', 'research_intake_begin', 'research_intake_stage', 'research_intake_scan', 'research_intake_answers', 'research_intake_propose'],
+  scholar: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status', 'research_methodology_status', 'research_synthesis_record', 'research_intake_begin', 'research_intake_stage', 'research_intake_scan', 'research_intake_answers', 'research_intake_propose'],
   curator: ['literature_search', 'paper_resolve', 'corpus_snapshot', 'passage_lookup', 'research_status'],
   'idea-panel': ['idea_create', 'idea_compare', 'novelty_audit', 'literature_search', 'research_status'],
-  architect: ['experiment_register', 'research_status', 'experiment_status'],
+  architect: ['experiment_register', 'research_status', 'research_methodology_status', 'research_protocol_record', 'experiment_status'],
   engineer: ['workspace_snapshot', 'patch_apply', 'baseline_prepare', 'baseline_verify', 'test_run', 'research_status', 'experiment_status'],
   operator: ['experiment_submit', 'experiment_status', 'experiment_cancel', 'research_status'],
   statistician: ['evidence_note_create', 'claim_create', 'claim_verify_request', 'analysis_request', 'research_status', 'experiment_status'],
-  writer: ['manuscript_build', 'research_status'],
-  reviewer: ['manuscript_review', 'claim_verify_request', 'research_status'],
-  auditor: ['claim_verify_request', 'manuscript_review', 'research_status'],
+  writer: ['manuscript_build', 'research_status', 'research_methodology_status', 'research_writing_review_record'],
+  reviewer: ['manuscript_review', 'claim_verify_request', 'research_status', 'research_methodology_status', 'research_writing_review_record'],
+  auditor: ['claim_verify_request', 'manuscript_review', 'research_status', 'research_methodology_status', 'research_writing_review_record'],
 }
 
 /** v2 §3.1: unknown/unregistered agents default to `none` (deny), NOT director. */

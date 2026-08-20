@@ -57,6 +57,7 @@ const host = (cli['kernel.host'] as string | undefined) ?? '127.0.0.1'
 const token = (cli['kernel.token'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_TOKEN
 const serviceToken = (cli['kernel.service_token'] as string | undefined) ?? process.env.DSH_SCHOLAR_SERVICE_TOKEN
 const dshPluginToken = process.env.DSH_SCHOLAR_DSH_PLUGIN_TOKEN
+const orchestratorToken = process.env.DSH_SCHOLAR_ORCHESTRATOR_TOKEN
 const endpointFile = (cli['kernel.endpoint_file'] as string | undefined) ?? process.env.DSH_SCHOLAR_KERNEL_ENDPOINT_FILE
 
 // CONFIG-01: the deployment's effective config is validated through the
@@ -113,6 +114,7 @@ const kernel = new ResearchKernel({
   secretRoot,
   serviceToken,
   dshPluginToken,
+  orchestratorToken,
   // OCR-CONFIG-01: the first built-in provider is MinerU's official Open API.
   // Other DNS providers remain fail-closed unless a future instance policy
   // explicitly allowlists them; loopback remains disabled here.

@@ -83,7 +83,7 @@ flowchart LR
 
 ## 4. Gate 与 Decision
 
-Gate 类型：scope、idea、contract、budget、release。
+Gate 类型：scope、idea、contract、budget、release、direction。前五类控制既有 Project/Governance 状态边界；`direction` 是 semantic-only Gate，不直接推进 Project 状态，其 strict payload 只为 Direction adoption 绑定 proposal、source synthesis 与 direction。
 
 ~~~yaml
 gate_id: gate_xxx
@@ -313,7 +313,9 @@ NextAction 只从 Project/Intake 状态、pending Gate、Job/Build 和 unresolve
 
 SURVEYING 的 Idea 子流程按权威数据细分：没有 proposed IdeaCard 时为 Agent `idea_generate`；已有候选但尚未选择时为 Human `idea_select`，refs 列出候选 idea，不能再次误报“需要生成”。选择操作完成真实 counter-search NoveltyAudit 后，由 Kernel 原子写入 audit、推进到 IDEATING 并创建 payload 绑定所选 idea 的 pending Gate。IDEATING 只有在 pending Idea Gate 存在时才投影 `idea_gate_approve`；禁止 orchestrator 预先创建 payload-less Idea Gate。
 
-`survey_run` 不是 Runner Job：它由当前项目 Chat 的 `/survey <query>` 驱动 connector 并冻结 Corpus Snapshot，因此 route 必须是 `chat`，不能把用户导航到没有 Job 的空 Runs 列表。浏览器 CTA 只预填由 Brief problem 得出的 slash command，必须由用户确认发送，不能因打开卡片自动产生外部检索副作用。SCOPED 项目第一次成功冻结 Corpus Snapshot 时，snapshot、`SCOPED→SURVEYING` 与对应 Outbox 必须在同一事务提交；随后投影主动作变为 `idea_generate`，不能继续重复显示 `survey_run`。其他状态补充/重做 Corpus Snapshot 不擅自改变阶段。
+没有 proposed IdeaCard 并不足以让 `idea_generate` ready：还必须存在同项目、frozen、source complete 且 `papers.length>0` 的 Corpus Snapshot，动作 refs 固定该 snapshot。缺少时 `idea_generate` blocked (`frozen_nonempty_corpus_snapshot`)，并同时投影 ready `survey_run` 作为修复入口，保持非终态进展不变量。
+
+`survey_run` 不是 Runner Job：它由当前项目 Chat 的 `/survey <query>` 驱动 connector 并冻结 Corpus Snapshot，因此 route 必须是 `chat`，不能把用户导航到没有 Job 的空 Runs 列表。浏览器 CTA 只预填由 Brief problem 得出的 slash command，必须由用户确认发送，不能因打开卡片自动产生外部检索副作用。SCOPED 项目第一次成功冻结 Corpus Snapshot 时，snapshot、`SCOPED→SURVEYING` 与对应 Outbox 必须在同一事务提交；随后只有 complete/frozen/non-empty snapshot 才把 `idea_generate` 置为 ready；空或未完成 snapshot 必须继续给出 `survey_run` 修复动作。其他状态补充/重做 Corpus Snapshot 不擅自改变阶段。
 
 Project `status` 是研究阶段标记，不是活动任务计数。首个冻结快照完成后的 `SURVEYING` 表示“调研语料已就绪，等待或正在执行 `idea_generate`”，不能翻译成暗示 connector 仍在运行的进行时。Runs 只投影持久实验 Job/Run；`SURVEYING + frozen Corpus + jobs=[]` 是合法组合，UI 必须明示“调研已完成、尚未创建实验运行”并导航到 Overview 的权威 NextAction，不得伪造 Job/Run 或用 Runs 计数推断 connector 是否活动。若未来 connector 改为长时任务，必须引入独立的 ConnectorActivity/Action 投影，仍不能冒充实验 Run。
 
@@ -350,3 +352,39 @@ Natural turn 只可在当前 Kernel projection 声明的 route/capability 内自
 事件包含 event_id、project_id、kind、source、payload、created_at、delivered_at。业务事务和对应事件原子提交。消费是 at-least-once，消费者按 event_id 去重。
 
 事件族：project.*、gate.*、artifact.*、job.*、terminal.*、corpus.*、idea.*、contract.*、evidence.*、claim.*、manuscript.*、tex.*、budget.*、policy.*、intake.*、adoption.*、session.*。DSH SessionEvent 可承载展示和关联事件，但 Kernel Outbox 始终是科研业务审计权威。trajectory.* 是可重建投影通知，不能反向替代对应业务事件。
+
+## 18. Methodology 与 Knowledge 对象
+
+### 18.1 AssuranceAudit
+
+AssuranceAudit 用三条独立轴描述审查：execution=`queued|running|succeeded|failed|cancelled|timed_out`，verdict=`PASS|WARN|FAIL|NOT_APPLICABLE|BLOCKED|ERROR`，acceptance=`pending|provisional|accepted|rejected|stale`。它必须绑定 project、audit kind、target refs、不可变 findings Artifact、input SHA-256 pins、assurance level 和 reviewer independence。
+
+`NOT_APPLICABLE` 是存在且新鲜的正式 verdict；missing Audit 不是 N/A。input pin 变化只把 effective acceptance 变成 stale，不修改旧 Audit。semantic Audit 的 deterministic reviewer 非法；same-model/same-family 最多 provisional，submission 级 accepted 需要 cross-family 或 human。Assurance acceptance 不替代 Gate Decision。
+
+### 18.2 ProtocolRevision 与研究循环
+
+ProtocolRevision 在正式/confirmatory Run 前冻结 hypothesis、prediction、variables、metrics、stopping conditions 和 Contract/Code/Data/Environment pins。当前 strict enum 为 Run intent=`exploratory|confirmatory`、outcome=`positive|negative|mixed|inconclusive`、validity=`valid|invalid|infrastructure_failure|integrity_blocked`；三者与 Job execution 正交。negative scientific result 不是 Job failure，infrastructure failure 不能制造 NegativeFinding。
+
+`RunOutcomeObservation` 是 Kernel 从 terminal Job/Run 派生的 immutable execution fact，不是科学结论。它固定 project/job/run、attempt、lease generation、manifest hash、Protocol pin、intent、execution/failure class，并作为 append-only outbox event 与 Job/Run completion 原子提交。`ResearchRunClassificationWriteRecord` 只允许授权调用者提供 scientific outcome/validity、analysis Artifact 与 Evidence refs；Kernel 从 observation 反查其余字段并记录分类 principal。未分类观察投影 `run_outcome_classify`，同一 run 只能消费一次，stale binding、late attempt 和冲突重放 fail closed。
+
+`SynthesisRecordRequest` 是确定性 trigger 产生的 fan-in 请求，不是 `ResearchSynthesis` 内容。它固定 request id、trigger run、fan-in 窗口内完整且唯一的 `source_run_refs`、Project revision 与 NextAction revision；分类、classified event 和 request 原子提交。pending request 投影 `synthesis_record`。ResearchSynthesis 写入必须显式携带一个仍 pending 的 request id，并逐项匹配 project、event window、snapshot pin、当前 Project/NextAction revision 与完整 source Run 集；unknown/stale/substituted binding 零写。成功后该窗口才算消费。该请求不修改 Project phase、Gate、Claim、Evidence 或 Release，full-auto 不自动执行科学分类或合成内容。
+
+InnerLoopCycle 是已批准边界内的 Protocol→Run→Measure→Record 投影，不是 Project phase。ResearchSynthesis 以 typed header + Artifact body 汇总 verified facts、negative findings、contradictions、open gaps 和 inferred relations。DirectionProposal 只提出 `deepen|broaden|pivot|conclude|pause`；DirectionAdoption 复用现有 Human/Gate/NextAction 权限，不能自动修改 Scope 或 Contract。
+
+Direction continuation 是由 `Project + pending Gates + Methodology stream` 重建的 NextAction overlay，不是持久化状态机。freshness 同时固定 Project revision、当前基础 NextAction revision、source Synthesis、proposal↔synthesis id 与 input hash；错误或 stale binding 只留下 diagnostic action。需治理的 Proposal 绑定唯一专用 Direction Gate。adopted Proposal 按 direction 确定性映射到 `direction_deepen_continue|direction_broaden_intake|direction_pivot_intake|direction_conclude_prepare|direction_pause_review`；其中 broaden/pivot 只建议进入现有 Intake proposal/adoption 流程。Methodology revision、Project revision 与 Intake revision 各自保持原有职责，不互相冒充。
+
+### 18.3 方法与知识 Pack
+
+`KnowledgePackageManifest`、`KnowledgePackageEvaluation`、`KnowledgeActivationRequest` 与成功 Activation receipt 共同固定 package identity、content hash、来源、许可、输入输出 Schema、requested/granted capabilities、project/session/phase/NextAction revision 与撤销判断。Instruction Pack 只包含 Scholar 自有或独立转写并测试过的可信方法；External Knowledge Pack 始终是不可信、只读、带来源资料。二者不能在读取或激活时互相降级/升级。
+
+ReverseOutline 与 ReviewFinding 必须绑定 TeX revision 和 input hashes；文稿变化后旧结果 stale，不能自动应用到新 revision 或直接覆盖 canonical TeX。Research Graph 由 Protocol、Synthesis、Direction/Adoption 及其 typed Claim/Contract/Run/Evidence/Data/Environment refs 确定性重建，边区分 `explicit|inferred`；它没有独立 revision、表或 mutation 权限，冲突 pin 与跨项目输入 fail closed。
+
+### 18.4 当前持久化与权威边界
+
+`AssuranceStore` 把 Audit 与 acceptance 作为独立事件写入 `assurance_events`。`MethodologyStore` 把 ProtocolRevision、ResearchSynthesis、DirectionProposal/Adoption、成功 Knowledge Activation、ReverseOutline 和 ReviewFinding 写入 project-scoped `methodology_project_events`，把 global Package/Evaluation 写入 `methodology_registry_events`。三个账本均 append-only；Store revision 只是方法论事件流 CAS，不替代 Project revision。
+
+这些对象仍是 non-authoritative proposal/diagnostic/audit facts；HTTP/Client、Research Graph 或 compact UI 的存在不提升其权威性。`ResearchKernel.submitJob(...)` 当前会在 formal 或 `run_intent=confirmatory` 时读取 project-scoped frozen Protocol，用权威 Contract/Code/Data/Environment/Runner/预算边界调用 run-admission evaluator，并在拒绝时保持 Job/Run/outbox 零写；被接收的 Job 持久化 `protocol_pin` 与 `run_intent`。Direction adoption adapter 从 durable PI 派生 Human actor，以当前 Project/NextAction revision 调 evaluator，并从 durable approved Decision 的 `gate_id` 读取同项目专用 `direction` Gate；Gate payload 必须 strict 绑定当前 proposal id、source synthesis id 和 direction，Decision principal 还必须是当前项目 Human PI/operator。只有该 verified receipt 可授权需 Gate 的 adoption；成功也只追加 `DirectionAdoption`，不直接修改 Project/Scope/Contract。NextAction 重建不会把 Adoption 的 receipt ref 当作权威结论，而会重新 join durable Decision/Gate 并验证同项目、approved 与 exact payload，失败只给 diagnostic。
+
+compact Assurance 通过 Store 投影复用 `verifyAssurance(...)`，并解析当前可用的 input hashes；Writing compact projection 从 live TeX tree 与当前 Claim–Evidence 关系生成 hash 后复用 `assessWritingMethodology(...)`。同一 compact wire 进入 standalone surfaces 与 exact-session DSH Scholar summary，但只读展示不等于 Gate、submission 或 TeX authority。五个 DSH methodology tool 只解析调用 session 的持久项目绑定；Knowledge activation 额外要求 Host confirmation 与显式 Human activation。
+
+真实本机 Docker formal positive fixture 已证明 `RunManifest.run_id`（不是 `job_id`）是 classification 的 `run_ref`，且请求不能回传/覆盖 observation 中的 execution/intent/Protocol。当前仍缺的是远端 SSH/GPU、生产 Docker 的科学分类/NegativeFinding 场景、真实 reviewer/model、pack payload 注入/撤销、自动 Release，以及真实浏览器/ARIA/TeX 验收。Kernel 已持久化 execution observation 与授权 scientific classification，但“由机器从执行状态自动判定科学结论”明确不属于领域契约。此前八个没有 runtime consumer 的方法论配置键不属于领域状态，也未在 Config Registry 注册；未来只有在 consumer、持久化与来源 parity 同时存在时才可新增。

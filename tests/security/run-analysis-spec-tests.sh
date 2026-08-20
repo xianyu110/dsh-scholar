@@ -76,10 +76,13 @@ bad() { printf '\033[1;31m  FAIL: %s\033[0m\n' "$*"; FAIL=$((FAIL + 1)); }
 # practice as run-evidence-tests.sh).
 export DSH_SCHOLAR_SERVICE_TOKEN='dsh-scholar-eval-service-token'
 api() { curl -sf -H 'content-type: application/json' -H "x-service-token: $DSH_SCHOLAR_SERVICE_TOKEN" "$@"; }
+human_decide() { api -H 'x-service-principal: standalone-human-bff' -X POST "$BASE/internal/human-gates/$1/decisions" -d "$2"; }
 # P0-4: code snapshots are workspace-bound — shared helpers seed the fixture
 # into a project workspace and POST workspace_id + root_relative_path.
 # shellcheck source=../../evals/code-snapshot-lib.sh
 source "$REPO/evals/code-snapshot-lib.sh"
+# shellcheck source=formal-fixture-lib.sh
+source "$REPO/tests/security/formal-fixture-lib.sh"
 
 jfield() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d);console.log(v$1 ?? '')}catch(e){console.log('')}})" ; }
 
@@ -91,6 +94,8 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+
+formal_fixture_init_target_identity "$WORK" 'analysis-spec-target-token-v1-0001'
 
 echo "== prerequisites =="
 if ! docker info > /dev/null 2>&1; then
@@ -113,10 +118,12 @@ start_kernel() {
   local port
   for port in $((20000 + $$ % 400)) $((20500 + $$ % 400)) $((21000 + $$ % 400)); do
     PORT=$port
-    nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
+    nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --secret-root "$FORMAL_FIXTURE_SECRET_ROOT" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
     KERNEL_PID=$!
     for _ in $(seq 1 50); do
-      curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && return 0
+      kill -0 "$KERNEL_PID" 2>/dev/null \
+        && curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 \
+        && return 0
       sleep 0.1
     done
     kill -9 "$KERNEL_PID" 2>/dev/null || true
@@ -128,33 +135,36 @@ start_kernel() {
 start_kernel || { echo "kernel failed to start"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 ok "kernel healthy on port $PORT"
-nohup node "$RUNNER_BIN" --kernel "$BASE" --owner analysis-spec --poll-ms 200 --mode docker --timeout-ms 30000 > "$WORK/runner.log" 2>&1 &
+nohup node "$RUNNER_BIN" --kernel "$BASE" --owner analysis-spec --poll-ms 200 --mode docker --target-id "$FORMAL_FIXTURE_TARGET_ID" --target-token "$FORMAL_FIXTURE_RUNNER_TARGET_TOKEN" --timeout-ms 30000 > "$WORK/runner.log" 2>&1 &
 RUNNER_PID=$!
-sleep 1
-ok "runner started (mode=docker, poll-ms=200)"
+if formal_fixture_wait_runner_ready "$BASE"; then
+  ok "runner started and target-scoped heartbeat is online (mode=docker, poll-ms=200)"
+else
+  bad "runner target never became ready"; tail -20 "$WORK/runner.log" || true; exit 1
+fi
 
 echo "== project + contract (stop_conditions.min_completed_seeds=3, direction higher_is_better) =="
 BRIEF='{"problem":"p","scope":"s","questions":[],"primary_metrics":["m1"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":"fixture-repo","domain":"machine-learning"}'
-PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"analysis-spec\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
+PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"analysis-spec\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"creator_principal_id\":\"analysis-spec-pi\",\"execution\":{\"runner_profile_id\":\"profile_local_docker_cpu_v1\"}}" | jfield '.project_id')
 [[ -n "$PROJ" ]] || { echo "failed to create project"; exit 1; }
 ok "project $PROJ"
 
 # Reach CONTRACT_PENDING through the authoritative gate lifecycle. This
 # ensures every baseline below uses the same atomic handoff as the product.
 G_SCOPE=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Analysis spec scope"}' | jfield '.gate_id')
-api -X POST "$BASE/v1/gates/$G_SCOPE/decisions" -d '{"actor":"analysis-spec","principal":{"principal_id":"analysis-spec-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_SCOPE" '{"actor":"analysis-spec","principal":{"principal_id":"analysis-spec-pi"},"decision":"approved"}' > /dev/null
 for PHASE in SURVEYING IDEATING; do
   REV=$(api "$BASE/v1/projects/$PROJ" | jfield '.revision')
   api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"$PHASE\",\"expected_revision\":$REV}" > /dev/null
 done
 G_IDEA=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"idea","title":"Analysis spec idea"}' | jfield '.gate_id')
-api -X POST "$BASE/v1/gates/$G_IDEA/decisions" -d '{"actor":"analysis-spec","principal":{"principal_id":"analysis-spec-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_IDEA" '{"actor":"analysis-spec","principal":{"principal_id":"analysis-spec-pi"},"decision":"approved"}' > /dev/null
 REV=$(api "$BASE/v1/projects/$PROJ" | jfield '.revision')
 api -X POST "$BASE/v1/projects/$PROJ/transitions" -d "{\"to\":\"CONTRACT_PENDING\",\"expected_revision\":$REV}" > /dev/null
 
 CT=$(api -X POST "$BASE/v1/projects/$PROJ/contracts" -d '{"idea_id":"idea_spec","data":{"dataset_id":"fixture","version":"v1","split":"official"},"methods":{"baseline":"baseline-engine","treatment":"treatment-engine"},"metrics":{"primary":"m1","secondary":["n_samples","m2"],"direction":"higher_is_better"},"seeds":[1,2,3],"analysis":{"effect_size":"mean_difference","interval":"bootstrap_95","multiple_testing":"holm"},"stop_conditions":{"max_gpu_hours":2,"min_completed_seeds":3,"stop_on_data_leakage":true}}' | jfield '.contract_id')
 G_CONTRACT=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d "{\"type\":\"contract\",\"title\":\"Analysis spec Contract\",\"payload\":{\"contract_id\":\"$CT\"}}" | jfield '.gate_id')
-api -X POST "$BASE/v1/gates/$G_CONTRACT/decisions" -d '{"actor":"analysis-spec","principal":{"principal_id":"analysis-spec-pi"},"decision":"approved"}' > /dev/null
+human_decide "$G_CONTRACT" '{"actor":"analysis-spec","principal":{"principal_id":"analysis-spec-pi"},"decision":"approved"}' > /dev/null
 APPROVE=$(api "$BASE/v1/projects/$PROJ/contracts" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const c=JSON.parse(d).find(x=>x.contract_id==='$CT');console.log(c?.status??'')})")
 if [[ "$CT" == expc_* ]] && [[ "$APPROVE" == "approved" ]]; then
   ok "contract $CT registered + frozen (status=approved, direction higher_is_better, seeds 1..3, min_completed_seeds=3)"
@@ -180,6 +190,19 @@ if [[ "$CODE_ART" == sha256:* ]]; then
   ok "code snapshot archived from CAS: $CODE_ART"
 else
   bad "code snapshot archive failed: $SNAP"
+fi
+
+DATA_ART=$(formal_fixture_register_data_file "$BASE" "$PROJ" "$WORK/fixture/data/seed-data.json")
+[[ "$DATA_ART" == sha256:* ]] || { bad "immutable data artifact registration failed: $DATA_ART"; exit 1; }
+ok "immutable data artifact registered: $DATA_ART"
+PROTOCOL_JSON=$(formal_fixture_register_protocol "$BASE" "$PROJ" "$CT" "$CODE_ART" "$DATA_ART" \
+  'analysis-spec-pi' 'protocol_analysis_spec_v1' 'm1')
+PROTOCOL_ID=$(printf '%s' "$PROTOCOL_JSON" | jfield '.record.protocol_id')
+PROTOCOL_HASH=$(printf '%s' "$PROTOCOL_JSON" | jfield '.record.canonical_hash')
+if [[ "$PROTOCOL_ID" == 'protocol_analysis_spec_v1' && "$PROTOCOL_HASH" == sha256:* ]]; then
+  ok "exact frozen Protocol registered before confirmatory jobs: $PROTOCOL_ID@$PROTOCOL_HASH"
+else
+  bad "frozen Protocol registration failed: $PROTOCOL_JSON"; exit 1
 fi
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -214,7 +237,7 @@ submit_job() { # <idempotency_key> <kind> <fixture-js> <seed> — real command j
       | api -X POST "$BASE/v1/projects/$PROJ/baseline-runs" -d @- \
       | jfield '.job.status'
   else
-    KEY="$key" KIND="$kind" SNAP="$CODE_ART" CT="$CT" SEED="$seed" JS="$js" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,contract_id:process.env.CT,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c","node /work/"+process.env.JS+" --seed "+process.env.SEED+" --data /work/data/seed-data.json --output /outputs/metrics.json --contract-id \"$DSH_CONTRACT_ID\""]}))' \
+    KEY="$key" KIND="$kind" SNAP="$CODE_ART" CT="$CT" DATA_ART="$DATA_ART" PROTOCOL_ID="$PROTOCOL_ID" PROTOCOL_HASH="$PROTOCOL_HASH" SEED="$seed" JS="$js" node -e 'process.stdout.write(JSON.stringify({idempotency_key:process.env.KEY,kind:process.env.KIND,code_snapshot_id:process.env.SNAP,data_artifact_ids:[process.env.DATA_ART],contract_id:process.env.CT,image_digest:"node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",run_intent:"confirmatory",protocol_pin:{protocol_id:process.env.PROTOCOL_ID,revision:1,canonical_hash:process.env.PROTOCOL_HASH},output_contract:{metrics:"/outputs/metrics.json",logs:"/outputs/run.log"},command:["sh","-c","node /work/"+process.env.JS+" --seed "+process.env.SEED+" --data /work/data/seed-data.json --output /outputs/metrics.json --contract-id \"$DSH_CONTRACT_ID\""]}))' \
       | api -X POST "$BASE/v1/projects/$PROJ/jobs" -d @- \
       | jfield '.status'
   fi

@@ -23,6 +23,16 @@ import {
   type TopologyLevelState, type TopologyTreeNodeView,
 } from '../topology-model'
 import type { ChildDetail, ChildHistoryEntry, ChildHistoryPage, FollowupReceipt, TopologyChildren } from '../types'
+import {
+  methodologySummaryNode,
+  type CompactMethodologyProjection,
+} from '../methodology-projection'
+import {
+  methodologyGraphPath,
+  methodologyGraphSectionNode,
+  type ResearchGraphFilter,
+  type ResearchGraphProjection,
+} from '../methodology-graph'
 
 /** Initial page size (server caps at 500). */
 const PAGE_LIMIT = 100
@@ -40,6 +50,10 @@ interface TopologyPanelState {
   followupDraft: string
   followupReceipt: FollowupReceipt | null
   followupError: boolean
+  graph: ResearchGraphProjection | null
+  graphStatus: 'idle' | 'loading' | 'ready' | 'error'
+  graphFilter: ResearchGraphFilter
+  graphRequest: number
 }
 
 const panelStates = new Map<string, TopologyPanelState>()
@@ -58,6 +72,10 @@ function ensureState(projectId: string): TopologyPanelState {
       followupDraft: '',
       followupReceipt: null,
       followupError: false,
+      graph: null,
+      graphStatus: 'idle',
+      graphFilter: 'all',
+      graphRequest: 0,
     }
     panelStates.set(projectId, st)
   }
@@ -395,31 +413,81 @@ async function loadDetail(projectId: string, st: TopologyPanelState, childId: st
   repaint()
 }
 
-function paintTopology(body: HTMLElement, st: TopologyPanelState, projectId: string): void {
+function paintTopology(
+  body: HTMLElement,
+  st: TopologyPanelState,
+  projectId: string,
+  methodology?: CompactMethodologyProjection | null,
+): void {
+  // A late response from a previously selected project/panel must never
+  // repaint the shared body with stale cross-project graph data.
+  if (body.dataset.panel !== 'topology' || body.dataset.topologyProject !== projectId) return
   body.replaceChildren()
+  const repaint = (): void => paintTopology(body, st, projectId, methodology)
+  body.appendChild(methodologySummaryNode(methodology, 'topology'))
+  body.appendChild(methodologyGraphSectionNode(
+    st.graph,
+    methodology,
+    projectId,
+    st.graphFilter,
+    next => {
+      st.graphFilter = next
+      repaint()
+    },
+    st.graphStatus,
+  ))
   const panel = el('div')
-  const repaint = (): void => paintTopology(body, st, projectId)
   if (st.detail !== null) paintDetail(panel, st, projectId, repaint)
   else paintTree(panel, st, projectId, repaint)
   body.appendChild(panel)
 }
 
+async function refreshMethodologyGraph(
+  st: TopologyPanelState,
+  projectId: string,
+  repaint: () => void,
+): Promise<void> {
+  const request = st.graphRequest + 1
+  st.graphRequest = request
+  st.graphStatus = 'loading'
+  repaint()
+  const graph = await api<ResearchGraphProjection>(methodologyGraphPath(projectId))
+  if (st.graphRequest !== request) return
+  if (graph === null) {
+    st.graph = null
+    st.graphStatus = 'error'
+  } else {
+    st.graph = graph
+    st.graphStatus = 'ready'
+  }
+  repaint()
+}
+
 /** Panel entry (index.ts dispatch): paints the current state, then fetches
  *  the root level when this project was never loaded. */
-export async function renderTopology(body: HTMLElement, projectId: string): Promise<void> {
+export async function renderTopology(
+  body: HTMLElement,
+  projectId: string,
+  methodology?: CompactMethodologyProjection | null,
+): Promise<void> {
+  body.dataset.panel = 'topology'
+  body.dataset.topologyProject = projectId
   const st = ensureState(projectId)
   const roots = st.levels[TOPOLOGY_ROOT_KEY] ?? initialTopologyLevel(null)
   st.levels[TOPOLOGY_ROOT_KEY] = roots
-  paintTopology(body, st, projectId)
+  paintTopology(body, st, projectId, methodology)
+  const repaint = (): void => paintTopology(body, st, projectId, methodology)
+  const graphRefresh = refreshMethodologyGraph(st, projectId, repaint)
   if (!roots.loaded && !roots.loading) {
     st.levels[TOPOLOGY_ROOT_KEY] = { ...roots, loading: true }
-    paintTopology(body, st, projectId)
+    paintTopology(body, st, projectId, methodology)
     const page = await api<TopologyChildren>(`/v1/projects/${encodeURIComponent(projectId)}/topology?limit=${PAGE_LIMIT}`)
     if (page === null) {
       st.levels[TOPOLOGY_ROOT_KEY] = { ...initialTopologyLevel(null), error: 'bridge' }
     } else {
       st.levels[TOPOLOGY_ROOT_KEY] = applyTopologyPage(initialTopologyLevel(null), page)
     }
-    paintTopology(body, st, projectId)
+    paintTopology(body, st, projectId, methodology)
   }
+  await graphRefresh
 }

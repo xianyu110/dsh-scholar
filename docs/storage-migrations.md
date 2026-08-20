@@ -679,3 +679,57 @@ stage 创建按 expected_size 事务预留 Intake 配额；finalize 与 intake_a
 **EXEC-ENV-02 追加迁移 0023（本轮）**：新增 `runner_targets`，保存 opaque `target_id`、`kind(local-process|local-docker|remote-ssh)`、display name、enabled/draining、capabilities JSON、`connection_json`（仅三项 SecretRef metadata：endpoint/credential/known_hosts）、health/last_seen、revision、created_by/created_at/updated_at；内置本机进程与本机 Docker 目标用 `INSERT OR IGNORE` 建立。表内严禁 hostname/private key/token/ProxyCommand 明文。迁移只追加，不修改 0022 以前 checksum；SCHEMA_VERSION 随迁移集合增加。完整性检查至少覆盖 remote-ssh 三个 SecretRef、kind/connection 一致性、revision 正数和内置目标存在。
 
 **EXEC-ENV-03 追加迁移 0025（SCHEMA_VERSION 22）**：只以 `ensureColumn` 给 `runner_targets` 增加可空 `runtime_json`，不修改已发布的 0023 DDL、seed 函数或 checksum。`NULL` 表示旧目标继续采用已固定 RunnerProfile 的 CPU/digest 语义；非空新写入必须由共享 schema 解析为 `{image_digest,compute}`，其中 image 是完整 `repository@sha256:<64hex>`，compute 只能是 CPU 或 NVIDIA `all`/不重复数字设备列表。迁移不回填旧行，避免改变既有 Job 的 target hash；操作者显式保存新配置时才产生新 target revision/hash。0025 本身不扫描历史 JSON；读取/更新路径会 fail closed，独立 recovery/integrity scan 对畸形 JSON、可变 tag、任意 flags 和非法设备列表的批量诊断仍是待实现项。
+
+## 13. DSH / Scholar 升级数据接管（DATA-UPGRADE-01）
+
+运行时权威目录固定为 `~/.dsh/research-kernel`。升级 DSH、重新安装/链接 Scholar、切换 standalone/DSH 入口均不得创建新的业务数据根；token、secret、runtime endpoint 也不得从退役实例复制进来。跨目录接管是版本切换前由 Operator 显式执行的一次性离线维护操作，不能由正常 sidecar 启动扫描环境变量或退役目录后自动触发；目标 Kernel 在线时必须拒绝，绝不在线合库。完成接管后运行时只读取 canonical 目录，启动只负责同目录 backup-first schema migration。
+
+显式接管对 snapshot 中任一已应用 migration checksum 漂移必须 fail closed，不能改写 `schema_migrations` 来“修好”历史数据库。Operator 应回到产生该数据库的已知版本导出或使用经审计的恢复流程；源库始终只读。普通启动也不得发现、复制、校验或修补 retired data tree。
+
+接管顺序固定为：目标 `VACUUM INTO` backup + CAS inventory → 源 `VACUUM INTO` 只读一致快照 → 仅在 disposable snapshot 上执行当前 migrations → 校验源/目标持久表 inventory 与列集合 → 按主键在一个 SQLite transaction 内合并全部领域表、补当前稳定本地 operator 的 canonical 项目 membership 并执行 `foreign_key_check` → transaction 成功后才校验并复制 CAS/Workspace/PTY workspace 普通文件 → 全部文件成功后才原子落 0600 receipt。数据库合并冲突必须 rollback，且不能产生任何源文件复制副作用；文件冲突发生时数据库合并可能已经幂等提交，但不得写 receipt，修正冲突后重试必须复用相同行并继续文件校验，不得重复业务对象。相同主键内容相同视为幂等重放；不同内容、unique/FK 冲突、CAS 同名异内容、symlink/特殊文件一律失败。源 snapshot 或 canonical Kernel 中任一已应用 migration 的 checksum mismatch 都必须 loud fail；离线接管不得重写 `schema_migrations` 或把漂移版本“修复”为当前 checksum。Operator 必须回到产生该数据库的已知版本导出，或使用单独审计的恢复流程。
+
+receipt 以源 `database_id` 命名并带格式版本、源 snapshot hash、源/目标目录、插入/已存在行数、文件计数、stable operator 与目标备份。当前格式为 v4；低于 v4 的 receipt 不足以证明当前完整 inventory、DB-first 文件顺序和 strict checksum 边界，必须在再次备份后执行完整的幂等 DB merge + 文件校验，成功后原子替换 receipt，不能用“只升级 receipt”掩盖漏表。采用完成后只读 canonical Kernel，不保留旧库 dual-read、schema parser fallback 或 endpoint fallback。源目录和备份只有在 acceptance-tests.md §24 的 Archived、Workspace、Artifact/CAS、TeX/PDF 与双入口人工验收完成后才能由用户显式清理。
+
+`MERGE_TABLES` 当前必须覆盖 schema 0028–0033 的全部新增持久对象：`assurance_events`、`methodology_run_outcomes`、`methodology_project_events`、`methodology_registry_events`、`writing_methodology_events`、`methodology_rollout_policies`、`methodology_project_rollout_events`、`methodology_rollout_consumptions`、`budget_block_provenance`、`writing_patch_intents` 与 `full_auto_gate_idempotency`。接管事务会把代码清单与 `main`/`legacy` 的当前 SQLite product-table inventory 双向比较；任何新 migration 增表但未定义 parent-first merge 顺序时必须 loud fail，禁止静默遗漏。
+
+事务合并 raw ledger 时必须临时停用并在同一事务恢复三个会派生新行的当前 trigger：Project create 的 rollout pin、Knowledge Activation consumption、Assurance execution consumption。接管的是源库已经持久化的 exact pin/consumption，不能让目标当前 policy 重新推导并篡改历史；任一失败 rollback 会连同 trigger DDL 一起恢复。其余 revision、identity、policy match、append-only 与 FK trigger 保持启用并继续 fail closed。
+
+普通 Scholar schema 升级由 sidecar 比较 `meta.schema_version` 与代码 `SCHEMA_VERSION`；落后时只有在 Kernel 停止后重启，并自动向 Kernel 添加 `--backup-on-start`。migration 0027 把历史 `projects.execution.runner_profile`/缺字段一次性规范为当前结构；旧 label 不映射成可执行 profile，`runner_profile_id` 保持 `null`，直到用户显式选择环境。
+
+## 14. Methodology / Knowledge 持久化
+
+新增 migration `0028_methodology_knowledge_layer`，并把 `SCHEMA_VERSION` 提升到 `25`；该 migration 只追加以下三个实际持久对象，不修改任何已发布 migration checksum：
+
+- `assurance_events`：按项目 revision 保存 `audit_recorded|audit_accepted` append-only stream；findings Artifact 使用 `(project_id, artifact_id)` 外键，acceptance 是独立事件。
+- `methodology_project_events`：按项目共享一条 CAS revision stream，`event_kind` 固定为 `protocol_revision|research_synthesis|direction_proposal|direction_adoption|knowledge_activation|reverse_outline|review_finding`。表级 identity CHECK、project FK、record 唯一约束、连续 revision trigger 与 UPDATE/DELETE trigger 全部 fail closed。成功的 Knowledge Activation 作为 `knowledge_activation` 事件写入该表，并不存在独立 `knowledge_activations` 表。
+- `methodology_registry_events`：global CAS revision stream，只保存 `package_registered|evaluation_recorded`。Package/Evaluation 都是 immutable event；同 name/version 的不同 manifest/payload hash 会保留成可检测的 equivocation，不能覆盖旧事实。当前没有独立 `knowledge_packages` 或 `knowledge_evaluations` 表。
+
+`AssuranceStore` 与 `MethodologyStore` 都接收调用方提供的同一个 `DatabaseSync` 连接；写入先做 strict Zod parse 与 revision CAS，读取会再次按精确类型 parse。`MethodologyStore.activateKnowledgePackage(...)` 必须先调用 `resolveKnowledgeActivation(...)`，只有 `allowed=true` 才能追加精确 Pin；`assessWriting(...)` 从已保存的 ReverseOutline/ReviewFinding 读取后复用 `assessWritingMethodology(...)`，不复制 freshness 与 Claim–Evidence 规则。global package schema 当前仅允许 `transport=local`，remote source 在进入 Registry revision 前即拒绝。
+
+0028 本身只负责 Schema/Store 持久化；其上现已接入 typed HTTP/Client、standalone 与 DSH compact projection、七个 exact-session DSH methodology tools、formal/confirmatory Job 的 Protocol pre-write admission，以及 revision + verified Direction Gate receipt-bound adoption。Assurance 没有 raw Audit 写旁路，Knowledge Activation 的 session/phase/capability authority 由 Kernel 当前 durable state 派生；二者均复用既有 append-only tables，不新增 migration。`ResearchKernel.submitJob(...)` 会从 `methodology_project_events` 读取 frozen Protocol，并调用 `evaluateResearchMethodology(...)` 复核权威边界；adoption route 同样复用 evaluator，查询当前 Project/NextAction，并沿 durable approved Decision→专用 `direction` Gate→strict payload 校验 proposal/synthesis/direction 绑定及 Gate 决策人的 Human PI/operator membership。成功只向 append-only methodology stream 写 Adoption，不新增 Gate/Decision 的第二份表。Research Graph 由这些 typed events 确定性重建并经 GET/Client 返回，不新增表、revision 或迁移责任。compact Assurance/Writing 分别复用 verifier/assessor 与当前可解析 input、live TeX/Claim–Evidence hashes，也不产生新持久对象。
+
+Runner completion→classification→synthesis request 本身不新增 migration 或第二状态机。terminal Job/Run 更新与 strict `research.run.unclassified` observation 共用既有 `events` outbox 事务；分类后的 immutable `ResearchRunOutcome` 继续进入 0029 已有 Methodology run stream，并在同一事务追加 `research.run.classified` 与可选 `research.synthesis.requested`。pending observation/request 从 append-only ledger 重建，raw UPDATE/DELETE 不是消费语义；close/reopen、重放和 outbox fault 都不得产生重复或半写。后续 correctness hardening 另以 0033 将整体 schema 提升到 30；run observation 能力仍未占用 migration。
+
+真实本机 Docker formal positive fixture 已证明 signed Manifest 的 `run_id` observation、classification 与 replay 不需要新增表或迁移。仍未闭环的是生产 reviewer/model execution、远端 SSH/GPU、生产 Docker 科学分类/NegativeFinding、pack payload 注入/撤销、自动 Release 和真实环境验收。此前八个无 consumer 的 `methodology.*` / `knowledge_registry.*` Config Registry 键已经删除；它们不需要迁移，也不得伪装成 schema-live。未来若重新引入，必须同时定义 consumer、持久化、config pin、来源 parity 与相应 migration/acceptance。
+
+对象正文虽以 JSON 存储，但不存在自由 JSON HTTP endpoint；未知 kind/字段、invalid JSON、foreign key、identity mismatch 或 schema version 一律 loud fail，不增加旧原型 fallback。Project 删除仍采用墓碑，三个事件账本保留历史。只有 `assurance_events.findings_artifact_id` 当前具有显式复合 Artifact FK；Synthesis/Writing 内的引用仍是 strict JSON pin，不能声称已进入 CAS inventory 或数据库外键闭环。
+
+自动化证据文件包括 Store 的 append-only、CAS、跨项目 404、strict reparse 与 file-backed close/reopen，以及 focused HTTP/AuthZ、Kernel admission 和 compact projection 测试。完整 `backup → 0028 migration → restart → HTTP/BFF`、既有 canonical 数据升级、CAS/Workspace/TeX 不变和真实浏览器读取仍未完成本层验收，状态分别保持 `PARTIAL_AUTOMATED_EVIDENCE` / `NOT_RUN_MANUAL_PENDING`；本轮最终命令结果和计数由主验收统一补录。
+
+## 15. Methodology rollout policy（migration 0032）
+
+`0032_methodology_rollout_policy` 把 `SCHEMA_VERSION` 提升到 `29`，只追加以下对象；不修改 0001–0031 的 body/checksum：
+
+- `methodology_rollout_policies`：全局 append-only policy revision；保存闭合 mode、deterministic policy hash、Operator/system actor 与时间。
+- `methodology_project_rollout_events`：每项目 append-only pin revision；保存 exact policy revision/hash/mode。migration 为所有既有 Project 回填 revision 1/default policy，Project INSERT trigger 为后续项目固定创建时的当前 policy。
+- `methodology_rollout_consumptions`：以 `(project_id,subject_kind,subject_id)` 唯一保存 `knowledge-activation|assurance-execution` 的 exact policy revision/hash/mode；0032 会把升级前已存在的 Knowledge Activation 与 recorded Assurance Audit 绑定到 migration 时回填的 default policy，避免升级后出现无 pin 历史。
+
+三表均有 UPDATE/DELETE 拒绝 trigger。Knowledge Activation 插入 `methodology_project_events`、Assurance Audit 插入 `assurance_events` 时，BEFORE trigger 要求项目已有 pin，AFTER trigger 在同一事务复制最新 project pin 到 consumption 表；因此业务 event 成功但 policy receipt 丢失的半写不可提交。读取时 Zod 与 deterministic policy hash 再校验；损坏、缺失或 policy/pin 不一致 loud fail。
+
+0032 不迁移或改写 Project、Artifact、Workspace、TeX、Gate、Decision、Protocol、Synthesis、Knowledge payload 或 Writing records。`MetricsStore` 保持进程内且不属于 migration/审计账本；重启后 counters 清零，但 rollout/project/consumption pin 必须字节等价恢复。`tests/unit/migrations.test.ts` 覆盖既有 Project 回填、版本 29、幂等 reopen 与旧 Project state 不变；`methodology-rollout.test.ts` 覆盖 policy/project/consumption reopen 和 append-only。
+
+## 16. Full-auto 全局幂等账本（migration 0033）
+
+`0033_full_auto_global_idempotency` 把 `SCHEMA_VERSION` 提升到 `30`，只追加 `full_auto_gate_idempotency`，不修改 0001–0032 的 body/checksum。`idempotency_key` 是全局主键；每行保存 canonical request SHA-256、exact project/Gate/revision、唯一 Decision、authority receipt 与创建时间，并以外键绑定既有 Project/Gate/Decision。
+
+Kernel 在 full-auto approval 事务开始时先按全局 key 查询：同 digest 从 ledger 重放 exact receipt；不同 project、Gate、revision 或 strict body 得到 409 `idempotency_conflict`，且不会进入 Gate/Decision 写入。首次成功则在 Decision、Gate/Project side effect 与 Outbox 所在的同一 SQLite 事务插入 ledger，因此不存在 Decision 成功而幂等 receipt 丢失的提交窗口。0033 不回填历史 Gate-local key，也不增加兼容查询；升级不改写 Project、Gate 或 Decision。`tests/unit/migrations.test.ts` 覆盖 fresh/reopen/29→30 与 Project 不变，`tests/unit/full-auto.test.ts` 覆盖跨 Gate、跨项目和重启后的同体/异体行为。

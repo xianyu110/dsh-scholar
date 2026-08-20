@@ -48,29 +48,50 @@ describe('DSH research plugin browser configuration', () => {
     expect(registerLocale).toHaveBeenCalledOnce()
     expect(registerLocale.mock.calls[0]?.[0]).toBe('settings.dshScholar')
     expect(registerLocale.mock.calls[0]?.[1]).toMatchObject({
-      zh: { title: 'dsh Scholar' },
-      en: { title: 'dsh Scholar' },
+      zh: { title: 'dsh Scholar', fullAuto: '自动审批（仅 Fixture）' },
+      en: { title: 'dsh Scholar', fullAuto: 'Automatic approval (Fixture only)' },
     })
   })
 
   it('loads and mutates restart-scoped settings through the Scholar RPC channel', async () => {
     const first = {
-      value: { defaultMode: 'gate-only', unattended: false, standalone: { url: 'http://127.0.0.1:18610/', shortcut: 'Alt+Shift+S' } },
+      value: {
+        defaultMode: 'gate-only', unattended: false,
+        standalone: { url: 'http://127.0.0.1:18610/', shortcut: 'Alt+Shift+S' },
+        automation: {
+          worker: 'running', runtime_default_mode: 'gate-only', restart_required: false,
+          fixture_only: true, release_requires_human: true, last_park: null,
+        },
+      },
       base: { defaultMode: 'gate-only' }, user: {}, revision: 4, writable: true, applies: 'restart',
     }
-    const second = { ...first, value: { ...first.value, defaultMode: 'full-auto' }, user: { defaultMode: 'full-auto' }, revision: 5 }
+    const second = {
+      ...first,
+      value: {
+        ...first.value,
+        defaultMode: 'full-auto',
+        automation: { ...first.value.automation, restart_required: true },
+      },
+      user: { defaultMode: 'full-auto' }, revision: 5,
+    }
     const call = vi.fn()
       .mockResolvedValueOnce({ ok: true, value: { available: true, snapshot: first } })
       .mockResolvedValueOnce({ ok: true, value: { available: true, snapshot: second } })
     const scope = new ScholarSettingsScope({ call }, true)
 
     await scope.refresh()
-    expect(scope.getSnapshot()).toMatchObject({ status: 'ready', value: { defaultMode: 'gate-only' }, revision: 4, writable: true })
+    expect(scope.getSnapshot()).toMatchObject({
+      status: 'ready',
+      value: { defaultMode: 'gate-only', automation: { worker: 'running', restart_required: false } },
+      revision: 4, writable: true,
+    })
     await scope.set('defaultMode', 'full-auto')
     expect(call).toHaveBeenLastCalledWith('/dsh-scholar', 'settings-mutate', {
       op: 'set', field: 'defaultMode', value: 'full-auto', expectedRevision: 4,
     })
-    expect(scope.getSnapshot()).toMatchObject({ status: 'ready', value: { defaultMode: 'full-auto' }, revision: 5 })
+    expect(scope.getSnapshot()).toMatchObject({
+      status: 'ready', value: { defaultMode: 'full-auto', automation: { restart_required: true } }, revision: 5,
+    })
   })
 
   it('keeps remote browsers unavailable without calling the privileged Scholar settings RPC', async () => {
@@ -116,6 +137,8 @@ describe('DSH research plugin browser configuration', () => {
     expect(source).toContain("props.t('sessionUnlinkedTitle')")
     expect(source).toContain("void runAction('bind')")
     expect(source).toContain("void runAction('create')")
+    expect(source).toContain("props.t('methodologyTitle')")
+    expect(source).toContain("props.t('methodologyUnavailable')")
     expect(source).not.toContain('<iframe')
     expect(source).not.toContain('postMessage(')
   })
@@ -140,6 +163,91 @@ describe('DSH research plugin browser configuration', () => {
     expect(call).toHaveBeenLastCalledWith('/dsh-scholar-view', 'session-bind', { session_id: 'session_1', project_id: 'rsp_1' })
     await expect(callScholarSessionCreate({ call }, 'session_1', '  New research  ')).resolves.toEqual(value)
     expect(call).toHaveBeenLastCalledWith('/dsh-scholar-view', 'session-create', { session_id: 'session_1', name: 'New research' })
+
+    const linkedProjection = {
+      ...projection,
+      linked: true,
+      project: { project_id: 'rsp_1', name: 'Research', status: 'DRAFT', revision: 2 },
+      methodology: {
+        project_id: 'rsp_1', revision: 0, assurance: null, protocol: null, synthesis: null,
+        knowledge: { active_count: 0, package_names: [], suppressed_count: 0, status: 'inactive' }, writing: null,
+        manuscript: {
+          revision: 0, method_triad: null, section_guide: null, reviewer_panel: null,
+          patches: { proposal_count: 0, application_count: 0, latest_proposal_id: null, latest_application_id: null },
+        },
+        runs: { revision: 0, count: 0, negative_finding_count: 0, claim_proposal_count: 0, latest_run_ref: null },
+        topology: { assurance_audit_count: 0, latest_audit_id: null, research_node_count: 0, research_edge_count: 0 },
+        next_recommendation: { code: 'configure_protocol', label_key: 'methodology.next.configureProtocol' },
+      },
+    }
+    const linkedValue = { session_id: 'session_1', projection: linkedProjection, available_projects: [] }
+    call.mockResolvedValueOnce({ ok: true, value: linkedValue })
+    await expect(callScholarSessionWorkspace({ call }, 'session_1')).resolves.toEqual(linkedValue)
+    call.mockResolvedValueOnce({
+      ok: true,
+      value: { ...linkedValue, projection: { ...linkedProjection, methodology: { ...linkedProjection.methodology, project_id: 'rsp_other' } } },
+    })
+    await expect(callScholarSessionWorkspace({ call }, 'session_1')).rejects.toThrow('unavailable')
+    call.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        ...linkedValue,
+        projection: {
+          ...linkedProjection,
+          methodology: {
+            ...linkedProjection.methodology,
+            manuscript: { ...linkedProjection.methodology.manuscript, browser_inferred_status: 'ready' },
+          },
+        },
+      },
+    })
+    await expect(callScholarSessionWorkspace({ call }, 'session_1')).resolves.toMatchObject({
+      projection: { methodology: { manuscript: { revision: 0 } } },
+    })
+    call.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        ...linkedValue,
+        projection: {
+          ...linkedProjection,
+          methodology: {
+            ...linkedProjection.methodology,
+            runs: { ...linkedProjection.methodology.runs, negative_finding_count: -1 },
+          },
+        },
+      },
+    })
+    await expect(callScholarSessionWorkspace({ call }, 'session_1')).resolves.toMatchObject({
+      projection: {
+        stages: linkedProjection.stages,
+        methodology: {
+          runs: { revision: 0, count: 0, negative_finding_count: 0, claim_proposal_count: 0, latest_run_ref: null },
+          unavailable_blocks: ['runs'],
+        },
+      },
+    })
+
+    const oldMethodology = {
+      project_id: 'rsp_1', revision: 0,
+      assurance: null, protocol: null, synthesis: null, writing: null,
+      knowledge: null, manuscript: null, runs: null, topology: null, next_recommendation: null,
+    }
+    call.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        ...linkedValue,
+        projection: { ...linkedProjection, methodology: oldMethodology, future_projection_field: { version: 2 } },
+        future_workspace_field: true,
+      },
+    })
+    const upgraded = await callScholarSessionWorkspace({ call }, 'session_1')
+    expect(upgraded.projection.methodology).toMatchObject({
+      project_id: 'rsp_1', revision: 0,
+      knowledge: { active_count: 0, status: 'inactive' },
+      manuscript: { revision: 0 }, runs: { revision: 0 }, topology: { assurance_audit_count: 0 },
+    })
+    expect(upgraded).not.toHaveProperty('future_workspace_field')
+    expect(upgraded.projection).not.toHaveProperty('future_projection_field')
 
     call.mockResolvedValueOnce({ ok: true, value: { ...value, session_id: 'session_2' } })
     await expect(callScholarSessionWorkspace({ call }, 'session_1')).rejects.toThrow('unavailable')

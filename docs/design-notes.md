@@ -238,3 +238,28 @@ Open file(version N)
 ## 9. 当前实现迁移说明
 
 当前仓库已有 Kernel、CAS、Runner（LocalDockerAdapter + RemoteRunnerAgent wire/fleet）、Analysis Worker、Durable Orchestrator、Connectors、DSH Agent 插件和独立原生 DOM UI。完整业务 UI/BFF 仍只有 standalone 一份；DSH 浏览器只保留 Plugin config、Host 原生 `conversation.view` session workspace 与新页面入口，不恢复旧 bridge、iframe 或第二套业务实现。截至 2026-08-17：ResearchOnboarding、结构化 NextAction、通用 Workspace、Interactive PTY、远端 Runner、Config Registry、Trajectory/Subagent projection、DSH session bind/create 与阶段感知 Chat intent 已实现（代码侧）；剩余项全部为真实环境/浏览器验收（真实远端 sandbox、Remote PTY、窄容器绑定视图、自由对话观感等，队列见 manual-acceptance.md）与明确标注的后续阶段。其余权限、Evidence provenance、最终式日志、TeX workspace 和 i18n 证据见 hardening-v0.2-status.md。
+
+## 10. Methodology / Knowledge Module seam
+
+方法论层不得进入 `ResearchKernel` 巨型类形成第二套状态机。当前已形成四个纯、无 I/O 的深 Module seam：
+
+- `verifyAssurance(input)`：隐藏 freshness、coverage、execution/verdict/acceptance、semantic reviewer independence 与 blocking 组合规则；
+- `evaluateResearchMethodology(input)`：隐藏 Protocol pin、run intent、scientific outcome、run validity、Synthesis/Direction eligibility 与 stale 判定；
+- `resolveKnowledgeActivation(input)`：隐藏 local-only source、license、equivocation/revocation、Human request、phase/NextAction pin 与 capability 交集规则；
+- `assessWritingMethodology(input)`：隐藏 document revision/hash freshness、Reverse Outline 和 Claim–Evidence finding 的投影规则。
+
+这些 Module 不读数据库、不调用模型、不创建 Artifact、不推进 Project，也不写 canonical TeX。调用方不得在 UI、Agent、HTTP 或 Runner 中复制或重新解释同一套判定规则。
+
+需要组合当前 Project/Session/NextAction、Store、Artifact、Topology 与 telemetry 的有状态决策，由 `methodology-coordinator.ts` 的三个深 Coordinator 承担：`KnowledgeMethodologyCoordinator` 负责 authority 派生、activation/deactivation/delivery；`SynthesisMethodologyCoordinator` 只组合现有 `run-outcome-lifecycle` 与 `synthesis-admission`；`WritingMethodologyCoordinator` 负责 manuscript pins、reviewer identity、MethodTriad/SectionGuide/Patch proposal 与 Assurance producer。`ResearchKernel` 对外方法只保留稳定 façade 并通过窄 callback ports 注入事务、投影和副作用；HTTP/Client wire 不感知这一内部拆分。Coordinator 不复制 scientific classification 或 full-auto Gate 决策，分别继续复用既有 lifecycle/admission 与 `full-auto.ts`。
+
+事务与零写边界属于 Coordinator 契约而非 adapter 偶然行为：Knowledge authority 的 session/member/revision/capability 派生与 activation/policy pin 在同一 Kernel transaction；semantic reviewer 的 project/session/action/topology/execution identity 必须全部通过后，Writing Assurance 才能注册 findings Artifact、Audit 与 rollout consumption。provider unavailable、空 reviewer、stale pin、跨项目或 CAS 冲突均不得产生部分方法论权威记录。
+
+持久化保持独立 adapter：`AssuranceStore` 使用 project-scoped `assurance_events`；`MethodologyStore` 使用 project-scoped `methodology_project_events` 和 global `methodology_registry_events`。两个 Store 都接收调用方提供的同一个 SQLite 连接，执行 strict reparse、append-only、revision CAS 与跨项目 404；成功 Knowledge Activation 必须经 `resolveKnowledgeActivation(...)`，Writing projection 必须经 `assessWritingMethodology(...)`。Store revision 只序列化方法论事件，不是 Project revision，也不能授权 Project/Gate/Job/Evidence/Claim/TeX mutation。
+
+当前 adapter 已包含 typed HTTP/Client、durable membership/PI/Operator AuthZ、deterministic Research Graph + GET/typed Client、standalone Overview/Manuscript/Topology compact projection、DSH exact-session compact Scholar panel/七个 methodology tools，以及 Protocol 驱动的 `submitJob` pre-write admission。Assurance raw Audit 写旁路已关闭，semantic independence 从 durable child execution identity/topology 派生；Knowledge Activation 外部输入只有 package identity/CAS，session/phase/capability authority 由 Kernel 当前状态派生。formal/confirmatory 请求会从 Store 读取 frozen Protocol，复核权威 Contract/Code/Data/Environment/Runner/预算边界后才允许 Job 写入；Job 中的 `run_intent`/`protocol_pin` 因而是已复核的 admission pin，不再只是 wire shape。Direction adoption route 从 durable PI 与当前 Project/NextAction revision 构造 evaluator input，并沿 durable approved Decision→专用 `direction` Gate→strict payload 解析 proposal/synthesis/direction 绑定及 Gate 决策人的 Human PI/operator membership；只有 verified receipt 可通过，成功仍只追加 Adoption。真实 Human workflow UI 与自动 Project/Scope/Contract mutation 尚未实现/验收。
+
+compact projection 已以当前 mandatory kinds/可解析 input hashes 复用 Assurance verifier，并以 live TeX tree 与 Claim–Evidence hash 复用 Writing assessor；Graph 仍是无状态、可重建、只读投影。DSH panel 只消费与调用 session 精确绑定的 compact wire，五个工具也不能选择任意项目；Knowledge activation 额外经过 Host confirmation 与 Kernel resolver。`research-core` Skill 已内化使用流程，但不形成新 authority seam。
+
+仍待验收或刻意不自动化的 adapter 边界包括生产 reviewer/model execution、Runner completion 后的 scientific outcome/run validity 人工/Agent 判读与生产 NegativeFinding E2E、项目激活 UI、自动 Release 和完整交互/真实浏览器流程。findings Artifact producer、Scholar-owned native Pack delivery/deactivate、revision-bound TeX patch 与 full-auto fixture-only Scope/Idea/Contract/Budget Gate + survey executor 已落地，但不能冒充这些生产/人工验收。后续接线必须复用现有 Project/Gate/Job/Evidence/Workspace/Topology 对象，禁止为了兼容外部仓库复制其状态文件、目录编排器或恢复协议。
+
+八个没有 runtime consumer 的 `methodology.*` / `knowledge_registry.*` 占位键已从 Config Registry 删除并显式 deferred：schema、defaults、effective config 与 Settings 都不得宣传它们，写入按 unknown key 拒绝。local-only/remote 禁止由 Package Schema、resolver 与许可策略保证，不依赖占位配置。未来只有在 Module/admission/activation/projection consumer、持久化、config pin 与 HTTP/UI/file parity 同时设计完成时，才能把相应键作为新契约登记；不得读取散落环境变量或先用隐藏默认值。

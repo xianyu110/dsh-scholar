@@ -9,6 +9,14 @@
 import { defineTool, type InferArgs, type InferValue, type ObjectValueSchemaSpec, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { KernelApiError, type ResearchClient } from '@dsh-scholar/research-client'
+import { protocolRevisionCanonicalHash } from '@dsh-scholar/research-kernel'
+import {
+  KnowledgeActivationIntent,
+  ProtocolRevision,
+  ResearchSynthesis,
+  ReviewFinding,
+  ReverseOutline,
+} from '@dsh-scholar/research-schemas'
 import { buildPassages, multiSourceSearch, resolvePaper, type ConnectorCache } from '@dsh-scholar/scholar-connectors'
 import { selectSkillPacks, selectedSkillNames } from './skills.js'
 import { runNativeScholarTurn, type NativeGrillAnswer, type NativeGrillQuestionPrompt } from './native-chat.js'
@@ -20,6 +28,7 @@ import {
   type StageSubagentCoordinator,
   type SubagentRuntimeLike,
 } from './stage-subagents.js'
+import { runWritingSemanticReview } from './assurance-reviewer.js'
 import type { ResearchRole } from './acl.js'
 
 /** Render a canonical tool value as text blocks. */
@@ -38,6 +47,50 @@ function parseJsonObject(text: string | undefined, label: string): Record<string
   } catch (error) {
     throw new Error(`${label} is not valid JSON: ${(error as Error).message}`)
   }
+}
+
+interface StrictSchema<T> {
+  parse(value: unknown): T
+}
+
+/** Parse one model-supplied JSON string through the same strict canonical
+ * schema used by the Kernel. This is an early error boundary, not a second
+ * methodology implementation; the Kernel reparses and authorizes the write. */
+function parseStrictJson<T>(text: string | undefined, label: string, schema: StrictSchema<T>): T {
+  const parsed = parseJsonObject(text, label)
+  try {
+    return schema.parse(parsed)
+  } catch (error) {
+    throw new Error(`${label} failed strict schema validation: ${(error as Error).message}`)
+  }
+}
+
+const PROTOCOL_HASH_VALIDATION_PLACEHOLDER = `sha256:${'0'.repeat(64)}`
+
+/** Parse a complete ProtocolRevision while treating canonical_hash only as a
+ * derived receipt. Frozen callers may omit it; supplied receipts are verified
+ * instead of silently replaced. Every content field remains schema-required. */
+function parseProtocolRevisionJson(text: string | undefined): ProtocolRevision {
+  const parsed = parseJsonObject(text, 'record_json')
+  const hashWasSupplied = parsed.canonical_hash !== undefined
+  const candidate = parsed.status === 'frozen' && !hashWasSupplied
+    ? { ...parsed, canonical_hash: PROTOCOL_HASH_VALIDATION_PLACEHOLDER }
+    : parsed
+
+  let record: ProtocolRevision
+  try {
+    record = ProtocolRevision.parse(candidate)
+  } catch (error) {
+    throw new Error(`record_json failed strict schema validation: ${(error as Error).message}`)
+  }
+
+  if (record.status !== 'frozen') return record
+
+  const deterministicHash = protocolRevisionCanonicalHash(record)
+  if (hashWasSupplied && record.canonical_hash !== deterministicHash) {
+    throw new Error('record_json canonical_hash does not match the deterministic Protocol receipt')
+  }
+  return { ...record, canonical_hash: deterministicHash }
 }
 
 export interface ResearchToolContext {
@@ -131,6 +184,20 @@ async function resolveProjectId(client: ResearchClient, sessionId: string | unde
   if (sessionId === undefined) return undefined
   const project = await client.getProjectBySession(sessionId)
   return project?.project_id ?? undefined
+}
+
+/** DSH-conversation methodology tools never accept an arbitrary project id.
+ * The calling root session must already be linked and every embedded record
+ * is checked against that exact project before it reaches ResearchClient. */
+async function resolveCallingSessionProject(client: ResearchClient, sessionId: string | undefined): Promise<string> {
+  if (sessionId === undefined || sessionId === '') throw new Error('methodology tool requires a calling DSH session')
+  const project = await client.getProjectBySession(sessionId)
+  if (project === null) throw new Error('calling DSH session is not linked to a Scholar project')
+  return project.project_id
+}
+
+function assertLinkedProject(linkedProjectId: string, recordProjectId: string): void {
+  if (recordProjectId !== linkedProjectId) throw new Error('methodology record does not belong to the session-linked project')
 }
 
 const okSchema = {
@@ -273,9 +340,9 @@ async function callIntake<T>(fn: () => Promise<T>): Promise<T> {
 export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<typeof defineTool>): void } }, toolCtx: ResearchToolContext): void {
   const { client } = toolCtx
 
-  // Native DSH Chat entry. This is intentionally the only tool available to
-  // an unregistered/root Agent role: it binds to the caller session and
-  // exposes a deterministic, capability-bounded research conversation.
+  // Native DSH Chat entry. This is the primary tool available to an
+  // unregistered/root Agent role; the only additional root tools are the
+  // exact-session methodology surface registered below.
   ctx.tools.register(researchTool({
     name: 'dsh_scholar',
     description: 'Primary entry for research requests made in native DSH Chat. Call this when the user asks in ordinary language to create, continue, inspect or discuss research; pass the current user text verbatim. For a complete affirmative create request in an unlinked calling DSH session, pass project_name only when it equals the complete name after the create command in the current user text, never a substring; never invent, rewrite or infer it from history, and never pass it for questions, discussion, ambiguous, negative, cancel or avoid wording. The tool performs name-only Init and links that session, or asks for a missing name without requiring slash commands. During Brief collection it reuses DSH\'s native user-question composer one question at a time when that Host capability is available. It returns the authoritative dsh Scholar phase/next action, may execute only that explicit create or an explicitly requested ready literature survey, and otherwise suggests a direct slash command. It never decides Gates, confirms a Brief, adopts an Intake, accepts Evidence or releases a project.',
@@ -353,7 +420,7 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         projection: { type: 'json' },
       },
     },
-    execute: async (args, ctx_, sessionId) => {
+    execute: async (args, ctx_, sessionId, exec) => {
       switch (args.action) {
         case 'create': {
           if (args.name === undefined || args.name === '') throw new Error('research_project create requires `name`')
@@ -502,6 +569,227 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const projectId = await resolveProjectId(client, sessionId, args.project_id)
       if (projectId === undefined) throw new Error('no project_id and no session-linked project')
       return { ok: true, projection: await client.projectProjection(projectId) }
+    },
+  }, toolCtx))
+
+  // ── DSH conversation methodology (METH-01) ───────────────────────────────
+  // These tools expose typed, non-authoritative methodology operations
+  // through the existing linked DSH session. Only the explicit Assurance
+  // tool may invoke the read-only StageSubagent reviewer seam; none decides a
+  // Gate, mutates canonical TeX or bypasses the Kernel's HTTP AuthZ.
+
+  ctx.tools.register(researchTool({
+    name: 'research_methodology_status',
+    description: 'Read the compact methodology projection and exact pending SynthesisRecordRequests for the Scholar project linked to the calling DSH session. Read-only: Assurance, Protocol, Synthesis, active Knowledge packages, Writing diagnostics and the next recommendation. It cannot inspect an arbitrary project.',
+    parameters: {},
+    output: okSchema,
+    execute: async (_args, ctx_, sessionId) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      const [methodology, synthesisRequests] = await Promise.all([
+        ctx_.client.getMethodology(projectId, ctx_.operatorPrincipal),
+        ctx_.client.listSynthesisRecordRequests(projectId, ctx_.operatorPrincipal),
+      ])
+      return { ok: true, methodology, synthesis_requests: synthesisRequests.pending }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_assurance_run',
+    description: 'Run one registered revision/hash-bound Assurance producer for the Scholar project linked to the exact calling DSH session. DSH Host confirmation is mandatory. writing reviews the manuscript; claim-evidence deterministically records NOT_APPLICABLE only when the authoritative Claim set is empty. deterministic reuses Kernel checks; semantic additionally runs the existing read-only StageSubagent panel when applicable. Provider failure is BLOCKED, automated same-family review stays provisional, and this tool cannot name a project, decide a Gate, edit TeX/manuscripts or create a Release.',
+    parameters: {
+      audit_kind: { type: 'string', required: true, enum: ['writing', 'claim-evidence'] },
+      mode: { type: 'string', required: true, enum: ['deterministic', 'semantic'] },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId, exec) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      if (args.mode !== 'deterministic' && args.mode !== 'semantic') {
+        throw new Error('research_assurance_run mode must be deterministic or semantic')
+      }
+      if (args.audit_kind !== 'writing' && args.audit_kind !== 'claim-evidence') {
+        throw new Error('research_assurance_run audit_kind must be writing or claim-evidence')
+      }
+      const mode = args.mode
+      const auditKind = args.audit_kind
+      if (mode === 'semantic' && exec.agent === undefined) {
+        throw new Error('semantic assurance requires an agent caller')
+      }
+      const semanticReview = mode === 'semantic'
+        ? await runWritingSemanticReview({
+            sessionId: sessionId!,
+            parent: exec.agent!,
+            signal: exec.signal,
+          }, {
+            coordinator: ctx_.stageSubagents,
+            panel: {
+              client: ctx_.client as unknown as StagePanelClient,
+              runtime: ctx_.ctx.subagents,
+              roles: ctx_.roles,
+              projectScopes: ctx_.projectScopes,
+              modelFor: ctx_.modelFor,
+            },
+            delivery: {
+              resolve: ({ projectId: deliveryProjectId, sessionId: deliverySessionId, surface, signal }) =>
+                ctx_.client.getKnowledgeDelivery(deliveryProjectId, ctx_.operatorPrincipal, {
+                  session_id: deliverySessionId,
+                  surface,
+                }, signal),
+            },
+          })
+        : null
+      const current = await ctx_.client.listAssuranceAudits(projectId, ctx_.operatorPrincipal)
+      const audit = await ctx_.client.runWritingAssuranceForDshSession(sessionId!, mode === 'semantic'
+        ? { expected_revision: current.revision, audit_kind: auditKind, mode, semantic_review: semanticReview! }
+        : { expected_revision: current.revision, audit_kind: auditKind, mode, semantic_review: null }, exec.signal)
+      return { ok: true, audit }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_protocol_record',
+    description: 'Record one complete strict ProtocolRevision for the Scholar project linked to the calling DSH session. Supply every content field in record_json and the current methodology stream expected_revision. For a frozen Protocol, canonical_hash may be omitted: the tool derives its deterministic receipt; a supplied hash must match exactly. No content field is inferred or overwritten, and this tool does not run a model, submit a Job or approve a Gate.',
+    parameters: {
+      record_json: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      const record = parseProtocolRevisionJson(args.record_json)
+      assertLinkedProject(projectId, record.project_id)
+      if (record.author_principal_id !== ctx_.operatorPrincipal) {
+        throw new Error('Protocol author_principal_id must match the authenticated Scholar operator')
+      }
+      const receipt = await ctx_.client.recordProtocol(projectId, ctx_.operatorPrincipal, {
+        record,
+        expected_revision: args.expected_revision,
+      })
+      return { ok: true, record: receipt }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_synthesis_record',
+    description: 'Record one complete strict agent-generated ResearchSynthesis for the Scholar project linked to the calling DSH session and one exact pending SynthesisRecordRequest. This tool does not run or impersonate a reviewer/model and therefore accepts generated_by=agent only; Human adoption and Direction decisions remain separate.',
+    parameters: {
+      request_id: { type: 'string', required: true },
+      record_json: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      const record = parseStrictJson(args.record_json, 'record_json', ResearchSynthesis)
+      assertLinkedProject(projectId, record.project_id)
+      if (record.generated_by !== 'agent') {
+        throw new Error('research_synthesis_record requires generated_by=agent; it cannot claim Human, panel or deterministic execution')
+      }
+      const receipt = await ctx_.client.recordSynthesis(projectId, ctx_.operatorPrincipal, {
+        request_id: args.request_id,
+        record,
+        expected_revision: args.expected_revision,
+      })
+      return { ok: true, record: receipt }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_writing_review_record',
+    description: 'Record one strict revision/hash-bound ReverseOutline or ReviewFinding diagnostic for the Scholar project linked to the calling DSH session. This stores only the supplied diagnostic; it does not run a reviewer, modify canonical TeX or apply a patch.',
+    parameters: {
+      kind: { type: 'string', required: true, enum: ['reverse-outline', 'review-finding'] },
+      record_json: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      if (args.kind === 'reverse-outline') {
+        const record = parseStrictJson(args.record_json, 'record_json', ReverseOutline)
+        assertLinkedProject(projectId, record.input_pin.project_id)
+        const receipt = await ctx_.client.recordReverseOutline(projectId, ctx_.operatorPrincipal, {
+          record,
+          expected_revision: args.expected_revision,
+        })
+        return { ok: true, record: receipt }
+      }
+      const record = parseStrictJson(args.record_json, 'record_json', ReviewFinding)
+      assertLinkedProject(projectId, record.input_pin.project_id)
+      const receipt = await ctx_.client.recordReviewFinding(projectId, ctx_.operatorPrincipal, {
+        record,
+        expected_revision: args.expected_revision,
+      })
+      return { ok: true, record: receipt }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_knowledge_activate',
+    description: 'Activate an already registered and evaluated immutable local Knowledge package for the exact calling DSH session. Supply only the exact package identity and stream CAS; DSH Host confirmation is required. The internal adapter derives the project/session and the Kernel derives current PI membership, phase, NextAction, policy and capability intersection. This tool never fetches remote content.',
+    parameters: {
+      package_name: { type: 'string', required: true },
+      package_version: { type: 'string', required: true },
+      manifest_sha256: { type: 'string', required: true },
+      payload_sha256: { type: 'string', required: true },
+      expected_revision: { type: 'integer', required: true },
+      expected_registry_revision: { type: 'integer', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId, exec) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      const projection = await ctx_.client.projectProjection(projectId, exec.signal)
+      const action = projection.next_actions_v2.find(candidate => candidate.state === 'ready')
+        ?? projection.next_actions_v2.find(candidate => candidate.state !== 'done')
+      const intent = KnowledgeActivationIntent.parse({
+        package_name: String(args.package_name ?? ''),
+        package_version: String(args.package_version ?? ''),
+        manifest_sha256: String(args.manifest_sha256 ?? '') as `sha256:${string}`,
+        payload_sha256: String(args.payload_sha256 ?? '') as `sha256:${string}`,
+        explicit_human_activation: true,
+        expected_revision: Number(args.expected_revision),
+        expected_registry_revision: Number(args.expected_registry_revision),
+        expected_project_revision: projection.project.revision,
+        expected_next_action_revision: action?.revision ?? projection.project.revision,
+      })
+      const receipt = await ctx_.client.activateKnowledgePackageForDshSession(sessionId!, intent)
+      return { ok: true, activation: receipt }
+    },
+  }, toolCtx))
+
+  ctx.tools.register(researchTool({
+    name: 'research_knowledge_deactivate',
+    description: 'Deactivate one immutable Knowledge activation belonging to the exact Scholar project and calling DSH session. DSH Host confirmation is required. The tool accepts no project_id, never reads package content, and an identical retry returns the existing append-only receipt without another write.',
+    parameters: {
+      activation_id: { type: 'string', required: true },
+      reason: { type: 'string', required: true, enum: ['user-requested', 'superseded', 'no-longer-needed'] },
+      expected_revision: { type: 'integer', required: true },
+    },
+    output: okSchema,
+    execute: async (args, ctx_, sessionId) => {
+      const projectId = await resolveCallingSessionProject(ctx_.client, sessionId)
+      const activationId = String(args.activation_id ?? '')
+      const reason = args.reason
+      if (!/^activation_[a-z0-9_]+$/.test(activationId)) throw new Error('activation_id is invalid')
+      if (reason !== 'user-requested' && reason !== 'superseded' && reason !== 'no-longer-needed') {
+        throw new Error('Knowledge deactivation reason is invalid')
+      }
+      const activations = await ctx_.client.listKnowledgeActivations(projectId, ctx_.operatorPrincipal)
+      const activation = activations.records.find(item => item.record.activation_id === activationId)
+      if (activation === undefined) throw new Error('Knowledge activation was not found in the session-linked project')
+      if (activation.record.request.session_id !== sessionId) {
+        throw new Error('Knowledge activation does not belong to the calling DSH session')
+      }
+      const receipt = await ctx_.client.deactivateKnowledgePackage(projectId, activationId, ctx_.operatorPrincipal, {
+        request: {
+          project_id: projectId,
+          session_id: sessionId!,
+          activation_id: activationId,
+          explicit_human_deactivation: true,
+          reason,
+        },
+        expected_revision: Number(args.expected_revision),
+      })
+      return { ok: true, deactivation: receipt }
     },
   }, toolCtx))
 
@@ -965,6 +1253,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       runner_target_id: OPT_STRING,
       image_digest: OPT_STRING,
       output_contract_json: OPT_STRING,
+      protocol_pin_json: OPT_STRING,
+      run_intent: { type: 'string', enum: ['exploratory', 'confirmatory'] },
     },
     output: okSchema,
     execute: async (args, ctx_, sessionId) => {
@@ -1150,6 +1440,9 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
       const outputContract = args.output_contract_json !== undefined
         ? parseJsonObject(args.output_contract_json, 'output_contract_json')
         : undefined
+      const protocolPin = args.protocol_pin_json !== undefined
+        ? parseJsonObject(args.protocol_pin_json, 'protocol_pin_json')
+        : undefined
       const job = await client.submitJob({
         project_id: projectId,
         idempotency_key: args.idempotency_key,
@@ -1159,6 +1452,8 @@ export function registerResearchTools(ctx: { tools: { register(tool: ReturnType<
         contract_id: args.contract_id ?? null,
         code_snapshot_id: args.code_snapshot_id ?? null,
         image_digest: args.image_digest,
+        protocol_pin: protocolPin as never,
+        run_intent: args.run_intent,
         ...outputContract !== undefined && typeof outputContract.metrics === 'string' && typeof outputContract.logs === 'string'
           && { output_contract: { metrics: outputContract.metrics, logs: outputContract.logs } },
       })

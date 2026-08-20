@@ -31,7 +31,7 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { randomId } from '@dsh-scholar/research-schemas'
+import { ChildExecutionIdentity, randomId, type ChildExecutionIdentity as ChildExecutionIdentityValue } from '@dsh-scholar/research-schemas'
 import type {
   ChildDetail, ChildHistoryPage, ChildLink, ChildLinkInput, ChildMode, ChildState,
   FollowupReceipt, KernelEvent, KernelEventKind, TopologyChildren, TopologyNode,
@@ -519,7 +519,10 @@ export class TrajectoryStore {
     const mode = input.mode ?? 'one-shot'
     const state = initialState
     if (existing === undefined) {
-      this.appendHistory(input.child_id, 'started', { label: input.label, mode, kind, state, project_id: input.project_id, child_id: input.child_id })
+      this.appendHistory(input.child_id, 'started', {
+        label: input.label, mode, kind, state, project_id: input.project_id, child_id: input.child_id,
+        execution_identity: input.execution_identity ?? null,
+      })
       this.emitEvent(input.project_id, 'trajectory.child.started', {
         project_id: input.project_id, child_id: input.child_id, parent_id: input.parent_id ?? null,
         label: input.label, mode, kind, state,
@@ -535,6 +538,23 @@ export class TrajectoryStore {
 
   getChildLink(childId: string): ChildLink {
     return linkFromRow(this.assertChild(childId))
+  }
+
+  /** Exact immutable execution identity from the child's first started
+   * event. A legacy/malformed/missing identity is unavailable, never guessed. */
+  getChildExecutionIdentity(childId: string): ChildExecutionIdentityValue | null {
+    this.assertChild(childId)
+    const row = this.db.prepare(
+      "SELECT payload FROM child_history WHERE child_id = ? AND event_type = 'started' ORDER BY seq ASC LIMIT 1",
+    ).get(childId) as { payload: string } | undefined
+    if (row === undefined) return null
+    try {
+      const payload = JSON.parse(row.payload) as { execution_identity?: unknown }
+      const parsed = ChildExecutionIdentity.safeParse(payload.execution_identity)
+      return parsed.success ? parsed.data : null
+    } catch {
+      return null
+    }
   }
 
   /** State transition — appends history + outbox; `ended_at` pins once at

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { ResearchRole } from './acl.js'
+import type { ChildExecutionIdentity } from '@dsh-scholar/research-schemas'
 
 export const PANEL_KINDS = ['scholar', 'curator', 'idea-panel', 'statistician', 'writer', 'reviewer', 'auditor'] as const
 export type PanelKind = typeof PANEL_KINDS[number]
@@ -173,6 +174,7 @@ export interface StagePanelClient {
     mode?: 'one-shot' | 'continuable' | 'read-only'
     role?: string | null
     state?: 'running'
+    execution_identity?: ChildExecutionIdentity
   }, sessionId: string, signal?: AbortSignal): Promise<Record<string, unknown>>
   updateChildStateFromSession(
     childId: string,
@@ -560,6 +562,8 @@ export class StageSubagentCoordinator {
         started += 1
         deps.roles.set(run.id, policy.role)
         deps.projectScopes.set(run.id, projectId)
+        const modelRef = model === undefined || model.trim() === '' ? 'host-default' : model.trim()
+        const familyRef = modelRef.includes('/') ? modelRef.split('/', 1)[0]! : modelRef.split(/[-:]/, 1)[0]!
         await awaitAbortable(deps.client.registerChildLinkFromSession({
           project_id: projectId,
           child_id: run.id,
@@ -570,6 +574,12 @@ export class StageSubagentCoordinator {
           mode: 'one-shot',
           role: policy.role,
           state: 'running',
+          execution_identity: {
+            provider_ref: this.config.provider,
+            model_ref: modelRef,
+            family_ref: familyRef,
+            config_hash: `sha256:${configHash}`,
+          },
         }, sessionId, childController.signal), childController.signal, 'subagent topology registration aborted')
         registered = true
         const result = await awaitAbortable(run.result, childController.signal, 'subagent result aborted')

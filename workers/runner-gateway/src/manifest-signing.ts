@@ -10,6 +10,7 @@
 
 import { createHash, sign } from 'node:crypto'
 import type { KeyObject } from 'node:crypto'
+import { canonicalJsonDeep } from '@dsh-scholar/research-schemas'
 
 /** Ed25519 签名密钥（§12.7）：keyId 进 manifest 的 runner_key_id。 */
 export interface RunnerSigningKey {
@@ -20,12 +21,12 @@ export interface RunnerSigningKey {
 }
 
 /**
- * Canonical JSON for manifest signing (design §12.7): top-level keys sorted,
- * no whitespace. `JSON.stringify(obj, keys)` serializes exactly the listed
- * keys in the given order — the verifier must use the same canonicalization.
+ * Canonical JSON for manifest signing (design §12.7): keys sorted at every
+ * object depth, array order preserved, no whitespace. The verifier imports
+ * the same shared implementation.
  */
 export function canonicalJson(manifest: Record<string, unknown>): string {
-  return JSON.stringify(manifest, Object.keys(manifest).sort())
+  return canonicalJsonDeep(manifest)
 }
 
 /** Sign the canonical RunManifest; returns signature/runner_key_id/payload_sha256. */

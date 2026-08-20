@@ -21,14 +21,17 @@ Unknown Agent role 是 none。所有项目读写执行 membership；所有 Human
 ## 2. 身份、AuthZ 与 Gate
 
 - BFF 从 standalone 本地身份或 SSO 解析 Human Principal；DSH session 通常只用于 Agent 命令/工具关联，浏览器 actor 字段无效。唯一创建例外是 `dsh_scholar` 的显式 name-only Init：internal route 同时要求 Kernel bearer、共享 service token、仅 DSH plugin/kernel 持有的独立非空专用 token 与固定 audience 标签；专用 token 配置缺失/空白、Runner 持有的共享 token、自报 `x-service-principal:dsh-plugin`、浏览器 bearer 均不能单独授权。服务端只从 Host path session 派生 pseudonymous creator Principal，并在同一事务检查 idempotency 与原始 `session_links` 行、创建 collecting Project/active Intake/PI membership/exact link；模型、浏览器和 route body 均不能提交或覆盖 Principal/session。项目名必须等于确定性命令解析出的完整后缀名称，子串或模型补名不算 consent；疑问、否定、歧义、标点或连接词引出的后续子句、无标点的“不创建/not create/先别创建”尾句或名称不一致零写。public v2 name-only adapter 可兼容并忽略 legacy 额外字段，但不得把 strict body 当作安全边界；internal DSH request hash 必须是由专用 plugin token 签出的 route/session/name `HMAC-SHA256`，公开请求在任一方向都不能伪造或认领该幂等行。transport 在 fetch、响应头或成功响应体读取/解析阶段失败、超时或 abort 时只可 replay-only 读取同 key 已提交回执，不能用同名 link 猜测成功。任何既有活动/墓碑/悬空 link 均禁止替换；
-- Gate Decision 只存在于 Human BFF，Agent Tool 和命令不注册该能力；
+- Gate Decision 只存在于 Human BFF，Agent Tool 和命令不注册该能力；Kernel public v1 写路由已删除，BFF 只经 service-token + 固定 `standalone-human-bff` identity 的 internal bridge 提交，与 full-auto service authority 分离；
+- full-auto internal route 另需独立 orchestrator credential：sidecar 以统一安全 helper 原子创建/复用 0600 文件，只把值作为 Kernel spawn env 和插件自管 orchestrator 的专用输入；Kernel 恒时比较 `x-orchestrator-token`。共享 service token + 自报 `research-orchestrator`、浏览器 bearer、argv/body/log/UI 中的值均不构成授权；
 - Project 角色至少为 owner/PI、researcher、operator、auditor、viewer；
 - 读 Terminal 原始日志是独立权限 job_log_read，不能假设查看 status 就可读 secret-bearing log；
 - 编辑 TeX 需要 document_write，编译需要 job_submit 和 document_read；
 - 编辑 Workspace 需要 workspace_write，打开/控制 PTY 需要 terminal_write；读取 Trajectory summary/detail 与 subagent follow-up 是三个独立 capability；
 - Intake begin/upload 可由 researcher 请求，adoption/merge 只允许 PI Human Principal；DSH Agent 不获得 accept；
 - 项目无权限与不存在都返回 404；
-- Gate、target freeze、Decision、Project revision 和 Outbox 单事务提交。
+- Gate、target freeze、Decision、Project revision 和 Outbox 单事务提交。Budget resume 还必须精确匹配超额时同事务记录的 gate-specific provenance；Gate payload 或新请求的 `resume_to` 不是独立权威。
+- Writing patch apply 的 actor/auth_method 只能由 standalone BFF 或可信 server session 派生的 Human Principal 建立；浏览器 body 不再接受身份字段，Kernel 拒绝 Agent/service/direct bearer、自报 researcher/PI，以及 durable membership 不具 PI/Writer capability 的 principal；可信 session 派生且 membership 为 PI/researcher 的 Human 可写。跨 Kernel/TeX SQLite connection 前必须先持久 intent；启动恢复只允许 exact old 或 exact replacement 状态，并在对外服务前补齐 immutable application receipt。
+- full-auto approval idempotency key 是全局安全边界；canonical digest 必须绑定 project/gate/revision/body 并持久化。同 key 不得在另一 project/Gate 或不同 revision 重用，重启后冲突语义不变。
 - 安全回归必须覆盖 forged actor 被忽略、非成员跨项目 404、PI/member 变更、CSRF token 注入/轮换和撤权后 SSE 关闭。
 
 ## 3. Web 安全
@@ -91,7 +94,7 @@ RunnerTarget heartbeat 必须同时通过共享 internal `x-service-token` 门�
 ## 8. Evidence 完整性
 
 - 正式指标只来自固定 metrics file；
-- RunManifest 签名、lease、Job/Contract、Snapshot、image 和 Artifact 全部校验；
+- RunManifest 签名、lease、Job/Contract、Snapshot、image 和 Artifact 全部校验；Runner 签名、Kernel 验签与 outcome observation 必须调用同一递归 canonical JSON module，嵌套 `resources/environment/outputs/lease` 不能被浅层 replacer 丢弃；
 - HTTP 公共接口不能提交 verified/accepted provenance；
 - Analysis Worker 是 verified Evidence 唯一写入身份；
 - Claim 只读取 accepted Evidence，缺方向、effect、CI、minimum_n 时 inconclusive；
@@ -175,3 +178,9 @@ i18n 资源也是发布资产：缺失 key 必须 fail loud，不能把 wire err
 论文复现与 Chat 附件适用同一不可信内容边界：PDF/OCR/repo README/notebook 中的指令不执行，附件 adoption 前零 Project authority。远端 SSH target 只接受服务端 allowlisted adapter 与 SecretRef，拒绝客户端 hostname、user、private key、ProxyCommand、任意 argv；host key/CA、DNS/redirect/proxy 和目标轮换 fail closed。Session Terminal 的 context/child ID 必须服务端解析，stale generation/expired lease/跨 context input 一律拒绝。
 
 Natural Chat intent 只解析当前 Human turn，不解析附件/OCR/论文/README 中的指令为命令。Intent router 的可执行集合由当前 `next_actions_v2`、role/capability、revision 与 canonical operation allowlist 相交得出；模型返回的 URL、tool name、slash、principal、Gate decision 或 runner endpoint 都是不可信候选。Human-only、blocked、unknown、歧义或参数缺失一律零副作用；所有自动执行保留原命令的 CSRF、membership、idempotency 与审计边界。
+
+## 15. Assurance / Knowledge authority isolation
+
+- 禁止公开 raw AssuranceAudit 写入口。caller/model 不能声明 verdict acceptance、reviewer independence、provider 或 topology 并让其成为 accepted；semantic Audit 只能由受控 producer 从 immutable findings Artifact、durable StageSubagent topology 与 execution identity 派生。缺 identity、空 reviewers、provider unavailable、错项目/session/action、非 reviewer child 或非 terminal state fail closed 且零 Audit/Artifact/rollout consumption 写；provider 故障只返回脱敏 typed execution diagnostic，不得写成 BLOCKED 权威记录。
+- Knowledge Activation body 只允许 exact package identity、显式 Human activation 与 CAS；`project_id/session_id/phase/principal_capabilities/project_policy_capabilities/next_action_capabilities` 均视为 forged authority 并由 strict schema 拒绝。session 来自 BFF 可信 context 或 internal DSH path，Kernel 必须再核对 durable link，并在事务中重读 membership、Project/NextAction/policy/capability。
+- DSH internal Assurance/Knowledge routes（包括 native Pack reconcile）必须同时要求 service token、固定 `dsh-plugin` audience 与独立 plugin token；URL session 只能是当前调用 session，不能携任意 project/principal 覆盖。共享 service token 加自报 audience 不能单独执行 reconcile。所有拒绝路径必须证明 append-only stream/Registry revision、Artifact consumption 与 rollout pin 零新增。

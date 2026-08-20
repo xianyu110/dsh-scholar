@@ -2,16 +2,12 @@
 # §19.2 P0 blocking test: agent-cannot-decide-gate + acceptance-tests.md §2
 # Gate/治理 kernel-level cases.
 #
-# §19.2 intent: a research gate must only be decided by a human with an
-# authenticated principal. Since the v1 kernel surface has no header-carried
-# identity, the HTTP gate-decision contract is principal fail-closed
-# (GOV-01): POST /v1/gates/{id}/decisions REQUIRES `principal` — an
-# anonymous or bare-actor (forged identity) decision is 422
-# principal_required and never recorded. What the kernel enforces:
+# §19.2 intent: a research gate must only be decided by a human authenticated
+# by the standalone BFF. The obsolete public Kernel v1 decision writer is
+# absent (404); only the service-token + standalone-human-bff bridge can
+# submit the BFF-derived Principal.
 #
-#   1. a gate decision requires a principal — a decision without principal
-#      (with or without a bare `actor`) is rejected 422 principal_required,
-#      it is never recorded as anonymous;
+#   1. every direct public v1 decision write is 404 and records nothing;
 #   2. a gate can be decided at most once — a second decision is rejected
 #      (409 gate_already_decided), the first decision wins.
 #
@@ -26,7 +22,7 @@
 #     the ONLY path into them;
 #   - five gate types each have an independent flow; the release gate migrates
 #     RELEASE_READY -> RELEASED (recorded + asserted semantics);
-#   - budget-gate-resume: only the payload-declared resume_to is honored;
+#   - budget-gate-resume: only the Kernel-journaled block provenance is honored;
 #     a client-supplied resume_to is ignored;
 #   - concurrent-decision: two parallel decisions -> one 200, one 409
 #     gate_already_decided, exactly one decision row;
@@ -41,6 +37,7 @@ KERNEL_BIN="$REPO/packages/research-kernel/lib/bin/kernel.js"
 WORK=$(mktemp -d)
 PORT=""
 KERNEL_PID=""
+SERVICE_TOKEN="gate-tests-service-token"
 PASS=0
 FAIL=0
 
@@ -62,7 +59,7 @@ start_kernel() {
   local port
   for port in $((20000 + $$ % 400)) $((20500 + $$ % 400)) $((21000 + $$ % 400)); do
     PORT=$port
-    nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
+    DSH_SCHOLAR_SERVICE_TOKEN="$SERVICE_TOKEN" nohup node "$KERNEL_BIN" --db "$WORK/kernel.db" --cas "$WORK/cas" --port "$PORT" > "$WORK/kernel.log" 2>&1 &
     KERNEL_PID=$!
     for _ in $(seq 1 50); do
       curl -sf "http://127.0.0.1:$PORT/v1/health" > /dev/null 2>&1 && return 0
@@ -83,31 +80,31 @@ PROJ=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"gate\",\"workspace\":\"/w
 GATE=$(api -X POST "$BASE/v1/projects/$PROJ/gates" -d '{"type":"scope","title":"Scope Gate v0.2"}' | jfield '.gate_id')
 [[ -n "$PROJ" && -n "$GATE" ]] || { echo "failed to create project/gate"; exit 1; }
 
-say "Test 1: gate decision without principal -> rejected 422 principal_required (no anonymous decisions)"
+say "Test 1: obsolete direct v1 Gate decision writer is absent"
 CODE_NO=$(curl -s -o "$WORK/no-actor.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"decision":"approved"}')
 ERR_NO=$(jfield '.error.code' < "$WORK/no-actor.json")
 N_DEC0=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '.length')
-if [[ "$CODE_NO" == "422" && "$ERR_NO" == "principal_required" && "$N_DEC0" == "0" ]]; then
-  ok "decision without principal -> HTTP 422 ($ERR_NO), no decision recorded"
+if [[ "$CODE_NO" == "404" && "$ERR_NO" == "not_found" && "$N_DEC0" == "0" ]]; then
+  ok "direct v1 decision -> HTTP 404 ($ERR_NO), no decision recorded"
 else
-  bad "expected 422 principal_required with no decision recorded, got HTTP $CODE_NO ($ERR_NO), decisions=$N_DEC0"
+  bad "expected 404 not_found with no decision recorded, got HTTP $CODE_NO ($ERR_NO), decisions=$N_DEC0"
 fi
 
-say "Test 2: agent-like actor is accepted and recorded verbatim (actual behavior)"
-CODE_AGENT=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"actor":"agent-tool-1","principal":{"principal_id":"agent-tool-1","auth_method":"agent-session"},"decision":"approved"}')
-ACTOR=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '[0].actor')
-GATE_STATUS=$(api "$BASE/v1/projects/$PROJ/gates" | jfield '[0].status')
-if [[ "$CODE_AGENT" == "200" && "$ACTOR" == "agent-tool-1" && "$GATE_STATUS" == "approved" ]]; then
-  ok "agent-like principal accepted and recorded verbatim (HTTP surface requires a principal; recorded for report)"
+say "Test 2: internal bridge rejects a self-asserted service identity"
+CODE_AGENT=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/internal/human-gates/$GATE/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: agent-tool' -d '{"actor":"agent-tool-1","principal":{"principal_id":"agent-tool-1","auth_method":"agent-session"},"decision":"approved"}')
+N_DEC_AGENT=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '.length')
+if [[ "$CODE_AGENT" == "403" && "$N_DEC_AGENT" == "0" ]]; then
+  ok "non-BFF service identity rejected; no decision recorded"
 else
-  bad "expected 200 + actor recorded; got HTTP $CODE_AGENT actor='$ACTOR' gate='$GATE_STATUS'"
+  bad "expected 403 + no decision, got HTTP $CODE_AGENT decisions=$N_DEC_AGENT"
 fi
 
-say "Test 3: second decision on the same gate -> rejected (409, exactly-once)"
-CODE2=$(curl -s -o "$WORK/second.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$GATE/decisions" -H 'content-type: application/json' -d '{"actor":"browser-x","principal":{"principal_id":"browser-x","auth_method":"dsh-session"},"decision":"approved"}')
+say "Test 3: authenticated Human BFF bridge decides once"
+CODE1=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/internal/human-gates/$GATE/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d '{"actor":"browser-x","principal":{"principal_id":"browser-x","auth_method":"dsh-session"},"decision":"approved"}')
+CODE2=$(curl -s -o "$WORK/second.json" -w '%{http_code}' -X POST "$BASE/internal/human-gates/$GATE/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d '{"actor":"browser-x","principal":{"principal_id":"browser-x","auth_method":"dsh-session"},"decision":"approved"}')
 ERR2=$(jfield '.error.code' < "$WORK/second.json")
 N_DEC=$(api "$BASE/v1/projects/$PROJ/decisions" | jfield '.length')
-if [[ "$CODE2" == "409" && "$ERR2" == "gate_already_decided" && "$N_DEC" == "1" ]]; then
+if [[ "$CODE1" == "200" && "$CODE2" == "409" && "$ERR2" == "gate_already_decided" && "$N_DEC" == "1" ]]; then
   ok "second decision -> HTTP 409 ($ERR2), exactly one decision recorded"
 else
   bad "expected 409 gate_already_decided with 1 decision, got HTTP $CODE2 ($ERR2), decisions=$N_DEC"
@@ -128,7 +125,8 @@ decide() {
   local body="{\"actor\":\"$actor\",\"principal\":{\"principal_id\":\"$actor\",\"tenant_id\":\"acme\",\"auth_method\":\"dsh-session\",\"session_id\":\"sess-$actor\"},\"decision\":\"$decision\""
   [[ -n "$extra" ]] && body="$body,$extra"
   body="$body}"
-  curl -s -o "$WORK/dec.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$gate/decisions" -H 'content-type: application/json' -d "$body"
+  curl -s -o "$WORK/dec.json" -w '%{http_code}' -X POST "$BASE/internal/human-gates/$gate/decisions" \
+    -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d "$body"
 }
 
 say "Test 4: gate-state-cannot-transition — the four gate-controlled states answer 422 via POST /v1/projects/{id}/transitions"
@@ -198,7 +196,7 @@ else
   bad "five-gate flow: expected release approval -> RELEASED with all four gates approved, got HTTP $CODE status=$STATUS types='$TYPES'"
 fi
 
-say "Test 6: budget-gate-resume — only the payload-declared resume_to is honored"
+say "Test 6: budget-gate-resume — only the Kernel-recorded block provenance is honored"
 P3=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"budget-resume\",\"workspace\":\"/w\",\"brief\":$BRIEF,\"constraints\":{\"max_model_cost_usd\":10,\"max_gpu_hours\":10,\"max_api_requests\":100,\"max_parallel_jobs\":2}}" | jfield '.project_id')
 [[ -n "$P3" ]] || { echo "failed to create project for budget-resume test"; exit 1; }
 G3=$(api -X POST "$BASE/v1/projects/$P3/gates" -d '{"type":"scope","title":"Scope Gate"}' | jfield '.gate_id')
@@ -228,18 +226,18 @@ fi
 CODE=$(decide "$GB" human-1 approved '"resume_to":"RELEASED"')
 STATUS=$(api "$BASE/v1/projects/$P3" | jfield '.status')
 if [[ "$CODE" == "200" && "$STATUS" == "EXPERIMENTING" ]]; then
-  ok "client resume_to=RELEASED ignored; approval resumed to payload-declared EXPERIMENTING"
+  ok "client resume_to=RELEASED ignored; approval resumed to Kernel-recorded EXPERIMENTING"
 else
-  bad "budget resume: expected EXPERIMENTING (payload-declared), got HTTP $CODE status=$STATUS"
+  bad "budget resume: expected EXPERIMENTING (Kernel-recorded), got HTTP $CODE status=$STATUS"
 fi
 
 say "Test 7: concurrent-decision — two parallel decisions, only one succeeds (409)"
 P4=$(api -X POST "$BASE/v1/projects" -d "{\"name\":\"concurrent\",\"workspace\":\"/w\",\"brief\":$BRIEF}" | jfield '.project_id')
 G4=$(api -X POST "$BASE/v1/projects/$P4/gates" -d '{"type":"scope","title":"Scope Gate"}' | jfield '.gate_id')
 BODY='{"actor":"human-a","principal":{"principal_id":"p-a","tenant_id":"acme","auth_method":"dsh-session","session_id":"sess-a"},"decision":"approved"}'
-(curl -s -o "$WORK/c1.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$G4/decisions" -H 'content-type: application/json' -d "$BODY" > "$WORK/c1.code") &
+(curl -s -o "$WORK/c1.json" -w '%{http_code}' -X POST "$BASE/internal/human-gates/$G4/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d "$BODY" > "$WORK/c1.code") &
 C1=$!
-(curl -s -o "$WORK/c2.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$G4/decisions" -H 'content-type: application/json' -d "$BODY" > "$WORK/c2.code") &
+(curl -s -o "$WORK/c2.json" -w '%{http_code}' -X POST "$BASE/internal/human-gates/$G4/decisions" -H 'content-type: application/json' -H "x-service-token: $SERVICE_TOKEN" -H 'x-service-principal: standalone-human-bff' -d "$BODY" > "$WORK/c2.code") &
 C2=$!
 wait "$C1" "$C2"
 R1=$(cat "$WORK/c1.code")
@@ -271,22 +269,22 @@ else
   bad "durable principal: expected ops-42/acme/dsh-session/sess-ops-42, got ($PID/$TEN/$AUTH/$SID) HTTP $CODE"
 fi
 
-say "Test 9: principal-required fail-closed (GOV-01) — bare actor rejected on the HTTP surface"
+say "Test 9: public v1 writer stays absent even for actor/principal payloads"
 P9=$(api -X POST "$BASE/v1/projects" -d '{"name":"gov-principal","workspace":"/w","mode":"gate-only","brief":{"problem":"p","scope":"s","questions":[],"primary_metrics":["m"],"resources":"","risks":[],"target_outputs":["paper"],"target_venue":null,"baseline_repo":null,"domain":"ml"}}' | jfield '.project_id')
 G9=$(api -X POST "$BASE/v1/projects/$P9/gates" -d '{"type":"scope","title":"principal gate"}' | jfield '.gate_id')
 CODE=$(curl -s -o "$WORK/gov9.json" -w '%{http_code}' -X POST "$BASE/v1/gates/$G9/decisions" -H 'content-type: application/json' -d '{"actor":"anon","decision":"approved"}')
 ERR=$(jfield '.error.code' < "$WORK/gov9.json")
-if [[ "$CODE" == "422" && "$ERR" == "principal_required" ]]; then
-  ok "bare-actor gate decision -> HTTP 422 principal_required (GOV-01 fail-closed, principal required)"
+if [[ "$CODE" == "404" && "$ERR" == "not_found" ]]; then
+  ok "bare-actor direct gate decision -> HTTP 404 not_found"
 else
-  bad "bare-actor decision: expected 422 principal_required, got HTTP $CODE (error=$ERR)"
+  bad "bare-actor decision: expected 404 not_found, got HTTP $CODE (error=$ERR)"
 fi
-# Control: with a principal the same gate decides fine (and the state moves).
+# A principal body cannot restore the removed route.
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/gates/$G9/decisions" -H 'content-type: application/json' -d '{"actor":"web-user","principal":{"principal_id":"pi-gov","auth_method":"dsh-session"},"decision":"approved"}')
-if [[ "$CODE" == "200" ]]; then
-  ok "principal-bearing decision on the same gate -> HTTP 200"
+if [[ "$CODE" == "404" ]]; then
+  ok "principal-bearing direct decision remains HTTP 404"
 else
-  bad "principal decision: expected 200, got HTTP $CODE"
+  bad "principal decision: expected 404, got HTTP $CODE"
 fi
 
 say "Summary: $PASS passed, $FAIL failed"

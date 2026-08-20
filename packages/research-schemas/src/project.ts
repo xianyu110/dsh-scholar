@@ -51,6 +51,13 @@ export const KernelEventKind = z.enum([
   'contract.approved',
   'job.submitted',
   'job.updated',
+  // RUN-OUTCOME-01: Runner completion emits an immutable, execution-only
+  // observation in the SAME transaction as jobs/runs finalization. A later
+  // authorized classification consumes it; neither event is a scientific
+  // conclusion, Project transition, Gate decision or Release authority.
+  'research.run.unclassified',
+  'research.run.classified',
+  'research.synthesis.requested',
   'claim.updated',
   'evidence.accepted',
   'corpus.snapshotted',

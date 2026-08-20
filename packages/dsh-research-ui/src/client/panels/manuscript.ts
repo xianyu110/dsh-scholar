@@ -6,6 +6,10 @@ import { state, tabSave } from '../state'
 import { terminalLoadSeq } from '../terminal'
 import { isEditorDirty } from '../manuscript-dirty'
 import { displayedManuscriptPdfIsStale, latestSucceededManuscriptBuild, previewPanelModel, triggerPreviewAfterSave } from '../manuscript-flow'
+import {
+  methodologySummaryNode,
+  type CompactMethodologyProjection,
+} from '../methodology-projection'
 /* ─────────────────────────── Manuscript Workbench ─────────────────────────── */
 
 /**
@@ -441,7 +445,12 @@ export async function msRegenerate(projectId: string): Promise<void> {
 }
 
 /** dsh-web Manuscript page: tree | editor | diagnostics+PDF. */
-export async function renderManuscript(body: HTMLElement, _p: Projection, projectId: string): Promise<void> {
+export async function renderManuscript(
+  body: HTMLElement,
+  _p: Projection,
+  projectId: string,
+  methodology?: CompactMethodologyProjection | null,
+): Promise<void> {
   msCleanup()
   const generation = msGeneration
   msProjectId = projectId
@@ -507,6 +516,8 @@ export async function renderManuscript(body: HTMLElement, _p: Projection, projec
   actions.append(saveBtn, compileBtn, refreshBtn, regenBtn)
   header.appendChild(actions)
   body.appendChild(header)
+
+  body.appendChild(methodologySummaryNode(methodology, 'manuscript'))
 
   if (msConflict !== null) {
     const banner = el('div', 'card border-red')

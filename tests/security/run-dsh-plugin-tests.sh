@@ -4,7 +4,8 @@
 # handlers, headless tools and skill provider resolution.
 #
 #   1. Tool catalog == reconstruction-contracts.md §17 canonical registry
-#      (35 canonical names incl. dsh_scholar and the ONBOARD-01 prepare surface);
+#      (42 canonical names incl. dsh_scholar, session-bound methodology and
+#      the ONBOARD-01 prepare surface);
 #      removed claim_verify/analysis_build/release_bundle names stay absent.
 #   2. No Human Decision / gate-decision tool exists; no intake adopt/accept
 #      tool exists (research-onboarding.md §2.1 — Agent has no accept); ACL
@@ -61,6 +62,8 @@ const CANONICAL = [
   'dsh_scholar',
   'research_project', 'research_phase', 'research_gate_request', 'research_budget',
   'research_status', 'literature_search', 'paper_resolve', 'corpus_snapshot',
+  'research_methodology_status', 'research_assurance_run', 'research_protocol_record', 'research_synthesis_record',
+  'research_writing_review_record', 'research_knowledge_activate', 'research_knowledge_deactivate',
   'passage_lookup', 'research_panel', 'idea_create', 'idea_compare', 'novelty_audit',
   'workspace_snapshot', 'patch_apply', 'baseline_prepare', 'test_run', 'baseline_verify',
   'experiment_register', 'experiment_submit', 'experiment_status', 'experiment_cancel',
@@ -71,7 +74,7 @@ const CANONICAL = [
   'research_intake_begin', 'research_intake_stage', 'research_intake_scan',
   'research_intake_answers', 'research_intake_propose',
 ]
-if (CANONICAL.length !== 35) throw new Error(`§17 registry has ${CANONICAL.length} entries, expected 35`)
+if (CANONICAL.length !== 42) throw new Error(`§17 registry has ${CANONICAL.length} entries, expected 42`)
 
 const registered = []
 // Tool defs capture `client` at registration time; one registration serves
@@ -109,6 +112,11 @@ if (gateTool !== undefined) {
   const actions = gateTool.parameters?.properties?.action?.enum ?? []
   if (actions.some(a => String(a) === 'decide')) problems.push('research_gate_request must not expose action=decide')
 }
+const assuranceTool = registered.find(x => x.name === 'research_assurance_run')
+if (assuranceTool === undefined) problems.push('research_assurance_run must be registered')
+if (Object.prototype.hasOwnProperty.call(assuranceTool?.parameters?.properties ?? {}, 'project_id')) {
+  problems.push('research_assurance_run must derive project scope from the exact DSH session')
+}
 // 3b. ONBOARD-01 (research-onboarding.md §2.1): the Agent has NO accept —
 //     no adopt tool exists and every intake tool is prepare-only copy.
 const intakeNames = names.filter(n => n.startsWith('research_intake'))
@@ -139,10 +147,13 @@ for (const n of intakeNames) {
 for (const role of Object.keys(ROLE_TOOLS)) {
   if (ROLE_TOOLS[role].includes('research_intake_adopt')) problems.push(`ROLE_TOOLS[${role}] must not contain an adopt tool`)
 }
-// 5. unknown/unregistered agent gets only the bounded native-chat façade.
+// 5. unknown/root DSH Agent gets the bounded native-chat façade plus the
+//    exact-session methodology surface; no arbitrary-project capability.
+const rootTools = new Set(['dsh_scholar', 'research_methodology_status', 'research_protocol_record',
+  'research_synthesis_record', 'research_writing_review_record', 'research_knowledge_activate', 'research_knowledge_deactivate', 'research_assurance_run'])
 for (const n of names) {
   const allowed = roles.allows(DEFAULT_ROLE, n)
-  if (n === 'dsh_scholar' ? !allowed : allowed) problems.push(`unknown agent ACL mismatch on ${n}`)
+  if (rootTools.has(n) ? !allowed : allowed) problems.push(`unknown agent ACL mismatch on ${n}`)
 }
 if (roles.get('some-unknown-session') !== 'none') problems.push('unknown session role must be none')
 if (roles.allows('writer', 'claim_verify_request')) problems.push('writer must not verify claims')
@@ -171,7 +182,7 @@ EOF
 NAMES=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).names.join(',')))")
 PROBLEMS=$(printf '%s' "$CATALOG" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.join('|')))")
 if [ -z "$PROBLEMS" ]; then
-  ok "all 35 §17 canonical tools registered; obsolete names absent; ACL consistent"
+  ok "all 42 §17 canonical tools registered; obsolete names absent; ACL consistent"
 else
   bad "catalog/ACL problems: $PROBLEMS"
 fi
@@ -201,7 +212,7 @@ else
   bad "intake prepare tool count wrong"
 fi
 if probe "$CATALOG" "!j.problems.some(p=>/unknown agent ACL mismatch/.test(p))"; then
-  ok "unknown/unregistered agent limited to dsh_scholar"
+  ok "unknown/root DSH Agent limited to the façade and exact-session methodology tools"
 else
   bad "unknown agent ACL leak"
 fi
@@ -224,27 +235,33 @@ fi
 say "DSH-01: unknown-agent deny / pre-execute waterfall / plugin disposer"
 DSH01=$(jnode - "$REPO" <<'EOF'
 const repo = process.argv[2]
-const { RoleRegistry, RESEARCH_TOOLS, DEFAULT_ROLE, ROLE_TOOLS } = await import(`${repo}/lib/plugin/acl.js`)
+const { DSH_SESSION_METHODOLOGY_TOOLS, RESEARCH_HUMAN_CONFIRMATION_TOOLS, RoleRegistry, RESEARCH_TOOLS, DEFAULT_ROLE, ROLE_TOOLS } = await import(`${repo}/lib/plugin/acl.js`)
 const { apply, KernelSidecar } = await import(`${repo}/lib/plugin/index.js`)
+const { ResearchClient } = await import(`${repo}/packages/research-client/lib/index.js`)
 
 const problems = []
 
 // 1. DEFAULT_ROLE = none; unknown sessions resolve to none; none has only the
-//    bounded dsh_scholar façade and no low-level research capability.
+//    bounded façade plus exact-session methodology tools.
 if (DEFAULT_ROLE !== 'none') problems.push('DEFAULT_ROLE must be none')
 const roles = new RoleRegistry()
 if (roles.get('some-unknown-agent-42') !== 'none') problems.push('unknown session role must resolve to none')
-if (ROLE_TOOLS.none.length !== 1 || ROLE_TOOLS.none[0] !== 'dsh_scholar') problems.push('none role surface must contain only dsh_scholar')
+const rootTools = new Set(['dsh_scholar', ...DSH_SESSION_METHODOLOGY_TOOLS])
+if (ROLE_TOOLS.none.length !== rootTools.size || ROLE_TOOLS.none.some(tool => !rootTools.has(tool))) problems.push('none role surface contains an unbounded tool')
 for (const tool of RESEARCH_TOOLS) {
   const allowed = roles.allows(DEFAULT_ROLE, tool)
-  if (tool === 'dsh_scholar' ? !allowed : allowed) problems.push(`unknown agent ACL mismatch on ${tool}`)
+  if (rootTools.has(tool) ? !allowed : allowed) problems.push(`unknown agent ACL mismatch on ${tool}`)
 }
+if (!RESEARCH_HUMAN_CONFIRMATION_TOOLS.includes('research_knowledge_activate')) problems.push('Knowledge activation must require Host confirmation')
+if (!RESEARCH_HUMAN_CONFIRMATION_TOOLS.includes('research_knowledge_deactivate')) problems.push('Knowledge deactivation must require Host confirmation')
+if (!RESEARCH_HUMAN_CONFIRMATION_TOOLS.includes('research_assurance_run')) problems.push('Assurance execution must require Host confirmation')
 
 // 2. pre-execute waterfall replicated 1:1 from src/plugin/index.ts (the
 //    tools/pre-execute listener): agent-id calls on research tools go
 //    through RoleRegistry.allows and are denied outside the role surface;
 //    agent-less calls and non-research tools pass through to next().
 const researchToolSet = new Set(RESEARCH_TOOLS)
+const humanConfirmationToolSet = new Set(RESEARCH_HUMAN_CONFIRMATION_TOOLS)
 const preExecute = async (exec, next) => {
   const agentId = exec.agent?.id
   if (agentId !== undefined && researchToolSet.has(exec.name)) {
@@ -252,6 +269,7 @@ const preExecute = async (exec, next) => {
     if (!roles.allows(role, exec.name)) {
       return { kind: 'deny', reason: `research tool ${exec.name} is outside the ${role} role's tool surface` }
     }
+    if (humanConfirmationToolSet.has(exec.name)) return { kind: 'ask', reason: 'Human confirmation required' }
   }
   return next()
 }
@@ -264,16 +282,19 @@ const run = async (agentId, tool) => {
   return result?.kind === 'deny' ? 'deny' : calledNext ? 'allow' : 'other'
 }
 
-// unknown agent: only dsh_scholar allowed; every low-level tool denied.
+// unknown/root Agent: façade + exact-session methodology tools allowed;
+// Knowledge activation and Assurance execution pause for explicit Host confirmation.
 for (const tool of RESEARCH_TOOLS) {
   const outcome = await run('unknown-agent-abc', tool)
-  if (tool === 'dsh_scholar' ? outcome !== 'allow' : outcome !== 'deny') problems.push(`unknown agent ACL mismatch on ${tool}`)
+  const expected = humanConfirmationToolSet.has(tool) ? 'other' : rootTools.has(tool) ? 'allow' : 'deny'
+  if (outcome !== expected) problems.push(`unknown agent ACL mismatch on ${tool}: got ${outcome}, expected ${expected}`)
 }
 // known role (director = the PI surface, docs/dsh-integration.md §4):
 // every canonical tool in its surface is allowed.
 roles.set('pi-session', 'director')
 for (const tool of ROLE_TOOLS.director) {
-  if (await run('pi-session', tool) !== 'allow') problems.push(`director denied on ${tool}`)
+  const expected = humanConfirmationToolSet.has(tool) ? 'other' : 'allow'
+  if (await run('pi-session', tool) !== expected) problems.push(`director denied on ${tool}`)
 }
 if (await run('pi-session', 'claim_verify') !== 'allow') problems.push('non-registered tools must pass through this plugin ACL')
 // statistician: claim_verify_request allowed; project creation denied.
@@ -297,8 +318,10 @@ let startCalled = 0
 let stopCalled = 0
 const origStart = KernelSidecar.prototype.start
 const origStop = KernelSidecar.prototype.stop
+const origReconcileNative = ResearchClient.prototype.reconcileNativeKnowledgePacks
 KernelSidecar.prototype.start = async function () { startCalled += 1 }
 KernelSidecar.prototype.stop = async function () { stopCalled += 1 }
+ResearchClient.prototype.reconcileNativeKnowledgePacks = async function () { return { registry_revision: 6, package_names: [] } }
 const cleanups = []
 const ctx = {
   logger: () => ({ info() {}, error() {}, warn() {} }),
@@ -319,6 +342,7 @@ try {
 } finally {
   KernelSidecar.prototype.start = origStart
   KernelSidecar.prototype.stop = origStop
+  ResearchClient.prototype.reconcileNativeKnowledgePacks = origReconcileNative
 }
 
 console.log(JSON.stringify({ problems }))
@@ -328,12 +352,12 @@ if [ -z "$DSH01" ]; then
   bad "DSH-01 probe script produced no output"
 else
   if probe "$DSH01" "j.problems.length === 0"; then
-    ok "unknown agent limited to dsh_scholar; known roles keep their surface"
+    ok "unknown/root Agent limited to bounded DSH session tools; known roles keep their surface"
   else
     bad "DSH-01 ACL: $(printf '%s' "$DSH01" | jnode -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).problems.join('|')))")"
   fi
   if probe "$DSH01" "!j.problems.some(p=>/unknown agent ACL mismatch/.test(p))"; then
-    ok "unknown agent denied on every low-level research tool (DSH-01)"
+    ok "unknown/root Agent limited to façade and exact-session methodology tools (DSH-01)"
   else
     bad "unknown-agent ACL leak"
   fi
@@ -366,7 +390,7 @@ fi
 #     client (no module-level tool-context ref), roles and ACL listeners are
 #     per-instance (granting a role in B never leaks into A);
 #   - reload: cordis update() unloads (kills the old kernel, unregisters
-#     tools) then re-applies — no duplicate registration (still exactly 35
+#     tools) then re-applies — no duplicate registration (still exactly 42
 #     tools / 1 skill provider), data persists in the same dataDir;
 #   - dispose: sidecar kernel dead, endpoint.json removed, port released,
 #     tools/commands/skills/pre-execute listeners all gone, the other
@@ -457,7 +481,7 @@ try {
 
   // ── tools / commands / skills registered exactly once ────────────────────
   const toolsA = rootA.tools.schemas().map(s => s.name)
-  if (toolsA.length !== 35) problems.push(`instance A tool count ${toolsA.length} != 35`)
+  if (toolsA.length !== 42) problems.push(`instance A tool count ${toolsA.length} != 42`)
   if (rootA.tools.get('research_project') === undefined) problems.push('research_project tool not registered')
   const expectedCommands = ['help','new','list','status','gates','jobs','claims','survey','ideas','reproduce','contract','run','evidence','write','review','release-bundle','release']
   const registeredCommands = rootA.commands.list({}).map(c => c.name).sort()
@@ -488,7 +512,7 @@ try {
   trackedPids.push(epFileA2.pid)
   if (alive(oldPid)) problems.push('reload must stop the old kernel (sidecar disposer)')
   if (epFileA2.pid === oldPid) problems.push('reload must spawn/reuse a fresh kernel instance')
-  if (rootA.tools.schemas().length !== 35) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 35, duplicate risk)`)
+  if (rootA.tools.schemas().length !== 42) problems.push(`reload re-registered tools (${rootA.tools.schemas().length} != 42, duplicate risk)`)
   if ((await rootA.skills.list()).length !== 4) problems.push('reload leaked or lost research skills')
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('reload must keep kernel data (same dataDir)')
   if ((rootA.events._hooks['tools/pre-execute'] ?? []).length !== 1) problems.push('reload must not duplicate the pre-execute listener')
@@ -507,14 +531,14 @@ try {
   const healthAfter = await fetch(`${lastEndpoint}/v1/health`).then(r => r.ok).catch(() => false)
   if (healthAfter) problems.push('dispose must release the kernel port (health still answering)')
   // the sibling instance is untouched
-  if (rootB.tools.schemas().length !== 35) problems.push('disposing A must not affect B tools')
+  if (rootB.tools.schemas().length !== 42) problems.push('disposing A must not affect B tools')
   if (rootB.research === undefined) problems.push('disposing A must not affect B research service')
 
   // ── re-apply on the same root: usable again, still exactly once ──────────
   handleA2 = await rootA.plugin(pluginMod, cfgA)
   const epFileA3 = readEp(dirA)
   trackedPids.push(epFileA3.pid)
-  if (rootA.tools.schemas().length !== 35) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 35`)
+  if (rootA.tools.schemas().length !== 42) problems.push(`re-apply tool count ${rootA.tools.schemas().length} != 42`)
   if (!(await rootA.research.client.listProjects()).some(p => p.project_id === projA.project_id)) problems.push('re-apply must restore the client against the same dataDir')
   await handleA2.dispose()
   handleA2 = undefined

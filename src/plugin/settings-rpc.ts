@@ -12,6 +12,7 @@ import {
   type ScholarSettingsMutation,
   type ScholarSettingsReadValue,
   type ScholarSettingsWireSnapshot,
+  type ScholarAutomationStatus,
 } from '../shared/settings-rpc.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -35,12 +36,23 @@ function projectSettings(value: unknown): ResearchSettings {
   return result
 }
 
-function snapshot(settings: SettingsProvider): ScholarSettingsReadValue {
+function snapshot(
+  settings: SettingsProvider,
+  readAutomationStatus?: () => Omit<ScholarAutomationStatus, 'restart_required'>,
+): ScholarSettingsReadValue {
   const descriptor = settings.describe({ redactSecrets: true })
     .find(entry => String(entry.ns) === SCHOLAR_SETTINGS_NAMESPACE)
   if (descriptor === undefined) return { available: false }
+  const value = projectSettings(descriptor.value)
+  const runtime = readAutomationStatus?.()
   const wire: ScholarSettingsWireSnapshot = {
-    value: projectSettings(descriptor.value),
+    value: runtime === undefined ? value : {
+      ...value,
+      automation: {
+        ...runtime,
+        restart_required: (value.defaultMode ?? 'gate-only') !== runtime.runtime_default_mode,
+      },
+    },
     ...(descriptor.base === undefined ? {} : { base: projectSettings(descriptor.base) }),
     ...(descriptor.user === undefined ? {} : { user: projectSettings(descriptor.user) }),
     revision: descriptor.revision,
@@ -105,6 +117,7 @@ function sessionProjectName(payload: unknown): { sessionId: string; name: string
 export function createScholarRpcHandler(
   settings: SettingsProvider,
   readStandaloneToken: () => string,
+  readAutomationStatus?: () => Omit<ScholarAutomationStatus, 'restart_required'>,
 ): ConnectionRpcHandler {
   return async (endpoint, payload, signal) => {
     if (endpoint === 'standalone-token') {
@@ -112,7 +125,7 @@ export function createScholarRpcHandler(
       catch { return internal('standalone token is unavailable') }
     }
     if (endpoint === 'settings-snapshot') {
-      try { return { ok: true, value: snapshot(settings) } }
+      try { return { ok: true, value: snapshot(settings, readAutomationStatus) } }
       catch { return internal('Scholar settings are unavailable') }
     }
     if (endpoint === 'settings-mutate') {
@@ -126,7 +139,7 @@ export function createScholarRpcHandler(
             : [{ op: 'unset', path: [parsed.field] }],
           parsed.expectedRevision,
         )
-        return { ok: true, value: snapshot(settings) }
+        return { ok: true, value: snapshot(settings, readAutomationStatus) }
       } catch { return internal('Scholar settings update failed') }
     }
     return internal('unsupported Scholar endpoint')

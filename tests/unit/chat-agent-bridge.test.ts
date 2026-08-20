@@ -28,7 +28,7 @@ describe('private Scholar agent bridge', () => {
     expect(lstatSync(tokenFile).mode & 0o777).toBe(0o600)
 
     await expect(requestScholarAgent(dataDir, {
-      operation: 'conversation', text: 'hello', locale: 'en',
+      operation: 'conversation', session_id: 'chat_1', text: 'hello', locale: 'en',
       project: { project_id: 'rsp_1', next_actions_v2: [] }, history: [],
     })).resolves.toEqual({ operation: 'conversation', assistant_text: 'answer:hello' })
 
@@ -43,7 +43,7 @@ describe('private Scholar agent bridge', () => {
     const service = new ScholarAgentBridge({ dataDir, handler: () => undefined })
     await service.start()
     await expect(requestScholarAgent(dataDir, {
-      operation: 'conversation', text: 'hello', locale: 'en',
+      operation: 'conversation', session_id: 'chat_1', text: 'hello', locale: 'en',
       project: { project_id: 'rsp_1', next_actions_v2: [] }, history: [],
     }, 2_000)).rejects.toThrow()
     await service.stop()
